@@ -1,5 +1,5 @@
-import path from "node:path";
 import { mkdir } from "node:fs/promises";
+import path from "node:path";
 import { expect, test } from "@playwright/test";
 
 const PROOF_SCREENSHOT = path.resolve(
@@ -18,8 +18,12 @@ test("scoped pairing narrows, grants, and revokes access", async ({ page }) => {
 
 	await page.goto("/scoped-pairing-proof.html");
 	await expect(page.locator('body[data-harness-ready="1"]')).toBeVisible();
-	await expect(page.getByRole("heading", { name: "Devices waiting to connect" })).toBeVisible();
-	await expect(page.getByText("Research browser", { exact: true })).toBeVisible();
+	await expect(
+		page.getByRole("heading", { name: "Devices waiting to connect" })
+	).toBeVisible();
+	await expect(
+		page.getByText("Research browser", { exact: true })
+	).toBeVisible();
 	await expect(page.getByText("J7K-PQM", { exact: true })).toBeVisible();
 	await expect(
 		page.getByText(
@@ -30,24 +34,42 @@ test("scoped pairing narrows, grants, and revokes access", async ({ page }) => {
 	await expect(page.getByText(/^Expires /).first()).toBeVisible();
 
 	const grantGroup = page.getByRole("group", { name: "Grant access" });
-	await expect(grantGroup.getByRole("checkbox", { name: "chat:read" })).toBeChecked();
-	await expect(grantGroup.getByRole("checkbox", { name: "chat:write" })).toBeChecked();
-	await expect(grantGroup.getByRole("checkbox", { name: "tools:read" })).toBeChecked();
+	await expect(
+		grantGroup.getByRole("checkbox", { name: "chat:read" })
+	).toBeChecked();
+	await expect(
+		grantGroup.getByRole("checkbox", { name: "chat:write" })
+	).toBeChecked();
+	await expect(
+		grantGroup.getByRole("checkbox", { name: "tools:read" })
+	).toBeChecked();
 	await grantGroup.getByRole("checkbox", { name: "chat:write" }).uncheck();
-	await expect(grantGroup.getByRole("checkbox", { name: "chat:write" })).not.toBeChecked();
+	await expect(
+		grantGroup.getByRole("checkbox", { name: "chat:write" })
+	).not.toBeChecked();
 
 	await expect(page.getByText("Active", { exact: true }).first()).toBeVisible();
 	await expect(page.getByText("Expired", { exact: true })).toBeVisible();
 	await expect(page.getByText("Inactive", { exact: true })).toBeVisible();
 	await expect(page.getByText("Revoked", { exact: true })).toBeVisible();
-	await expect(page.getByRole("button", { name: "Revoke Expired CI runner" })).toHaveCount(0);
-	await expect(page.getByRole("button", { name: "Revoke Inactive tablet" })).toHaveCount(0);
-	await expect(page.getByRole("button", { name: "Revoke Revoked browser" })).toHaveCount(0);
+	await expect(
+		page.getByRole("button", { name: "Revoke Expired CI runner" })
+	).toHaveCount(0);
+	await expect(
+		page.getByRole("button", { name: "Revoke Inactive tablet" })
+	).toHaveCount(0);
+	await expect(
+		page.getByRole("button", { name: "Revoke Revoked browser" })
+	).toHaveCount(0);
 
 	await page
-		.getByRole("button", { name: "Approve Research browser with requested access" })
+		.getByRole("button", {
+			name: "Approve Research browser with requested access",
+		})
 		.click();
-	await expect(page.getByText("Research browser", { exact: true })).toBeVisible();
+	await expect(
+		page.getByText("Research browser", { exact: true })
+	).toBeVisible();
 	await expect(page.getByText("J7K-PQM", { exact: true })).toHaveCount(0);
 	const approval = await page.evaluate(() => {
 		return (
@@ -64,17 +86,27 @@ test("scoped pairing narrows, grants, and revokes access", async ({ page }) => {
 	const researchRow = page
 		.locator("li")
 		.filter({ has: page.getByText("Research browser", { exact: true }) });
-	const grantedAccess = researchRow.getByRole("list", { name: "Granted access" });
-	await expect(grantedAccess.getByText("chat:read", { exact: true })).toBeVisible();
-	await expect(grantedAccess.getByText("tools:read", { exact: true })).toBeVisible();
-	await expect(grantedAccess.getByText("chat:write", { exact: true })).toHaveCount(0);
+	const grantedAccess = researchRow.getByRole("list", {
+		name: "Granted access",
+	});
+	await expect(
+		grantedAccess.getByText("chat:read", { exact: true })
+	).toBeVisible();
+	await expect(
+		grantedAccess.getByText("tools:read", { exact: true })
+	).toBeVisible();
+	await expect(
+		grantedAccess.getByText("chat:write", { exact: true })
+	).toHaveCount(0);
 
 	await page.getByRole("button", { name: "Revoke VS Code MCP" }).click();
 	const vscodeRow = page
 		.locator("li")
 		.filter({ has: page.getByText("VS Code MCP", { exact: true }) });
 	await expect(vscodeRow.getByText("Revoked", { exact: true })).toBeVisible();
-	await expect(page.getByRole("button", { name: "Revoke VS Code MCP" })).toHaveCount(0);
+	await expect(
+		page.getByRole("button", { name: "Revoke VS Code MCP" })
+	).toHaveCount(0);
 
 	await mkdir(path.dirname(PROOF_SCREENSHOT), { recursive: true });
 	await page.screenshot({ fullPage: true, path: PROOF_SCREENSHOT });

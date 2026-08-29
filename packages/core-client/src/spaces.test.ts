@@ -31,10 +31,10 @@ import type { ApiTarget } from "./client.ts";
 import {
 	cancelSpaceRetrievalModeChange,
 	createSpace,
-	fetchSpaces,
 	fetchSpaceRetrievalModeStatus,
-	startSpaceRetrievalModeChange,
+	fetchSpaces,
 	type RetrievalModeStatus,
+	startSpaceRetrievalModeChange,
 } from "./spaces.ts";
 
 const realFetch = globalThis.fetch;
@@ -43,7 +43,11 @@ afterEach(() => {
 	globalThis.fetch = realFetch;
 });
 
-const TARGET: ApiTarget = { url: "http://127.0.0.1:7980", token: "node" };
+const TARGET: ApiTarget = {
+	url: "http://127.0.0.1:7980",
+	token: "node",
+	userJwt: null,
+};
 
 interface CapturedRequest {
 	init?: RequestInit;

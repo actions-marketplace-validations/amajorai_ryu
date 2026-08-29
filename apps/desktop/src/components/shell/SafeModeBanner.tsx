@@ -38,7 +38,7 @@ export function SafeModeBanner() {
 	// target in the render body — same reason as `SupportAccessBanner`.
 	const node = useNodeStore((s) => s.getActiveNode());
 	const target: ApiTarget = useMemo(
-		() => ({ token: node.token ?? null, url: node.url }),
+		() => ({ token: node.token, userJwt: node.userJwt ?? null, url: node.url }),
 		[node.token, node.url]
 	);
 

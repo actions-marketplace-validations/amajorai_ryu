@@ -36,7 +36,10 @@ const originalGlobals = new Map<string, PropertyDescriptor | undefined>();
 
 const stubGlobal = (name: string, value: unknown): void => {
 	if (!originalGlobals.has(name)) {
-		originalGlobals.set(name, Object.getOwnPropertyDescriptor(globalThis, name));
+		originalGlobals.set(
+			name,
+			Object.getOwnPropertyDescriptor(globalThis, name)
+		);
 	}
 	Object.defineProperty(globalThis, name, {
 		configurable: true,
@@ -44,6 +47,7 @@ const stubGlobal = (name: string, value: unknown): void => {
 		value,
 	});
 };
+
 import {
 	applyRemote,
 	installSettingsObserver,

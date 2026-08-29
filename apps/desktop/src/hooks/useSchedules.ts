@@ -28,8 +28,9 @@ export function useSchedules(): UseSchedulesResult {
 	const target: ApiTarget = {
 		url: activeNode.url,
 		token: activeNode.token ?? null,
+		userJwt: activeNode.userJwt ?? null,
 	};
-	const { url, token } = target;
+	const { url, token, userJwt } = target;
 
 	const [jobs, setJobs] = useState<ScheduledJob[]>([]);
 	const [loading, setLoading] = useState(true);
@@ -39,7 +40,7 @@ export function useSchedules(): UseSchedulesResult {
 		setLoading(true);
 		setError(null);
 		try {
-			const list = await fetchJobs({ url, token });
+			const list = await fetchJobs({ url, token, userJwt });
 			setJobs(list);
 		} catch (e) {
 			console.error("Failed to load schedules", e);
@@ -58,7 +59,7 @@ export function useSchedules(): UseSchedulesResult {
 
 	const create = useCallback(
 		async (input: JobInput) => {
-			const job = await apiCreateJob({ url, token }, input);
+			const job = await apiCreateJob({ url, token, userJwt }, input);
 			setJobs((prev) => [...prev, job]);
 			return job;
 		},
@@ -67,7 +68,7 @@ export function useSchedules(): UseSchedulesResult {
 
 	const remove = useCallback(
 		async (id: string) => {
-			await apiDeleteJob({ url, token }, id);
+			await apiDeleteJob({ url, token, userJwt }, id);
 			setJobs((prev) => prev.filter((j) => j.id !== id));
 		},
 		[url, token]

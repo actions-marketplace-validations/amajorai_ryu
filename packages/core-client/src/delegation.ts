@@ -131,7 +131,7 @@ export async function streamDelegation(
 ): Promise<void> {
 	const resp = await fetch(apiUrl(target, "/api/delegate/stream"), {
 		method: "POST",
-		headers: makeHeaders(target.token),
+		headers: makeHeaders(target.token, target.userJwt),
 		body: JSON.stringify(body),
 		signal,
 	});

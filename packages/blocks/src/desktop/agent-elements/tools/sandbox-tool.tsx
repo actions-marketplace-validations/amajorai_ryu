@@ -1,5 +1,8 @@
 import { CodeBlock } from "@ryu/ui/components/agents/code-block";
-import { ToolResult, ToolResultOutput } from "@ryu/ui/components/agents/tool-result";
+import {
+	ToolResult,
+	ToolResultOutput,
+} from "@ryu/ui/components/agents/tool-result";
 import { memo, useMemo } from "react";
 import { unwrapMcpOutput } from "../utils/unwrap-mcp-output.ts";
 
@@ -113,7 +116,15 @@ export const SandboxTool = memo(function SandboxTool({
 						<CodeBlock
 							code={code}
 							filename={headerTitle}
-							language={language as "typescript" | "bash" | "json" | "text" | "tsx" | "diff"}
+							language={
+								language as
+									| "typescript"
+									| "bash"
+									| "json"
+									| "text"
+									| "tsx"
+									| "diff"
+							}
 							maxHeight={360}
 							status={status === "running" ? "streaming" : "complete"}
 							wrap

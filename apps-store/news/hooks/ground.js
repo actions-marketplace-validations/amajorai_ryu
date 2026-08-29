@@ -89,7 +89,7 @@ try {
 	// A half-written or older-format value is indistinguishable from no news.
 	return { kind: "none" };
 }
-if (!snap || !Array.isArray(snap.items) || snap.items.length === 0) {
+if (!(snap && Array.isArray(snap.items)) || snap.items.length === 0) {
 	return { kind: "none" };
 }
 
@@ -102,7 +102,8 @@ const generatedAt = Date.parse(snap.generated_at || "");
 if (!Number.isFinite(generatedAt)) {
 	return { kind: "none" };
 }
-const ttlSecs = Number(snap.ttl_secs) > 0 ? Number(snap.ttl_secs) : DEFAULT_TTL_SECS;
+const ttlSecs =
+	Number(snap.ttl_secs) > 0 ? Number(snap.ttl_secs) : DEFAULT_TTL_SECS;
 const ageSecs = (Date.now() - generatedAt) / 1000;
 if (ageSecs > ttlSecs) {
 	return { kind: "none" };
@@ -111,18 +112,72 @@ if (ageSecs > ttlSecs) {
 // Floor for a snapshot written before `stopwords` shipped. Deliberately short — the
 // real list belongs to the sidecar.
 const FALLBACK_STOPWORDS = [
-	"the", "a", "an", "and", "or", "but", "of", "to", "in", "on", "for", "with",
-	"about", "from", "by", "at", "as", "is", "are", "was", "were", "be", "been",
-	"it", "its", "this", "that", "these", "those", "what", "whats", "which", "who",
-	"how", "why", "when", "any", "some", "new", "you", "your", "me", "my", "i",
-	"can", "could", "would", "should", "do", "does", "did", "not", "there", "here",
-	"latest", "news", "tell", "give", "please", "thanks",
+	"the",
+	"a",
+	"an",
+	"and",
+	"or",
+	"but",
+	"of",
+	"to",
+	"in",
+	"on",
+	"for",
+	"with",
+	"about",
+	"from",
+	"by",
+	"at",
+	"as",
+	"is",
+	"are",
+	"was",
+	"were",
+	"be",
+	"been",
+	"it",
+	"its",
+	"this",
+	"that",
+	"these",
+	"those",
+	"what",
+	"whats",
+	"which",
+	"who",
+	"how",
+	"why",
+	"when",
+	"any",
+	"some",
+	"new",
+	"you",
+	"your",
+	"me",
+	"my",
+	"i",
+	"can",
+	"could",
+	"would",
+	"should",
+	"do",
+	"does",
+	"did",
+	"not",
+	"there",
+	"here",
+	"latest",
+	"news",
+	"tell",
+	"give",
+	"please",
+	"thanks",
 ];
 const stopwords = new Set(
 	(Array.isArray(snap.stopwords) && snap.stopwords.length
 		? snap.stopwords
 		: FALLBACK_STOPWORDS
-	).map((w) => String(w).toLowerCase()),
+	).map((w) => String(w).toLowerCase())
 );
 
 const MIN_TOKEN_LEN = 3;
@@ -131,7 +186,9 @@ function tokenize(text) {
 	const seen = new Set();
 	// Split on anything that is not a letter or a digit. `\p{L}`/`\p{N}` rather than
 	// `\w` so a non-Latin script is tokenized rather than erased.
-	for (const t of String(text).toLowerCase().split(/[^\p{L}\p{N}]+/u)) {
+	for (const t of String(text)
+		.toLowerCase()
+		.split(/[^\p{L}\p{N}]+/u)) {
 		if (t.length < MIN_TOKEN_LEN || stopwords.has(t) || seen.has(t)) {
 			continue;
 		}
@@ -158,14 +215,15 @@ const MAX_ITEMS = 3;
 
 const matched = [];
 for (const item of snap.items) {
-	if (!item || !item.title || !item.url) {
+	if (!(item && item.title && item.url)) {
 		continue;
 	}
 	// Prefer the tokens the sidecar computed; fall back to the title so an item
 	// missing them is degraded rather than invisible.
-	const itemTokens = Array.isArray(item.tokens) && item.tokens.length
-		? item.tokens
-		: tokenize(item.title);
+	const itemTokens =
+		Array.isArray(item.tokens) && item.tokens.length
+			? item.tokens
+			: tokenize(item.title);
 	let overlap = 0;
 	for (const t of itemTokens) {
 		if (messageSet.has(String(t).toLowerCase())) {
@@ -192,7 +250,9 @@ if (matched.length === 0) {
 const MAX_TITLE_CHARS = 180;
 const lines = matched.map((item, idx) => {
 	const title = String(item.title).trim().slice(0, MAX_TITLE_CHARS);
-	const attribution = [item.source, item.published_at].filter(Boolean).join(", ");
+	const attribution = [item.source, item.published_at]
+		.filter(Boolean)
+		.join(", ");
 	const spread =
 		Number(item.source_count) > 1
 			? ` (${item.source_count} outlets covering this story)`

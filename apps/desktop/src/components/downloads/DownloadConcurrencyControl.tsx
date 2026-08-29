@@ -45,7 +45,11 @@ function describe(settings: DownloadSettings): string {
 
 export function DownloadConcurrencyControl() {
 	const node = useActiveNode();
-	const target = { token: node.token ?? null, url: node.url };
+	const target = {
+		token: node.token,
+		userJwt: node.userJwt ?? null,
+		url: node.url,
+	};
 	const queryClient = useQueryClient();
 	const queryKey = ["downloads", "settings", node.url];
 

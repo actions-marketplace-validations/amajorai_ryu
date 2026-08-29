@@ -357,7 +357,7 @@ export function ContinueOnNodeDialog({
 						{copied ? "Handoff link copied" : "Copy handoff link"}
 					</Button>
 					<Button
-						disabled={!preview || !selectedName || pending}
+						disabled={!(preview && selectedName) || pending}
 						onClick={() => void handleContinue()}
 					>
 						{pending

@@ -115,7 +115,7 @@ export async function streamDownloads(
 ): Promise<void> {
 	const resp = await fetch(apiUrl(target, "/api/downloads/stream"), {
 		method: "GET",
-		headers: makeHeaders(target.token),
+		headers: makeHeaders(target.token, target.userJwt),
 		signal,
 	});
 	if (!resp.ok) {

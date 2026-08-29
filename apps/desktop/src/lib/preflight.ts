@@ -53,7 +53,12 @@ export async function collectDiagnostics(
 			fetchSystemStatus(target)
 		),
 		section("Sidecars (/api/catalog)", async () => {
-			const items = await fetchCatalog(target.url, target.token);
+			const items = await fetchCatalog(
+				target.url,
+				target.token,
+				undefined,
+				target.userJwt
+			);
 			return items
 				.map(
 					(item) =>
@@ -65,7 +70,8 @@ export async function collectDiagnostics(
 	// Console capture can contain user prompts, tool results, and provider output.
 	// It remains available for explicit local copy, but issue reports must not send
 	// it to the crash sink as part of an otherwise consented diagnostics bundle.
-	const consoleText = options.includeConsole === false ? "" : getConsoleBufferText();
+	const consoleText =
+		options.includeConsole === false ? "" : getConsoleBufferText();
 	// Timings only exist when the same gate that fills the console buffer is on,
 	// so an empty string here means "not recording", not "everything was fast".
 	// Omit the section rather than print a table of zeroes that reads as a result.
@@ -77,7 +83,9 @@ export async function collectDiagnostics(
 		...(metricsText ? [`## Performance\n${metricsText}`] : []),
 		...(options.includeConsole === false
 			? []
-			: [`## Recent console\n${consoleText || "(empty — console capture is DEV-only)"}`]),
+			: [
+					`## Recent console\n${consoleText || "(empty — console capture is DEV-only)"}`,
+				]),
 	].join("\n\n");
 }
 

@@ -236,6 +236,7 @@ export function DeepLinkConfirmDialog() {
 	const target: ApiTarget = {
 		url: installNode.url,
 		token: installNode.token ?? null,
+		userJwt: installNode.userJwt ?? null,
 	};
 	// True when the link named a node we do not have — say so rather than
 	// silently installing somewhere the user did not pick.

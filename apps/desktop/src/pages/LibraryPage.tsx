@@ -523,6 +523,7 @@ function LibraryCollections({
 	const installedSkillsResult = useQuery(
 		installedSkillsQuery({
 			token: activeNode.token ?? null,
+			userJwt: activeNode.userJwt ?? null,
 			url: activeNode.url,
 		})
 	);

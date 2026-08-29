@@ -223,7 +223,7 @@ export async function streamMonitorAlerts(
 ): Promise<void> {
 	const resp = await fetch(apiUrl(target, "/api/monitors/alerts/stream"), {
 		method: "GET",
-		headers: makeHeaders(target.token),
+		headers: makeHeaders(target.token, target.userJwt),
 		signal,
 	});
 	if (!(resp.ok && resp.body)) {

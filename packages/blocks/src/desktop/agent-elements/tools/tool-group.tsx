@@ -1,4 +1,4 @@
-﻿import {
+import {
 	AgentActivity,
 	type AgentActivityTrace,
 } from "@ryu/ui/components/agents/agent-activity";

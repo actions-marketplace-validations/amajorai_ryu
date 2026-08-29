@@ -19,11 +19,15 @@ declare module "@novnc/novnc" {
 
 		addEventListener(
 			type: string,
-			listener: (event: CustomEvent<{ clean?: boolean; message?: string }>) => void
+			listener: (
+				event: CustomEvent<{ clean?: boolean; message?: string }>
+			) => void
 		): void;
 		removeEventListener(
 			type: string,
-			listener: (event: CustomEvent<{ clean?: boolean; message?: string }>) => void
+			listener: (
+				event: CustomEvent<{ clean?: boolean; message?: string }>
+			) => void
 		): void;
 
 		connect(): void;

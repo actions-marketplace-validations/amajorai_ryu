@@ -208,7 +208,7 @@ export async function streamMeetingEvents(
 ): Promise<void> {
 	const resp = await fetch(apiUrl(target, "/api/meetings/stream"), {
 		method: "GET",
-		headers: makeHeaders(target.token),
+		headers: makeHeaders(target.token, target.userJwt),
 		signal,
 	});
 	if (!(resp.ok && resp.body)) {

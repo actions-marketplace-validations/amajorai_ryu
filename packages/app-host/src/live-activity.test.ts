@@ -1,12 +1,12 @@
 import { describe, expect, it } from "bun:test";
 import {
-	type LiveActivity,
-	type LiveActivityContribution,
-	type LiveActivitySourceMap,
 	actionForLiveActivity,
 	helloLiveActivity,
 	helloLiveActivityRows,
 	isLiveStatus,
+	type LiveActivity,
+	type LiveActivityContribution,
+	type LiveActivitySourceMap,
 	liveActivitiesFromResponse,
 	renderLiveActivityTarget,
 	statusFromRow,
@@ -48,7 +48,11 @@ describe("live activity vocabulary", () => {
 					items: "rows",
 					map: { id: "id", title: "title" },
 				},
-				map: { progress: "percent", status: "state", statusMap: { active: "running" } },
+				map: {
+					progress: "percent",
+					status: "state",
+					statusMap: { active: "running" },
+				},
 			},
 		};
 		const [row] = liveActivitiesFromResponse(
@@ -74,8 +78,18 @@ describe("live activity vocabulary", () => {
 			contribution,
 			{
 				runs: [
-					{ id: "r1", title: "Ship docs", run_status: "running", folder_path: "/work/docs" },
-					{ id: "r2", title: "Refactor", run_status: "completed", folder_path: "/work/ryu" },
+					{
+						id: "r1",
+						title: "Ship docs",
+						run_status: "running",
+						folder_path: "/work/docs",
+					},
+					{
+						id: "r2",
+						title: "Refactor",
+						run_status: "completed",
+						folder_path: "/work/ryu",
+					},
 				],
 			},
 			1_700_000_000_000
@@ -100,7 +114,11 @@ describe("live activity vocabulary", () => {
 	});
 
 	it("returns an empty list for a non-array payload", () => {
-		const rows = liveActivitiesFromResponse(helloLiveActivity, { nope: true }, 0);
+		const rows = liveActivitiesFromResponse(
+			helloLiveActivity,
+			{ nope: true },
+			0
+		);
 		expect(rows).toEqual([]);
 	});
 
@@ -114,9 +132,17 @@ describe("live activity vocabulary", () => {
 
 	it("builds an activation action from the target", () => {
 		const action = actionForLiveActivity(helloLiveActivity, { id: "convo-1" });
-		expect(action).toEqual({ kind: "route", path: "/chat?conversationId=convo-1" });
+		expect(action).toEqual({
+			kind: "route",
+			path: "/chat?conversationId=convo-1",
+		});
 		// No target → no action.
-		expect(actionForLiveActivity({ ...helloLiveActivity, spec: undefined }, { id: "x" })).toBeUndefined();
+		expect(
+			actionForLiveActivity(
+				{ ...helloLiveActivity, spec: undefined },
+				{ id: "x" }
+			)
+		).toBeUndefined();
 	});
 
 	it("validates shape without throwing", () => {

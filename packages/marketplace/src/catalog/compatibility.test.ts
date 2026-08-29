@@ -39,7 +39,12 @@ describe("evaluateCompatibility", () => {
 		const v = evaluateCompatibility({ ryu: ">=0.2.0" }, { core: "0.1.12" });
 		expect(v.compatible).toBe(false);
 		expect(v.unmet).toEqual([
-			{ code: "too_old", present: "0.1.12", required: ">=0.2.0", surface: "core" },
+			{
+				code: "too_old",
+				present: "0.1.12",
+				required: ">=0.2.0",
+				surface: "core",
+			},
 		]);
 	});
 
@@ -152,17 +157,21 @@ describe("evaluateCompatibility", () => {
 		expect(v.compatible).toBe(true);
 		expect(v.unmet).toEqual([]);
 
-		const withServer = evaluateCompatibility({ ryu: "^weird" }, { core: "0.1.12" }, {
-			compatible: false,
-			unmet: [
-				{
-					code: "invalid_requirement",
-					reason: "unexpected character",
-					required: "^weird",
-					surface: "core",
-				},
-			],
-		});
+		const withServer = evaluateCompatibility(
+			{ ryu: "^weird" },
+			{ core: "0.1.12" },
+			{
+				compatible: false,
+				unmet: [
+					{
+						code: "invalid_requirement",
+						reason: "unexpected character",
+						required: "^weird",
+						surface: "core",
+					},
+				],
+			}
+		);
 		expect(withServer.compatible).toBe(false);
 	});
 
@@ -187,7 +196,12 @@ describe("blockingUnmet", () => {
 			blockingUnmet({
 				compatible: false,
 				unmet: [
-					{ code: "too_old", present: "1.0.0", required: ">=2", surface: "core" },
+					{
+						code: "too_old",
+						present: "1.0.0",
+						required: ">=2",
+						surface: "core",
+					},
 					{
 						code: "invalid_requirement",
 						reason: "bad",

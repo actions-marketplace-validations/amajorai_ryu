@@ -426,7 +426,11 @@ export function CreateFolderDialog({
 		setCreating(true);
 		setError(null);
 		const result = await createProjectFolder(
-			{ url: activeNode.url, token: activeNode.token ?? null },
+			{
+				url: activeNode.url,
+				token: activeNode.token,
+				userJwt: activeNode.userJwt ?? null,
+			},
 			trimmed
 		);
 		setCreating(false);
@@ -536,7 +540,11 @@ export function CloneFolderDialog({
 		setCloning(true);
 		setError(null);
 		const result = await cloneProjectFolder(
-			{ url: activeNode.url, token: activeNode.token ?? null },
+			{
+				url: activeNode.url,
+				token: activeNode.token,
+				userJwt: activeNode.userJwt ?? null,
+			},
 			trimmedUrl,
 			name
 		);

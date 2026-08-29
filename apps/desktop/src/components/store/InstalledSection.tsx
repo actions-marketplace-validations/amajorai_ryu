@@ -311,6 +311,7 @@ export default function InstalledSection() {
 	const target: ApiTarget = {
 		url: activeNode.url,
 		token: activeNode.token ?? null,
+		userJwt: activeNode.userJwt ?? null,
 	};
 	const lifecycleCapabilities = useQuery({
 		queryFn: () => fetchAppLifecycleCapabilities(target),
@@ -331,7 +332,11 @@ export default function InstalledSection() {
 
 	const pollSidecarStatus = useCallback(async () => {
 		const node = getActiveNode();
-		const nodeTarget: ApiTarget = { url: node.url, token: node.token ?? null };
+		const nodeTarget: ApiTarget = {
+			url: node.url,
+			token: node.token,
+			userJwt: node.userJwt ?? null,
+		};
 		try {
 			const status = await fetchSidecarStatus(nodeTarget);
 			setSidecarStatus(status);

@@ -42,11 +42,12 @@ export function useQuestEvents(): void {
 	const node = useActiveNode();
 	const url = node.url;
 	const token = node.token ?? null;
+	const userJwt = node.userJwt ?? null;
 	const qc = useQueryClient();
 
 	useEffect(() => {
 		const controller = new AbortController();
-		const target: ApiTarget = { url, token };
+		const target: ApiTarget = { url, token, userJwt };
 
 		const onEvent = (event: QuestEvent) => {
 			if (event.type === "suggested") {
@@ -84,5 +85,5 @@ export function useQuestEvents(): void {
 		return () => {
 			controller.abort();
 		};
-	}, [url, token, qc]);
+	}, [url, token, userJwt, qc]);
 }

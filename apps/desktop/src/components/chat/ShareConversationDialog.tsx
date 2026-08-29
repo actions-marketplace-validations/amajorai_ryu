@@ -23,10 +23,11 @@ import {
 	SelectTrigger,
 	SelectValue,
 } from "@ryu/ui/components/select";
+import { toast } from "@ryu/ui/components/sileo.tsx";
 import { Spinner } from "@ryu/ui/components/spinner";
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { toast } from "@ryu/ui/components/sileo.tsx";
 import { getActiveUserId, listAccounts } from "@/lib/auth-client.ts";
+import type { ApiTarget } from "@/src/lib/api/client.ts";
 import {
 	type ConversationAccess,
 	type ConversationAccessRole,
@@ -35,12 +36,11 @@ import {
 	getPublicShare,
 	getPublicSnapshotMessages,
 	type PrincipalDirectory,
-	publishPublicShare,
 	type PublicShareStatus,
+	publishPublicShare,
 	revokePublicShare,
 	setConversationAccess,
 } from "@/src/lib/api/conversation-sharing.ts";
-import type { ApiTarget } from "@/src/lib/api/client.ts";
 
 type GeneralAccess = ConversationAccess["visibility"] | "public";
 
@@ -155,7 +155,7 @@ export function ShareConversationDialog({
 	}, [access?.collaborators, directory?.members, ownerUserId]);
 
 	const addPerson = (userId: string | null) => {
-		if (!userId || !access) {
+		if (!(userId && access)) {
 			return;
 		}
 		setAccess({
@@ -499,7 +499,7 @@ export function ShareConversationDialog({
 													<SelectItem value="team">A team</SelectItem>
 												) : null}
 												<SelectItem
-													disabled={!owner || !canManage}
+													disabled={!(owner && canManage)}
 													value="public"
 												>
 													Anyone with the link
@@ -536,11 +536,11 @@ export function ShareConversationDialog({
 											</Select>
 										) : null}
 										<p className="text-muted-foreground text-xs">
-											{!canManage
-												? "Only the owner or an organization admin can change access."
-												: generalAccess === "private"
+											{canManage
+												? generalAccess === "private"
 													? "Only invited people can open the live chat."
-													: null}
+													: null
+												: "Only the owner or an organization admin can change access."}
 											{generalAccess === "org"
 												? "Everyone in your organization can participate."
 												: null}

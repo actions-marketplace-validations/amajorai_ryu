@@ -7112,7 +7112,11 @@ export function GatewayDialog({
 	}, [entityGroups, search]);
 
 	const node = getActiveNode();
-	const target: ApiTarget = { url: node.url, token: node.token ?? null };
+	const target: ApiTarget = {
+		url: node.url,
+		token: node.token ?? null,
+		userJwt: node.userJwt ?? null,
+	};
 	// Managed (Ryu Cloud) node: keys are held server-side in the fleet vault, so
 	// the key cards render read-only and their writers no-op (WS4). Synchronous —
 	// travels on the node record from hydrateCloudNodes, no async probe needed.

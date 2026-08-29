@@ -7,7 +7,11 @@ import {
 } from "./webhooks.ts";
 
 const realFetch = globalThis.fetch;
-const target: ApiTarget = { token: "node-token", url: "http://127.0.0.1:7980" };
+const target: ApiTarget = {
+	token: "node-token",
+	url: "http://127.0.0.1:7980",
+	userJwt: null,
+};
 
 afterEach(() => {
 	globalThis.fetch = realFetch;

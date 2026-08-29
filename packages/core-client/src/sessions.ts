@@ -50,7 +50,7 @@ export async function listSessionsForConversation(
 ): Promise<Session[]> {
 	const resp = await fetch(
 		apiUrl(target, `/api/conversations/${conversationId}/sessions`),
-		{ headers: makeHeaders(target.token) }
+		{ headers: makeHeaders(target.token, target.userJwt) }
 	);
 	if (!resp.ok) {
 		throw new Error(`Failed to load sessions: ${resp.status}`);

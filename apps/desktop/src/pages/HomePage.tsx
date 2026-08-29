@@ -220,7 +220,11 @@ function nextRow(widgets: Widget[]): number {
 export default function HomePage() {
 	const activeNode = useActiveNode();
 	const target = useMemo(
-		() => ({ url: activeNode.url, token: activeNode.token ?? null }),
+		() => ({
+			url: activeNode.url,
+			token: activeNode.token,
+			userJwt: activeNode.userJwt ?? null,
+		}),
 		[activeNode.url, activeNode.token]
 	);
 	const dashboardRealtimeRef = useRef<RealtimeConnection | null>(null);

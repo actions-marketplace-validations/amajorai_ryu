@@ -9,36 +9,36 @@ type Tokens = Record<string, string>;
 export type ThemeDensity = "compact" | "comfortable" | "spacious";
 
 export interface ThemeAppearance {
-	uiFont?: string;
-	headingFont?: string;
+	cardRadius?: number;
 	codeFont?: string;
+	contentScale?: number;
+	contentWidth?: string;
+	density?: ThemeDensity;
 	fontSizes?: Partial<
 		Record<"xs" | "sm" | "base" | "lg" | "xl" | "2xl", string>
 	>;
 	fontWeights?: Partial<
 		Record<"normal" | "medium" | "semibold" | "bold", number>
 	>;
-	spacingScale?: number;
-	density?: ThemeDensity;
-	radius?: number;
-	cardRadius?: number;
-	panelRadius?: number;
-	contentWidth?: string;
-	contentScale?: number;
+	headingFont?: string;
 	layout?: {
 		navigation?: "sidebar" | "topbar" | "minimal";
 		contentAlign?: "start" | "center" | "wide";
 		panelStyle?: "flat" | "card" | "outline";
 	};
+	panelRadius?: number;
+	radius?: number;
+	spacingScale?: number;
+	uiFont?: string;
 }
 
 export interface ThemeVariant {
+	appearance?: ThemeAppearance;
 	id: string;
 	label: string;
 	mode: "light" | "dark";
 	preview: { bg: string; surface: string; primary: string; text: string };
 	tokens: Tokens;
-	appearance?: ThemeAppearance;
 }
 
 interface Swatch {
@@ -1785,11 +1785,7 @@ export function colorToHex(color: string): string | null {
 	const oklchMatch = color.match(OKLCH_RE);
 	if (oklchMatch) {
 		const [, lightness, chroma, hue] = oklchMatch;
-		if (
-			lightness === undefined ||
-			chroma === undefined ||
-			hue === undefined
-		) {
+		if (lightness === undefined || chroma === undefined || hue === undefined) {
 			return null;
 		}
 		return oklchToHex(lightness, chroma, hue);

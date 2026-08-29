@@ -10,8 +10,6 @@
 @custom-variant dark (&:is(.dark *));
 
 :root {
-	color-scheme: light dark;
-	font-synthesis: none;
 	--background: oklch(1 0 0);
 	--foreground: oklch(0.145 0 0);
 	--card: oklch(1 0 0);
@@ -40,6 +38,8 @@
 	--spacing: 0.25rem;
 	--ryu-dialog-overlay-background: rgb(0 0 0 / 30%);
 	--ryu-dialog-overlay-blur: 8px;
+	font-synthesis: none;
+	color-scheme: light dark;
 }
 
 /* Standalone bundles get a sensible system-dark default. A host-provided inline
@@ -141,8 +141,8 @@ button,
 input,
 select,
 textarea {
-	border-color: var(--border);
 	font: inherit;
+	border-color: var(--border);
 }
 
 button,

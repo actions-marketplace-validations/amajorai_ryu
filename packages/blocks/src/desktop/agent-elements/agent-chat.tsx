@@ -81,6 +81,7 @@ export function AgentChat({
 	density,
 	composerDisabled,
 	composerFooter,
+	voiceMode,
 	infoBar,
 	onComposerMenuSelect,
 	onComposerResize,
@@ -354,6 +355,7 @@ export function AgentChat({
 						}
 					: undefined
 			}
+			seamless={voiceMode?.active}
 			status={status}
 			suggestions={
 				showInputSuggestions
@@ -365,6 +367,10 @@ export function AgentChat({
 			value={draft}
 		/>
 	);
+	const voiceModeNode = voiceMode?.active
+		? voiceMode.render(inputBarNode)
+		: null;
+	const renderedComposer = voiceMode?.active ? null : inputBarNode;
 
 	let transcriptNode: ReactNode;
 	if (showPlaceholder) {
@@ -501,7 +507,7 @@ export function AgentChat({
 					layout={!reduceMotion}
 					transition={reduceMotion ? { duration: 0 } : CHAT_LAYOUT_TRANSITION}
 				>
-					{inputBarNode}
+					{renderedComposer}
 				</motion.div>
 				{isCenteredEmptyState ? (
 					<>
@@ -532,13 +538,19 @@ export function AgentChat({
 			{chatStage}
 		</div>
 	);
+	const chatSurface = (
+		<>
+			{chatNode}
+			{voiceModeNode}
+		</>
+	);
 
 	return density ? (
 		<ChatDisplayPrefsProvider value={{ density }}>
-			{chatNode}
+			{chatSurface}
 		</ChatDisplayPrefsProvider>
 	) : (
-		chatNode
+		chatSurface
 	);
 }
 

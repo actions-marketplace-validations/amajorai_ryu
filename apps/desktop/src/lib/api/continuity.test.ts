@@ -19,7 +19,7 @@ const bundle: RnpContinuityBundleV0 = {
 describe("RNP continuity client", () => {
 	it("keeps source and destination credentials on their own requests", async () => {
 		const calls: Array<{
-			target: { url: string; token: string | null };
+			target: { url: string; token: string | null; userJwt?: string | null };
 			path: string;
 		}> = [];
 		const client = createContinuityClient({
@@ -41,22 +41,32 @@ describe("RNP continuity client", () => {
 
 		await client.transferConversation({
 			conversationId: "conversation-1",
-			source: { url: "https://source.example", token: "source-secret" },
+			source: {
+				url: "https://source.example",
+				token: "source-secret",
+				userJwt: null,
+			},
 			destination: {
 				url: "https://destination.example",
 				token: "destination-secret",
+				userJwt: null,
 			},
 		});
 
 		expect(calls).toEqual([
 			{
-				target: { url: "https://source.example", token: "source-secret" },
+				target: {
+					url: "https://source.example",
+					token: "source-secret",
+					userJwt: null,
+				},
 				path: "/api/rnp/v0/conversations/conversation-1/export",
 			},
 			{
 				target: {
 					url: "https://destination.example",
 					token: "destination-secret",
+					userJwt: null,
 				},
 				path: "/api/rnp/v0/conversations/conversation-1/resume",
 			},
@@ -75,8 +85,12 @@ describe("RNP continuity client", () => {
 		await expect(
 			client.transferConversation({
 				conversationId: "conversation-1",
-				source: { url: "https://source.example", token: null },
-				destination: { url: "https://destination.example", token: null },
+				source: { url: "https://source.example", token: null, userJwt: null },
+				destination: {
+					url: "https://destination.example",
+					token: null,
+					userJwt: null,
+				},
 			})
 		).rejects.toThrow("invalid continuity bundle");
 		expect(calls).toBe(1);
@@ -92,7 +106,7 @@ describe("RNP continuity client", () => {
 		});
 		await expect(
 			mismatchedSource.exportConversation(
-				{ url: "https://source.example", token: null },
+				{ url: "https://source.example", token: null, userJwt: null },
 				"conversation-1",
 				{ version: 0, transcript: { mode: "recent", maxMessages: 50 } }
 			)
@@ -110,7 +124,7 @@ describe("RNP continuity client", () => {
 		});
 		await expect(
 			invalidResume.resumeConversation(
-				{ url: "https://destination.example", token: null },
+				{ url: "https://destination.example", token: null, userJwt: null },
 				bundle
 			)
 		).rejects.toThrow("invalid continuity response");

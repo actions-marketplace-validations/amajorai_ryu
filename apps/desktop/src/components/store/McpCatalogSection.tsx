@@ -190,9 +190,9 @@ export default function McpCatalogSection({
 					installing={installing}
 					loading={loading}
 					loadingMore={loadingMore}
+					onClearSearch={() => setQuery("")}
 					onInstall={cardInstall}
 					onSelect={select}
-					onClearSearch={() => setQuery("")}
 					selectedId={selectedId}
 					servers={visibleServers}
 					settingsOpener={settingsOpener}

@@ -119,7 +119,11 @@ export function SystemStatusIndicator() {
 				? "Degraded"
 				: "Core offline";
 
-	const target = { url: activeNode.url, token: activeNode.token };
+	const target = {
+		url: activeNode.url,
+		token: activeNode.token,
+		userJwt: activeNode.userJwt ?? null,
+	};
 
 	return (
 		<Popover>

@@ -31,8 +31,8 @@ export function ComputerUseSettings({
 	const [error, setError] = useState<string | null>(null);
 	const [saved, setSaved] = useState(false);
 	const stableTarget = useMemo(
-		() => ({ url: target.url, token: target.token }),
-		[target.token, target.url]
+		() => ({ url: target.url, token: target.token, userJwt: target.userJwt }),
+		[target.token, target.url, target.userJwt]
 	);
 
 	useEffect(() => {

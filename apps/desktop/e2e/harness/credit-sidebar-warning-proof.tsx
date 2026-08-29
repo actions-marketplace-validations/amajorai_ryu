@@ -9,8 +9,8 @@ import { NodeSelector } from "../../src/components/shell/NodeSelector.tsx";
 import { EntitlementProvider } from "../../src/contexts/entitlement-context.tsx";
 import { SystemStatusProvider } from "../../src/contexts/SystemStatusContext.tsx";
 import { TabsProvider } from "../../src/contexts/TabsContext.tsx";
-import { useSettingsDialog } from "../../src/store/useSettingsDialog.ts";
 import { LOCAL_FALLBACK, useNodeStore } from "../../src/store/useNodeStore.ts";
+import { useSettingsDialog } from "../../src/store/useSettingsDialog.ts";
 import "../../src/index.css";
 
 const PROOF_ORG_ID = "org-proof";

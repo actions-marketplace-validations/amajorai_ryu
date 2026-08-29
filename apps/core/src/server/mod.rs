@@ -486,6 +486,13 @@ fn route_policy(method: &Method, path: &str) -> crate::authorization::RoutePolic
     if path == "/api/mcp/tools/call" {
         return RoutePolicy::requires([Capability::ToolsExec]);
     }
+    if path == "/api/sandboxes" {
+        return if read {
+            RoutePolicy::requires([Capability::GatewayRoute])
+        } else {
+            RoutePolicy::OwnerOnly
+        };
+    }
     if path == "/api/mcp/tools" || path_has_prefix(path, "/api/tools") {
         return RoutePolicy::requires([if read {
             Capability::ToolsRead
@@ -543,6 +550,313 @@ mod gateway_audit_route_policy_tests {
             RoutePolicy::OwnerOnly
         );
     }
+
+    #[test]
+    fn sandbox_visibility_is_read_scoped_but_creation_stays_owner_only() {
+        assert_eq!(
+            route_policy(&Method::GET, "/api/sandboxes"),
+            RoutePolicy::requires([crate::authorization::Capability::GatewayRoute])
+        );
+        assert_eq!(
+            route_policy(&Method::POST, "/api/sandboxes"),
+            RoutePolicy::OwnerOnly
+        );
+    }
+}
+
+#[cfg(test)]
+mod managed_user_authorization_tests {
+    use super::managed_user_jwt_resolution_for;
+    use crate::authorization::{Capability, RoutePolicy};
+    use crate::identity_verify::{OrgRole, TeamMembership, VerifiedCaller};
+    use crate::sidecar::control_plane::{NodeScope, RegisteredNode, RegisteredOrg};
+
+    fn node() -> RegisteredNode {
+        RegisteredNode {
+            org: RegisteredOrg {
+                id: "org_1".to_owned(),
+                name: "Acme".to_owned(),
+                slug: None,
+            },
+            node_id: "node_1".to_owned(),
+            scope: NodeScope::Org,
+            team_id: None,
+            owner_user_id: None,
+        }
+    }
+
+    fn caller(role: OrgRole, org_id: &str) -> VerifiedCaller {
+        VerifiedCaller {
+            user_id: "user_1".to_owned(),
+            email: None,
+            org_id: Some(org_id.to_owned()),
+            role,
+            teams: Vec::new(),
+        }
+    }
+
+    fn team_node() -> RegisteredNode {
+        RegisteredNode {
+            team_id: Some("team_1".to_owned()),
+            scope: NodeScope::Team,
+            ..node()
+        }
+    }
+
+    fn personal_node() -> RegisteredNode {
+        RegisteredNode {
+            owner_user_id: Some("user_1".to_owned()),
+            scope: NodeScope::Personal,
+            ..node()
+        }
+    }
+
+    #[test]
+    fn member_user_jwt_gets_tool_execution_but_not_management() {
+        let resolved = managed_user_jwt_resolution_for(caller(OrgRole::Member, "org_1"), &node(), Some("ryu"), 10)
+            .expect("same-org member should resolve");
+
+        assert!(!resolved.context.is_owner());
+        assert!(resolved
+            .context
+            .authorize(
+                &RoutePolicy::requires([Capability::ToolsExec]),
+                &resolved.bindings,
+                10,
+            )
+            .is_allowed());
+        assert_eq!(
+            resolved.context.authorize(&RoutePolicy::OwnerOnly, &resolved.bindings, 10),
+            crate::authorization::AuthorizationDecision::Deny(
+                crate::authorization::DenialReason::OwnerRequired
+            )
+        );
+    }
+
+    #[test]
+    fn viewer_user_jwt_can_list_tools_but_cannot_execute_them() {
+        let resolved = managed_user_jwt_resolution_for(caller(OrgRole::Viewer, "org_1"), &node(), Some("ryu"), 10)
+            .expect("same-org viewer should resolve");
+
+        assert!(resolved
+            .context
+            .authorize(
+                &RoutePolicy::requires([Capability::ToolsRead]),
+                &resolved.bindings,
+                10,
+            )
+            .is_allowed());
+        assert!(!resolved
+            .context
+            .authorize(
+                &RoutePolicy::requires([Capability::ToolsExec]),
+                &resolved.bindings,
+                10,
+            )
+            .is_allowed());
+    }
+
+    #[test]
+    fn a_user_from_another_org_is_not_admitted() {
+        assert!(managed_user_jwt_resolution_for(caller(OrgRole::Owner, "org_other"), &node(), Some("ryu"), 10)
+            .is_none());
+    }
+
+    #[test]
+    fn team_node_requires_membership_in_that_team() {
+        let mut member = caller(OrgRole::Member, "org_1");
+        assert!(managed_user_jwt_resolution_for(member.clone(), &team_node(), Some("ryu"), 10)
+            .is_none());
+
+        member.teams.push(TeamMembership {
+            id: "team_1".to_owned(),
+            org_id: "org_1".to_owned(),
+            role: "member".to_owned(),
+        });
+        assert!(managed_user_jwt_resolution_for(member, &team_node(), Some("ryu"), 10)
+            .is_some());
+    }
+
+    #[test]
+    fn personal_node_requires_the_owner() {
+        assert!(managed_user_jwt_resolution_for(caller(OrgRole::Member, "org_1"), &personal_node(), Some("ryu"), 10)
+            .is_some());
+
+        let mut other = caller(OrgRole::Member, "org_1");
+        other.user_id = "user_2".to_owned();
+        assert!(managed_user_jwt_resolution_for(other, &personal_node(), Some("ryu"), 10)
+            .is_none());
+    }
+}
+
+/// Lower the built-in organization role into the capability vocabulary used by
+/// Core's route and MCP method gates. Custom permissions remain enforced by the
+/// handler-level organization checks; this mapping is the safe baseline needed
+/// before a request can reach a handler at all.
+fn capabilities_for_managed_user(
+    role: crate::identity_verify::OrgRole,
+) -> crate::authorization::CapabilitySet {
+    use crate::authorization::Capability;
+    use crate::identity_verify::permissions;
+
+    let mut capabilities = Vec::new();
+    if permissions::can(role, permissions::SPACE_READ) {
+        capabilities.extend([
+            Capability::ChatRead,
+            Capability::ToolsRead,
+            Capability::MemoryRead,
+            Capability::FilesRead,
+        ]);
+    }
+    if permissions::can(role, permissions::SPACE_WRITE) {
+        capabilities.extend([
+            Capability::ChatWrite,
+            Capability::MemoryWrite,
+            Capability::FilesWrite,
+        ]);
+    }
+    if permissions::can(role, permissions::AGENT_VIEW) {
+        capabilities.push(Capability::AgentsRead);
+    }
+    if permissions::can(role, permissions::AGENT_EDIT) {
+        capabilities.push(Capability::AgentsManage);
+    }
+    if permissions::can(role, permissions::WORKFLOW_VIEW) {
+        capabilities.push(Capability::WorkflowsRead);
+    }
+    if permissions::can(role, permissions::WORKFLOW_RUN) {
+        capabilities.push(Capability::WorkflowsRun);
+    }
+    if permissions::can(role, permissions::WORKFLOW_EDIT) {
+        capabilities.push(Capability::WorkflowsManage);
+    }
+    if permissions::can(role, permissions::TOOL_EXEC) {
+        capabilities.push(Capability::ToolsExec);
+    }
+    if permissions::can(role, permissions::GATEWAY_VIEW) {
+        capabilities.push(Capability::GatewayRoute);
+    }
+    crate::authorization::CapabilitySet::new(capabilities)
+}
+
+/// Build the authorization context for a valid Better Auth user JWT on an
+/// org-bound node. This is pure after JWT verification, which keeps the
+/// high-risk role-to-capability mapping testable without a JWKS server.
+fn managed_user_jwt_resolution_for(
+    caller: crate::identity_verify::VerifiedCaller,
+    node: &crate::sidecar::control_plane::RegisteredNode,
+    path_agent_id: Option<&str>,
+    now: u64,
+) -> Option<ResolvedAuthorization> {
+    if caller.org_id.as_deref() != Some(node.org.id.as_str()) {
+        return None;
+    }
+
+    // The organization claim is only the first boundary. Managed credentials
+    // can be scoped to one team or one user's personal node; a JWT for another
+    // member of the same organization must not cross either boundary. The
+    // registration response is validated into this disjoint shape, but keep the
+    // checks fail-closed if a malformed/legacy response ever reaches this seam.
+    let in_scope = match node.scope {
+        crate::sidecar::control_plane::NodeScope::Org => {
+            node.team_id.is_none() && node.owner_user_id.is_none()
+        }
+        crate::sidecar::control_plane::NodeScope::Team => {
+            node.owner_user_id.is_none()
+                && node.team_id.as_deref().is_some_and(|team_id| {
+                    caller
+                        .teams
+                        .iter()
+                        .any(|team| team.id == team_id && team.org_id == node.org.id)
+                })
+        }
+        crate::sidecar::control_plane::NodeScope::Personal => {
+            node.team_id.is_none()
+                && node.owner_user_id.as_deref() == Some(caller.user_id.as_str())
+        }
+    };
+    if !in_scope {
+        return None;
+    }
+
+    let agent_id = path_agent_id.map(str::to_owned);
+    let bindings = crate::authorization::RequestBindings {
+        subject_id: Some(caller.user_id.clone()),
+        agent_id: agent_id.clone(),
+        node_id: Some(node.node_id.clone()),
+        org_id: Some(node.org.id.clone()),
+        ..Default::default()
+    };
+    let constraints = crate::authorization::GrantConstraints {
+        subject_id: Some(caller.user_id.clone()),
+        agent_id,
+        node_id: Some(node.node_id.clone()),
+        org_id: Some(node.org.id.clone()),
+        ..Default::default()
+    };
+
+    Some(ResolvedAuthorization {
+        context: crate::authorization::AuthorizationContext {
+            credential: crate::authorization::CredentialKind::ManagedUserJwt,
+            principal: crate::authorization::Principal::User {
+                subject_id: caller.user_id.clone(),
+            },
+            capabilities: capabilities_for_managed_user(caller.role),
+            constraints,
+            issued_at: now,
+            expires_at: None,
+        },
+        bindings,
+        caller: Some(caller),
+        verified_user_jwt: None,
+    })
+}
+
+/// Verify a Better Auth bearer used as the primary credential by a managed or
+/// organization-bound node. A valid optional identity header must name the same
+/// user, role, and team set so downstream handlers cannot see a different caller
+/// than the admission middleware authorized.
+async fn resolve_managed_user_jwt(
+    token: &str,
+    headers: &axum::http::HeaderMap,
+    path_agent_id: Option<&str>,
+    now: u64,
+) -> Option<ResolvedAuthorization> {
+    if token.split('.').count() != 3 {
+        return None;
+    }
+    let node = crate::sidecar::control_plane::registered_node()?;
+    let caller = verified_caller_from_token(token).await?;
+    let resolved = managed_user_jwt_resolution_for(caller.clone(), &node, path_agent_id, now)?;
+
+    if let Some(header_token) = header_str(headers, USER_JWT_HEADER) {
+        let header_caller = verified_caller_from_token(&header_token).await?;
+        if !same_verified_caller(&caller, &header_caller) {
+            return None;
+        }
+    }
+
+    Some(ResolvedAuthorization {
+        verified_user_jwt: Some(token.to_owned()),
+        ..resolved
+    })
+}
+
+fn same_verified_caller(
+    left: &crate::identity_verify::VerifiedCaller,
+    right: &crate::identity_verify::VerifiedCaller,
+) -> bool {
+    left.user_id == right.user_id
+        && left.org_id == right.org_id
+        && left.role == right.role
+        && left.teams.len() == right.teams.len()
+        && left.teams.iter().all(|team| {
+            right.teams.iter().any(|candidate| {
+                candidate.id == team.id
+                    && candidate.org_id == team.org_id
+                    && candidate.role == team.role
+            })
+        })
 }
 
 fn mcp_path_agent_id(path: &str) -> Option<String> {
@@ -636,6 +950,10 @@ async fn require_auth_with_token(
                 caller,
                 verified_user_jwt,
             }
+        } else if let Some(resolved) =
+            resolve_managed_user_jwt(token, req.headers(), path_agent_id.as_deref(), now).await
+        {
+            resolved
         } else {
             let (caller, verified_user_jwt) = verified_header_identity(req.headers()).await;
             let bindings = request_bindings(caller.as_ref(), path_agent_id.as_deref());
@@ -672,52 +990,6 @@ async fn require_auth_with_token(
     }
     req.extensions_mut().insert(resolved);
     Ok(next.run(req).await)
-}
-
-/// The tiny, explicit allowlist of routes that a valid, org-matched Better Auth
-/// user JWT may authorize AS AN ALTERNATIVE to the `RYU_TOKEN` node-admittance
-/// bearer. Deliberately org-scoped READ endpoints only; every other route stays
-/// strictly `RYU_TOKEN`-gated. Keep this list minimal and read-only.
-fn path_allows_jwt_auth(path: &str) -> bool {
-    matches!(path, "/api/sandboxes")
-}
-
-/// True when a request to a JWT-allowlisted route carries a Better Auth user JWT
-/// whose verified identity is a member of THIS node's bound org.
-///
-/// Fail-closed at every step:
-///   - the node MUST be org-bound (`registered_org`); an unbound node has no org
-///     to authorize against, so JWT auth is unavailable (RYU_TOKEN still works);
-///   - the JWT is verified entirely offline via `crate::identity_verify`
-///     (EdDSA-only, `iss`/`aud`/`exp` checked) — the same strict path used
-///     everywhere, never a second, weaker verifier;
-///   - after narrowing to the node's org, the caller's `org_id` MUST equal it
-///     (a non-member narrows to `None`, which can never match).
-///
-/// The token is read from the `Authorization: Bearer` header (how the control-
-/// plane fan-out sends it) or the `x-ryu-user-jwt` header (the existing user-
-/// identity channel), so either transport authorizes.
-async fn jwt_authorizes_org_read(
-    headers: &axum::http::HeaderMap,
-    authorization_bearer: Option<&str>,
-) -> bool {
-    let Some(node_org) = crate::sidecar::control_plane::registered_org() else {
-        return false;
-    };
-    let token = authorization_bearer
-        .map(str::to_owned)
-        .or_else(|| header_str(headers, USER_JWT_HEADER));
-    let Some(token) = token else {
-        return false;
-    };
-    let claims = match crate::identity_verify::verify_jwt(&token).await {
-        Ok(claims) => claims,
-        Err(_) => return false,
-    };
-    let caller = crate::identity_verify::to_caller_for_org(&claims, Some(&node_org.id));
-    // Authorization IS the org match: only a JWT whose `orgs` claim contains this
-    // node's org yields `org_id == node_org` after narrowing.
-    caller.org_id.as_deref() == Some(node_org.id.as_str())
 }
 
 /// Read a single trimmed, non-empty header value.
@@ -908,14 +1180,20 @@ const USER_JWT_HEADER: &str = "x-ryu-user-jwt";
 /// Resolve the verified caller from the optional user JWT on the request.
 ///
 /// Returns `None` (anonymous) when the header is absent OR the token fails
-/// verification — failure is NEVER an error to the request, because `RYU_TOKEN`
-/// is the gate and a missing/invalid user identity must simply be absent, never
-/// spoofable-as-privileged. The JWT is verified entirely offline
+/// verification — failure is NEVER an error to the request, because node or
+/// managed admission is a separate gate and a missing/invalid user identity
+/// must simply be absent, never
+/// spoofable-as-privileged. Managed direct requests carry the JWT in
+/// `x-ryu-user-jwt`; the Authorization fallback supports the same verified JWT
+/// on the read-only managed sandbox fan-out. The JWT is verified entirely offline
 /// (`crate::identity_verify`) and narrowed to THIS node's bound org.
 pub(crate) async fn verified_caller_from_headers(
     headers: &axum::http::HeaderMap,
 ) -> Option<crate::identity_verify::VerifiedCaller> {
-    let token = header_str(headers, USER_JWT_HEADER)?;
+    let token = header_str(headers, USER_JWT_HEADER).or_else(|| {
+        header_str(headers, "authorization")
+            .and_then(|value| value.strip_prefix("Bearer ").map(str::to_owned))
+    })?;
     verified_caller_from_token(&token).await
 }
 
@@ -45323,15 +45601,16 @@ mod mcp_plugin_governance_tests {
 
 // ── require_auth node-admittance middleware ──────────────────────────────────
 //
-// The single highest-stakes surface in this file: the `RYU_TOKEN` bearer gate
-// every protected route inherits. Driven end-to-end through a stand-in Router
-// (the `app_gate_tests` pattern) so the real `ct_eq` match, the 401 fail-closed
-// branches, and the JWT carve-out's inertness on an unbound node are all pinned.
+// The single highest-stakes surface in this file: the node bearer gate every
+// protected route inherits. Organization-bound managed nodes also admit a
+// verified Better Auth user JWT as a scoped primary bearer; local and unbound
+// nodes remain node-token-only. Driven through stand-in Router tests so the
+// constant-time node-token match, fail-closed branches, and managed role ceiling
+// stay pinned.
 //
-// `registered_org()` is `None` in tests (only the network-gated
-// `register_managed_node` ever writes it), so `jwt_authorizes_org_read` returns
-// false — which is exactly the guarantee to assert: with no bound org, EVERY
-// non-token request 401s, allowlisted path or not.
+// `registered_org()` is `None` in tests (only the network-gated registration
+// path ever writes it), so managed user-JWT admission remains unavailable and
+// every unbound node stays strictly node-token gated.
 #[cfg(test)]
 mod require_auth_tests {
 	use axum::{
@@ -45410,28 +45689,6 @@ mod require_auth_tests {
         );
     }
 
-    #[tokio::test]
-    async fn jwt_carveout_is_inert_on_an_unbound_node() {
-        // The allowlisted GET route is reachable by JWT ONLY on an org-bound node.
-        // In tests the node is unbound (`registered_org() == None`), so the carve-out
-        // never fires and the route stays strictly RYU_TOKEN-gated — a tokenless
-        // request 401s exactly like every other route.
-        assert_eq!(
-            get_status(Some("s3cret"), "/api/sandboxes", None).await,
-            StatusCode::UNAUTHORIZED
-        );
-        // A bogus bearer on the allowlisted path is still 401 (JWT verify fails
-        // closed with no bound org to authorize against).
-        assert_eq!(
-            get_status(Some("s3cret"), "/api/sandboxes", Some("not-a-jwt")).await,
-            StatusCode::UNAUTHORIZED
-        );
-        // The RYU_TOKEN itself still admits the allowlisted route unchanged.
-        assert_eq!(
-            get_status(Some("s3cret"), "/api/sandboxes", Some("s3cret")).await,
-            StatusCode::OK
-        );
-    }
 }
 
 // ── Pure request/parse/format helpers ────────────────────────────────────────
@@ -45477,19 +45734,6 @@ mod pure_helper_tests {
         assert!(!ct_eq("toke", "token"));
         // Same length, one differing byte.
         assert!(!ct_eq("token", "tokeb"));
-    }
-
-    // ── path_allows_jwt_auth: the JWT carve-out allowlist ─────────────────────
-    #[test]
-    fn only_sandboxes_is_jwt_allowlisted() {
-        assert!(path_allows_jwt_auth("/api/sandboxes"));
-        // Everything else — including near neighbours and trailing-slash variants —
-        // stays strictly RYU_TOKEN-gated.
-        assert!(!path_allows_jwt_auth("/api/sandboxes/"));
-        assert!(!path_allows_jwt_auth("/api/sandboxes/123"));
-        assert!(!path_allows_jwt_auth("/api/conversations"));
-        assert!(!path_allows_jwt_auth("/"));
-        assert!(!path_allows_jwt_auth(""));
     }
 
     // ── header_str / header_decoded ──────────────────────────────────────────
@@ -47334,7 +47578,7 @@ mod per_resource_gate_tests {
     /// tenant data — the equivalent of an OpenAPI schema.
     #[test]
     fn every_acl_read_handler_enforces_a_permission() {
-        let src = include_str!("mod.rs");
+        let src = include_str!("mod.rs").replace("\r\n", "\n");
         for handler in [
             "async fn acl_get_resource(",
             "async fn acl_list_resources(",

@@ -20,13 +20,13 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 
 /**
- * The Ryu home directory for a profile, mirroring `apps/core/src/profile.rs`.
- * The `release` profile (and an unset `RYU_PROFILE`) uses `~/.ryu`; every other
- * profile gets its own `~/.ryu-<profile>` so a `bun dev` stack never reads the
- * installed release node's token.
+ * The Ryu data directory, mirroring `apps/core/src/paths.rs`. `RYU_DIR` is the
+ * Core-level relocation override; `RYU_HOME` remains the JS client's explicit
+ * compatibility override. Without either, profiles use `~/.ryu-<profile>` so a
+ * dev stack never reads the installed release node's token.
  */
 export function ryuHomeDir(): string {
-	const explicit = process.env.RYU_HOME?.trim();
+	const explicit = process.env.RYU_DIR?.trim() || process.env.RYU_HOME?.trim();
 	if (explicit) {
 		return explicit;
 	}

@@ -26,20 +26,20 @@ describe("Dream and Reflect memory clients", () => {
 		globalThis.fetch = Object.assign(
 			async () =>
 				jsonResponse({
-				proposals: [
-					{
-						created_at: 1,
-						current: null,
-						id: "proposal-1",
-						proposed: {
-							content: "Prefers short answers",
-							id: "memory-1",
-							tags: [],
+					proposals: [
+						{
+							created_at: 1,
+							current: null,
+							id: "proposal-1",
+							proposed: {
+								content: "Prefers short answers",
+								id: "memory-1",
+								tags: [],
+							},
+							reason: "Repeated preference",
+							source: "chat",
 						},
-						reason: "Repeated preference",
-						source: "chat",
-					},
-				],
+					],
 				}),
 			{ preconnect: nativeFetch.preconnect }
 		);
@@ -64,12 +64,12 @@ describe("Dream and Reflect memory clients", () => {
 				input: Parameters<typeof fetch>[0],
 				init?: Parameters<typeof fetch>[1]
 			) => {
-			calls.push({
-				body: String(init?.body ?? ""),
-				method: init?.method ?? "GET",
-				url: String(input),
-			});
-			return jsonResponse({ memory: { content: "saved", id: "memory-1" } });
+				calls.push({
+					body: String(init?.body ?? ""),
+					method: init?.method ?? "GET",
+					url: String(input),
+				});
+				return jsonResponse({ memory: { content: "saved", id: "memory-1" } });
 			},
 			{ preconnect: nativeFetch.preconnect }
 		);
@@ -90,17 +90,17 @@ describe("Dream and Reflect memory clients", () => {
 		globalThis.fetch = Object.assign(
 			async () =>
 				jsonResponse({
-				activity: [{ count: 12, label: "Conversations", trend: 25 }],
-				insights: [
-					{
-						body: "You made progress",
-						id: "i1",
-						title: "A good week",
-						tone: "positive",
-					},
-				],
-				period: "30d",
-				topics: [{ count: 4, name: "Writing", summary: "Drafts and edits" }],
+					activity: [{ count: 12, label: "Conversations", trend: 25 }],
+					insights: [
+						{
+							body: "You made progress",
+							id: "i1",
+							title: "A good week",
+							tone: "positive",
+						},
+					],
+					period: "30d",
+					topics: [{ count: 4, name: "Writing", summary: "Drafts and edits" }],
 				}),
 			{ preconnect: nativeFetch.preconnect }
 		);
@@ -119,19 +119,19 @@ describe("Dream and Reflect memory clients", () => {
 	it("falls back to the privacy-gated usage review route on older nodes", async () => {
 		globalThis.fetch = Object.assign(
 			async (input: Parameters<typeof fetch>[0]) => {
-			const url = String(input);
-			if (url.includes("/api/memory/reflect?")) {
-				return new Response(JSON.stringify({ error: "not_found" }), {
-					status: 404,
+				const url = String(input);
+				if (url.includes("/api/memory/reflect?")) {
+					return new Response(JSON.stringify({ error: "not_found" }), {
+						status: 404,
+					});
+				}
+				return jsonResponse({
+					metrics: { active_days: 3, conversation_count: 2, message_count: 8 },
+					period: { to: 100 },
+					topics: [
+						{ conversation_count: 2, label: "Planning", message_count: 8 },
+					],
 				});
-			}
-			return jsonResponse({
-				metrics: { active_days: 3, conversation_count: 2, message_count: 8 },
-				period: { to: 100 },
-				topics: [
-					{ conversation_count: 2, label: "Planning", message_count: 8 },
-				],
-			});
 			},
 			{ preconnect: nativeFetch.preconnect }
 		);

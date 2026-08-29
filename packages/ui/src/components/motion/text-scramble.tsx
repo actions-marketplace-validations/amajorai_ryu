@@ -9,14 +9,14 @@ import { type CSSProperties, useEffect, useRef, useState } from "react";
 const DEFAULT_GLYPHS = "ABCDEFGHJKLMNPQRSTUVWXYZ0123456789#%&@$?/";
 
 export interface TextScrambleProps {
-	/** Final text revealed by the scramble animation. */
-	text: string;
+	className?: string;
 	/** Maximum animation duration in milliseconds. */
 	duration?: number;
 	/** Characters sampled while unresolved positions are scrambling. */
 	glyphs?: string;
-	className?: string;
 	style?: CSSProperties;
+	/** Final text revealed by the scramble animation. */
+	text: string;
 }
 
 /** Character scramble that resolves to `text` and respects reduced motion. */
@@ -79,7 +79,10 @@ export function TextScramble({
 	}, [duration, glyphs, reduce, text]);
 
 	return (
-		<span className={cn("inline-block whitespace-pre", className)} style={style}>
+		<span
+			className={cn("inline-block whitespace-pre", className)}
+			style={style}
+		>
 			<span className="sr-only">{text}</span>
 			<span aria-hidden="true">{reduce ? text : display}</span>
 		</span>

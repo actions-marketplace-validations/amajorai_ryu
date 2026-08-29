@@ -76,12 +76,12 @@ export function InlineCitationCardTrigger({
 	const extra = sources.length > 1 ? ` +${sources.length - 1}` : "";
 	return (
 		<HoverCardTrigger
-			closeDelay={100}
-			delay={120}
 			className={cn(
 				"inline-flex cursor-default items-center gap-1 rounded-full border border-border bg-muted/60 px-1.5 py-0.5 align-middle font-medium text-[11px] text-muted-foreground transition-colors hover:border-primary/40 hover:text-foreground",
 				className
 			)}
+			closeDelay={100}
+			delay={120}
 		>
 			{label ? <span className="text-primary">{label}</span> : null}
 			<span className="max-w-[140px] truncate">{primary}</span>

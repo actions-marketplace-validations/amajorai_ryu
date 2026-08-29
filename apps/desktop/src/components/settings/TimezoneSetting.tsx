@@ -89,8 +89,9 @@ export function TimezoneSetting() {
 			if (!needle) {
 				return true;
 			}
-			const haystack =
-				`${labelFor(value)} ${value}`.toLowerCase().replace(/_/g, " ");
+			const haystack = `${labelFor(value)} ${value}`
+				.toLowerCase()
+				.replace(/_/g, " ");
 			return haystack.includes(needle);
 		},
 		[labelFor]

@@ -505,9 +505,9 @@ Start writing a new paragraph AFTER <Document> ONLY ONE SENTENCE`
 		label: "Replace selection",
 		value: "replace",
 		onSelect: ({ aiEditor, editor }) => {
-				Promise.resolve(
-					editor.getTransforms(AIChatPlugin).aiChat.replaceSelection(aiEditor)
-				).catch(() => undefined);
+			Promise.resolve(
+				editor.getTransforms(AIChatPlugin).aiChat.replaceSelection(aiEditor)
+			).catch(() => undefined);
 		},
 	},
 	simplifyLanguage: {
@@ -546,9 +546,9 @@ Start writing a new paragraph AFTER <Document> ONLY ONE SENTENCE`
 		label: "Try again",
 		value: "tryAgain",
 		onSelect: ({ editor }) => {
-			Promise.resolve(
-				editor.getApi(AIChatPlugin).aiChat.reload()
-			).catch(() => undefined);
+			Promise.resolve(editor.getApi(AIChatPlugin).aiChat.reload()).catch(
+				() => undefined
+			);
 		},
 	},
 } satisfies Record<

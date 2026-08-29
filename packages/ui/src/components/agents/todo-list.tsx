@@ -25,22 +25,22 @@ export type TodoItemStatus =
 	| "cancelled";
 
 export interface TodoItem {
-	id: string;
-	title: ReactNode;
-	status?: TodoItemStatus;
-	progress?: number;
 	detail?: ReactNode;
+	id: string;
+	progress?: number;
+	status?: TodoItemStatus;
+	title: ReactNode;
 }
 
 export interface TodoListProps {
-	items: TodoItem[];
-	title?: ReactNode;
-	open?: boolean;
-	defaultOpen?: boolean;
-	onOpenChange?: (open: boolean) => void;
-	collapseOnComplete?: boolean;
-	maxHeight?: number;
 	className?: string;
+	collapseOnComplete?: boolean;
+	defaultOpen?: boolean;
+	items: TodoItem[];
+	maxHeight?: number;
+	onOpenChange?: (open: boolean) => void;
+	open?: boolean;
+	title?: ReactNode;
 }
 
 function statusLabel(status: TodoItemStatus) {
@@ -142,7 +142,9 @@ function TodoStatusIcon({
 				strokeDasharray={status === "pending" ? "2 3" : undefined}
 				strokeLinecap="round"
 				strokeWidth="1.5"
-				transition={reduce ? { duration: 0 } : { duration: 0.18, ease: EASE_OUT }}
+				transition={
+					reduce ? { duration: 0 } : { duration: 0.18, ease: EASE_OUT }
+				}
 			/>
 			<motion.circle
 				animate={{
@@ -165,7 +167,13 @@ function TodoStatusIcon({
 				style={{ transformOrigin: "12px 12px" }}
 				transition={
 					status === "in-progress" && progress === undefined && !reduce
-						? { rotate: { duration: 1.1, repeat: Infinity, ease: "linear" } }
+						? {
+								rotate: {
+									duration: 1.1,
+									repeat: Number.POSITIVE_INFINITY,
+									ease: "linear",
+								},
+							}
 						: reduce
 							? { duration: 0 }
 							: SPRING_LAYOUT
@@ -183,7 +191,9 @@ function TodoStatusIcon({
 				strokeLinecap="round"
 				strokeLinejoin="round"
 				strokeWidth="2"
-				transition={reduce ? { duration: 0 } : { duration: 0.24, ease: EASE_OUT }}
+				transition={
+					reduce ? { duration: 0 } : { duration: 0.24, ease: EASE_OUT }
+				}
 			/>
 			<motion.path
 				animate={{
@@ -196,7 +206,9 @@ function TodoStatusIcon({
 				stroke="currentColor"
 				strokeLinecap="round"
 				strokeWidth="2"
-				transition={reduce ? { duration: 0 } : { duration: 0.2, ease: EASE_OUT }}
+				transition={
+					reduce ? { duration: 0 } : { duration: 0.2, ease: EASE_OUT }
+				}
 			/>
 		</motion.svg>
 	);
@@ -347,7 +359,10 @@ export function TodoList({
 														}
 											}
 										>
-											<TodoStatusIcon progress={item.progress} status={status} />
+											<TodoStatusIcon
+												progress={item.progress}
+												status={status}
+											/>
 											<span className="sr-only">{statusLabel(status)}: </span>
 											<span
 												className={cn(
@@ -371,7 +386,11 @@ export function TodoList({
 														transition={
 															reduce
 																? { duration: 0 }
-																: { duration: 0.28, ease: EASE_OUT, delay: 0.06 }
+																: {
+																		duration: 0.28,
+																		ease: EASE_OUT,
+																		delay: 0.06,
+																	}
 														}
 													/>
 												</span>
@@ -387,7 +406,7 @@ export function TodoList({
 							</AnimatePresence>
 						</ol>
 					) : (
-						<p className="px-1.5 py-2 text-sm text-muted-foreground">
+						<p className="px-1.5 py-2 text-muted-foreground text-sm">
 							No tasks yet
 						</p>
 					)}

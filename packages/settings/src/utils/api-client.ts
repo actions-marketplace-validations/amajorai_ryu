@@ -1,5 +1,17 @@
 // API client for settings-related operations
 
+import type {
+	CreateOAuthAppInput,
+	OAuthApp,
+	OwnedOAuthApp,
+} from "@ryu/auth/oauth-contract";
+
+export type {
+	CreateOAuthAppInput,
+	OAuthApp,
+	OwnedOAuthApp,
+} from "@ryu/auth/oauth-contract";
+
 let _getToken: (() => string | null) | null = null;
 
 export function configureSettingsApi(opts: { getToken: () => string | null }) {
@@ -18,14 +30,6 @@ export interface Session {
 	ipAddress?: string;
 	userAgent?: string;
 	userId: string;
-}
-
-export interface OAuthApp {
-	clientId: string;
-	clientName: string;
-	grantedAt: Date;
-	icon: string | null;
-	scopes: string;
 }
 
 export interface AvatarResponse {
@@ -552,6 +556,33 @@ export const settingsApi = {
 			await fetchApi(`/api/oauth-apps/${encodeURIComponent(clientId)}`, {
 				method: "DELETE",
 			});
+		},
+
+		owned: {
+			list(): Promise<{ apps: OwnedOAuthApp[] }> {
+				return fetchApi("/api/oauth-apps/owned");
+			},
+
+			create(input: CreateOAuthAppInput): Promise<{ app: OwnedOAuthApp }> {
+				return fetchApi("/api/oauth-apps/owned", {
+					body: JSON.stringify(input),
+					method: "POST",
+				});
+			},
+
+			async delete(clientId: string): Promise<void> {
+				await fetchApi(
+					`/api/oauth-apps/owned/${encodeURIComponent(clientId)}`,
+					{ method: "DELETE" }
+				);
+			},
+
+			rotateSecret(clientId: string): Promise<{ app: OwnedOAuthApp }> {
+				return fetchApi(
+					`/api/oauth-apps/owned/${encodeURIComponent(clientId)}/rotate-secret`,
+					{ method: "POST" }
+				);
+			},
 		},
 	},
 

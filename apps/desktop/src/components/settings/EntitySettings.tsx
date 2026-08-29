@@ -35,8 +35,8 @@ import { PluginSettingsFields } from "./PluginSettingsFields.tsx";
 import { PredictSettings } from "./PredictSettings.tsx";
 import { QuestsSettings } from "./QuestsSettings.tsx";
 import { ShadowSettings } from "./ShadowSettings.tsx";
-import { SettingsSection } from "./shared/settings-items.tsx";
 import { SpacesSettings } from "./SpacesSettings.tsx";
+import { SettingsSection } from "./shared/settings-items.tsx";
 
 /**
  * First-party settings views, keyed by the OWNING plugin id. Mirrors the

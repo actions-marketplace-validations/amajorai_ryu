@@ -18,6 +18,6 @@ export function getVoiceCallInitials(name: string): string {
 		return words[0]?.slice(0, 2).toUpperCase() ?? "R";
 	}
 	const first = words[0]?.[0] ?? "R";
-	const last = words[words.length - 1]?.[0] ?? "Y";
+	const last = words.at(-1)?.[0] ?? "Y";
 	return `${first}${last}`.toUpperCase();
 }

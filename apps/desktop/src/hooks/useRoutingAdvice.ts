@@ -46,7 +46,7 @@ export function useRoutingAdvice(
 		queryKey: ["routing-advice", node.url, agentId, model, atConversationStart],
 		queryFn: () =>
 			fetchRoutingAdvice(
-				{ url: node.url, token: node.token ?? null },
+				{ url: node.url, token: node.token, userJwt: node.userJwt ?? null },
 				agentId ?? "",
 				model ?? "",
 				atConversationStart

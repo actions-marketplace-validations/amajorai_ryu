@@ -17,11 +17,7 @@ describe("diffLines", () => {
 
 	it("marks a deletion as a removed row without a new line number", () => {
 		const lines = diffLines("a\nb\nc", "a\nc");
-		expect(lines.map((l) => l.type)).toEqual([
-			"context",
-			"removed",
-			"context",
-		]);
+		expect(lines.map((l) => l.type)).toEqual(["context", "removed", "context"]);
 		const removed = lines.find((l) => l.type === "removed");
 		expect(removed).toMatchObject({ content: "b", oldLine: 2 });
 		expect(removed?.newLine).toBeUndefined();
@@ -48,14 +44,14 @@ describe("diffLines", () => {
 		// row (new side) plus the real rows. The callers guard against both
 		// being empty before reaching here; this pins the one-sided shape.
 		const additions = diffLines("", "a\nb");
-		expect(additions.filter((l) => l.type === "added").map((l) => l.content)).toEqual(
-			["a", "b"]
-		);
+		expect(
+			additions.filter((l) => l.type === "added").map((l) => l.content)
+		).toEqual(["a", "b"]);
 
 		const removals = diffLines("a\nb", "");
-		expect(removals.filter((l) => l.type === "removed").map((l) => l.content)).toEqual(
-			["a", "b"]
-		);
+		expect(
+			removals.filter((l) => l.type === "removed").map((l) => l.content)
+		).toEqual(["a", "b"]);
 	});
 
 	it("emits unique ids so the beUI FileDiff rows never collide", () => {

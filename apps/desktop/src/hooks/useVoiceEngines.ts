@@ -64,6 +64,7 @@ export function useVoiceEngines(
 	const activeNode = useActiveNode();
 	const url = activeNode.url;
 	const token = activeNode.token ?? null;
+	const userJwt = activeNode.userJwt ?? null;
 	// Stable key so the reload callback only changes when the set actually changes.
 	const categoryKey = categories.join(",");
 
@@ -76,8 +77,8 @@ export function useVoiceEngines(
 		setError(null);
 		try {
 			const [catalog, status] = await Promise.all([
-				fetchCatalog(url, token),
-				fetchSidecarStatus(url, token).catch(
+				fetchCatalog(url, token, undefined, userJwt),
+				fetchSidecarStatus(url, token, userJwt).catch(
 					() => ({}) as Record<string, boolean>
 				),
 			]);
@@ -102,7 +103,7 @@ export function useVoiceEngines(
 		} finally {
 			setLoading(false);
 		}
-	}, [url, token, categoryKey]);
+	}, [url, token, userJwt, categoryKey]);
 
 	useEffect(() => {
 		reload().catch(() => undefined);
@@ -114,30 +115,30 @@ export function useVoiceEngines(
 	// `force` turns an install into an UPDATE — see the note in useEngines.
 	const install = useCallback(
 		async (name: string, force = false) => {
-			await installSidecar(url, token, name, force);
+			await installSidecar(url, token, name, force, undefined, userJwt);
 			await reload();
 		},
-		[url, token, reload]
+		[url, token, userJwt, reload]
 	);
 
 	const uninstall = useCallback(
 		async (name: string) => {
-			await uninstallSidecar(url, token, name);
+			await uninstallSidecar(url, token, name, userJwt);
 			await reload();
 		},
-		[url, token, reload]
+		[url, token, userJwt, reload]
 	);
 
 	const setRunning = useCallback(
 		async (name: string, running: boolean) => {
 			if (running) {
-				await startSidecar(url, token, name);
+				await startSidecar(url, token, name, userJwt);
 			} else {
-				await stopSidecar(url, token, name);
+				await stopSidecar(url, token, name, userJwt);
 			}
 			await reload();
 		},
-		[url, token, reload]
+		[url, token, userJwt, reload]
 	);
 
 	return { engines, loading, error, reload, install, uninstall, setRunning };

@@ -410,7 +410,12 @@ export default function CompanionPage() {
 	const activeNode = useActiveNode();
 	const nodeUrl = activeNode.url;
 	const nodeToken = activeNode.token ?? null;
-	const target: ApiTarget = { url: nodeUrl, token: nodeToken };
+	const nodeUserJwt = activeNode.userJwt ?? null;
+	const target: ApiTarget = {
+		url: nodeUrl,
+		token: nodeToken,
+		userJwt: nodeUserJwt,
+	};
 
 	// ── Consent state (AC1: per-capability opt-in, disabled by default) ──────
 	const [consent, setConsent] = useState<CompanionConsent>({
@@ -458,7 +463,7 @@ export default function CompanionPage() {
 	useEffect(() => {
 		let cancelled = false;
 		setAgentsError(false);
-		fetchAgents({ url: nodeUrl, token: nodeToken })
+		fetchAgents({ url: nodeUrl, token: nodeToken, userJwt: nodeUserJwt })
 			.then((list) => {
 				if (cancelled) {
 					return;
@@ -477,7 +482,7 @@ export default function CompanionPage() {
 		};
 		// `reloadKey` is load-bearing: `retryLoadAgents` (wired to `onRetryAgents`)
 		// only bumps it, so without it the retry does nothing at all.
-	}, [nodeUrl, nodeToken, reloadKey]);
+	}, [nodeUrl, nodeToken, nodeUserJwt, reloadKey]);
 
 	const retryLoadAgents = useCallback(() => {
 		setReloadKey((key) => key + 1);

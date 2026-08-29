@@ -17,7 +17,7 @@
 # (/v1/config, /v1/audit) without the master key.
 
 # ---- builder ------------------------------------------------------------------
-FROM rust:1-bookworm AS builder
+FROM rust:1-trixie AS builder
 
 # Gateway-only build deps: build-essential + libssl-dev for native-tls, and the C
 # toolchain for rusqlite's bundled SQLite (the audit store). cmake / protobuf are
@@ -55,7 +55,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
  && cp target/release/ryu-gateway /usr/local/bin/ryu-gateway
 
 # ---- runtime ------------------------------------------------------------------
-FROM debian:bookworm-slim AS runtime
+FROM debian:trixie-slim AS runtime
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
       ca-certificates \

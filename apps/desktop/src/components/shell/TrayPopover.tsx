@@ -24,8 +24,8 @@
 
 import { ArrowUpRight01Icon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon, type IconSvgElement } from "@hugeicons/react";
-import { Spinner } from "@ryu/ui/components/spinner.tsx";
 import { PullToRefresh } from "@ryu/ui/components/pull-to-refresh.tsx";
+import { Spinner } from "@ryu/ui/components/spinner.tsx";
 import {
 	Tooltip,
 	TooltipContent,
@@ -771,7 +771,9 @@ export function TrayScroll({
 		>
 			{content}
 		</PullToRefresh>
-	) : content;
+	) : (
+		content
+	);
 }
 
 /** Centred nothing-here state, sized for a popover rather than a page. */

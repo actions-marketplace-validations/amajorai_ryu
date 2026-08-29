@@ -165,16 +165,19 @@ export function useMessageQueue({
 	const prevStatusRef = useRef<ChatStatus>(status);
 	const prevQueueLenRef = useRef(0);
 
-	const enqueue = useCallback((content: string, attachments?: QueuedAttachment[]) => {
-		const trimmed = content.trim();
-		if (!trimmed && (!attachments || attachments.length === 0)) {
-			return;
-		}
-		setQueue((prev) => [
-			...prev,
-			{ id: makeId(), content: trimmed, attachments: attachments ?? [] },
-		]);
-	}, []);
+	const enqueue = useCallback(
+		(content: string, attachments?: QueuedAttachment[]) => {
+			const trimmed = content.trim();
+			if (!trimmed && (!attachments || attachments.length === 0)) {
+				return;
+			}
+			setQueue((prev) => [
+				...prev,
+				{ id: makeId(), content: trimmed, attachments: attachments ?? [] },
+			]);
+		},
+		[]
+	);
 
 	const remove = useCallback((id: string) => {
 		setQueue((prev) => prev.filter((m) => m.id !== id));
@@ -197,9 +200,13 @@ export function useMessageQueue({
 	const reorder = useCallback((id: string, toIndex: number) => {
 		setQueue((prev) => {
 			const fromIndex = prev.findIndex((item) => item.id === id);
-			if (fromIndex < 0) return prev;
+			if (fromIndex < 0) {
+				return prev;
+			}
 			const nextIndex = Math.max(0, Math.min(toIndex, prev.length - 1));
-			if (fromIndex === nextIndex) return prev;
+			if (fromIndex === nextIndex) {
+				return prev;
+			}
 			const next = [...prev];
 			const [item] = next.splice(fromIndex, 1);
 			next.splice(nextIndex, 0, item);
@@ -223,7 +230,11 @@ export function useMessageQueue({
 			const forced = items.find((m) => m.id === forcedId);
 			if (forced) {
 				setQueue((prev) => prev.filter((m) => m.id !== forced.id));
-				send({ role: "user", content: forced.content, attachments: forced.attachments });
+				send({
+					role: "user",
+					content: forced.content,
+					attachments: forced.attachments,
+				});
 				return;
 			}
 		}
@@ -238,7 +249,11 @@ export function useMessageQueue({
 			return;
 		}
 		setQueue((prev) => prev.filter((m) => m.id !== next.id));
-		send({ role: "user", content: next.content, attachments: next.attachments });
+		send({
+			role: "user",
+			content: next.content,
+			attachments: next.attachments,
+		});
 	}, [send]);
 
 	useEffect(() => {
@@ -271,7 +286,11 @@ export function useMessageQueue({
 				// bare `=== "ready"`: `stop()` has nothing to interrupt there, so the
 				// button below would do nothing at all.
 				setQueue((prev) => prev.filter((m) => m.id !== id));
-				send({ role: "user", content: item.content, attachments: item.attachments });
+				send({
+					role: "user",
+					content: item.content,
+					attachments: item.attachments,
+				});
 				return;
 			}
 			// Busy: mark it as the forced next dispatch and move it to the front,

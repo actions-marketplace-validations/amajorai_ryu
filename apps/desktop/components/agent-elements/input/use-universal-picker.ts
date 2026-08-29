@@ -298,12 +298,21 @@ export function useUniversalPicker(
 	const installedQuery = useQuery({
 		queryKey: ["models", "installed", node.url],
 		queryFn: () =>
-			listInstalledModels({ url: node.url, token: node.token ?? null }),
+			listInstalledModels({
+				url: node.url,
+				token: node.token,
+				userJwt: node.userJwt ?? null,
+			}),
 		staleTime: 60_000,
 	});
 	const activeModelQuery = useQuery({
 		queryKey: ["models", "active", node.url],
-		queryFn: () => getActiveModel({ url: node.url, token: node.token ?? null }),
+		queryFn: () =>
+			getActiveModel({
+				url: node.url,
+				token: node.token,
+				userJwt: node.userJwt ?? null,
+			}),
 		staleTime: 30_000,
 	});
 	// Chat-capable weights only — the inventory also carries the embedder and the
@@ -368,7 +377,10 @@ export function useUniversalPicker(
 	 */
 	const switchToLocalModel = useCallback(
 		(stem: string, thinkingLevel: string | null) => {
-			setActiveModel({ url: node.url, token: node.token ?? null }, stem)
+			setActiveModel(
+				{ url: node.url, token: node.token, userJwt: node.userJwt ?? null },
+				stem
+			)
 				.then((res) => {
 					queryClient
 						.invalidateQueries({ queryKey: ["models", "active", node.url] })

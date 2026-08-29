@@ -29,7 +29,11 @@ import {
 	skillSourcesQuery,
 } from "./useSkillsCatalog.ts";
 
-const TARGET: ApiTarget = { url: "http://127.0.0.1:8980", token: null };
+const TARGET: ApiTarget = {
+	url: "http://127.0.0.1:8980",
+	token: null,
+	userJwt: null,
+};
 
 /** Every descriptor, with the prefix its hook's mutations invalidate by. */
 const DESCRIPTORS: { key: readonly unknown[]; prefix: unknown[] }[] = [
@@ -102,7 +106,11 @@ describe("store catalog query descriptors", () => {
 	});
 
 	test("the node url is part of every key, so two nodes never share a cache", () => {
-		const other: ApiTarget = { url: "http://192.168.1.9:8980", token: null };
+		const other: ApiTarget = {
+			url: "http://192.168.1.9:8980",
+			token: null,
+			userJwt: null,
+		};
 		expect(skillSourcesQuery(other).queryKey).not.toEqual(
 			skillSourcesQuery(TARGET).queryKey
 		);

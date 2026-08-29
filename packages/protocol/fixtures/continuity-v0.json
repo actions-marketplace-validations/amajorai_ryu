@@ -15,8 +15,18 @@
     "omittedEarlierMessages": false
   },
   "messages": [
-    { "sourceId": "message-fixture-1", "role": "user", "text": "Continue this elsewhere.", "createdAt": 10 },
-    { "sourceId": "message-fixture-2", "role": "assistant", "text": "The checkpoint is ready.", "createdAt": 20 }
+    {
+      "sourceId": "message-fixture-1",
+      "role": "user",
+      "text": "Continue this elsewhere.",
+      "createdAt": 10
+    },
+    {
+      "sourceId": "message-fixture-2",
+      "role": "assistant",
+      "text": "The checkpoint is ready.",
+      "createdAt": 20
+    }
   ],
   "context": {
     "version": 0,

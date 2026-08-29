@@ -67,7 +67,11 @@ export default function WorkflowsPage({
 	const { openTab } = useTabsContext();
 	const activeNode = useActiveNode();
 	const target = useMemo(
-		() => ({ url: activeNode.url, token: activeNode.token ?? null }),
+		() => ({
+			url: activeNode.url,
+			token: activeNode.token,
+			userJwt: activeNode.userJwt ?? null,
+		}),
 		[activeNode.url, activeNode.token]
 	);
 

@@ -293,7 +293,10 @@ mod tests {
         let manager = LlamaCppSpeechManager::new();
         assert_eq!(manager.name(), "llamacpp-speech");
         assert_eq!(SPEECH_PROCESSING_ENGINE_ID, "s1-mini");
-        assert_eq!(speech_processing_port(), 8088);
+        assert_eq!(
+            speech_processing_port(),
+            crate::profile::port(SPEECH_PROCESSING_PORT_BASE)
+        );
         assert!(!manager.is_required());
         assert!(!manager.is_running());
     }

@@ -52,11 +52,11 @@ if (!(ctx.flags && ctx.flags["io.ryu.rlm"])) {
 
 const rev = ctx.transcript.slice().reverse();
 const lastAssistant = rev.find((m) => m.role === "assistant");
-if (!lastAssistant || !lastAssistant.content.trim()) {
+if (!(lastAssistant && lastAssistant.content.trim())) {
 	return { kind: "none" };
 }
 const lastUser = rev.find((m) => m.role === "user");
-if (!lastUser || !lastUser.content.trim()) {
+if (!(lastUser && lastUser.content.trim())) {
 	return { kind: "none" };
 }
 
@@ -64,7 +64,7 @@ if (!lastUser || !lastUser.content.trim()) {
 // silently doing nothing would be the worst default: the user turned the toggle on
 // and would see no reading and no reason why.
 const contextId = await host.getPreference({ key: "rlm-active-context" });
-if (!contextId || !String(contextId).trim()) {
+if (!(contextId && String(contextId).trim())) {
 	return {
 		kind: "note",
 		text:
@@ -112,7 +112,9 @@ try {
 
 // The bridge hands back the sub-agent's final text; coerce defensively so a
 // non-string never reaches the user as "[object Object]".
-const text = (typeof report === "string" ? report : String(report ?? "")).trim();
+const text = (
+	typeof report === "string" ? report : String(report ?? "")
+).trim();
 const marker = text.match(/RLM:\s*(ok|budget_exhausted|error)\s+(\S+)\s*$/im);
 if (!marker) {
 	return {
@@ -127,7 +129,9 @@ if (!marker) {
 
 const status = marker[1].toLowerCase();
 const runId = marker[2];
-const body = text.replace(/\s*RLM:\s*(ok|budget_exhausted|error)\s+\S+\s*$/im, "").trim();
+const body = text
+	.replace(/\s*RLM:\s*(ok|budget_exhausted|error)\s+\S+\s*$/im, "")
+	.trim();
 
 if (status === "error") {
 	return {

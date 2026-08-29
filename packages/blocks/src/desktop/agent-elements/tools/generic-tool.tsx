@@ -1,4 +1,4 @@
-﻿import { ToolResult } from "@ryu/ui/components/agents/tool-result";
+import { ToolResult } from "@ryu/ui/components/agents/tool-result";
 import { cn } from "@ryu/ui/lib/utils";
 import { Wrench } from "lucide-react";
 import type React from "react";

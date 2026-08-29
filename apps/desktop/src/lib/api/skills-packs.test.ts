@@ -15,7 +15,11 @@ import {
 	removeSkillPack,
 } from "./skills.ts";
 
-const TARGET: ApiTarget = { url: "http://127.0.0.1:7980", token: null };
+const TARGET: ApiTarget = {
+	url: "http://127.0.0.1:7980",
+	token: null,
+	userJwt: null,
+};
 
 function jsonResponse(body: unknown, status = 200): Response {
 	return new Response(JSON.stringify(body), {

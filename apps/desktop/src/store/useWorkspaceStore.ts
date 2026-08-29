@@ -543,7 +543,11 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
 		const activeNode = useNodeStore.getState().getActiveNode();
 		if (isLocalNode(activeNode)) {
 			await listDirectory(
-				{ url: activeNode.url, token: activeNode.token ?? null },
+				{
+					url: activeNode.url,
+					token: activeNode.token,
+					userJwt: activeNode.userJwt ?? null,
+				},
 				path
 			);
 		}

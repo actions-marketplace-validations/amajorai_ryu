@@ -497,7 +497,7 @@ function appLifecyclePath(id: string, action: AppLifecycleAction): string {
 export async function fetchApps(target: ApiTarget): Promise<AppInfo[]> {
 	const resp = await fetch(apiUrl(target, "/api/plugins"), {
 		method: "GET",
-		headers: makeHeaders(target.token),
+		headers: makeHeaders(target.token, target.userJwt),
 	});
 	if (!resp.ok) {
 		throw new Error(`/api/plugins failed: ${resp.status}`);
@@ -526,7 +526,7 @@ export async function fetchHookEvents(
 ): Promise<HookEventInfo[]> {
 	const resp = await fetch(apiUrl(target, "/api/plugins/contributions"), {
 		method: "GET",
-		headers: makeHeaders(target.token),
+		headers: makeHeaders(target.token, target.userJwt),
 	});
 	if (!resp.ok) {
 		throw new Error(`/api/plugins/contributions failed: ${resp.status}`);
@@ -543,7 +543,7 @@ export async function installApp(
 	const path = appLifecyclePath(id, "install");
 	const resp = await fetch(apiUrl(target, path), {
 		method: "POST",
-		headers: makeHeaders(target.token),
+		headers: makeHeaders(target.token, target.userJwt),
 	});
 	if (!resp.ok) {
 		const err = await parseLifecycleError(resp, path);
@@ -565,7 +565,7 @@ export async function enableApp(
 	const path = appLifecyclePath(id, "enable");
 	const resp = await fetch(apiUrl(target, path), {
 		method: "POST",
-		headers: makeHeaders(target.token),
+		headers: makeHeaders(target.token, target.userJwt),
 	});
 	if (!resp.ok) {
 		const err = await parseLifecycleError(resp, path);
@@ -590,7 +590,7 @@ export async function disableApp(
 	const path = options?.cascade ? `${endpoint}?cascade=true` : endpoint;
 	const resp = await fetch(apiUrl(target, path), {
 		method: "POST",
-		headers: makeHeaders(target.token),
+		headers: makeHeaders(target.token, target.userJwt),
 	});
 	if (!resp.ok) {
 		const err = await parseLifecycleError(resp, path);
@@ -638,7 +638,7 @@ export async function uninstallApp(
 	const path = options?.cascade ? `${endpoint}?cascade=true` : endpoint;
 	const resp = await fetch(apiUrl(target, path), {
 		method: "POST",
-		headers: makeHeaders(target.token),
+		headers: makeHeaders(target.token, target.userJwt),
 	});
 	if (!resp.ok) {
 		const err = await parseLifecycleError(resp, path);
@@ -679,7 +679,7 @@ export async function updateApp(
 	const path = appLifecyclePath(id, "update");
 	const resp = await fetch(apiUrl(target, path), {
 		method: "POST",
-		headers: makeHeaders(target.token),
+		headers: makeHeaders(target.token, target.userJwt),
 		body: JSON.stringify({ force: options?.force ?? false }),
 	});
 	if (!resp.ok) {
@@ -786,7 +786,7 @@ export async function installAppFromUrl(
 ): Promise<void> {
 	const resp = await fetch(apiUrl(target, "/api/plugins/install"), {
 		method: "POST",
-		headers: makeHeaders(target.token),
+		headers: makeHeaders(target.token, target.userJwt),
 		body: JSON.stringify({ url }),
 	});
 	if (!resp.ok) {
@@ -805,7 +805,7 @@ export async function installPluginFromCatalog(
 	const path = "/api/plugins/catalog/install";
 	const resp = await fetch(apiUrl(target, path), {
 		method: "POST",
-		headers: makeHeaders(target.token),
+		headers: makeHeaders(target.token, target.userJwt),
 		body: JSON.stringify({ id }),
 	});
 	if (!resp.ok) {
@@ -823,7 +823,7 @@ export async function fetchSidecarStatus(
 ): Promise<Record<string, boolean>> {
 	const resp = await fetch(apiUrl(target, "/api/sidecar/status"), {
 		method: "GET",
-		headers: makeHeaders(target.token),
+		headers: makeHeaders(target.token, target.userJwt),
 	});
 	if (!resp.ok) {
 		throw new Error(`/api/sidecar/status failed: ${resp.status}`);
@@ -846,7 +846,7 @@ export async function installSidecar(
 ): Promise<void> {
 	const resp = await fetch(apiUrl(target, `/api/setup/${name}/install`), {
 		method: "POST",
-		headers: makeHeaders(target.token),
+		headers: makeHeaders(target.token, target.userJwt),
 	});
 	if (!resp.ok) {
 		throw new Error(`/api/setup/${name}/install failed: ${resp.status}`);
@@ -860,7 +860,7 @@ export async function startSidecar(
 ): Promise<void> {
 	const resp = await fetch(apiUrl(target, `/api/sidecar/${name}/start`), {
 		method: "POST",
-		headers: makeHeaders(target.token),
+		headers: makeHeaders(target.token, target.userJwt),
 	});
 	if (!resp.ok) {
 		throw new Error(`/api/sidecar/${name}/start failed: ${resp.status}`);
@@ -874,7 +874,7 @@ export async function stopSidecar(
 ): Promise<void> {
 	const resp = await fetch(apiUrl(target, `/api/sidecar/${name}/stop`), {
 		method: "POST",
-		headers: makeHeaders(target.token),
+		headers: makeHeaders(target.token, target.userJwt),
 	});
 	if (!resp.ok) {
 		throw new Error(`/api/sidecar/${name}/stop failed: ${resp.status}`);

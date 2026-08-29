@@ -30,7 +30,11 @@ afterEach(() => {
 	setBuyerTokenProvider(() => null);
 });
 
-const target: ApiTarget = { url: "http://127.0.0.1:7980", token: "t" };
+const target: ApiTarget = {
+	url: "http://127.0.0.1:7980",
+	token: "t",
+	userJwt: null,
+};
 
 interface Captured {
 	init?: RequestInit;

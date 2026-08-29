@@ -23,6 +23,7 @@ export type SettingsSectionValue =
 	| "updates"
 	| "integrations"
 	| "sessions"
+	| "ryu-apps"
 	| "authorized-apps"
 	| "billing"
 	| "referrals"

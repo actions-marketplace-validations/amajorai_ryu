@@ -6,10 +6,10 @@
 // request. A decided request is removed by the reconcile pass. Tapping the card
 // opens the approval inbox.
 
-import { useEffect } from "react";
 import type { LiveActivity } from "@ryu/app-host/live-activity";
-import type { ApprovalRequest } from "@/src/lib/api/approvals.ts";
+import { useEffect } from "react";
 import { useApprovals } from "@/src/hooks/useApprovals.ts";
+import type { ApprovalRequest } from "@/src/lib/api/approvals.ts";
 import { useLiveActivityStore } from "@/src/store/useLiveActivityStore.ts";
 
 const KIND_LABELS: Record<string, string> = {
@@ -23,7 +23,8 @@ const KIND_LABELS: Record<string, string> = {
 
 function approvalToActivity(request: ApprovalRequest): LiveActivity {
 	const kindLabel = KIND_LABELS[request.kind] ?? request.kind;
-	const detail = request.summary || (request.title !== kindLabel ? request.title : "");
+	const detail =
+		request.summary || (request.title === kindLabel ? "" : request.title);
 	return {
 		id: `approval:${request.id}`,
 		appId: "shell",

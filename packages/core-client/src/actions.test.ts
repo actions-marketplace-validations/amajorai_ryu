@@ -6,6 +6,7 @@ const realFetch = globalThis.fetch;
 const target: ApiTarget = {
 	url: "http://127.0.0.1:7980/",
 	token: "node-token",
+	userJwt: null,
 };
 
 afterEach(() => {

@@ -118,7 +118,11 @@ export function useRegisterEditorAi(): void {
 
 	useEffect(() => {
 		let cancelled = false;
-		const target: ApiTarget = { url: node.url, token: node.token ?? null };
+		const target: ApiTarget = {
+			url: node.url,
+			token: node.token,
+			userJwt: node.userJwt ?? null,
+		};
 
 		const register = async () => {
 			const raw = await getPreference(target, EDITOR_AI_PREF_KEY).catch(

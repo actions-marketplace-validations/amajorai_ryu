@@ -109,7 +109,11 @@ export function useSystemStatus(): SystemStatus {
 
 	const poll = useCallback(async () => {
 		const node = getActiveNode();
-		const target: ApiTarget = { url: node.url, token: node.token ?? null };
+		const target: ApiTarget = {
+			url: node.url,
+			token: node.token,
+			userJwt: node.userJwt ?? null,
+		};
 		const local = isLocalNode(node);
 
 		// Core merges engine/sidecar/gateway/mesh (and the degrade rules) into one

@@ -6,8 +6,8 @@
 
 import { describe, expect, test } from "bun:test";
 import {
-	CompanionSurfaceSchema,
 	ChatWidgetTemplateSchema,
+	CompanionSurfaceSchema,
 	labelImpersonatesSystemChrome,
 	PluginManifestSchema,
 	RunnableMetaSchema,

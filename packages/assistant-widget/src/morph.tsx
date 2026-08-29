@@ -23,6 +23,8 @@ export interface RyuAssistantMorphProps {
 	/** Positioning for the fixed wrapper. */
 	className?: string;
 	contentHeight: number;
+	contentMaxHeight?: number | string;
+	contentMaxWidth?: number | string;
 	contentWidth?: number;
 	dismissable?: boolean;
 	isOpen?: boolean;
@@ -44,6 +46,8 @@ export function RyuAssistantMorph({
 	chromeClassName,
 	className,
 	contentHeight,
+	contentMaxHeight,
+	contentMaxWidth,
 	contentWidth = DEFAULT_CONTENT_WIDTH,
 	dismissable = true,
 	isOpen: controlledIsOpen,
@@ -120,6 +124,7 @@ export function RyuAssistantMorph({
 						setRendered(false);
 					}
 				}}
+				style={{ maxHeight: contentMaxHeight, maxWidth: contentMaxWidth }}
 				transition={transition}
 			>
 				<motion.button
@@ -152,9 +157,9 @@ export function RyuAssistantMorph({
 						initial={{ opacity: 0 }}
 						role="dialog"
 						style={{
-							height: contentHeight,
+							height: "100%",
 							pointerEvents: isOpen ? "auto" : "none",
-							width: contentWidth,
+							width: "100%",
 						}}
 						transition={{
 							delay: isOpen ? OPEN_CONTENT_DELAY : 0,

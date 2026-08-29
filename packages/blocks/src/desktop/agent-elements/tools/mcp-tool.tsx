@@ -1,4 +1,4 @@
-﻿import {
+import {
 	ToolResult,
 	ToolResultOutput,
 } from "@ryu/ui/components/agents/tool-result";

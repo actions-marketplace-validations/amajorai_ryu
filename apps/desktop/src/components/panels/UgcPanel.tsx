@@ -378,20 +378,24 @@ function useUgcCall(): UgcCall {
 	const node = useActiveNode();
 	const url = node.url;
 	const token = node.token ?? null;
-	const headers = useMemo(() => makeHeaders(token), [token]);
+	const userJwt = node.userJwt ?? null;
+	const headers = useMemo(() => makeHeaders(token, userJwt), [token, userJwt]);
 	return useCallback(
 		async <T,>(path: string, init?: RequestInit): Promise<T> => {
-			const resp = await fetch(apiUrl({ token, url }, `${UGC_BASE}${path}`), {
-				headers,
-				...init,
-			});
+			const resp = await fetch(
+				apiUrl({ token, url, userJwt }, `${UGC_BASE}${path}`),
+				{
+					headers,
+					...init,
+				}
+			);
 			const text = await resp.text();
 			if (!resp.ok) {
 				throw new Error(errorMessage(text, resp.status));
 			}
 			return (text ? JSON.parse(text) : {}) as T;
 		},
-		[headers, token, url]
+		[headers, token, url, userJwt]
 	);
 }
 

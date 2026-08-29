@@ -35,7 +35,7 @@ export async function uploadUserFile(
 		signal?: AbortSignal;
 	}
 ): Promise<UploadObject> {
-	const headers = makeHeaders(target.token);
+	const headers = makeHeaders(target.token, target.userJwt);
 	// Raw body — override JSON content-type from makeHeaders.
 	headers["Content-Type"] = opts.contentType || "application/octet-stream";
 	headers["x-filename"] = opts.fileName;

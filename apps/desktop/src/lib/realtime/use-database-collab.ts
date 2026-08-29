@@ -50,6 +50,8 @@ export interface UseDatabaseCollabOptions {
 	token: string | null;
 	/** Active node base url. */
 	url: string;
+	/** Managed-node user JWT, when the active node supplies one. */
+	userJwt?: string | null;
 }
 
 export interface DatabaseCollab {
@@ -103,7 +105,7 @@ function syncFirstTime(
 export function useDatabaseCollab(
 	options: UseDatabaseCollabOptions
 ): DatabaseCollab {
-	const { roomId, ready, url, token } = options;
+	const { roomId, ready, url, token, userJwt } = options;
 	const [collaborative, setCollaborative] = useState(false);
 	const [access, setAccess] = useState<"read" | "write" | null>(null);
 	const [status, setStatus] = useState<RyuYjsStatus>("connecting");
@@ -138,7 +140,7 @@ export function useDatabaseCollab(
 			}
 			const created = new RyuYjsProvider({
 				roomId,
-				target: { url, token },
+				target: { url, token, userJwt },
 				jwt,
 				handlers: {
 					onReset: () => {
@@ -197,7 +199,7 @@ export function useDatabaseCollab(
 			setCollaborative(false);
 			setAccess(null);
 		};
-	}, [ready, roomId, url, token]);
+	}, [ready, roomId, url, token, userJwt]);
 
 	const getCollabDoc = useCallback(
 		() => (collaborativeRef.current ? docRef.current : null),

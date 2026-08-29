@@ -47,8 +47,9 @@ export function useAgentsCatalog(): UseAgentsCatalogResult {
 	const target: ApiTarget = {
 		url: activeNode.url,
 		token: activeNode.token ?? null,
+		userJwt: activeNode.userJwt ?? null,
 	};
-	const { url, token } = target;
+	const { url, token, userJwt } = target;
 	const qc = useQueryClient();
 
 	const catalogQuery = useQuery(agentCatalogQuery(target));
@@ -63,12 +64,12 @@ export function useAgentsCatalog(): UseAgentsCatalogResult {
 	}, [qc, url]);
 
 	const installMutation = useMutation({
-		mutationFn: (id: string) => installAgent({ url, token }, id),
+		mutationFn: (id: string) => installAgent({ url, token, userJwt }, id),
 		onSettled: revalidate,
 	});
 
 	const uninstallMutation = useMutation({
-		mutationFn: (id: string) => uninstallAgent({ url, token }, id),
+		mutationFn: (id: string) => uninstallAgent({ url, token, userJwt }, id),
 		onSettled: revalidate,
 	});
 

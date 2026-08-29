@@ -75,24 +75,32 @@ export function SafeModeSettings() {
 
 	const target: ApiTarget = {
 		token: activeNode.token ?? null,
+		userJwt: activeNode.userJwt ?? null,
 		url: activeNode.url,
 	};
 	const targetUrl = target.url;
 	const targetToken = target.token;
+	const targetUserJwt = target.userJwt ?? null;
 
 	const refresh = useCallback(async () => {
 		// The sentinel first, because it is the read that survives a Core that will
 		// not answer — which is the state a user reaching for Safe Mode is often in.
 		setSentinel(await readSafeModeSentinel());
 		try {
-			setState(await fetchSafeMode({ token: targetToken, url: targetUrl }));
+			setState(
+				await fetchSafeMode({
+					token: targetToken,
+					url: targetUrl,
+					userJwt: targetUserJwt,
+				})
+			);
 		} catch {
 			// An unreachable node is exactly the situation this panel is for, so a
 			// failed read must not blank the section — the switch falls back to the
 			// sentinel and stays usable.
 			setState(null);
 		}
-	}, [targetToken, targetUrl]);
+	}, [targetToken, targetUrl, targetUserJwt]);
 
 	useEffect(() => {
 		refresh();

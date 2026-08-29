@@ -24,7 +24,7 @@ afterEach(() => {
 	}
 });
 
-test("round-trips bounded history and ignores corrupt files", () => {
+test("round-trips bounded history and ignores corrupt files", async () => {
 	const path = join(tempDir, "nested", "history.json");
 	let state = initialPromptHistory();
 	for (let index = 0; index < 101; index += 1) {
@@ -35,7 +35,7 @@ test("round-trips bounded history and ignores corrupt files", () => {
 	expect(loadPromptHistory(path).entries).toHaveLength(100);
 	expect(loadPromptHistory(path).entries[0]).toBe("prompt-1");
 
-	Bun.write(path, "not-json");
+	await Bun.write(path, "not-json");
 	expect(loadPromptHistory(path).entries).toEqual([]);
 });
 

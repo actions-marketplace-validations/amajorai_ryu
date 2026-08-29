@@ -37,10 +37,10 @@ export interface VoiceModeOptions {
 }
 
 export interface VoiceMode {
-	/** Display name of the agent on the call screen. */
-	agentName: string;
 	/** True while a voice-mode session is open (drives overlay visibility). */
 	active: boolean;
+	/** Display name of the agent on the call screen. */
+	agentName: string;
 	/** The assistant's streaming caption for this turn. */
 	caption: string;
 	/** Seconds since this voice session started. */
@@ -49,18 +49,18 @@ export interface VoiceMode {
 	error: string | null;
 	/** Manually interrupt the assistant (barge-in via a button). */
 	interrupt: () => void;
-	/** Whether microphone frames are currently paused. */
-	muted: boolean;
 	/** Rolling mic RMS history, oldest-to-newest, bounded to 24 samples. */
 	levels: number[];
+	/** Whether microphone frames are currently paused. */
+	muted: boolean;
 	/** Current turn phase. */
 	phase: VoiceModePhase;
 	/** Open the session + mic. */
 	start: () => void;
-	/** Toggle the microphone without ending the call. */
-	toggleMute: () => void;
 	/** Close the session + mic. */
 	stop: () => void;
+	/** Toggle the microphone without ending the call. */
+	toggleMute: () => void;
 	/** The user's latest (final) transcript for this turn. */
 	transcript: string;
 	/** The running chat-style transcript of the whole session (both roles). */

@@ -444,7 +444,11 @@ function LaunchpadComposer() {
 
 	// The node the composer's mic / voice mode / image staging talk to.
 	const target = useMemo(
-		() => ({ url: activeNode.url, token: activeNode.token ?? null }),
+		() => ({
+			url: activeNode.url,
+			token: activeNode.token,
+			userJwt: activeNode.userJwt ?? null,
+		}),
 		[activeNode.url, activeNode.token]
 	);
 
@@ -490,62 +494,65 @@ function LaunchpadComposer() {
 		},
 		[addFiles]
 	);
+	const composerNode = (
+		<Composer
+			attachedImages={images}
+			autoFocus
+			isDragOver={isDragOver}
+			onAttach={onAttach}
+			onPaste={onPaste}
+			onRemoveImage={onRemoveImage}
+			onSend={(message: { role: "user"; content: string }) => {
+				const content = message.content.trim();
+				if (!content && images.length === 0) {
+					return;
+				}
+				openTab("/chat", {
+					forceNew: true,
+					initialPrompt: content,
+					// User-initiated send: actually SEND it in the new chat tab, not
+					// just pre-fill the composer (that's the deep-link/Inbox behavior).
+					// A team target isn't carried into the tab, so for a team pick we
+					// fall back to pre-fill rather than auto-send to the wrong agent.
+					initialSubmit: teamId ? undefined : true,
+					initialImages: images.length > 0 ? images : undefined,
+					initialAgent: teamId ? undefined : (agentId ?? undefined),
+					initialGhost: ghost ? true : undefined,
+				});
+				// The images now live on the tab seed; drop them here so they don't
+				// re-attach to the next thing typed on the launchpad.
+				clear();
+			}}
+			onStop={() => undefined}
+			placeholder="What do you want to do?"
+			status="ready"
+			workspaceBar={
+				interfaceLevel === "simple" ? undefined : (
+					<WorkspaceBar target={target} />
+				)
+			}
+		/>
+	);
+	const renderedComposer = composer.voiceMode.active
+		? composer.voiceMode.render(composerNode)
+		: composerNode;
 
 	return (
-		<>
-			<div
-				className="relative"
-				onDragLeave={(e) => {
-					if (!e.currentTarget.contains(e.relatedTarget as Node)) {
-						setIsDragOver(false);
-					}
-				}}
-				onDragOver={(e) => {
-					e.preventDefault();
-					setIsDragOver(true);
-				}}
-				onDrop={handleDrop}
-			>
-				<Composer
-					attachedImages={images}
-					autoFocus
-					isDragOver={isDragOver}
-					onAttach={onAttach}
-					onPaste={onPaste}
-					onRemoveImage={onRemoveImage}
-					onSend={(message: { role: "user"; content: string }) => {
-						const content = message.content.trim();
-						if (!content && images.length === 0) {
-							return;
-						}
-						openTab("/chat", {
-							forceNew: true,
-							initialPrompt: content,
-							// User-initiated send: actually SEND it in the new chat tab, not
-							// just pre-fill the composer (that's the deep-link/Inbox behavior).
-							// A team target isn't carried into the tab, so for a team pick we
-							// fall back to pre-fill rather than auto-send to the wrong agent.
-							initialSubmit: teamId ? undefined : true,
-							initialImages: images.length > 0 ? images : undefined,
-							initialAgent: teamId ? undefined : (agentId ?? undefined),
-							initialGhost: ghost ? true : undefined,
-						});
-						// The images now live on the tab seed; drop them here so they don't
-						// re-attach to the next thing typed on the launchpad.
-						clear();
-					}}
-					onStop={() => undefined}
-					placeholder="What do you want to do?"
-					status="ready"
-					workspaceBar={
-						interfaceLevel === "simple" ? undefined : (
-							<WorkspaceBar target={target} />
-						)
-					}
-				/>
-			</div>
-			{composer.voiceModeOverlay}
-		</>
+		<div
+			className="relative"
+			onDragLeave={(e) => {
+				if (!e.currentTarget.contains(e.relatedTarget as Node)) {
+					setIsDragOver(false);
+				}
+			}}
+			onDragOver={(e) => {
+				e.preventDefault();
+				setIsDragOver(true);
+			}}
+			onDrop={handleDrop}
+		>
+			{renderedComposer}
+		</div>
 	);
 }
 
@@ -559,7 +566,11 @@ export function EmptyTabsState() {
 	const [importOpen, setImportOpen] = useState(false);
 	const [setupImportOpen, setSetupImportOpen] = useState(false);
 	const importTarget = useMemo(
-		() => ({ url: activeNode.url, token: activeNode.token ?? null }),
+		() => ({
+			url: activeNode.url,
+			token: activeNode.token,
+			userJwt: activeNode.userJwt ?? null,
+		}),
 		[activeNode.url, activeNode.token]
 	);
 	// Onboarding checklist, moved here from the chat page's empty state so the

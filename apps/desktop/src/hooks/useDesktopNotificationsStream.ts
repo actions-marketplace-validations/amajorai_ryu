@@ -45,10 +45,11 @@ export function useDesktopNotificationsStream(): void {
 	const node = useActiveNode();
 	const url = node.url;
 	const token = node.token ?? null;
+	const userJwt = node.userJwt ?? null;
 
 	useEffect(() => {
 		const controller = new AbortController();
-		const target: ApiTarget = { url, token };
+		const target: ApiTarget = { url, token, userJwt };
 
 		const onNotification = (n: DesktopNotification) => {
 			const notify =
@@ -67,5 +68,5 @@ export function useDesktopNotificationsStream(): void {
 		return () => {
 			controller.abort();
 		};
-	}, [url, token]);
+	}, [url, token, userJwt]);
 }

@@ -69,7 +69,7 @@ export function SupportAccessBanner() {
 	// on every store change and re-render the banner needlessly.
 	const node = useNodeStore((s) => s.getActiveNode());
 	const target: ApiTarget = useMemo(
-		() => ({ url: node.url, token: node.token ?? null }),
+		() => ({ url: node.url, token: node.token, userJwt: node.userJwt ?? null }),
 		[node.url, node.token]
 	);
 

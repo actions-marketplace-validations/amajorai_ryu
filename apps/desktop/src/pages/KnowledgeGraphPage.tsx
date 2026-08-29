@@ -22,13 +22,14 @@ export default function KnowledgeGraphPage({ spaceId }: { spaceId?: string }) {
 	const node = useActiveNode();
 	const { url } = node;
 	const token = node.token ?? null;
+	const userJwt = node.userJwt ?? null;
 	const { openTab } = useTabsContext();
 	const [graph, setGraph] = useState<DocGraph | null>(null);
 	const [loading, setLoading] = useState(true);
 
 	const load = useCallback(async () => {
 		setLoading(true);
-		const target = { url, token };
+		const target = { url, token, userJwt };
 		try {
 			const result = spaceId
 				? await fetchSpaceGraph(target, spaceId)
@@ -39,7 +40,7 @@ export default function KnowledgeGraphPage({ spaceId }: { spaceId?: string }) {
 		} finally {
 			setLoading(false);
 		}
-	}, [url, token, spaceId]);
+	}, [url, token, userJwt, spaceId]);
 
 	useEffect(() => {
 		load().catch(() => undefined);
@@ -48,14 +49,18 @@ export default function KnowledgeGraphPage({ spaceId }: { spaceId?: string }) {
 	const openNode = useCallback(
 		(graphNode: DocGraph["nodes"][number]) => {
 			if (graphNode.pending) {
-				apiCreatePage({ url, token }, graphNode.spaceId, graphNode.title)
+				apiCreatePage(
+					{ url, token, userJwt },
+					graphNode.spaceId,
+					graphNode.title
+				)
 					.then((id) => openTab(`/spaces/${graphNode.spaceId}/doc/${id}`))
 					.catch(() => undefined);
 				return;
 			}
 			openTab(`/spaces/${graphNode.spaceId}/doc/${graphNode.id}`);
 		},
-		[url, token, openTab]
+		[url, token, userJwt, openTab]
 	);
 
 	return (

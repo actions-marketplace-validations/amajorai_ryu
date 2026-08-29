@@ -1143,7 +1143,7 @@ describe("the bulk action shows its work and never touches egress", () => {
 		};
 		expect(
 			await applyToolBridgePlan(
-				{ url: "http://127.0.0.1:1/", token: null },
+				{ url: "http://127.0.0.1:1/", token: null, userJwt: null },
 				empty
 			)
 		).toBe(true);

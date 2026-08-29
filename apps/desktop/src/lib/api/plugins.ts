@@ -623,7 +623,10 @@ export async function fetchApps(
 ): Promise<AppInfo[]> {
 	const resp = await authenticatedFetch(target, "/api/plugins", {
 		method: "GET",
-		headers: { ...makeHeaders(target.token), ...identityHeaders() },
+		headers: {
+			...makeHeaders(target.token, target.userJwt),
+			...identityHeaders(),
+		},
 		skipUserJwt: options.skipUserJwt,
 	});
 	if (!resp.ok) {
@@ -656,7 +659,10 @@ export async function fetchPluginDoctor(
 		`/api/plugins/doctor${suffix}`,
 		{
 			method: "GET",
-			headers: { ...makeHeaders(target.token), ...identityHeaders() },
+			headers: {
+				...makeHeaders(target.token, target.userJwt),
+				...identityHeaders(),
+			},
 		}
 	);
 	if (!resp.ok) {
@@ -1217,7 +1223,10 @@ export async function getPluginContributions(
 ): Promise<PluginContributions> {
 	const resp = await authenticatedFetch(target, "/api/plugins/contributions", {
 		method: "GET",
-		headers: { ...makeHeaders(target.token), ...identityHeaders() },
+		headers: {
+			...makeHeaders(target.token, target.userJwt),
+			...identityHeaders(),
+		},
 	});
 	if (!resp.ok) {
 		throw new Error(`/api/plugins/contributions failed: ${resp.status}`);
@@ -1270,7 +1279,7 @@ export async function fetchPluginUiBundle(
 	const resp = await authenticatedFetch(
 		target,
 		`/api/plugins/${encodeURIComponent(id)}/ui-bundle`,
-		{ method: "GET", headers: makeHeaders(target.token) }
+		{ method: "GET", headers: makeHeaders(target.token, target.userJwt) }
 	);
 	if (resp.status === 404) {
 		return null;
@@ -1343,7 +1352,7 @@ export async function pluginHostInvoke(
 			`/api/plugins/${encodeURIComponent(pluginId)}/host`,
 			{
 				method: "POST",
-				headers: makeHeaders(target.token),
+				headers: makeHeaders(target.token, target.userJwt),
 				body: JSON.stringify({ method, args }),
 			}
 		);
@@ -1398,7 +1407,7 @@ export async function pluginHostInvokeStream(
 			`/api/plugins/${encodeURIComponent(pluginId)}/host/stream`,
 			{
 				method: "POST",
-				headers: makeHeaders(target.token),
+				headers: makeHeaders(target.token, target.userJwt),
 				body: JSON.stringify({ method: "agent.run", args: input }),
 				signal: opts.signal,
 			}
@@ -1475,7 +1484,7 @@ export async function pluginFinetuneStream(
 			`/api/plugins/${encodeURIComponent(pluginId)}/host/stream`,
 			{
 				method: "POST",
-				headers: makeHeaders(target.token),
+				headers: makeHeaders(target.token, target.userJwt),
 				body: JSON.stringify({
 					method: "finetune.stream",
 					args: { id: jobId },
@@ -1538,7 +1547,7 @@ export async function fireActivationEvent(
 		"/api/plugins/activation-event",
 		{
 			method: "POST",
-			headers: makeHeaders(target.token),
+			headers: makeHeaders(target.token, target.userJwt),
 			body: JSON.stringify({ event: `onCommand:${commandId}` }),
 		}
 	);
@@ -1559,7 +1568,7 @@ export async function installApp(
 		`/api/plugins/${encodedId}/install`,
 		{
 			method: "POST",
-			headers: makeHeaders(target.token),
+			headers: makeHeaders(target.token, target.userJwt),
 			skipUserJwt: options.skipUserJwt,
 		}
 	);
@@ -1585,7 +1594,7 @@ export async function installStandaloneAppBundle(
 	};
 	const resp = await authenticatedFetch(target, "/api/plugins/install-bundle", {
 		method: "POST",
-		headers: makeHeaders(target.token),
+		headers: makeHeaders(target.token, target.userJwt),
 		body: JSON.stringify(manifest),
 		skipUserJwt: options.skipUserJwt,
 	});
@@ -1653,7 +1662,7 @@ export async function updateInstalledPlugin(
 		`/api/plugins/${encodedId}/update`,
 		{
 			method: "POST",
-			headers: makeHeaders(target.token),
+			headers: makeHeaders(target.token, target.userJwt),
 			body: JSON.stringify(channel ? { channel } : {}),
 		}
 	);
@@ -1679,7 +1688,7 @@ export async function updateInstalledPluginAtVersion(
 		`/api/plugins/${encodedId}/update`,
 		{
 			method: "POST",
-			headers: makeHeaders(target.token),
+			headers: makeHeaders(target.token, target.userJwt),
 			body: JSON.stringify({ force: true, version }),
 		}
 	);
@@ -1707,7 +1716,7 @@ export async function enableApp(
 		`/api/plugins/${encodedId}/enable`,
 		{
 			method: "POST",
-			headers: makeHeaders(target.token),
+			headers: makeHeaders(target.token, target.userJwt),
 			skipUserJwt: options.skipUserJwt,
 		}
 	);
@@ -1742,7 +1751,7 @@ export async function setPluginGrants(
 		`/api/plugins/${encodedId}/grants`,
 		{
 			method: "POST",
-			headers: makeHeaders(target.token),
+			headers: makeHeaders(target.token, target.userJwt),
 			body: JSON.stringify({ grants }),
 		}
 	);
@@ -1771,7 +1780,7 @@ export async function disableApp(
 		: `/api/plugins/${encodedId}/disable`;
 	const resp = await authenticatedFetch(target, path, {
 		method: "POST",
-		headers: makeHeaders(target.token),
+		headers: makeHeaders(target.token, target.userJwt),
 	});
 	if (!resp.ok) {
 		const err = await parseLifecycleError(resp, `/api/plugins/${id}/disable`);
@@ -1808,7 +1817,7 @@ export async function uninstallApp(
 		: `/api/plugins/${encodedId}/uninstall`;
 	const resp = await authenticatedFetch(target, path, {
 		method: "POST",
-		headers: makeHeaders(target.token),
+		headers: makeHeaders(target.token, target.userJwt),
 	});
 	if (!resp.ok) {
 		const err = await parseLifecycleError(resp, `/api/plugins/${id}/uninstall`);
@@ -2263,7 +2272,7 @@ export async function installAppFromUrl(
 ): Promise<void> {
 	const resp = await authenticatedFetch(target, "/api/plugins/install", {
 		method: "POST",
-		headers: makeHeaders(target.token),
+		headers: makeHeaders(target.token, target.userJwt),
 		body: JSON.stringify({ url }),
 	});
 	if (!resp.ok) {
@@ -2293,7 +2302,7 @@ export async function installPluginFromCatalog(
 	 *  this train on every later update instead of being pulled back to stable. */
 	channel?: string | null
 ): Promise<void> {
-	const headers = makeHeaders(target.token);
+	const headers = makeHeaders(target.token, target.userJwt);
 	if (buyerToken) {
 		headers["x-ryu-buyer-token"] = buyerToken;
 	}
@@ -2321,7 +2330,7 @@ export async function installPluginFromCatalogAtVersion(
 	version: string,
 	buyerToken?: string | null
 ): Promise<void> {
-	const headers = makeHeaders(target.token);
+	const headers = makeHeaders(target.token, target.userJwt);
 	if (buyerToken) {
 		headers["x-ryu-buyer-token"] = buyerToken;
 	}
@@ -2349,7 +2358,7 @@ export async function fetchSidecarStatus(
 ): Promise<Record<string, boolean>> {
 	const resp = await authenticatedFetch(target, "/api/sidecar/status", {
 		method: "GET",
-		headers: makeHeaders(target.token),
+		headers: makeHeaders(target.token, target.userJwt),
 	});
 	if (!resp.ok) {
 		throw new Error(`/api/sidecar/status failed: ${resp.status}`);
@@ -2383,7 +2392,7 @@ export async function fetchSidecarDetails(
 ): Promise<Record<string, SidecarDetail>> {
 	const resp = await authenticatedFetch(target, "/api/sidecar/status", {
 		method: "GET",
-		headers: makeHeaders(target.token),
+		headers: makeHeaders(target.token, target.userJwt),
 	});
 	if (!resp.ok) {
 		throw new Error(`/api/sidecar/status failed: ${resp.status}`);
@@ -2432,7 +2441,7 @@ export async function fetchEngineConcurrency(
 ): Promise<EngineConcurrency | null> {
 	const resp = await authenticatedFetch(target, "/api/engine/concurrency", {
 		method: "GET",
-		headers: makeHeaders(target.token),
+		headers: makeHeaders(target.token, target.userJwt),
 	});
 	if (!resp.ok) {
 		return null;
@@ -2471,7 +2480,7 @@ export async function installSidecar(
 ): Promise<void> {
 	const resp = await authenticatedFetch(target, `/api/setup/${name}/install`, {
 		method: "POST",
-		headers: makeHeaders(target.token),
+		headers: makeHeaders(target.token, target.userJwt),
 	});
 	if (!resp.ok) {
 		throw new Error(`/api/setup/${name}/install failed: ${resp.status}`);
@@ -2485,7 +2494,7 @@ export async function startSidecar(
 ): Promise<void> {
 	const resp = await authenticatedFetch(target, `/api/sidecar/${name}/start`, {
 		method: "POST",
-		headers: makeHeaders(target.token),
+		headers: makeHeaders(target.token, target.userJwt),
 	});
 	if (!resp.ok) {
 		throw new Error(`/api/sidecar/${name}/start failed: ${resp.status}`);
@@ -2499,7 +2508,7 @@ export async function stopSidecar(
 ): Promise<void> {
 	const resp = await authenticatedFetch(target, `/api/sidecar/${name}/stop`, {
 		method: "POST",
-		headers: makeHeaders(target.token),
+		headers: makeHeaders(target.token, target.userJwt),
 	});
 	if (!resp.ok) {
 		throw new Error(`/api/sidecar/${name}/stop failed: ${resp.status}`);

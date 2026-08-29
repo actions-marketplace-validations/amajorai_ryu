@@ -42,6 +42,7 @@ export function useSkillRelations({
 	const target = useMemo(
 		() => ({
 			token: activeNode.token ?? null,
+			userJwt: activeNode.userJwt ?? null,
 			url: activeNode.url,
 		}),
 		[activeNode.token, activeNode.url]

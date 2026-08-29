@@ -39,7 +39,7 @@
 // the model call.
 
 const MIN_TURN_CHARS = 600;
-const MAX_TURN_CHARS = 16000;
+const MAX_TURN_CHARS = 16_000;
 const MAX_CANDIDATES = 8;
 const MAX_PROMPT_CHARS = 300;
 const MAX_ANSWER_CHARS = 600;
@@ -193,7 +193,7 @@ function parseCandidates(reply) {
 		}
 		const prompt = clamp(entry.prompt, MAX_PROMPT_CHARS);
 		const answer = clamp(entry.answer, MAX_ANSWER_CHARS);
-		if (!prompt || !answer) {
+		if (!(prompt && answer)) {
 			continue;
 		}
 		out.push({ prompt, answer, skill: clamp(entry.skill, MAX_SKILL_CHARS) });
@@ -234,5 +234,7 @@ function textSinceLastUserMessage(transcript) {
 		}
 	}
 	const joined = parts.join("\n\n").trim();
-	return joined.length > MAX_TURN_CHARS ? joined.slice(-MAX_TURN_CHARS) : joined;
+	return joined.length > MAX_TURN_CHARS
+		? joined.slice(-MAX_TURN_CHARS)
+		: joined;
 }

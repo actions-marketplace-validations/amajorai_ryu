@@ -389,7 +389,11 @@ export function AssistantPanel({ bare = false }: { bare?: boolean } = {}) {
 
 	const activeNode = useActiveNode();
 	const chatTarget: ApiTarget = useMemo(
-		() => ({ url: activeNode.url, token: activeNode.token ?? null }),
+		() => ({
+			url: activeNode.url,
+			token: activeNode.token,
+			userJwt: activeNode.userJwt ?? null,
+		}),
 		[activeNode.url, activeNode.token]
 	);
 
@@ -1126,10 +1130,9 @@ export function AssistantPanel({ bare = false }: { bare?: boolean } = {}) {
 					showCopyToolbar
 					slots={{ InputBar: composerSlot }}
 					status={status}
+					voiceMode={activeComposer.voiceMode}
 				/>
 			</div>
-			{/* ChatGPT-style voice mode overlay (full-screen) for the active composer. */}
-			{activeComposer.voiceModeOverlay}
 		</>
 	);
 

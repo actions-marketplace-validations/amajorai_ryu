@@ -1,4 +1,4 @@
-﻿"use client";
+"use client";
 
 import { cn } from "@ryu/ui/lib/utils";
 import type { LottieComponentProps, LottieRefCurrentProps } from "lottie-react";

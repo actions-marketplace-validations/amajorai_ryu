@@ -10,7 +10,11 @@ import { useActiveNode } from "./useActiveNode.ts";
 
 const useTarget = (): ApiTarget => {
 	const activeNode = useActiveNode();
-	return { token: activeNode.token ?? null, url: activeNode.url };
+	return {
+		token: activeNode.token,
+		userJwt: activeNode.userJwt ?? null,
+		url: activeNode.url,
+	};
 };
 
 export const useMcpOAuthConnections = (pluginId: string) => {

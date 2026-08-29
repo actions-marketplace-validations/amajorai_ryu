@@ -41,7 +41,11 @@ export interface UseNotificationsResult {
  */
 export function useNotifications(archived?: boolean): UseNotificationsResult {
 	const node = useActiveNode();
-	const target: ApiTarget = { url: node.url, token: node.token ?? null };
+	const target: ApiTarget = {
+		url: node.url,
+		token: node.token,
+		userJwt: node.userJwt ?? null,
+	};
 	const { data: session } = useSession();
 	const meId = session?.user?.id ?? getActiveUserId() ?? null;
 	const qc = useQueryClient();

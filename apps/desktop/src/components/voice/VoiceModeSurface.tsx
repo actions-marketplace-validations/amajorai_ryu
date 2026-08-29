@@ -3,20 +3,32 @@
 // (`ryu:voice-show-transcript`, default ON). One swap-in for every voice mount
 // point (ChatPage, EmptyTabsState, composer slot) keeps the choice centralized.
 
+import type { ReactNode } from "react";
 import { usePersistedToggle } from "@/src/hooks/usePersistedToggle.ts";
 import type { VoiceMode } from "@/src/hooks/useVoiceMode.ts";
 import { VOICE_SHOW_TRANSCRIPT_KEY } from "@/src/lib/voice-prefs.ts";
-import { VoiceModeOverlay } from "./VoiceModeOverlay.tsx";
-import { VoiceModePanel } from "./VoiceModePanel.tsx";
+import { VoiceModeCallScreen } from "./VoiceModeCallScreen.tsx";
 
-export function VoiceModeSurface({ voice }: { voice: VoiceMode }) {
-	const [showTranscript] = usePersistedToggle(VOICE_SHOW_TRANSCRIPT_KEY, true);
+export function VoiceModeSurface({
+	composer,
+	voice,
+}: {
+	composer?: ReactNode;
+	voice: VoiceMode;
+}) {
+	const [showTranscript, setShowTranscript] = usePersistedToggle(
+		VOICE_SHOW_TRANSCRIPT_KEY,
+		true
+	);
 	if (!voice.active) {
 		return null;
 	}
-	return showTranscript ? (
-		<VoiceModePanel voice={voice} />
-	) : (
-		<VoiceModeOverlay voice={voice} />
+	return (
+		<VoiceModeCallScreen
+			composer={composer}
+			onShowTranscriptChange={setShowTranscript}
+			showTranscript={showTranscript}
+			voice={voice}
+		/>
 	);
 }

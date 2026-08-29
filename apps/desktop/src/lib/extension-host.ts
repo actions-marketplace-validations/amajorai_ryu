@@ -1,11 +1,7 @@
 import { useSyncExternalStore } from "react";
 
 /** Browser surfaces that can remember a model independently. */
-export type BrowserSurface =
-	| "dashboard"
-	| "new-tab"
-	| "ask-ryu"
-	| "in-page";
+export type BrowserSurface = "dashboard" | "new-tab" | "ask-ryu" | "in-page";
 
 export type BrowserModelStatus =
 	| "ready"
@@ -54,7 +50,10 @@ export interface BrowserLocalTurnResult {
 }
 
 export interface BrowserProviderHost {
-	getModelSelection: (agentId: string | null, surface: BrowserSurface) => string;
+	getModelSelection: (
+		agentId: string | null,
+		surface: BrowserSurface
+	) => string;
 	getSnapshot: () => BrowserProviderSnapshot | null;
 	runLocalTurn: (
 		request: BrowserLocalTurnRequest

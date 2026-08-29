@@ -43,6 +43,7 @@ export function DeveloperTab() {
 	const target: ApiTarget = {
 		url: activeNode.url,
 		token: activeNode.token ?? null,
+		userJwt: activeNode.userJwt ?? null,
 	};
 
 	// When the user enables developer mode, activate console capture immediately

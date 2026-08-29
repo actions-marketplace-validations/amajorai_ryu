@@ -1,4 +1,3 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Badge } from "@ryu/ui/components/badge.tsx";
 import { Button } from "@ryu/ui/components/button.tsx";
 import { Input } from "@ryu/ui/components/input.tsx";
@@ -6,6 +5,7 @@ import { Label } from "@ryu/ui/components/label.tsx";
 import { toast } from "@ryu/ui/components/sileo.tsx";
 import { Spinner } from "@ryu/ui/components/spinner.tsx";
 import { Switch } from "@ryu/ui/components/switch.tsx";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { type ReactNode, useState } from "react";
 import { useActiveNode } from "@/src/hooks/useActiveNode.ts";
 import { useAgents } from "@/src/hooks/useAgents.ts";
@@ -32,8 +32,8 @@ import {
 	saveA2aSettings,
 	setA2aPeerTrust,
 } from "@/src/lib/api/a2a.ts";
-import type { ApiTarget } from "@/src/lib/api/client.ts";
 import type { Agent, AgentInput, AgentSummary } from "@/src/lib/api/agents.ts";
+import type { ApiTarget } from "@/src/lib/api/client.ts";
 
 const ALL_SCOPES: A2aScope[] = [
 	"send",
@@ -199,7 +199,11 @@ export function A2aSettingsView({
 	agentRoster: A2aAgentRoster;
 }) {
 	const node = useActiveNode();
-	const target: ApiTarget = { url: node.url, token: node.token ?? null };
+	const target: ApiTarget = {
+		url: node.url,
+		token: node.token ?? null,
+		userJwt: node.userJwt ?? null,
+	};
 	const queryClient = useQueryClient();
 	const settings = useQuery({
 		queryKey: ["a2a", node.url, "settings"],

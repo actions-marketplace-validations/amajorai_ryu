@@ -1416,8 +1416,10 @@ pub(crate) fn is_local_marketplace_ref(repo: &str) -> bool {
     {
         return true;
     }
-    let path = expand_local_path(repo);
-    path.is_dir() || (path.is_file() && repo.to_ascii_lowercase().ends_with(".json"))
+    let path = Path::new(repo);
+    path.is_absolute()
+        || path.is_dir()
+        || (path.is_file() && repo.to_ascii_lowercase().ends_with(".json"))
 }
 
 /// Classify a user-supplied marketplace repo reference into where its

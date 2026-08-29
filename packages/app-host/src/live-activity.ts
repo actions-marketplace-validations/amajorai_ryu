@@ -22,10 +22,7 @@
 // `LiveActivityContribution`); the `spec` there is opaque, so a new activity
 // capability needs no Core change. The desktop's generic renderer interprets it.
 
-import {
-	type ViewSource,
-	sourceItemsFromResponse,
-} from "./views.ts";
+import { sourceItemsFromResponse, type ViewSource } from "./views.ts";
 
 /** Lifecycle phase of a live activity, shared by every surface renderer. This is
  *  the exact status vocabulary the mobile `AgentActivity` uses, so an "agent
@@ -51,30 +48,30 @@ export type LiveActivityAction =
 /** One live activity card. Identity is the stable `id`; surfaces upsert by id so
  *  a running item updates in place rather than flickering. */
 export interface LiveActivity {
-	/** Stable identity, e.g. `run:<id>`, `download:<id>`, or
-	 *  `plugin:<pluginId>:<activityId>:<rowId>` for a contributed activity. */
-	id: string;
+	/** Accent colour hint (any CSS color). */
+	accent?: string;
+	/** What tapping the card does. */
+	action?: LiveActivityAction;
 	/** The owning app/plugin id — `"shell"` for a built-in adapter, otherwise the
 	 *  plugin whose `contributes.live_activities` minted it. Used to group/collapse
 	 *  the dock by source. */
 	appId: string;
-	/** The activity kind (`"agent-run"`, `"download"`, or a contributed activity id). */
-	kind: string;
-	/** Short headline. */
-	title: string;
 	/** Secondary line — the latest step / progress caption. */
 	detail: string;
-	status: LiveActivityStatus;
-	/** Optional 0..1 determinate progress; omit for indeterminate. */
-	progress?: number;
 	/** Glyph id resolved by the host's Icon primitive. */
 	icon?: string;
-	/** Accent colour hint (any CSS color). */
-	accent?: string;
+	/** Stable identity, e.g. `run:<id>`, `download:<id>`, or
+	 *  `plugin:<pluginId>:<activityId>:<rowId>` for a contributed activity. */
+	id: string;
+	/** The activity kind (`"agent-run"`, `"download"`, or a contributed activity id). */
+	kind: string;
+	/** Optional 0..1 determinate progress; omit for indeterminate. */
+	progress?: number;
 	startedAt: number;
+	status: LiveActivityStatus;
+	/** Short headline. */
+	title: string;
 	updatedAt: number;
-	/** What tapping the card does. */
-	action?: LiveActivityAction;
 }
 
 /** A pure predicate helpers use to decide which rows become live cards. */
@@ -102,8 +99,8 @@ export function isLiveStatus(status: LiveActivityStatus): boolean {
 export interface LiveActivitySourceMap {
 	accent?: string;
 	detail?: string;
-	id?: string;
 	icon?: string;
+	id?: string;
 	/** Row key holding a 0..1 (or 0..100) progress value. */
 	progress?: string;
 	/** Row key holding the activity's status string. */
@@ -152,12 +149,12 @@ export interface LiveActivityContribution {
 	accent?: string;
 	/** Core-stamped declarative HTTP authority. */
 	http_policy?: unknown;
-	id: string;
 	icon?: string;
-	/** Owning plugin id, added by Core's contributions endpoint. */
-	plugin?: string;
+	id: string;
 	/** Optional placement hint among the dock's activities (lower = first). */
 	order?: number;
+	/** Owning plugin id, added by Core's contributions endpoint. */
+	plugin?: string;
 	spec?: LiveActivitySpec;
 	title: string;
 }
@@ -169,7 +166,10 @@ export interface SourceLiveActivity {
 	raw: Record<string, unknown>;
 }
 
-function rawString(row: Record<string, unknown>, key?: string): string | undefined {
+function rawString(
+	row: Record<string, unknown>,
+	key?: string
+): string | undefined {
 	if (!key) {
 		return undefined;
 	}
@@ -180,7 +180,10 @@ function rawString(row: Record<string, unknown>, key?: string): string | undefin
 	return typeof value === "object" ? JSON.stringify(value) : String(value);
 }
 
-function rawNumber(row: Record<string, unknown>, key?: string): number | undefined {
+function rawNumber(
+	row: Record<string, unknown>,
+	key?: string
+): number | undefined {
 	if (!key) {
 		return undefined;
 	}
@@ -376,8 +379,18 @@ export function helloLiveActivityRows(): SourceLiveActivity[] {
 		helloLiveActivity,
 		{
 			runs: [
-				{ id: "run-1", title: "Ship the docs", run_status: "running", folder_path: "/work/docs" },
-				{ id: "run-2", title: "Refactor sidecar", run_status: "completed", folder_path: "/work/ryu" },
+				{
+					id: "run-1",
+					title: "Ship the docs",
+					run_status: "running",
+					folder_path: "/work/docs",
+				},
+				{
+					id: "run-2",
+					title: "Refactor sidecar",
+					run_status: "completed",
+					folder_path: "/work/ryu",
+				},
 			],
 		},
 		1_700_000_000_000

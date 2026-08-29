@@ -9,8 +9,8 @@
 // The run id IS the conversation id (see `lib/api/runs.ts`), so tapping the card
 // opens the chat that owns the run.
 
-import { useEffect, useRef } from "react";
 import type { LiveActivity } from "@ryu/app-host/live-activity";
+import { useEffect, useRef } from "react";
 import { useActiveNode } from "@/src/hooks/useActiveNode.ts";
 import type { RunSummary } from "@/src/hooks/useRuns.ts";
 import { toTarget } from "@/src/lib/api/client.ts";
@@ -20,7 +20,7 @@ import { useLiveActivityStore } from "@/src/store/useLiveActivityStore.ts";
 
 const INITIAL_BACKOFF_MS = 500;
 const MAX_BACKOFF_MS = 10_000;
-const TERMINAL_LINGER_MS = 8_000;
+const TERMINAL_LINGER_MS = 8000;
 
 /** Split a run's folder path on either separator to show its basename. */
 const PATH_SEPARATOR_RE = /[\\/]/;
@@ -33,17 +33,19 @@ function runId(id: string): string {
  *  card opens the owning chat. */
 function runToActivity(run: RunSummary): LiveActivity {
 	const folder = run.folder_path?.split(PATH_SEPARATOR_RE).pop() ?? "";
-	const detail = [folder, run.branch && `@ ${run.branch}`].filter(Boolean).join(" · ");
+	const detail = [folder, run.branch && `@ ${run.branch}`]
+		.filter(Boolean)
+		.join(" · ");
 	const status =
 		run.run_status === "completed"
 			? "done"
 			: run.run_status === "awaiting_input"
 				? "waiting"
-			: run.run_status === "failed"
-				? "error"
-				: run.run_status === "interrupted"
+				: run.run_status === "failed"
 					? "error"
-				: "running";
+					: run.run_status === "interrupted"
+						? "error"
+						: "running";
 	const stateDetail =
 		run.run_status === "awaiting_input"
 			? "Needs your input"
@@ -62,7 +64,10 @@ function runToActivity(run: RunSummary): LiveActivity {
 		icon: "loader-circle",
 		startedAt: run.created_at * 1000,
 		updatedAt: run.updated_at * 1000,
-		action: { kind: "route", path: `/chat?conversationId=${encodeURIComponent(run.id)}` },
+		action: {
+			kind: "route",
+			path: `/chat?conversationId=${encodeURIComponent(run.id)}`,
+		},
 	};
 }
 

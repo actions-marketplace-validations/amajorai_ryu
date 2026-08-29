@@ -316,6 +316,7 @@ function IntegrationDetailPanel({
 	const target = {
 		url: activeNode.url,
 		token: activeNode.token ?? null,
+		userJwt: activeNode.userJwt ?? null,
 	};
 	const detailQuery = useQuery({
 		queryKey: ["integrations", "detail", target.url, brand.id],
@@ -551,7 +552,11 @@ function ProviderOptionRow({
 	option: IntegrationOption;
 }) {
 	const node = useActiveNode();
-	const target = { url: node.url, token: node.token ?? null };
+	const target = {
+		url: node.url,
+		token: node.token,
+		userJwt: node.userJwt ?? null,
+	};
 	const href = safeHttpUrl(option.url);
 	const connectionId =
 		option.connectionId ?? option.id.replace(/^directory:/, "");

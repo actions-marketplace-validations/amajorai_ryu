@@ -50,6 +50,7 @@ export function useMentionableResources(
 		queryFn: () =>
 			listOutputStyles({
 				token: activeNode.token ?? null,
+				userJwt: activeNode.userJwt ?? null,
 				url: activeNode.url,
 			}),
 		queryKey: ["output-styles", activeNode.url, activeNode.token],

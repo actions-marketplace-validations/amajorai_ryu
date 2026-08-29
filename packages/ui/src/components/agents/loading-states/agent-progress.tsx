@@ -20,15 +20,15 @@ const GRID_CELLS = [
 ];
 
 export interface AgentProgressProps {
-	/** Verb describing the agent's current activity. */
-	label?: string;
+	className?: string;
 	/** Controlled elapsed time in seconds. */
 	elapsedSeconds?: number;
 	/** Starting time for the internal timer, in seconds. */
 	initialSeconds?: number;
+	/** Verb describing the agent's current activity. */
+	label?: string;
 	/** Whether the internal timer should advance. Ignored when elapsedSeconds is provided. */
 	running?: boolean;
-	className?: string;
 }
 
 function formatElapsed(totalSeconds: number) {
@@ -67,7 +67,7 @@ export function AgentProgress({
 		<span
 			aria-label={`${label}, in progress`}
 			className={cn(
-				"inline-flex items-center gap-3 font-mono text-sm text-muted-foreground",
+				"inline-flex items-center gap-3 font-mono text-muted-foreground text-sm",
 				className
 			)}
 			role="status"
@@ -91,13 +91,13 @@ export function AgentProgress({
 						transition={{
 							duration: 1.55,
 							ease: EASE_IN_OUT,
-							repeat: Infinity,
+							repeat: Number.POSITIVE_INFINITY,
 							delay,
 						}}
 					/>
 				))}
 			</span>
-			<span className="font-sans font-medium">{label}</span>
+			<span className="font-medium font-sans">{label}</span>
 			<span
 				aria-hidden="true"
 				className="text-muted-foreground/70 tabular-nums"

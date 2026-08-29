@@ -1,4 +1,4 @@
-﻿"use client";
+"use client";
 
 import { PatchDiff } from "@pierre/diffs/react";
 import { Button } from "@ryu/ui/components/button";
@@ -198,6 +198,8 @@ export interface InputBarProps {
 		deletions: number;
 	};
 	className?: string;
+	/** Remove the composer field's card chrome when embedded in voice mode. */
+	seamless?: boolean;
 
 	/**
 	 * Responsive compact composer used once a conversation has history. A plain
@@ -523,6 +525,7 @@ export const InputBar = memo(function InputBar({
 	leftActions,
 	rightActions,
 	draftControls,
+	seamless,
 	voice,
 	voiceMode,
 	onGenerateImage,
@@ -922,7 +925,12 @@ export const InputBar = memo(function InputBar({
 	// obviously in compact mode, where the textarea block is short enough that the
 	// two became one undifferentiated box.
 	const actionBarNode = workspaceBar ? (
-		<div className="flex h-[34px] min-w-0 items-center gap-0.5 rounded-b-2xl bg-muted/40 px-2">
+		<div
+			className={cn(
+				"flex h-[34px] min-w-0 items-center gap-0.5 px-2",
+				seamless ? "bg-transparent" : "rounded-b-2xl bg-muted/40"
+			)}
+		>
 			{workspaceBar}
 		</div>
 	) : null;
@@ -1535,8 +1543,9 @@ export const InputBar = memo(function InputBar({
 	const renderComposerSurface = (expanded: boolean) => (
 		<motion.div
 			className={cn(
-				"composer-container relative cursor-text rounded-2xl bg-muted",
-				expanded && "border border-border/70 shadow-sm",
+				"composer-container relative cursor-text",
+				seamless ? "bg-transparent" : "rounded-2xl bg-muted",
+				expanded && !seamless && "border border-border/70 shadow-sm",
 				isDragOver && "ring-2 ring-primary ring-inset"
 			)}
 			initial={false}
@@ -1792,7 +1801,7 @@ export const InputBar = memo(function InputBar({
 						// (distinct from the input box), so the bars — which carry no bg of
 						// their own — show this color, and the sliver at the input box's
 						// rounded corners is the same color as the bars (seamless).
-						shouldShowInfoBar || goalBar || workspaceBar
+						!seamless && (shouldShowInfoBar || goalBar || workspaceBar)
 							? "rounded-2xl bg-card"
 							: null
 					)}

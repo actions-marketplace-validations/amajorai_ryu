@@ -2226,14 +2226,20 @@ function BrowserSidecarPanel({ active = true }: { active?: boolean }) {
 	const [isFrozen, setIsFrozen] = useState(false);
 
 	const base = "/api/ext/@ryu/browser";
-	const headers = useMemo(() => makeHeaders(node.token ?? null), [node.token]);
+	const headers = useMemo(
+		() => makeHeaders(node.token ?? null, node.userJwt),
+		[node.token, node.userJwt]
+	);
 	const openAssistant = useAssistantStore((store) => store.open);
 	const setPendingPrompt = useAssistantStore((store) => store.setPendingPrompt);
 
 	const call = useCallback(
 		async (path: string, init?: RequestInit) => {
 			const resp = await fetch(
-				apiUrl({ url: node.url, token: node.token ?? null }, path),
+				apiUrl(
+					{ url: node.url, token: node.token, userJwt: node.userJwt ?? null },
+					path
+				),
 				{
 					headers,
 					...init,
@@ -2691,13 +2697,19 @@ function SimulatorSidecarPanel() {
 	const [error, setError] = useState<string | null>(null);
 	const [busy, setBusy] = useState(false);
 
-	const headers = useMemo(() => makeHeaders(node.token ?? null), [node.token]);
+	const headers = useMemo(
+		() => makeHeaders(node.token ?? null, node.userJwt),
+		[node.token, node.userJwt]
+	);
 	const selected = devices.find((d) => d.id === selectedId) ?? null;
 
 	const call = useCallback(
 		async (path: string, init?: RequestInit) => {
 			const resp = await fetch(
-				apiUrl({ url: node.url, token: node.token ?? null }, path),
+				apiUrl(
+					{ url: node.url, token: node.token, userJwt: node.userJwt ?? null },
+					path
+				),
 				{ headers, ...init }
 			);
 			if (!resp.ok) {

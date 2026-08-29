@@ -60,6 +60,7 @@ export function useIntegrationsCatalog(
 	const target: ApiTarget = {
 		url: activeNode.url,
 		token: activeNode.token ?? null,
+		userJwt: activeNode.userJwt ?? null,
 	};
 	const [query, setQuery] = useState(initialQuery);
 	const debouncedQuery = useDebouncedValue(query, SEARCH_DEBOUNCE_MS);

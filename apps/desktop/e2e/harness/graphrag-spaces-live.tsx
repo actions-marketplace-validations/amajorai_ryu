@@ -16,11 +16,11 @@ import {
 	ingestDocument,
 	type RetrievalMode,
 	type RetrievalModeProgress,
-	searchSpace,
-	setSpaceRetrievalMode,
 	type Space,
 	type SpaceDocument,
 	type SpaceMatch,
+	searchSpace,
+	setSpaceRetrievalMode,
 } from "../../src/lib/api/spaces.ts";
 import "../../src/index.css";
 
@@ -212,7 +212,7 @@ function LiveGraphRagProof() {
 	);
 
 	const handleSearch = useCallback(async () => {
-		if (!space || !searchQuery.trim()) {
+		if (!(space && searchQuery.trim())) {
 			return;
 		}
 		setSearchBusy(true);

@@ -1,4 +1,4 @@
-﻿export function FileExtIcon({
+export function FileExtIcon({
 	filename,
 	className,
 }: {

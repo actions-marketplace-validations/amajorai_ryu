@@ -112,8 +112,9 @@ export function useMcpCatalog(initialQuery = ""): UseMcpCatalogResult {
 	const target: ApiTarget = {
 		url: activeNode.url,
 		token: activeNode.token ?? null,
+		userJwt: activeNode.userJwt ?? null,
 	};
-	const { url, token } = target;
+	const { url, token, userJwt } = target;
 	const qc = useQueryClient();
 
 	const [query, setQuery] = useState(initialQuery);
@@ -126,7 +127,7 @@ export function useMcpCatalog(initialQuery = ""): UseMcpCatalogResult {
 	const activeSource = sourcesQuery.data?.active ?? "";
 
 	const selectSourceMutation = useMutation({
-		mutationFn: (id: string) => selectMcpSource({ url, token }, id),
+		mutationFn: (id: string) => selectMcpSource({ url, token, userJwt }, id),
 		onSuccess: () => {
 			Promise.resolve(
 				qc.invalidateQueries({ queryKey: ["mcp", "sources", url] })
@@ -165,7 +166,8 @@ export function useMcpCatalog(initialQuery = ""): UseMcpCatalogResult {
 
 	const detailQuery = useQuery({
 		queryKey: ["mcp", "detail", url, selectedId],
-		queryFn: () => fetchMcpCatalogDetail({ url, token }, selectedId as string),
+		queryFn: () =>
+			fetchMcpCatalogDetail({ url, token, userJwt }, selectedId as string),
 		enabled: selectedId !== null,
 	});
 
@@ -182,7 +184,8 @@ export function useMcpCatalog(initialQuery = ""): UseMcpCatalogResult {
 	}, [detailQuery.data, installedNames]);
 
 	const installMutation = useMutation({
-		mutationFn: () => installMcpServer({ url, token }, selectedId as string),
+		mutationFn: () =>
+			installMcpServer({ url, token, userJwt }, selectedId as string),
 		onSettled: () => {
 			// Installed-state is derived from the registered servers list, so the
 			// authoritative refresh is re-fetching that — the list/detail then

@@ -52,9 +52,10 @@ export function SessionsTab() {
 		<div className="space-y-4">
 			<div className="flex items-center justify-between">
 				<div>
-					<h3 className="font-medium text-sm">Active Sessions</h3>
+					<h3 className="font-medium text-sm">Sessions &amp; devices</h3>
 					<p className="mt-0.5 text-muted-foreground text-xs">
-						Manage where you're signed in.
+						Manage where you're signed in and revoke devices you don't
+						recognize.
 					</p>
 				</div>
 				{sessions.length > 1 &&

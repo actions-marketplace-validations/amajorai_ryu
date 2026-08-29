@@ -184,7 +184,9 @@ fn copy_tree(
 ///   - `nodes.json`    entries carry absolute URLs with a HARDCODED port. Copying
 ///                     `http://127.0.0.1:7980` into a profile that listens on 9980
 ///                     leaves it pointing at the wrong stack — the source's.
-///   - `auth.json`     device sign-in token, stored in plaintext.
+///   - `auth.json`     legacy active-account sign-in token, sealed with the Core
+///                     master key and excluded because it identifies the source
+///                     node's account session.
 ///   - `node-auth.token` this node's minted `RYU_TOKEN` (see `crate::node_token`).
 ///                     A copy would hand another machine THIS node's admittance
 ///                     secret — a credential leak, not just a wrong identity.
@@ -1046,19 +1048,23 @@ mod tests {
     /// user who clicked "reset node" reasonably expects them gone.
     #[test]
     fn deep_clean_targets_the_roots_a_node_reset_never_reaches() {
-        let home = std::path::Path::new("/home/tester");
-        let config = std::path::Path::new("/home/tester/.config");
-        let roots = auxiliary_roots(home, Some(config), "-canary", true);
+        let home = if cfg!(windows) {
+            std::env::temp_dir().join("ryu-test-home")
+        } else {
+            std::path::PathBuf::from("/home/tester")
+        };
+        let config = home.join(".config");
+        let roots = auxiliary_roots(&home, Some(&config), "-canary", true);
         let paths: Vec<String> = roots
             .iter()
             .map(|(_, p)| p.to_string_lossy().into_owned())
             .collect();
-        assert!(paths.contains(&"/home/tester/.shadow".to_string()));
-        assert!(paths.contains(&"/home/tester/.ghost".to_string()));
+        assert!(paths.contains(&home.join(".shadow").to_string_lossy().to_string()));
+        assert!(paths.contains(&home.join(".ghost").to_string_lossy().to_string()));
         // The config dir IS profile-suffixed — clearing release's must never take
         // canary's gateway.toml with it.
-        assert!(paths.contains(&"/home/tester/.config/ryu-canary".to_string()));
-        assert!(!paths.contains(&"/home/tester/.config/ryu".to_string()));
+        assert!(paths.contains(&config.join("ryu-canary").to_string_lossy().to_string()));
+        assert!(!paths.contains(&config.join("ryu").to_string_lossy().to_string()));
     }
 
     /// Deleting a real tree, and proving the home-containment guard bites.

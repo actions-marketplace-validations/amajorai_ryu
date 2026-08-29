@@ -203,7 +203,11 @@ export function MemoryLibrary({
 	const categoryLabels = memoryCategoryLabels(friendly);
 
 	const target: ApiTarget = useMemo(
-		() => ({ url: activeNode.url, token: activeNode.token ?? null }),
+		() => ({
+			url: activeNode.url,
+			token: activeNode.token,
+			userJwt: activeNode.userJwt ?? null,
+		}),
 		[activeNode.url, activeNode.token]
 	);
 	const [view, setView] = useState<MemoryView>(initialView);

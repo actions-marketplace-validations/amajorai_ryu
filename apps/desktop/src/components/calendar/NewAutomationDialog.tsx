@@ -92,6 +92,7 @@ export function NewAutomationDialog({
 		const target: ApiTarget = {
 			url: activeNode.url,
 			token: activeNode.token ?? null,
+			userJwt: activeNode.userJwt ?? null,
 		};
 		try {
 			await createScheduledAgentWorkflow(target, {

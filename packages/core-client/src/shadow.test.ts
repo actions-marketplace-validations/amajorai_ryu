@@ -32,7 +32,10 @@ describe("shadow timeline client", () => {
 		globalThis.fetch = fetchMock as unknown as typeof fetch;
 
 		await expect(
-			fetchTimeline({ token: "node-token", url: "http://node" }, 15)
+			fetchTimeline(
+				{ token: "node-token", url: "http://node", userJwt: null },
+				15
+			)
 		).resolves.toHaveLength(1);
 		expect(fetchMock).toHaveBeenCalledTimes(1);
 	});

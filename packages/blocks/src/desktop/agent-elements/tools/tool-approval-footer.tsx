@@ -1,6 +1,6 @@
 import {
-	type ToolApprovalChoice,
 	ToolApprovalActions,
+	type ToolApprovalChoice,
 	type ToolApprovalStatus,
 } from "@ryu/ui/components/agents/tool-approval";
 import { cn } from "@ryu/ui/lib/utils";

@@ -81,8 +81,9 @@ export function useStoreSearch(query: string): UseStoreSearchResult {
 	const target: ApiTarget = {
 		url: activeNode.url,
 		token: activeNode.token ?? null,
+		userJwt: activeNode.userJwt ?? null,
 	};
-	const { url, token } = target;
+	const { url, token, userJwt } = target;
 
 	const debounced = useDebouncedValue(query.trim(), SEARCH_DEBOUNCE_MS);
 	const enabled = debounced.length > 0;
@@ -92,7 +93,7 @@ export function useStoreSearch(query: string): UseStoreSearchResult {
 		queryKey: ["store-search", "models", url, debounced],
 		queryFn: () =>
 			searchModels(
-				{ url, token },
+				{ url, token, userJwt },
 				{ query: debounced, limit: PER_REALM_LIMIT }
 			),
 		enabled,
@@ -102,7 +103,7 @@ export function useStoreSearch(query: string): UseStoreSearchResult {
 		queryKey: ["store-search", "skills", url, debounced],
 		queryFn: () =>
 			searchSkills(
-				{ url, token },
+				{ url, token, userJwt },
 				{
 					query: debounced,
 					limit: PER_REALM_LIMIT,
@@ -116,7 +117,7 @@ export function useStoreSearch(query: string): UseStoreSearchResult {
 		queryKey: ["store-search", "mcp", url, debounced],
 		queryFn: () =>
 			searchMcpCatalog(
-				{ url, token },
+				{ url, token, userJwt },
 				{ query: debounced, limit: PER_REALM_LIMIT }
 			),
 		enabled,
@@ -126,13 +127,13 @@ export function useStoreSearch(query: string): UseStoreSearchResult {
 	// query key with their sections → cache-deduped) and filter in-memory.
 	const appsQuery = useQuery({
 		queryKey: ["apps", "catalog", url],
-		queryFn: () => fetchAppsCatalog({ url, token }),
+		queryFn: () => fetchAppsCatalog({ url, token, userJwt }),
 		enabled,
 	});
 
 	const agentsQuery = useQuery({
 		queryKey: ["agents", "catalog", url],
-		queryFn: () => fetchAgentCatalog({ url, token }),
+		queryFn: () => fetchAgentCatalog({ url, token, userJwt }),
 		enabled,
 	});
 

@@ -92,6 +92,21 @@ export type ProfileTab =
 	| "authorized-apps"
 	| "support-access";
 
+export interface LinkedAccount {
+	accountId: string;
+	providerId: string;
+}
+
+function linkedAccountLabel(providerId: string): string {
+	if (providerId === "google") {
+		return "Google";
+	}
+	return providerId
+		.split(/[-_]/)
+		.map((word) => `${word[0]?.toUpperCase() ?? ""}${word.slice(1)}`)
+		.join(" ");
+}
+
 const SECONDS_PER_HOUR = 3600;
 
 const joinedDateFormatter = new Intl.DateTimeFormat("en-US", {
@@ -630,6 +645,7 @@ export interface ProfileSettingsProps {
 	isSavingUsername?: boolean;
 	/** Notifications tab. */
 	isSubscribed?: boolean;
+	linkedAccounts?: LinkedAccount[];
 	/**
 	 * App-local "merge another account" dialog and its pending-request banner
 	 * (injected by the live page), mirroring the change-email pair above. Sits in
@@ -648,6 +664,7 @@ export interface ProfileSettingsProps {
 	onSaveUsername?: () => void;
 	onSubscriptionToggle?: (checked: boolean) => void;
 	onTabChange?: (tab: string) => void;
+	onUnlinkAccount?: (account: LinkedAccount) => void;
 	onUnlinkGoogle?: () => void;
 	onUsernameChange?: (username: string) => void;
 	/** App-local Better-Auth tabs (injected by the live page). */
@@ -705,6 +722,8 @@ export default function ProfileSettings({
 	onSubscriptionToggle = noop,
 	googleConnected = false,
 	onConnectGoogle = noop,
+	linkedAccounts,
+	onUnlinkAccount,
 	onUnlinkGoogle = noop,
 	sessionsSlot,
 	passkeysSlot,
@@ -712,6 +731,17 @@ export default function ProfileSettings({
 	authorizedAppsSlot,
 	supportAccessSlot,
 }: ProfileSettingsProps) {
+	const connections =
+		linkedAccounts ??
+		(googleConnected ? [{ accountId: "google", providerId: "google" }] : []);
+	const unlinkAccount = (account: LinkedAccount) => {
+		if (onUnlinkAccount) {
+			onUnlinkAccount(account);
+			return;
+		}
+		onUnlinkGoogle();
+	};
+
 	return (
 		<div className="container mx-auto flex min-h-screen max-w-4xl flex-col gap-8 px-4 py-8">
 			<PageHeader
@@ -727,8 +757,8 @@ export default function ProfileSettings({
 					<TabsTrigger value="referrals">Referrals</TabsTrigger>
 					<TabsTrigger value="notifications">Notifications</TabsTrigger>
 					<TabsTrigger value="connections">Connections</TabsTrigger>
-					<TabsTrigger value="sessions">Sessions</TabsTrigger>
-					<TabsTrigger value="authorized-apps">Authorized Apps</TabsTrigger>
+					<TabsTrigger value="sessions">Sessions &amp; devices</TabsTrigger>
+					<TabsTrigger value="authorized-apps">OAuth apps</TabsTrigger>
 					<TabsTrigger value="support-access">Support Access</TabsTrigger>
 				</TabsList>
 
@@ -1021,27 +1051,49 @@ export default function ProfileSettings({
 
 				<TabsContent className="mt-6 space-y-6" value="connections">
 					<Card>
-						<CardContent>
-							<div className="flex items-center justify-between">
-								<div className="flex items-center gap-3">
-									<div className="flex size-10 items-center justify-center rounded-full bg-muted">
-										{GOOGLE_LOGO}
-									</div>
-									<div>
-										<p className="font-medium">Google</p>
-										<p className="text-muted-foreground text-sm">
-											{googleConnected ? "Connected" : "Not connected"}
-										</p>
-									</div>
-								</div>
-								{googleConnected ? (
-									<Button onClick={onUnlinkGoogle} variant="destructive">
-										Unlink
-									</Button>
-								) : (
-									<Button onClick={onConnectGoogle}>Connect</Button>
-								)}
+						<CardContent className="space-y-4">
+							<div>
+								<p className="font-medium">Connected accounts</p>
+								<p className="text-muted-foreground text-sm">
+									Accounts linked for sign-in and provider access.
+								</p>
 							</div>
+							{connections.length > 0 ? (
+								<div className="space-y-3">
+									{connections.map((account) => (
+										<div
+											className="flex items-center justify-between gap-3"
+											key={account.accountId}
+										>
+											<div className="flex min-w-0 items-center gap-3">
+												<div className="flex size-10 shrink-0 items-center justify-center rounded-full bg-muted">
+													{account.providerId === "google" ? (
+														GOOGLE_LOGO
+													) : (
+														<Plug className="size-5 text-muted-foreground" />
+													)}
+												</div>
+												<p className="truncate font-medium">
+													{linkedAccountLabel(account.providerId)}
+												</p>
+											</div>
+											<Button
+												onClick={() => unlinkAccount(account)}
+												variant="destructive"
+											>
+												Unlink
+											</Button>
+										</div>
+									))}
+								</div>
+							) : (
+								<p className="text-muted-foreground text-sm">
+									No connected accounts yet.
+								</p>
+							)}
+							<Button onClick={onConnectGoogle} variant="outline">
+								Connect Google
+							</Button>
 						</CardContent>
 					</Card>
 				</TabsContent>

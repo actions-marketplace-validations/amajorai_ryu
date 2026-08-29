@@ -294,9 +294,9 @@ describe("buildMissionDigest — headlines", () => {
 describe("toolNameOf", () => {
 	it("reads the name out of a typed part and a dynamic part", () => {
 		expect(toolNameOf({ type: "tool-Edit" })).toBe("Edit");
-		expect(
-			toolNameOf({ type: "dynamic-tool", toolName: "mcp.thing.do" })
-		).toBe("mcp.thing.do");
+		expect(toolNameOf({ type: "dynamic-tool", toolName: "mcp.thing.do" })).toBe(
+			"mcp.thing.do"
+		);
 	});
 
 	it("degrades to a generic name rather than throwing on a malformed part", () => {

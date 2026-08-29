@@ -84,7 +84,7 @@ export async function fetchGitFileDiff(
 ): Promise<GitFileDiffResult> {
 	const response = await fetch(apiUrl(target, "/api/git/file-diff"), {
 		body: JSON.stringify({ cwd, paths }),
-		headers: makeHeaders(target.token),
+		headers: makeHeaders(target.token, target.userJwt),
 		method: "POST",
 		signal,
 	});
@@ -107,7 +107,7 @@ export async function reverseGitEdits(
 ): Promise<ReverseEditsResult> {
 	const response = await fetch(apiUrl(target, "/api/git/reverse-edits"), {
 		body: JSON.stringify({ cwd, plan }),
-		headers: makeHeaders(target.token),
+		headers: makeHeaders(target.token, target.userJwt),
 		method: "POST",
 		signal,
 	});

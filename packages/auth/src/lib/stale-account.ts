@@ -26,11 +26,19 @@ export function daysSinceLastActive(
 
 /** Stable, timezone-explicit display text for an authentication alert. */
 export function formatLoginTime(value: Date): string {
-	return `${value.toLocaleString("en-US", {
-		dateStyle: "medium",
+	const date = value.toLocaleDateString("en-US", {
+		day: "numeric",
+		month: "short",
 		timeZone: "UTC",
-		timeStyle: "short",
-	})} UTC`;
+		year: "numeric",
+	});
+	const time = value.toLocaleTimeString("en-US", {
+		hour: "numeric",
+		hour12: true,
+		minute: "2-digit",
+		timeZone: "UTC",
+	});
+	return `${date} at ${time} UTC`;
 }
 
 /** Bound request-derived device/IP text before it reaches an email. */

@@ -38,7 +38,8 @@ const serve = async (): Promise<void> => {
 const USAGE = "Usage: ryu-mcp [serve|login|logout|whoami]\n";
 
 // argv dispatch: a bare invocation (or `serve`) runs the stdio server; the auth
-// subcommands run the device-authorization flow against Core's proxy and exit.
+// subcommands run the device-authorization flow against the control plane and
+// exit. The account session never substitutes for the target node bearer.
 const main = async (): Promise<void> => {
 	const command = process.argv[2];
 	switch (command) {

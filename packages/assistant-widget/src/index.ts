@@ -4,9 +4,6 @@ export * from "./docs";
 export * from "./iframe";
 export * from "./local-node";
 export * from "./morph";
-export type {
-	AssistantMode,
-	RyuAssistantWidgetProps,
-} from "./RyuAssistantWidget";
-export { RyuAssistantWidget } from "./RyuAssistantWidget";
+export type { AssistantMode, RyuAssistantWidgetProps } from "./public-widget";
+export { RyuAssistantWidget } from "./public-widget";
 export * from "./surface";

@@ -634,6 +634,7 @@ function NodeHardwareDialog({
 	const target: ApiTarget = {
 		url: node?.url ?? "",
 		token: node?.token ?? null,
+		userJwt: node?.userJwt ?? null,
 	};
 	const { data: info, isLoading } = useNodeSystemInfo(
 		target,
@@ -1059,7 +1060,7 @@ function NodeItem({
 	// Live hardware snapshot for this node — only fetched once the node is
 	// reachable, so an offline node never blocks on an unreachable fetch.
 	const { data: info } = useNodeSystemInfo(
-		{ url: node.url, token: node.token },
+		{ url: node.url, token: node.token, userJwt: node.userJwt ?? null },
 		online === true
 	);
 
@@ -1543,7 +1544,7 @@ function useNodeEngines(target: ApiTarget) {
 		queryKey: ["node-engines", target.url],
 		queryFn: async () => {
 			const [catalog, details, active, concurrency] = await Promise.all([
-				fetchCatalog(target.url, target.token),
+				fetchCatalog(target.url, target.token, undefined, target.userJwt),
 				fetchSidecarDetails(target).catch(
 					() => ({}) as Record<string, SidecarDetail>
 				),
@@ -1577,7 +1578,14 @@ function useNodeEngines(target: ApiTarget) {
 /** Install a catalog engine on `target`, reporting either outcome. */
 async function installEngine(target: ApiTarget, item: CatalogItem) {
 	try {
-		await installSidecar(target.url, target.token, item.name);
+		await installSidecar(
+			target.url,
+			target.token,
+			item.name,
+			false,
+			undefined,
+			target.userJwt
+		);
 		sileo.success({ title: `Installing ${item.displayName}` });
 	} catch (e) {
 		sileo.error({
@@ -1599,7 +1607,12 @@ function EnginesSection({ target }: { target: ApiTarget }) {
 
 	const uninstall = async (item: CatalogItem) => {
 		try {
-			await uninstallSidecar(target.url, target.token, item.name);
+			await uninstallSidecar(
+				target.url,
+				target.token,
+				item.name,
+				target.userJwt
+			);
 			sileo.success({ title: `Removed ${item.displayName}` });
 		} catch (e) {
 			sileo.error({
@@ -2438,7 +2451,12 @@ function VoiceAndSandboxSection({
 							entry.engine === sttPrefs.engine || !item
 								? undefined
 								: async () => {
-										await uninstallSidecar(target.url, target.token, item.name);
+										await uninstallSidecar(
+											target.url,
+											target.token,
+											item.name,
+											target.userJwt
+										);
 										await refresh();
 									},
 					};
@@ -3584,6 +3602,7 @@ export function NodeSelector({ mode }: NodeSelectorProps) {
 	const target: ApiTarget = {
 		url: activeNode?.url ?? "http://127.0.0.1:7980",
 		token: activeNode?.token ?? null,
+		userJwt: activeNode?.userJwt ?? null,
 	};
 
 	// # 0.1.0: Island disabled — uncomment when re-enabling the Island ServiceRow

@@ -5,12 +5,9 @@
 // per in-flight task with live progress. Terminal tasks are removed once they
 // settle — the download center is the durable history, not the dock.
 
-import { useEffect } from "react";
 import type { LiveActivity } from "@ryu/app-host/live-activity";
-import {
-	type DownloadTask,
-	isInFlight,
-} from "@/src/lib/api/downloads.ts";
+import { useEffect } from "react";
+import { type DownloadTask, isInFlight } from "@/src/lib/api/downloads.ts";
 import { useDownloadsStore } from "@/src/store/useDownloadsStore.ts";
 import { useLiveActivityStore } from "@/src/store/useLiveActivityStore.ts";
 

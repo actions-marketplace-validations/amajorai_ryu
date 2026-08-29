@@ -1,4 +1,4 @@
-﻿/**
+/**
  * Tool state cache for detecting AI SDK in-place mutations.
  * AI SDK mutates objects in-place during streaming, so we must
  * cache state externally and compare cached values.

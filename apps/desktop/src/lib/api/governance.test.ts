@@ -111,6 +111,7 @@ describe("governance transport", () => {
 			const snapshot = await fetchGatewayGovernance({
 				token: "node-token",
 				url: "http://127.0.0.1:7980",
+				userJwt: null,
 			});
 			expect(snapshot.layers[0]?.scope).toBe("node");
 		} finally {
@@ -138,7 +139,7 @@ describe("governance transport", () => {
 
 		try {
 			await updateGatewayGovernance(
-				{ token: null, url: "http://127.0.0.1:7980" },
+				{ token: null, url: "http://127.0.0.1:7980", userJwt: null },
 				"git",
 				"user",
 				{ branchPrefix: "codex/" }

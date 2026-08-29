@@ -75,7 +75,10 @@ function AgentCard({
 	const configQuery = useQuery({
 		queryKey: ["acp-config", node.url, agent.id],
 		queryFn: () =>
-			fetchAcpConfig({ url: node.url, token: node.token ?? null }, agent.id),
+			fetchAcpConfig(
+				{ url: node.url, token: node.token, userJwt: node.userJwt ?? null },
+				agent.id
+			),
 		// Cold-start cost is the whole reason this is gated on `open`.
 		enabled: open,
 		staleTime: 5 * 60 * 1000,
@@ -205,7 +208,12 @@ export function AgentModelsSettings({
 	const node = useActiveNode();
 	const agentsQuery = useQuery({
 		queryKey: ["agents", node.url],
-		queryFn: () => fetchAgents({ url: node.url, token: node.token ?? null }),
+		queryFn: () =>
+			fetchAgents({
+				url: node.url,
+				token: node.token,
+				userJwt: node.userJwt ?? null,
+			}),
 		staleTime: 60_000,
 	});
 

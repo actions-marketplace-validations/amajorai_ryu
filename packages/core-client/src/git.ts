@@ -39,7 +39,7 @@ export async function fetchGitStatus(
 	try {
 		const resp = await fetch(url, {
 			method: "GET",
-			headers: makeHeaders(target.token),
+			headers: makeHeaders(target.token, target.userJwt),
 			signal,
 		});
 		if (!resp.ok) {
@@ -87,7 +87,7 @@ export async function fetchGitBranches(
 	try {
 		const resp = await fetch(url, {
 			method: "GET",
-			headers: makeHeaders(target.token),
+			headers: makeHeaders(target.token, target.userJwt),
 			signal,
 		});
 		if (!resp.ok) {
@@ -126,7 +126,7 @@ export async function checkoutBranch(
 		const resp = await fetch(url, {
 			method: "POST",
 			headers: {
-				...makeHeaders(target.token),
+				...makeHeaders(target.token, target.userJwt),
 				"content-type": "application/json",
 			},
 			body: JSON.stringify({ cwd, branch }),
@@ -213,7 +213,7 @@ export async function applyWorktree(
 	const resp = await fetch(url, {
 		method: "POST",
 		headers: {
-			...makeHeaders(target.token),
+			...makeHeaders(target.token, target.userJwt),
 			"content-type": "application/json",
 		},
 		body: JSON.stringify(opts),
@@ -258,7 +258,7 @@ export async function fetchWorktreeDiff(
 	try {
 		const resp = await fetch(url, {
 			method: "GET",
-			headers: makeHeaders(target.token),
+			headers: makeHeaders(target.token, target.userJwt),
 			signal,
 		});
 		if (!resp.ok) {

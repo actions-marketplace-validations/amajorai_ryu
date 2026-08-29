@@ -1,4 +1,4 @@
-﻿import {
+import {
 	ApprovalCard,
 	type ApprovalCardAnswer,
 	type ApprovalCardQuestion,
@@ -65,7 +65,9 @@ function toApprovalQuestion(
 				: (question.customPlaceholder ?? customLabel),
 		options: (question.options ?? []).map((option) => ({
 			value: option.id,
-			label: option.description ? `${option.label} — ${option.description}` : option.label,
+			label: option.description
+				? `${option.label} — ${option.description}`
+				: option.label,
 		})),
 	};
 }
@@ -153,7 +155,6 @@ export function QuestionTool({ part }: QuestionToolProps) {
 	return (
 		<ApprovalCard
 			className="an-tool-question"
-			defaultStep={clampedIndex - 1}
 			defaultAnswers={Object.fromEntries(
 				Object.entries(localAnswers)
 					.filter(([, answer]) => answer && answer.kind !== "skip")
@@ -165,10 +166,8 @@ export function QuestionTool({ part }: QuestionToolProps) {
 						} satisfies ApprovalCardAnswer,
 					])
 			)}
+			defaultStep={clampedIndex - 1}
 			description="The agent needs an answer before it continues."
-			questions={approvalQuestions}
-			status={isComplete ? "answered" : "pending"}
-			submitLabel={part.input?.submitLabel ?? "Submit response"}
 			onAnswersChange={(answers) => {
 				// Keep localAnswers in sync so completion state and the summary stay
 				// truthful as the user moves through the questions.
@@ -202,7 +201,10 @@ export function QuestionTool({ part }: QuestionToolProps) {
 					answer ? fromApprovalAnswer(lastQuestion, answer) : { kind: "skip" }
 				);
 			}}
+			questions={approvalQuestions}
 			result={isComplete ? summaryText : undefined}
+			status={isComplete ? "answered" : "pending"}
+			submitLabel={part.input?.submitLabel ?? "Submit response"}
 		/>
 	);
 }

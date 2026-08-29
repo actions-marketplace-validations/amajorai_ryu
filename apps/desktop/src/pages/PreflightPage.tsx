@@ -100,7 +100,7 @@ function activeTarget(): ApiTarget {
 	try {
 		return toTarget(useNodeStore.getState().getActiveNode());
 	} catch {
-		return { url: "http://127.0.0.1:7980", token: null };
+		return { url: "http://127.0.0.1:7980", token: null, userJwt: null };
 	}
 }
 

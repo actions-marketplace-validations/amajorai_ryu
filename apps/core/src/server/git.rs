@@ -1424,8 +1424,10 @@ pub async fn list_directory(Query(q): Query<ListDirQuery>) -> axum::response::Re
 
     // Canonicalize so `..` segments and symlinks resolve before the boundary
     // check. Existing symlinks that escape the home tree are therefore rejected.
-    let target = std::fs::canonicalize(&target).unwrap_or(target);
-    let home = std::fs::canonicalize(&home).unwrap_or(home);
+    // `canonical_ish` also handles a not-yet-existing leaf without mixing raw
+    // and Windows-verbatim path prefixes in the boundary comparison.
+    let target = crate::paths::canonical_ish(&target);
+    let home = crate::paths::canonical_ish(&home);
     if target != home && target.strip_prefix(&home).is_err() {
         return (
             StatusCode::FORBIDDEN,
@@ -1645,15 +1647,15 @@ mod tests {
 
     #[cfg(windows)]
     #[tokio::test]
-    async fn list_directory_drive_root_parents_to_this_pc() {
-        // Listing a drive root must point "up" at the virtual This PC root so the
-        // picker can cross to another drive; the real filesystem parent is None.
+    async fn list_directory_drive_root_stays_outside_home_tree() {
+        // Drive roots are outside the home-tree boundary. Keep the traversal guard
+        // closed rather than allowing a remote picker to enumerate another drive.
         let system_drive = std::env::var("SystemDrive").unwrap_or_else(|_| "C:".to_string());
         let root = format!("{system_drive}\\");
         let resp = list_directory(Query(ListDirQuery { path: Some(root) })).await;
         let (status, json) = body_json(resp).await;
-        assert_eq!(status, StatusCode::OK);
-        assert_eq!(json["parent"].as_str().unwrap(), THIS_PC);
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(json["error"], "workspace path must stay inside the node home directory");
     }
 
     // ── Handler validation paths ──────────────────────────────────────────────

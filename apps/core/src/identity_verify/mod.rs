@@ -6,9 +6,11 @@
 //!     device-authorization grant that fetches a control-plane bearer.
 //!   - `crate::identity` — the Composio credential vault (a different concern).
 //!
-//! A remote client presents BOTH a node-admittance credential (`RYU_TOKEN`,
+//! A normal remote client presents BOTH a node-admittance credential (`RYU_TOKEN`,
 //! enforced in `server::require_auth`) AND a Better Auth JWT that carries the
-//! verified user identity. This module verifies that JWT entirely OFFLINE:
+//! verified user identity. An organization-bound managed client may use that
+//! verified JWT as its primary bearer because the control plane does not expose a
+//! reusable node secret. This module verifies the JWT entirely OFFLINE:
 //! Better Auth signs tokens with EdDSA/Ed25519 and publishes its public keys at
 //! `{BASE_URL}/api/auth/jwks`; Core caches that key set and validates the
 //! signature, expiry, issuer, and audience locally — no live round-trip per

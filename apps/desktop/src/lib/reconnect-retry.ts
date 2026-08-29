@@ -147,7 +147,7 @@ export function saveRetryCandidates(
 
 export async function fetchRuns(target: ApiTarget): Promise<RunSummary[]> {
 	const response = await fetch(apiUrl(target, "/api/runs"), {
-		headers: makeHeaders(target.token),
+		headers: makeHeaders(target.token, target.userJwt),
 	});
 	if (!response.ok) {
 		throw new Error(`run snapshot failed: ${response.status}`);
@@ -168,7 +168,7 @@ export async function retryConversation(
 		apiUrl(target, `/api/chat/retry/${encodeURIComponent(conversationId)}`),
 		{
 			body: JSON.stringify({ reason: "network_reconnect" }),
-			headers: makeHeaders(target.token),
+			headers: makeHeaders(target.token, target.userJwt),
 			method: "POST",
 		}
 	);

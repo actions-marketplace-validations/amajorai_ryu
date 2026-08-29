@@ -41,7 +41,8 @@ const checks = [
 		detail:
 			"Both project surfaces work without a folder and accept an encoded folder when one is selected.",
 		label: "Project routes",
-		pass: menu[2]?.route === "/project/files" && menu[3]?.route === "/project/diff",
+		pass:
+			menu[2]?.route === "/project/files" && menu[3]?.route === "/project/diff",
 	},
 	{
 		detail:

@@ -103,7 +103,7 @@ const desktopInstall = {
 /** Active node identity, normalized to the shared seam's `{url, token}` shape. */
 function useCatalogNode(): CatalogNode {
 	const node = useActiveNode();
-	return { url: node.url, token: node.token ?? null };
+	return { url: node.url, token: node.token, userJwt: node.userJwt ?? null };
 }
 
 /** Installed models by stem for the active node (fine-tuned-variants list). */
@@ -112,7 +112,11 @@ function useInstalledModels(): InstalledModelEntry[] {
 	const query = useQuery({
 		queryKey: ["models", "installed", node.url],
 		queryFn: () =>
-			listInstalledModels({ url: node.url, token: node.token ?? null }),
+			listInstalledModels({
+				url: node.url,
+				token: node.token,
+				userJwt: node.userJwt ?? null,
+			}),
 	});
 	return query.data ?? [];
 }
@@ -200,7 +204,11 @@ export function DesktopCatalogHost({ children }: { children: ReactNode }) {
 			// `estimateLlmfit` is bound below.
 			fetchVersionDetail: (repo: string, tag: string) =>
 				fetchPluginVersionDetail(
-					{ url: activeNode.url, token: activeNode.token },
+					{
+						url: activeNode.url,
+						token: activeNode.token,
+						userJwt: activeNode.userJwt,
+					},
 					repo,
 					tag
 				),
@@ -210,14 +218,25 @@ export function DesktopCatalogHost({ children }: { children: ReactNode }) {
 			// browse-only one), so switching nodes must switch the answer.
 			fetchListingChannels: (id: string, repo?: string | null) =>
 				fetchPluginChannels(
-					{ url: activeNode.url, token: activeNode.token },
+					{
+						url: activeNode.url,
+						token: activeNode.token,
+						userJwt: activeNode.userJwt,
+					},
 					id,
 					repo
 				),
 			navigate,
 			openExternal,
 			runCatalogScan: (input) =>
-				runCatalogScan({ url: activeNode.url, token: activeNode.token }, input),
+				runCatalogScan(
+					{
+						url: activeNode.url,
+						token: activeNode.token,
+						userJwt: activeNode.userJwt,
+					},
+					input
+				),
 			useAppsCatalog,
 			useMarketplaceAccess,
 			useSkillsCatalog,
@@ -235,7 +254,15 @@ export function DesktopCatalogHost({ children }: { children: ReactNode }) {
 			usePluginSettingsOpener,
 			installSidecar,
 			estimateLlmfit: (node, repo, options) =>
-				estimateLlmfit({ url: node.url, token: node.token }, repo, options),
+				estimateLlmfit(
+					{
+						url: node.url,
+						token: node.token,
+						userJwt: node.userJwt,
+					},
+					repo,
+					options
+				),
 			useInstalledModels,
 			ActiveModelControl,
 			fitStyle,
@@ -243,7 +270,14 @@ export function DesktopCatalogHost({ children }: { children: ReactNode }) {
 		}),
 		// activeNode is a dep because fetchVersionDetail closes over it — without
 		// it, switching nodes would keep reading versions from the previous one.
-		[navigate, skillEditorOwner, activeNode.url, activeNode.token, hostVersions]
+		[
+			navigate,
+			skillEditorOwner,
+			activeNode.url,
+			activeNode.token,
+			activeNode.userJwt,
+			hostVersions,
+		]
 	);
 
 	return (

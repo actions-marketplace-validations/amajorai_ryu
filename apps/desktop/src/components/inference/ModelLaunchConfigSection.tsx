@@ -49,6 +49,7 @@ export function ModelLaunchConfigSection({
 	const target: ApiTarget = {
 		url: activeNode.url,
 		token: activeNode.token ?? null,
+		userJwt: activeNode.userJwt ?? null,
 	};
 	const { url } = target;
 	const qc = useQueryClient();

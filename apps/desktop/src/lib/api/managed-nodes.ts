@@ -26,6 +26,10 @@ export interface ManagedNode {
 	name: string;
 	orgId: string;
 	orgName: string | null;
+	/** Personal owner, when this is a personal node. */
+	ownerUserId?: string | null;
+	/** Scope returned by the control plane's visibility filter. */
+	scope?: "org" | "team" | "personal";
 	/**
 	 * The managed-server row this node runs on, or null when it has none.
 	 *
@@ -38,27 +42,28 @@ export interface ManagedNode {
 	 * absence rather than guess.
 	 */
 	serverId?: string | null;
-	/**
-	 * Bearer the desktop presents to this node's remote Core. It is a short-lived
-	 * per-request Better-Auth user JWT the control plane mints and returns ONCE at
-	 * the list level (a single `token` on the response envelope, not per node) —
-	 * every node authorizes it offline via the control-plane JWKS + the user's org
-	 * claim. Null on an older server that does not return one, so a token-protected
-	 * node degrades to unauthenticated (and simply won't be auto-selected).
-	 */
-	token: string | null;
+	/** Team scope, when this is a team node. */
+	teamId?: string | null;
 	/** Publicly-reachable Core base URL the node advertised on registration. */
 	url: string;
+	/**
+	 * Short-lived Better Auth user JWT for the selected managed node. The
+	 * control plane returns one at the response-envelope level; this client
+	 * copies it onto each node so request construction stays local. It is
+	 * distinct from a self-hosted node bearer and is never persisted as one.
+	 */
+	userJwt: string | null;
 }
 
 const NODES_URL = `${BACKEND_URL.replace(/\/$/, "")}/api/control-plane/nodes`;
 
 /**
- * Fetch the active org's reachable managed nodes. Returns an empty array on any
- * non-2xx (not signed in, no org, route absent) so the caller never has to
- * handle errors: managed-node hydration is purely additive to the local picker.
+ * Fetch the active org's reachable managed nodes. `null` means the scope could
+ * not be refreshed; an empty array is a successful response with no reachable
+ * nodes. Keeping those states distinct lets the node store remove nodes that
+ * left the user's scope without wiping them during an offline refresh.
  */
-export async function fetchManagedNodes(): Promise<ManagedNode[]> {
+export async function fetchManagedNodes(): Promise<ManagedNode[] | null> {
 	let token: string | null = null;
 	try {
 		token = localStorage.getItem(TOKEN_KEY);
@@ -66,7 +71,7 @@ export async function fetchManagedNodes(): Promise<ManagedNode[]> {
 		// No storage available — treat as signed out.
 	}
 	if (!token) {
-		return [];
+		return null;
 	}
 
 	try {
@@ -74,19 +79,34 @@ export async function fetchManagedNodes(): Promise<ManagedNode[]> {
 			headers: { Authorization: `Bearer ${token}` },
 		});
 		if (!resp.ok) {
-			return [];
+			return null;
 		}
 		const json = (await resp.json()) as {
-			nodes?: ManagedNode[];
+			nodes?: Array<ManagedNode & { token?: string | null }>;
 			token?: string | null;
+			userJwt?: string | null;
 		};
 		const list = Array.isArray(json.nodes) ? json.nodes : [];
-		// The auth token is delivered once at the envelope level; attach it to every
-		// node so hydrateCloudNodes forwards a non-null bearer to probe/MCP/realtime.
-		const shared = typeof json.token === "string" ? json.token : null;
-		return list.map((n) => ({ ...n, token: n.token ?? shared }));
+		// New responses name this credential explicitly. Read the old `token`
+		// spelling for one release so an older control plane still hydrates, but
+		// never expose that ambiguous name in the desktop model.
+		const shared =
+			typeof json.userJwt === "string"
+				? json.userJwt
+				: typeof json.token === "string"
+					? json.token
+					: null;
+		return list.map(({ token: legacyToken, ...node }) => ({
+			...node,
+			userJwt:
+				typeof node.userJwt === "string"
+					? node.userJwt
+					: typeof legacyToken === "string"
+						? legacyToken
+						: shared,
+		}));
 	} catch {
 		// Server unreachable / offline — degrade to no managed nodes.
-		return [];
+		return null;
 	}
 }

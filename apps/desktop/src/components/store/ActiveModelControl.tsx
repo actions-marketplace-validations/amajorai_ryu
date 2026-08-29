@@ -14,7 +14,11 @@ import { getActiveModel, setActiveModel } from "@/src/lib/api/models.ts";
  */
 export function ActiveModelControl({ repoId }: { repoId: string }) {
 	const node = useActiveNode();
-	const target: ApiTarget = { url: node.url, token: node.token ?? null };
+	const target: ApiTarget = {
+		url: node.url,
+		token: node.token,
+		userJwt: node.userJwt ?? null,
+	};
 	const qc = useQueryClient();
 
 	const activeQuery = useQuery({

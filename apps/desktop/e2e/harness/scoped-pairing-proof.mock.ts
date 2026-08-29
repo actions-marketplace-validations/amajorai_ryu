@@ -171,9 +171,13 @@ export async function request<T>(
 			user_code: REQUEST_CODE,
 		};
 		if (JSON.stringify(approval) !== JSON.stringify(expected)) {
-			throw new Error(`unexpected narrowed approval: ${JSON.stringify(approval)}`);
+			throw new Error(
+				`unexpected narrowed approval: ${JSON.stringify(approval)}`
+			);
 		}
-		const approved = pending.find((item) => item.user_code === approval.user_code);
+		const approved = pending.find(
+			(item) => item.user_code === approval.user_code
+		);
 		if (!approved) {
 			throw new Error("pending request was already consumed");
 		}
@@ -196,7 +200,9 @@ export async function request<T>(
 		return { approved: true } as T;
 	}
 	if (method === "DELETE" && path.startsWith("/api/pair/clients/")) {
-		const clientId = decodeURIComponent(path.slice("/api/pair/clients/".length));
+		const clientId = decodeURIComponent(
+			path.slice("/api/pair/clients/".length)
+		);
 		const client = clients.find((item) => item.id === clientId);
 		if (!client) {
 			throw new Error(`unknown client: ${clientId}`);

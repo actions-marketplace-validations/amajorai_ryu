@@ -1,4 +1,4 @@
-﻿import {
+import {
 	IconBook2 as BookOpen,
 	IconFolderSearch as FolderSearch,
 	IconGitBranch as GitBranch,
@@ -496,7 +496,7 @@ export function parseMcpToolType(partType: string): McpToolInfo | null {
 		return builtin;
 	}
 	const isLegacy = partType.startsWith(LEGACY_MCP_TOOL_PREFIX);
-	if (!isLegacy && !partType.startsWith(MCP_TOOL_PREFIX)) {
+	if (!(isLegacy || partType.startsWith(MCP_TOOL_PREFIX))) {
 		return null;
 	}
 	const prefix = isLegacy ? LEGACY_MCP_TOOL_PREFIX : MCP_TOOL_PREFIX;

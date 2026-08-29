@@ -59,6 +59,7 @@ export function communityAgentInstallCacheKey(
 		accountId,
 		id,
 		token: target.token,
+		userJwt: target.userJwt ?? null,
 		url: target.url.replace(/\/$/, ""),
 	});
 }
@@ -81,8 +82,9 @@ export function useCommunityAgents(): UseCommunityAgentsResult {
 	const target: ApiTarget = {
 		url: activeNode.url,
 		token: activeNode.token ?? null,
+		userJwt: activeNode.userJwt ?? null,
 	};
-	const { url, token } = target;
+	const { url, token, userJwt } = target;
 	const accountId = getActiveUserId();
 
 	const [agents, setAgents] = useState<MarketplaceCard[]>([]);
@@ -127,7 +129,7 @@ export function useCommunityAgents(): UseCommunityAgentsResult {
 				setPendingId(id);
 				try {
 					const result = await installPublishedAgent(
-						{ url, token },
+						{ url, token, userJwt },
 						id,
 						communityAgentInstallIdempotencyKey(target, accountId, id)
 					);

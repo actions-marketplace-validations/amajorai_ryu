@@ -1,4 +1,4 @@
-﻿export const spiralFastData = {
+export const spiralFastData = {
 	nm: "spiral2",
 	h: 16,
 	w: 16,

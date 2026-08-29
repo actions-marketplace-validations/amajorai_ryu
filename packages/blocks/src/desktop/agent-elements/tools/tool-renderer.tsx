@@ -1,4 +1,4 @@
-﻿import type React from "react";
+import type React from "react";
 import { memo } from "react";
 import { AgentUI } from "../agent-ui/agent-ui.tsx";
 import { useChatDisplayPrefs } from "../chat-display-prefs.tsx";

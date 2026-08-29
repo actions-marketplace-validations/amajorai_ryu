@@ -106,7 +106,7 @@ export function TelegramManagedBotPanel({
 	// The store hands back a fresh object each render; the poll effect keys off
 	// this, so narrow it to the two fields that actually matter.
 	const target = useMemo(
-		() => toTarget({ url: node.url, token: node.token }),
+		() => toTarget({ url: node.url, token: node.token, userJwt: node.userJwt }),
 		[node.url, node.token]
 	);
 

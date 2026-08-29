@@ -32,7 +32,7 @@ describe("preference change notifications", () => {
 
 			expect(
 				await setPreference(
-					{ token: null, url: "http://ryu.test" },
+					{ token: null, url: "http://ryu.test", userJwt: null },
 					"ambient-elevator-enabled",
 					"false"
 				)
@@ -52,7 +52,7 @@ describe("preference change notifications", () => {
 			);
 			expect(
 				await getPreference(
-					{ token: null, url: "http://ryu.test" },
+					{ token: null, url: "http://ryu.test", userJwt: null },
 					"missing-key"
 				)
 			).toBeNull();
@@ -68,11 +68,14 @@ describe("preference change notifications", () => {
 				() => new Response('{"error":"forbidden"}', { status: 403 })
 			);
 			await expect(
-				getPreference({ token: null, url: "http://ryu.test" }, "protected-key")
+				getPreference(
+					{ token: null, url: "http://ryu.test", userJwt: null },
+					"protected-key"
+				)
 			).rejects.toMatchObject({ status: 403 });
 			await expect(
 				setPreference(
-					{ token: null, url: "http://ryu.test" },
+					{ token: null, url: "http://ryu.test", userJwt: null },
 					"protected-key",
 					"value"
 				)

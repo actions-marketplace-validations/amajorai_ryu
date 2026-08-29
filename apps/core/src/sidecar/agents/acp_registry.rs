@@ -830,12 +830,14 @@ mod tests {
         // installed from `detect_binary` being on PATH, so it is selectable, while
         // nothing was ever written to `~/.ryu/agents/<id>`. Spawning the archive
         // path anyway is what left `opencode` with no session and no pickers.
+        let missing_dir = tempfile::tempdir().expect("missing archive tempdir");
+        let missing_opencode = missing_dir.path().join("agents").join("opencode");
         let dist = DirectArchiveDist {
             registry_id: "opencode".to_owned(),
             archive_url: "https://dl.example.com/opencode.zip".to_owned(),
             cmd: "./opencode".to_owned(),
             args: vec!["acp".to_owned()],
-            install_dir: std::path::PathBuf::from("/nonexistent/ryu/agents/opencode"),
+            install_dir: missing_opencode.clone(),
         };
         let cmd = spawn_cmd_for_direct_archive(&dist);
         // The registry's args ride along either way — only the program changes.
@@ -845,10 +847,16 @@ mod tests {
         // same PATH probe that decides whether the agent is reported installed.
         // Those two disagreeing is the entire bug this covers.
         if crate::sidecar::adapters::acp::binary_in_path("opencode") {
-            assert_eq!(cmd, "opencode acp");
+            let expected = if cfg!(windows) {
+                "cmd /c opencode acp"
+            } else {
+                "opencode acp"
+            };
+            assert_eq!(cmd, expected);
         } else {
+            let missing_program = missing_opencode.to_string_lossy();
             assert!(
-                cmd.contains("/nonexistent/ryu/agents/opencode"),
+                cmd.contains(missing_program.as_ref()),
                 "with no CLI on PATH the archive path is still the target: {cmd}"
             );
         }
@@ -856,15 +864,17 @@ mod tests {
         // An agent with no `underlying_cli_probe` row has no user-installed CLI to
         // fall back TO, so it keeps naming the archive path — the install flow is
         // the only way to make it runnable, and the error should say so.
+        let missing_x = missing_dir.path().join("agents").join("x");
         let unknown = DirectArchiveDist {
             registry_id: "no-such-registry-agent".to_owned(),
             archive_url: "https://dl.example.com/x.zip".to_owned(),
             cmd: "./x".to_owned(),
             args: vec!["acp".to_owned()],
-            install_dir: std::path::PathBuf::from("/nonexistent/ryu/agents/x"),
+            install_dir: missing_x.clone(),
         };
+        let missing_program = missing_x.to_string_lossy();
         assert!(
-            spawn_cmd_for_direct_archive(&unknown).contains("/nonexistent/ryu/agents/x"),
+            spawn_cmd_for_direct_archive(&unknown).contains(missing_program.as_ref()),
             "no probe row ⇒ no fallback"
         );
 
@@ -880,8 +890,9 @@ mod tests {
             args: vec!["acp".to_owned()],
             install_dir: tmp.path().to_path_buf(),
         };
-        assert!(
-            spawn_cmd_for_direct_archive(&installed).starts_with(&bin.display().to_string()),
+        assert_eq!(
+            spawn_cmd_for_direct_archive(&installed),
+            shell_wrap_npx(&format!("{} acp", bin.display())),
             "a present archive binary must win over PATH"
         );
     }

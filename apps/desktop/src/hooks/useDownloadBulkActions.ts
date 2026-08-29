@@ -42,9 +42,7 @@ export function isFinishedTask(task: DownloadTask): boolean {
  *  cancel-then-clear rather than a plain clear. */
 export function isUnfinishedTask(task: DownloadTask): boolean {
 	return (
-		isInFlight(task.state) ||
-		task.state === "paused" ||
-		task.state === "failed"
+		isInFlight(task.state) || task.state === "paused" || task.state === "failed"
 	);
 }
 

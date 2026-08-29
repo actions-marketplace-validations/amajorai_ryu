@@ -14,7 +14,7 @@ export function chatStreamUrl(target: ApiTarget): string {
 
 /** Auth headers (bearer token when present) for the chat transport. */
 export function chatHeaders(target: ApiTarget): Record<string, string> {
-	const headers = makeHeaders(target.token);
+	const headers = makeHeaders(target.token, target.userJwt);
 	// The AI SDK transport sets its own content-type per request; only the
 	// Authorization header needs to be carried here.
 	const auth: Record<string, string> = {};

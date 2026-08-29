@@ -168,7 +168,7 @@ export function useAvailableUpdates(): UseAvailableUpdatesResult {
 			},
 			{
 				queryKey: SIDECAR_CATALOG_KEY(url),
-				queryFn: () => fetchCatalog(url, token),
+				queryFn: () => fetchCatalog(url, token, undefined, target.userJwt),
 				staleTime: UPDATES_STALE_MS,
 			},
 			{
@@ -413,7 +413,14 @@ export function useAvailableUpdates(): UseAvailableUpdatesResult {
 				case "tool":
 				case "voice":
 				case "media": {
-					await installSidecar(url, token, update.id, true);
+					await installSidecar(
+						url,
+						token,
+						update.id,
+						true,
+						undefined,
+						target.userJwt
+					);
 					// Core installs in the background and streams bytes through the
 					// download center, so this resolves at the START of the work.
 					return {

@@ -89,9 +89,17 @@ function statusMeta(status: string | undefined): {
 		case "failed":
 			return { icon: AlertCircleIcon, label: "Failed", variant: "destructive" };
 		case "awaiting_input":
-			return { icon: AlertCircleIcon, label: "Needs input", variant: "outline" };
+			return {
+				icon: AlertCircleIcon,
+				label: "Needs input",
+				variant: "outline",
+			};
 		case "interrupted":
-			return { icon: AlertCircleIcon, label: "Interrupted", variant: "outline" };
+			return {
+				icon: AlertCircleIcon,
+				label: "Interrupted",
+				variant: "outline",
+			};
 		default:
 			return null;
 	}
@@ -189,7 +197,10 @@ function HistoryRow({
 				</span>
 			</div>
 			{status ? (
-				<Badge title={conversationRunStatusMeta(entry.runStatus)?.description} variant={status.variant}>
+				<Badge
+					title={conversationRunStatusMeta(entry.runStatus)?.description}
+					variant={status.variant}
+				>
 					<HugeiconsIcon
 						className={cn("size-3", status.spin && "animate-spin")}
 						icon={status.icon}

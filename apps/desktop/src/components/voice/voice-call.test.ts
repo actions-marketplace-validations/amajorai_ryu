@@ -1,8 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import {
-	formatVoiceCallDuration,
-	getVoiceCallInitials,
-} from "./voice-call.ts";
+import { formatVoiceCallDuration, getVoiceCallInitials } from "./voice-call.ts";
 
 describe("voice call display helpers", () => {
 	test("formats elapsed time as a stable call timer", () => {

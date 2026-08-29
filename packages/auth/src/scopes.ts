@@ -14,6 +14,9 @@ import { ADMIN_ROLE, WAITLIST_ROLE } from "./lib/waitlist.ts";
 
 export type RyuStatements = Record<string, string[]>;
 
+export const PERSONAL_TOKEN_TYPES = ["classic", "fine-grained"] as const;
+export type PersonalTokenType = (typeof PERSONAL_TOKEN_TYPES)[number];
+
 // resource -> the actions it supports, most-permissive last. `manage` implies the
 // destructive create/update/delete surface; `read` is always the floor.
 export const RYU_CAPABILITIES = {
@@ -28,8 +31,13 @@ export const RYU_CAPABILITIES = {
 
 export type RyuResource = keyof typeof RYU_CAPABILITIES;
 
-// Standard OIDC scopes an MCP client may also request alongside Ryu scopes.
-export const OIDC_STANDARD_SCOPES = ["openid", "profile", "email"] as const;
+// Standard OIDC scopes an OAuth client may request alongside Ryu scopes.
+export const OIDC_STANDARD_SCOPES = [
+	"openid",
+	"profile",
+	"email",
+	"offline_access",
+] as const;
 
 // Flat "resource:action" scope strings for the OAuth/OIDC provider (MCP clients
 // request these). Derived from RYU_CAPABILITIES so the two vocabularies can never
@@ -163,6 +171,32 @@ export function intersectStatements(
 		}
 	}
 	return out;
+}
+
+function cloneStatements(statements: RyuStatements): RyuStatements {
+	const out: RyuStatements = {};
+	for (const [resource, actions] of Object.entries(statements)) {
+		out[resource] = [...actions];
+	}
+	return out;
+}
+
+/**
+ * Resolve the permissions carried by a personal token.
+ *
+ * Classic tokens receive the complete capability set available to the caller.
+ * Fine-grained tokens can only narrow that set through explicit scopes. Neither
+ * mode can exceed the caller's server-side role ceiling.
+ */
+export function permissionsForPersonalToken(input: {
+	ceiling: RyuStatements;
+	scopes: string[];
+	tokenType: PersonalTokenType;
+}): RyuStatements {
+	if (input.tokenType === "classic") {
+		return cloneStatements(input.ceiling);
+	}
+	return intersectStatements(scopesToStatements(input.scopes), input.ceiling);
 }
 
 function allCapabilities(): RyuStatements {

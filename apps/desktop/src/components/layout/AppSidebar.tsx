@@ -4454,7 +4454,11 @@ function SkillsSection({
 }: SectionProps) {
 	const { openTab } = useTabsContext();
 	const node = useActiveNode();
-	const target: ApiTarget = { url: node.url, token: node.token ?? null };
+	const target: ApiTarget = {
+		url: node.url,
+		token: node.token ?? null,
+		userJwt: node.userJwt ?? null,
+	};
 	const skillsQuery = useQuery({
 		queryKey: ["skills", "installed", target.url],
 		queryFn: () => listSkills(target),
@@ -8317,7 +8321,11 @@ export function SidebarPanelContent({
 		}
 	}, [canMakePrivate, pendingChatVisibility, setConversationVisibility]);
 	const importTarget = useMemo(
-		() => ({ url: activeNode.url, token: activeNode.token ?? null }),
+		() => ({
+			url: activeNode.url,
+			token: activeNode.token,
+			userJwt: activeNode.userJwt ?? null,
+		}),
 		[activeNode.url, activeNode.token]
 	);
 	// Background auto-import of agents' own on-disk threads, gated by the General

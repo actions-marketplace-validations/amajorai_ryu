@@ -228,6 +228,18 @@ export interface ChatSlots {
 	WidgetRenderer?: WidgetRendererComponent;
 }
 
+/**
+ * Replaces the normal composer with a voice-mode surface while a live call is
+ * active. The surface receives the exact composer node AgentChat owns, so draft
+ * state and send behavior stay shared with the regular chat path.
+ */
+export type ChatVoiceMode =
+	| { active: false }
+	| {
+			active: true;
+			render: (composer: React.ReactNode) => React.ReactNode;
+	  };
+
 export interface ModelOption {
 	id: string;
 	name: string;
@@ -550,6 +562,8 @@ export interface AgentChatProps {
 	/** Version-pager data keyed by message id: how many versions exist at this
 	 * branch point, which is active, and the ordered sibling ids to step through. */
 	versions?: Record<string, { index: number; count: number; ids: string[] }>;
+	/** Active voice-mode surface that temporarily owns the shared composer. */
+	voiceMode?: ChatVoiceMode;
 }
 
 export type AnAgentChatProps = AgentChatProps;

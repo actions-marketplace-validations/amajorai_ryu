@@ -1,49 +1,79 @@
 // User authentication for the Ryu MCP server via the OAuth 2.0 Device
-// Authorization Grant (RFC 8628) - the SAME flow the desktop, mobile, and CLI
-// clients use. The MCP server is a local, non-browser process, so it drives the
-// grant through Ryu Core's proxy (POST /api/auth/login -> open browser -> poll
-// GET /api/auth/status), exactly like apps/cli. Core performs the Better Auth
-// device grant server-side and persists the resulting bearer to the shared
-// credential store ~/.ryu/auth.json - so `ryu-mcp login`, `ryu login`, and a
-// desktop sign-in all satisfy each other (single sign-on).
+// Authorization Grant (RFC 8628). This is the same Better Auth flow the
+// desktop, mobile, and CLI clients use, but it runs directly against the
+// control plane so `ryu-mcp login` does not require a local Core node.
 //
-// The stored credential is a standard OAuth 2.0 Bearer access token (a Better
-// Auth control-plane SESSION token) - which is exactly the bearer format MCP's
-// own auth model expects. It identifies the USER to the control plane (whoami,
-// sessions, billing). It is NOT a Core node-admittance bearer: Core's /api/*
-// routes are gated by RYU_CORE_TOKEN (the node secret), which the server keeps
-// sending as `Authorization: Bearer`. Device-auth here is additive.
+// The stored credential is a Better Auth control-plane session token. It
+// identifies the user to the control plane for `whoami` and account operations.
+// It is NOT a Core node-admittance bearer. Core requests use the separate
+// `RYU_CORE_TOKEN` or a local node token.
 
 import { spawn } from "node:child_process";
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
-const DEFAULT_CORE_URL = "http://127.0.0.1:7980";
 const DEFAULT_AUTH_BACKEND = "http://localhost:3000";
-const POLL_INTERVAL_MS = 1500;
-const LOGIN_TIMEOUT_MS = 300_000;
+const DEVICE_CLIENT_ID = "ryu-mcp";
+const OAUTH_SCOPES = "openid profile email";
+const DEFAULT_INTERVAL_SECONDS = 5;
+const DEFAULT_EXPIRES_SECONDS = 900;
+const MAX_INTERVAL_SECONDS = 60;
+const MAX_EXPIRES_SECONDS = 3600;
+const LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1", "[::1]"]);
 const SECRET_DIR_MODE = 0o700;
 const SECRET_FILE_MODE = 0o600;
 
-/** Persisted credential. Shape matches apps/cli (token + optional profile). */
+/** Persisted control-plane session for this MCP bridge only. */
 export interface AuthData {
+	backendUrl?: string;
 	email?: string | null;
 	name?: string | null;
 	token: string;
 }
 
-const ryuDir = (): string => join(homedir(), ".ryu");
-const authFilePath = (): string => join(ryuDir(), "auth.json");
+export interface DeviceAuthStart {
+	backendUrl: string;
+	deviceCode: string;
+	expiresIn: number;
+	interval: number;
+	userCode: string;
+	verificationUri: string;
+	verificationUriComplete: string;
+}
 
-const coreUrl = (): string =>
-	process.env.RYU_CORE_URL?.trim() || DEFAULT_CORE_URL;
+const ryuDir = (): string =>
+	process.env.RYU_HOME?.trim() || join(homedir(), ".ryu");
+const authFilePath = (): string =>
+	process.env.RYU_MCP_AUTH_FILE?.trim() || join(ryuDir(), "mcp-auth.json");
 
-/** Control-plane (Better Auth) base URL - where the session token is valid. */
+/** Control-plane (Better Auth) base URL. */
+/** Allow plaintext only for a local control plane; remote auth must use HTTPS. */
+export const safeAuthBackendUrl = (value: string): string => {
+	const parsed = new URL(value);
+	const isLoopback =
+		parsed.protocol === "http:" && LOOPBACK_HOSTS.has(parsed.hostname);
+	if (parsed.protocol !== "https:" && !isLoopback) {
+		throw new Error("RYU_AUTH_URL must use HTTPS unless it targets loopback");
+	}
+	return parsed.href.replace(/\/$/, "");
+};
+
 export const authBackendUrl = (): string =>
-	process.env.RYU_AUTH_URL?.trim() || DEFAULT_AUTH_BACKEND;
+	safeAuthBackendUrl(process.env.RYU_AUTH_URL?.trim() || DEFAULT_AUTH_BACKEND);
 
-/** Read the shared credential, or null when absent/malformed. */
+const boundedPositiveSeconds = (
+	value: unknown,
+	fallback: number,
+	maximum: number
+): number => {
+	if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) {
+		return fallback;
+	}
+	return Math.min(value, maximum);
+};
+
+/** Read this bridge's local credential, or null when absent/malformed. */
 export const loadToken = (): AuthData | null => {
 	try {
 		const data = JSON.parse(readFileSync(authFilePath(), "utf8")) as AuthData;
@@ -55,7 +85,10 @@ export const loadToken = (): AuthData | null => {
 
 /** Write the credential 0600 under ~/.ryu (0700). Mode is ignored on Windows. */
 const saveToken = (data: AuthData): void => {
-	mkdirSync(ryuDir(), { recursive: true, mode: SECRET_DIR_MODE });
+	mkdirSync(dirname(authFilePath()), {
+		recursive: true,
+		mode: SECRET_DIR_MODE,
+	});
 	writeFileSync(authFilePath(), JSON.stringify(data, null, 2), {
 		mode: SECRET_FILE_MODE,
 	});
@@ -72,118 +105,202 @@ export const clearToken = (): void => {
 const sleep = (ms: number): Promise<void> =>
 	new Promise((resolve) => setTimeout(resolve, ms));
 
-/** Open a URL in the default browser, cross-platform. Best-effort. */
-const openBrowser = (url: string): void => {
+class TerminalDeviceAuthError extends Error {}
+
+/** Return a canonical URL that is safe to hand to an OS browser launcher. */
+export const safeBrowserUrl = (value: string): string | null => {
 	try {
-		if (process.platform === "win32") {
-			spawn("cmd", ["/c", "start", "", url], {
-				stdio: "ignore",
-				detached: true,
-			}).unref();
-			return;
-		}
-		const cmd = process.platform === "darwin" ? "open" : "xdg-open";
-		spawn(cmd, [url], { stdio: "ignore", detached: true }).unref();
-	} catch {
-		// Non-fatal: the URL is also printed for manual navigation.
-	}
-};
-
-interface LoginStartResponse {
-	error?: string;
-	userCode?: string;
-	verificationUri?: string;
-	verificationUriComplete?: string;
-}
-
-interface StatusResponse {
-	authenticated?: boolean;
-	pending?: boolean;
-	token?: string | null;
-}
-
-/** Fetch the control-plane session for a token. Returns the `user` object. */
-export const fetchSession = async (
-	token: string
-): Promise<Record<string, unknown> | null> => {
-	try {
-		const resp = await fetch(`${authBackendUrl()}/api/auth/get-session`, {
-			headers: { Authorization: `Bearer ${token}` },
-		});
-		if (!resp.ok) {
+		const parsed = new URL(value);
+		if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
 			return null;
 		}
-		const json = (await resp.json()) as { user?: Record<string, unknown> };
-		return json.user ?? null;
+		return parsed.href;
 	} catch {
 		return null;
 	}
 };
 
-/** Poll Core's device-auth status until authenticated; returns the bearer. */
-const pollStatus = async (core: string): Promise<string> => {
-	const deadline = Date.now() + LOGIN_TIMEOUT_MS;
-	while (Date.now() < deadline) {
-		await sleep(POLL_INTERVAL_MS);
-		try {
-			const resp = await fetch(`${core}/api/auth/status`);
-			const data = (await resp.json()) as StatusResponse;
-			if (data.authenticated && data.token) {
-				return data.token;
-			}
-		} catch {
-			// Transient - keep polling until the deadline.
-		}
+/** Open a URL in the default browser, cross-platform. Best-effort. */
+const openBrowser = (url: string): void => {
+	const safeUrl = safeBrowserUrl(url);
+	if (!safeUrl) {
+		return;
 	}
-	throw new Error(`Login timed out after ${LOGIN_TIMEOUT_MS / 1000} seconds`);
+	try {
+		if (process.platform === "win32") {
+			spawn("rundll32.exe", ["url.dll,FileProtocolHandler", safeUrl], {
+				stdio: "ignore",
+				detached: true,
+			}).unref();
+			return;
+		}
+		const command = process.platform === "darwin" ? "open" : "xdg-open";
+		spawn(command, [safeUrl], { stdio: "ignore", detached: true }).unref();
+	} catch {
+		// Non-fatal: the URL is also printed for manual navigation.
+	}
 };
 
-/**
- * Run the device-authorization login through Core's proxy and persist the
- * bearer. Prints progress to stdout - this runs as the `ryu-mcp login`
- * subcommand (a normal terminal process), NOT the stdio MCP server.
- */
-export const runLogin = async (): Promise<void> => {
-	const core = coreUrl();
-
-	let start: LoginStartResponse;
-	try {
-		const resp = await fetch(`${core}/api/auth/login`, {
-			method: "POST",
-			headers: { "Content-Type": "application/json" },
-			body: JSON.stringify({}),
-		});
-		start = (await resp.json()) as LoginStartResponse;
-	} catch {
+/** Start the Better Auth device grant directly at the control plane. */
+export const requestDeviceCode = async (
+	backendUrl: string
+): Promise<DeviceAuthStart> => {
+	const base = safeAuthBackendUrl(backendUrl);
+	const resp = await fetch(`${base}/api/auth/device/code`, {
+		method: "POST",
+		headers: { "Content-Type": "application/json" },
+		body: JSON.stringify({
+			client_id: DEVICE_CLIENT_ID,
+			scope: OAUTH_SCOPES,
+		}),
+	});
+	const data = (await resp.json().catch(() => ({}))) as Record<string, unknown>;
+	if (!resp.ok) {
 		throw new Error(
-			`Could not reach Ryu Core at ${core}. Is it running? Set RYU_CORE_URL to point elsewhere.`
+			`Device code request failed (${resp.status}): ${String(data.error ?? "unknown error")}`
 		);
 	}
-	if (start.error) {
-		throw new Error(`Core could not start the login flow: ${start.error}`);
+	const deviceCode =
+		typeof data.device_code === "string" ? data.device_code : "";
+	const userCode = typeof data.user_code === "string" ? data.user_code : "";
+	if (!(deviceCode && userCode)) {
+		throw new Error("Better Auth returned an invalid device code response");
 	}
+	const configuredVerificationUri =
+		typeof data.verification_uri === "string"
+			? safeBrowserUrl(data.verification_uri)
+			: null;
+	const verificationUri = configuredVerificationUri ?? `${base}/device`;
+	const verificationUriComplete =
+		typeof data.verification_uri_complete === "string"
+			? safeBrowserUrl(data.verification_uri_complete)
+			: null;
+	return {
+		backendUrl: base,
+		deviceCode,
+		expiresIn: boundedPositiveSeconds(
+			data.expires_in,
+			DEFAULT_EXPIRES_SECONDS,
+			MAX_EXPIRES_SECONDS
+		),
+		interval: boundedPositiveSeconds(
+			data.interval,
+			DEFAULT_INTERVAL_SECONDS,
+			MAX_INTERVAL_SECONDS
+		),
+		userCode,
+		verificationUri,
+		verificationUriComplete: verificationUriComplete ?? verificationUri,
+	};
+};
 
-	const url = start.verificationUriComplete || start.verificationUri;
-	if (!url) {
-		throw new Error("Core did not return a verification URL");
+/** Poll Better Auth until the device grant is approved, denied, or expires. */
+export const pollDeviceToken = async (
+	backendUrl: string,
+	deviceCode: string,
+	intervalSeconds: number,
+	expiresInSeconds: number
+): Promise<string> => {
+	const base = safeAuthBackendUrl(backendUrl);
+	const expiresIn = boundedPositiveSeconds(
+		expiresInSeconds,
+		DEFAULT_EXPIRES_SECONDS,
+		MAX_EXPIRES_SECONDS
+	);
+	const deadline = Date.now() + expiresIn * 1000;
+	let interval =
+		boundedPositiveSeconds(
+			intervalSeconds,
+			DEFAULT_INTERVAL_SECONDS,
+			MAX_INTERVAL_SECONDS
+		) * 1000;
+	while (Date.now() < deadline) {
+		let shouldContinue = false;
+		try {
+			const resp = await fetch(`${base}/api/auth/device/token`, {
+				method: "POST",
+				headers: { "Content-Type": "application/json" },
+				body: JSON.stringify({
+					client_id: DEVICE_CLIENT_ID,
+					device_code: deviceCode,
+					grant_type: "urn:ietf:params:oauth:grant-type:device_code",
+				}),
+			});
+			const data = (await resp.json().catch(() => ({}))) as Record<
+				string,
+				unknown
+			>;
+			const token = data.access_token;
+			if (typeof token === "string" && token) {
+				return token;
+			}
+			switch (data.error) {
+				case "access_denied":
+					throw new TerminalDeviceAuthError(
+						"Access denied. You declined the sign-in request."
+					);
+				case "expired_token":
+					throw new TerminalDeviceAuthError(
+						"The sign-in request expired. Please try again."
+					);
+				case "slow_down":
+					interval = Math.min(interval + 5000, MAX_INTERVAL_SECONDS * 1000);
+					shouldContinue = true;
+					break;
+				case undefined:
+				case "authorization_pending":
+					shouldContinue = true;
+					break;
+				default:
+					throw new TerminalDeviceAuthError(
+						`Sign-in failed: ${String(data.error)}`
+					);
+			}
+		} catch (error) {
+			if (error instanceof TerminalDeviceAuthError) {
+				throw error;
+			}
+			// A transport failure is transient. Keep polling until the grant expires.
+			shouldContinue = true;
+		}
+		if (shouldContinue) {
+			await sleep(interval);
+		}
+	}
+	throw new Error("Login timed out. Please try again.");
+};
+
+/** Run the device authorization flow and persist this bridge's session. */
+export const runLogin = async (): Promise<void> => {
+	const backend = authBackendUrl();
+	let start: DeviceAuthStart;
+	try {
+		start = await requestDeviceCode(backend);
+	} catch (error) {
+		throw new Error(
+			`Could not reach the Ryu control plane at ${backend}: ${String(error)}`
+		);
 	}
 
 	process.stdout.write("Opening your browser to sign in to Ryu...\n");
-	process.stdout.write(`If it does not open, visit:\n  ${url}\n`);
-	if (start.userCode) {
-		process.stdout.write(`Device code: ${start.userCode}\n`);
-	}
-	openBrowser(url);
+	process.stdout.write(
+		`If it does not open, visit:\n  ${start.verificationUriComplete}\n`
+	);
+	process.stdout.write(`Device code: ${start.userCode}\n`);
+	openBrowser(start.verificationUriComplete);
 	process.stdout.write(
 		"Waiting for you to approve the sign-in (Ctrl+C to cancel)...\n"
 	);
 
-	const token = await pollStatus(core);
-
-	// Core persists {token}; upgrade it to {token,email,name} (a superset both
-	// Core and the CLI read) so whoami can answer without a round-trip.
-	const user = await fetchSession(token);
+	const token = await pollDeviceToken(
+		start.backendUrl,
+		start.deviceCode,
+		start.interval,
+		start.expiresIn
+	);
+	const user = await fetchSession(token, start.backendUrl);
 	saveToken({
+		backendUrl: start.backendUrl,
 		token,
 		email: (user?.email as string | undefined) ?? null,
 		name: (user?.name as string | undefined) ?? null,
@@ -198,25 +315,42 @@ export const runLogin = async (): Promise<void> => {
 	}
 };
 
-/** Clear the local credential and tell Core to drop its in-memory token. */
-export const runLogout = async (): Promise<void> => {
+/** Clear this bridge's local session without changing other Ryu clients. */
+export const runLogout = (): void => {
 	clearToken();
-	try {
-		await fetch(`${coreUrl()}/api/auth/logout`, { method: "POST" });
-	} catch {
-		// Core may be down - the local credential is already cleared.
-	}
 	process.stdout.write("Signed out.\n");
 };
 
-/** Print the signed-in user (or a prompt to log in). For the CLI subcommand. */
+/** Fetch the control-plane user for the stored session. */
+export const fetchSession = async (
+	token: string,
+	backendUrl?: string
+): Promise<Record<string, unknown> | null> => {
+	try {
+		const resp = await fetch(
+			`${safeAuthBackendUrl(backendUrl ?? authBackendUrl())}/api/auth/get-session`,
+			{
+				headers: { Authorization: `Bearer ${token}` },
+			}
+		);
+		if (!resp.ok) {
+			return null;
+		}
+		const json = (await resp.json()) as { user?: Record<string, unknown> };
+		return json.user ?? null;
+	} catch {
+		return null;
+	}
+};
+
+/** Print the signed-in user, or an actionable login hint. */
 export const runWhoami = async (): Promise<void> => {
 	const data = loadToken();
 	if (!data) {
 		process.stdout.write("Not signed in. Run `ryu-mcp login`.\n");
 		return;
 	}
-	const user = await fetchSession(data.token);
+	const user = await fetchSession(data.token, data.backendUrl);
 	if (user) {
 		process.stdout.write(
 			`Signed in as ${String(user.name ?? "?")} <${String(user.email ?? "?")}>\n`

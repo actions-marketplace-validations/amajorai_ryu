@@ -181,12 +181,12 @@ export interface StreamedAcpConfig {
 export interface StreamedAcpControl {
 	/** Agent target whose live composer should adopt this control. */
 	agentId: string | null;
+	/** Explicit effort value, or null when the control cleared it. */
+	effort?: string | null;
 	/** Emission identity of the `data-ryu-agent-control` part. */
 	key: string;
 	/** Explicit model value, or null when the control cleared it. */
 	model?: string | null;
-	/** Explicit effort value, or null when the control cleared it. */
-	effort?: string | null;
 }
 
 /**
@@ -895,12 +895,7 @@ export function useAcpSections({
 			}
 			return next;
 		});
-	}, [
-		acpOptionValues,
-		acpSessionConfig,
-		agentId,
-		streamedControl,
-	]);
+	}, [acpOptionValues, acpSessionConfig, agentId, streamedControl]);
 
 	const handleAcpModeChange = useCallback(
 		(modeId: string) => {
@@ -1062,8 +1057,8 @@ export function useAcpSections({
 		agents,
 		acpSessionConfig,
 		acpMode,
-			acpModel,
-			acpModelCleared,
+		acpModel,
+		acpModelCleared,
 		acpOptionValues,
 		engineModel,
 		filterModelItems,

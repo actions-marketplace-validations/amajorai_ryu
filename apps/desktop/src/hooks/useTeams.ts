@@ -32,6 +32,7 @@ export function useTeams(): UseTeamsResult {
 	const activeNode = useActiveNode();
 	const { url } = activeNode;
 	const token = activeNode.token ?? null;
+	const userJwt = activeNode.userJwt ?? null;
 
 	const [teams, setTeams] = useState<Team[]>([]);
 	const [loading, setLoading] = useState(true);
@@ -40,7 +41,7 @@ export function useTeams(): UseTeamsResult {
 	const reload = useCallback(async () => {
 		setLoading(true);
 		setError(null);
-		const node: ApiTarget = { url, token };
+		const node: ApiTarget = { url, token, userJwt };
 		try {
 			setTeams(await fetchTeams(node));
 		} catch (e) {
@@ -48,7 +49,7 @@ export function useTeams(): UseTeamsResult {
 		} finally {
 			setLoading(false);
 		}
-	}, [url, token]);
+	}, [url, token, userJwt]);
 
 	useEffect(() => {
 		reload().catch(() => undefined);
@@ -65,46 +66,50 @@ export function useTeams(): UseTeamsResult {
 
 	const create = useCallback(
 		async (input: CreateTeamInput) => {
-			const team = await apiCreateTeam({ url, token }, input);
+			const team = await apiCreateTeam({ url, token, userJwt }, input);
 			upsert(team);
 			return team;
 		},
-		[url, token, upsert]
+		[url, token, userJwt, upsert]
 	);
 
 	const update = useCallback(
 		async (id: string, input: UpdateTeamInput) => {
-			const team = await apiUpdateTeam({ url, token }, id, input);
+			const team = await apiUpdateTeam({ url, token, userJwt }, id, input);
 			upsert(team);
 			return team;
 		},
-		[url, token, upsert]
+		[url, token, userJwt, upsert]
 	);
 
 	const remove = useCallback(
 		async (id: string) => {
-			await apiDeleteTeam({ url, token }, id);
+			await apiDeleteTeam({ url, token, userJwt }, id);
 			setTeams((prev) => prev.filter((t) => t.id !== id));
 		},
-		[url, token]
+		[url, token, userJwt]
 	);
 
 	const addMember = useCallback(
 		async (teamId: string, agentId: string) => {
-			const team = await apiAddMember({ url, token }, teamId, agentId);
+			const team = await apiAddMember({ url, token, userJwt }, teamId, agentId);
 			upsert(team);
 			return team;
 		},
-		[url, token, upsert]
+		[url, token, userJwt, upsert]
 	);
 
 	const removeMember = useCallback(
 		async (teamId: string, agentId: string) => {
-			const team = await apiRemoveMember({ url, token }, teamId, agentId);
+			const team = await apiRemoveMember(
+				{ url, token, userJwt },
+				teamId,
+				agentId
+			);
 			upsert(team);
 			return team;
 		},
-		[url, token, upsert]
+		[url, token, userJwt, upsert]
 	);
 
 	return {

@@ -25,7 +25,11 @@ import { useActiveNode } from "./useActiveNode.ts";
 
 function useTarget(): ApiTarget {
 	const activeNode = useActiveNode();
-	return { url: activeNode.url, token: activeNode.token ?? null };
+	return {
+		url: activeNode.url,
+		token: activeNode.token,
+		userJwt: activeNode.userJwt ?? null,
+	};
 }
 
 /** Whether a Composio key is configured on the active node. */

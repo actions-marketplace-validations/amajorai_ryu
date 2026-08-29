@@ -54,6 +54,7 @@ import {
 	checkBodyDrift,
 	checkManifestContract,
 	findManifestSeat,
+	normalizeLineEndings,
 } from "./manifest.mjs";
 import { formatViolations, scanPurity } from "./purity.mjs";
 
@@ -338,9 +339,7 @@ export async function runOnce({ kind, code, testCase, adapterTools }) {
 		bindingNames = ["input", "caller", "host"];
 		bindingValues = [
 			input,
-			frozenCopy(
-				testCase.caller ?? { agent_id: null, conversation_id: null }
-			),
+			frozenCopy(testCase.caller ?? { agent_id: null, conversation_id: null }),
 			buildHost(testCase.host, calls),
 		];
 	}
@@ -443,7 +442,7 @@ export function defineToolTests(dir) {
 	const spec = JSON.parse(readFileSync(casesPath, "utf8"));
 	const kind = spec.kind ?? "inline_tool";
 	const codePath = join(dir, spec.code_file);
-	const code = readFileSync(codePath, "utf8");
+	const code = normalizeLineEndings(readFileSync(codePath, "utf8"));
 
 	test(`${spec.tool}: body is present and non-trivial`, () => {
 		assert.ok(existsSync(codePath), `${codePath} is missing`);

@@ -1,10 +1,10 @@
+import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
+import { once } from "node:events";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { once } from "node:events";
-import { spawn } from "node:child_process";
 import { test } from "node:test";
-import assert from "node:assert/strict";
 
 const BOOTSTRAP = new URL("./plugin_host_bootstrap.mjs", import.meta.url);
 

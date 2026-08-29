@@ -77,7 +77,7 @@ describe("updateHookOverride", () => {
 
 		try {
 			await updateHookOverride(
-				{ token: null, url: "http://127.0.0.1:7980" },
+				{ token: null, url: "http://127.0.0.1:7980", userJwt: null },
 				{
 					hookKey: "com.example.reviewer::review",
 					policy: { enabled: false, trusted: true },

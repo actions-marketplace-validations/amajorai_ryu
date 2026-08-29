@@ -1,7 +1,7 @@
+import { SpacesView } from "@ryu/blocks/desktop/spaces";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { useCallback, useState } from "react";
 import { createRoot } from "react-dom/client";
-import { SpacesView } from "@ryu/blocks/desktop/spaces";
 import { SpaceImportsPanel } from "../../src/components/spaces/SpaceImportsPanel.tsx";
 import "../../src/index.css";
 
@@ -59,8 +59,8 @@ const completedImports = [
 		byte_size: 0,
 		message: null,
 		created_at: now - 24 * 60 * 60_000,
-		updated_at: now - 24 * 60 * 60_000 + 5_000,
-		completed_at: now - 24 * 60 * 60_000 + 5_000,
+		updated_at: now - 24 * 60 * 60_000 + 5000,
+		completed_at: now - 24 * 60 * 60_000 + 5000,
 	},
 ];
 
@@ -108,7 +108,10 @@ globalThis.fetch = (async (input: URL | RequestInfo, init?: RequestInit) => {
 	}
 	if (url.includes("/api/composio/actions")) {
 		if (!url.includes("tags=readOnlyHint")) {
-			return response({ error: "Missing provider-owned read-only filter" }, 400);
+			return response(
+				{ error: "Missing provider-owned read-only filter" },
+				400
+			);
 		}
 		return response({
 			data: [

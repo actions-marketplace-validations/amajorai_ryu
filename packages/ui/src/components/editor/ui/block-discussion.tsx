@@ -157,9 +157,9 @@ const BlockCommentContent = ({ children, element }: PlateElementProps) => {
 				open={open}
 			>
 				<div className="w-full">{children}</div>
-					{anchorElement && (
-						<PopoverAnchor
-							className="w-full"
+				{anchorElement && (
+					<PopoverAnchor
+						className="w-full"
 						virtualRef={{ current: anchorElement }}
 					/>
 				)}

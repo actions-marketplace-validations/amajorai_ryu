@@ -77,7 +77,11 @@ export default function DownloadsPage() {
 	const historyQuery = useQuery({
 		queryKey: ["downloads", "history", node.url],
 		queryFn: () =>
-			listDownloadHistory({ url: node.url, token: node.token ?? null }),
+			listDownloadHistory({
+				url: node.url,
+				token: node.token,
+				userJwt: node.userJwt ?? null,
+			}),
 	});
 
 	const active = tasks.filter(

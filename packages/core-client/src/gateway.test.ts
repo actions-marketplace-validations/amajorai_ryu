@@ -34,7 +34,11 @@ afterEach(() => {
 	globalThis.fetch = realFetch;
 });
 
-const target: ApiTarget = { url: "http://127.0.0.1:7980", token: "t" };
+const target: ApiTarget = {
+	url: "http://127.0.0.1:7980",
+	token: "t",
+	userJwt: null,
+};
 
 function stub(body: unknown, status = 200): void {
 	globalThis.fetch = ((_url: string, _init: RequestInit) =>

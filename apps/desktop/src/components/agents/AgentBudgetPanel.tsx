@@ -39,7 +39,10 @@ export function AgentBudgetPanel({
 	disabled?: boolean;
 }) {
 	const node = useActiveNode();
-	const target = useMemo(() => toTarget(node), [node.token, node.url]);
+	const target = useMemo(
+		() => toTarget(node),
+		[node.token, node.url, node.userJwt]
+	);
 	const canConfigure = useGatewayConfigurable();
 	const [rule, setRule] = useState<BudgetRule | null>(null);
 	const [form, setForm] = useState<BudgetFormState>(() =>

@@ -16,6 +16,7 @@ const SAVED = { ...process.env };
 
 function reset() {
 	for (const key of [
+		"RYU_DIR",
 		"RYU_HOME",
 		"RYU_PROFILE",
 		"RYU_TOKEN",
@@ -48,7 +49,15 @@ describe("ryuHomeDir", () => {
 	it("honours an explicit RYU_HOME", () => {
 		process.env.RYU_HOME = "/tmp/custom-ryu";
 		expect(ryuHomeDir()).toBe("/tmp/custom-ryu");
-		expect(nodeAuthTokenPath()).toBe("/tmp/custom-ryu/node-auth.token");
+		expect(nodeAuthTokenPath()).toBe(
+			join("/tmp/custom-ryu", "node-auth.token")
+		);
+	});
+
+	it("prefers Core's relocated RYU_DIR", () => {
+		process.env.RYU_HOME = "/tmp/js-home";
+		process.env.RYU_DIR = "/tmp/core-data";
+		expect(ryuHomeDir()).toBe("/tmp/core-data");
 	});
 });
 

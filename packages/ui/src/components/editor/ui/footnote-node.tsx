@@ -297,28 +297,28 @@ export function FootnoteDefinitionElement(
 					>
 						<PopoverAnchor>
 							<button
-									aria-expanded={
-										hasMultipleReferences ? referencePickerOpen : undefined
+								aria-expanded={
+									hasMultipleReferences ? referencePickerOpen : undefined
+								}
+								aria-haspopup={hasMultipleReferences ? "dialog" : undefined}
+								aria-label={`Back to reference ${identifier}`}
+								className="min-w-3 cursor-pointer rounded-xs text-muted-foreground text-xs tabular-nums underline-offset-2 hover:text-foreground focus:ring-2 focus:ring-ring focus:ring-offset-1"
+								onClick={(event) => {
+									event.preventDefault();
+									event.stopPropagation();
+								}}
+								onMouseDown={(event) => {
+									event.preventDefault();
+									event.stopPropagation();
+
+									if (hasMultipleReferences) {
+										setReferencePickerOpen((open) => !open);
+
+										return;
 									}
-									aria-haspopup={hasMultipleReferences ? "dialog" : undefined}
-									aria-label={`Back to reference ${identifier}`}
-									className="min-w-3 cursor-pointer rounded-xs text-muted-foreground text-xs tabular-nums underline-offset-2 hover:text-foreground focus:ring-2 focus:ring-ring focus:ring-offset-1"
-									onClick={(event) => {
-										event.preventDefault();
-										event.stopPropagation();
-									}}
-									onMouseDown={(event) => {
-										event.preventDefault();
-										event.stopPropagation();
 
-										if (hasMultipleReferences) {
-											setReferencePickerOpen((open) => !open);
-
-											return;
-										}
-
-										footnoteTransforms.focusReference({ identifier });
-									}}
+									footnoteTransforms.focusReference({ identifier });
+								}}
 								type="button"
 							>
 								{identifier}

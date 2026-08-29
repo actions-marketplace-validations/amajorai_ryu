@@ -153,8 +153,9 @@ export function useModelCatalog(initialQuery = ""): UseModelCatalogResult {
 	const target: ApiTarget = {
 		url: activeNode.url,
 		token: activeNode.token ?? null,
+		userJwt: activeNode.userJwt ?? null,
 	};
-	const { url, token } = target;
+	const { url, token, userJwt } = target;
 	const qc = useQueryClient();
 
 	const [query, setQuery] = useState(initialQuery);
@@ -203,13 +204,17 @@ export function useModelCatalog(initialQuery = ""): UseModelCatalogResult {
 	const detailQuery = useQuery({
 		queryKey: ["models", "detail", url, selectedId, selectedFormat],
 		queryFn: () =>
-			fetchModelDetail({ url, token }, selectedId as string, selectedFormat),
+			fetchModelDetail(
+				{ url, token, userJwt },
+				selectedId as string,
+				selectedFormat
+			),
 		enabled: selectedId !== null,
 	});
 
 	const installMutation = useMutation({
 		mutationFn: (file: string) =>
-			installModelFile({ url, token }, selectedId as string, file),
+			installModelFile({ url, token, userJwt }, selectedId as string, file),
 		// Optimistically flip the file (and its card) to installed so the button
 		// updates instantly; roll back if the download fails.
 		onMutate: async (file: string) => {
@@ -244,7 +249,7 @@ export function useModelCatalog(initialQuery = ""): UseModelCatalogResult {
 
 	const uninstallMutation = useMutation({
 		mutationFn: (file: string) =>
-			uninstallModelFile({ url, token }, selectedId as string, file),
+			uninstallModelFile({ url, token, userJwt }, selectedId as string, file),
 		// Optimistically flip the file back to not-installed so the button updates
 		// instantly; roll back if the delete fails. The card's `installed` flag is
 		// left for revalidation since other quants of the same repo may remain.
@@ -283,11 +288,11 @@ export function useModelCatalog(initialQuery = ""): UseModelCatalogResult {
 	// switches Core's active endpoint, so every model list/detail must refetch.
 	const sourcesQuery = useQuery({
 		queryKey: ["models", "sources", url],
-		queryFn: () => fetchModelSources({ url, token }),
+		queryFn: () => fetchModelSources({ url, token, userJwt }),
 	});
 
 	const selectSourceMutation = useMutation({
-		mutationFn: (id: string) => selectModelSource({ url, token }, id),
+		mutationFn: (id: string) => selectModelSource({ url, token, userJwt }, id),
 		onSuccess: () => {
 			Promise.resolve(
 				qc.invalidateQueries({ queryKey: ["models", "sources", url] })
@@ -323,7 +328,7 @@ export function useModelCatalog(initialQuery = ""): UseModelCatalogResult {
 	const installSnapshotMutation = useMutation({
 		mutationFn: () =>
 			installModelSnapshot(
-				{ url, token },
+				{ url, token, userJwt },
 				selectedId as string,
 				selectedFormat
 			),

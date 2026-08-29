@@ -173,7 +173,10 @@ function isServerConfig(value: unknown): value is A2aServerConfig {
 }
 
 function installMock(): void {
-	const mockFetch = async (input: URL | RequestInfo, init?: RequestInit): Promise<Response> => {
+	const mockFetch = async (
+		input: URL | RequestInfo,
+		init?: RequestInit
+	): Promise<Response> => {
 		const url =
 			typeof input === "string"
 				? input

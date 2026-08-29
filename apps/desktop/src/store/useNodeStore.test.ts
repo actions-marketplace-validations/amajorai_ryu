@@ -18,9 +18,9 @@ import type { Node } from "./useNodeStore.ts";
 // Mutable so a test can decide what the control plane "returns" for this run;
 // the module factory only ever runs once, so the indirection is what makes the
 // managed-node path testable at all.
-type ManagedNodeFixture = Pick<ManagedNode, "name" | "token" | "url"> &
+type ManagedNodeFixture = Pick<ManagedNode, "name" | "userJwt" | "url"> &
 	Partial<Pick<ManagedNode, "orgId" | "serverId">>;
-let managedNodes: ManagedNodeFixture[] = [];
+let managedNodes: ManagedNodeFixture[] | null = [];
 mock.module("@/src/lib/api/managed-nodes.ts", () => ({
 	fetchManagedNodes: () => Promise.resolve(managedNodes),
 }));
@@ -31,16 +31,19 @@ const LOCAL: Node = {
 	name: "local",
 	url: "http://127.0.0.1:7980",
 	token: null,
+	userJwt: null,
 };
 const REMOTE: Node = {
 	name: "remote",
 	url: "http://10.0.0.5:7980",
 	token: "t",
+	userJwt: null,
 };
 const REMOTE_B: Node = {
 	name: "remote-b",
 	url: "http://10.0.0.6:7980",
 	token: "t",
+	userJwt: null,
 };
 
 beforeEach(() => {
@@ -320,7 +323,7 @@ describe("managed cloud node credentials", () => {
 
 	test("an unadded cloud node is available for zero-setup adoption", async () => {
 		useNodeStore.setState({ localNodes: [LOCAL], nodes: [LOCAL] });
-		managedNodes = [{ name: "prod", url: CLOUD_URL, token: "jwt-fresh" }];
+		managedNodes = [{ name: "prod", url: CLOUD_URL, userJwt: "jwt-fresh" }];
 
 		await useNodeStore.getState().hydrateCloudNodes();
 
@@ -328,7 +331,7 @@ describe("managed cloud node credentials", () => {
 			.getState()
 			.nodes.find((node) => node.url === CLOUD_URL);
 		expect(cloud?.managed).toBe(true);
-		expect(cloud?.token).toBe("jwt-fresh");
+		expect(cloud?.userJwt).toBe("jwt-fresh");
 		expect(useNodeStore.getState().suggestedCloudNodes).toHaveLength(1);
 	});
 
@@ -336,17 +339,20 @@ describe("managed cloud node credentials", () => {
 		// The node as it sits on disk: added from a tokenless connect link, or
 		// holding a JWT that has since expired.
 		useNodeStore.setState({
-			localNodes: [LOCAL, { name: "cloud-prod", url: CLOUD_URL, token: null }],
+			localNodes: [
+				LOCAL,
+				{ name: "cloud-prod", url: CLOUD_URL, token: null, userJwt: null },
+			],
 			nodes: [LOCAL],
 		});
-		managedNodes = [{ name: "prod", url: CLOUD_URL, token: "jwt-fresh" }];
+		managedNodes = [{ name: "prod", url: CLOUD_URL, userJwt: "jwt-fresh" }];
 
 		await useNodeStore.getState().hydrateCloudNodes();
 
 		const added = useNodeStore
 			.getState()
 			.nodes.find((n) => n.url === CLOUD_URL);
-		expect(added?.token).toBe("jwt-fresh");
+		expect(added?.userJwt).toBe("jwt-fresh");
 		expect(added?.managed).toBe(true);
 		// It is added, so it must not also be offered as a suggestion.
 		expect(useNodeStore.getState().suggestedCloudNodes).toEqual([]);
@@ -354,7 +360,7 @@ describe("managed cloud node credentials", () => {
 
 	test("a self-hosted node's token is never overwritten", async () => {
 		useNodeStore.setState({ localNodes: [LOCAL, REMOTE], nodes: [LOCAL] });
-		managedNodes = [{ name: "prod", url: CLOUD_URL, token: "jwt-fresh" }];
+		managedNodes = [{ name: "prod", url: CLOUD_URL, userJwt: "jwt-fresh" }];
 
 		await useNodeStore.getState().hydrateCloudNodes();
 
@@ -366,14 +372,120 @@ describe("managed cloud node credentials", () => {
 
 	test("a control plane that mints no token leaves the stored one alone", async () => {
 		useNodeStore.setState({
-			localNodes: [{ name: "cloud-prod", url: CLOUD_URL, token: "stored" }],
+			localNodes: [
+				{
+					name: "cloud-prod",
+					url: CLOUD_URL,
+					token: "stored-node-token",
+					userJwt: null,
+				},
+			],
 			nodes: [LOCAL],
 		});
-		managedNodes = [{ name: "prod", url: CLOUD_URL, token: null }];
+		managedNodes = [{ name: "prod", url: CLOUD_URL, userJwt: null }];
 
 		await useNodeStore.getState().hydrateCloudNodes();
 
-		expect(useNodeStore.getState().nodes[0]?.token).toBe("stored");
+		expect(useNodeStore.getState().nodes[0]?.token).toBe("stored-node-token");
+	});
+
+	test("drops a managed node that disappears from the refreshed scope", async () => {
+		const stale = {
+			managed: true,
+			name: "cloud-prod",
+			orgId: "org_1",
+			token: null,
+			url: CLOUD_URL,
+			userJwt: "expired-jwt",
+		};
+		useNodeStore.setState({
+			cloudNodes: [stale],
+			localNodes: [LOCAL, stale],
+			nodes: [LOCAL, stale],
+		});
+		managedNodes = [];
+
+		await useNodeStore.getState().refreshCloudTokens();
+
+		expect(useNodeStore.getState().cloudNodes).toEqual([]);
+		expect(
+			useNodeStore.getState().nodes.some((node) => node.url === CLOUD_URL)
+		).toBe(false);
+	});
+
+	test("retains managed nodes when the scope refresh is unavailable", async () => {
+		const stale = {
+			managed: true,
+			name: "cloud-prod",
+			orgId: "org_1",
+			token: null,
+			url: CLOUD_URL,
+			userJwt: "still-valid",
+		};
+		useNodeStore.setState({
+			cloudNodes: [stale],
+			localNodes: [LOCAL, stale],
+			nodes: [LOCAL, stale],
+		});
+		managedNodes = null;
+
+		await useNodeStore.getState().refreshCloudTokens();
+
+		expect(useNodeStore.getState().cloudNodes).toEqual([stale]);
+		expect(
+			useNodeStore.getState().nodes.some((node) => node.url === CLOUD_URL)
+		).toBe(true);
+	});
+
+	test("adds a newly visible managed node during a successful refresh", async () => {
+		const newCloudUrl = "http://cloud-2.example.com:7980";
+		const existing = {
+			managed: true,
+			name: "cloud-prod",
+			token: null,
+			url: CLOUD_URL,
+			userJwt: "still-valid",
+		};
+		useNodeStore.setState({
+			cloudNodes: [existing],
+			localNodes: [LOCAL],
+			nodes: [LOCAL, existing],
+		});
+		managedNodes = [{ name: "new", url: newCloudUrl, userJwt: "new-jwt" }];
+
+		await useNodeStore.getState().refreshCloudTokens();
+
+		expect(useNodeStore.getState().cloudNodes).toEqual([
+			expect.objectContaining({
+				name: "cloud-new",
+				url: newCloudUrl,
+				userJwt: "new-jwt",
+			}),
+		]);
+		expect(useNodeStore.getState().suggestedCloudNodes[0]?.url).toBe(
+			newCloudUrl
+		);
+	});
+
+	test("clears a legacy managed JWT from the node bearer slot", async () => {
+		useNodeStore.setState({
+			localNodes: [
+				{
+					name: "cloud-prod",
+					url: CLOUD_URL,
+					token: "header.payload.signature",
+					userJwt: null,
+				},
+			],
+			nodes: [LOCAL],
+		});
+		managedNodes = [{ name: "prod", url: CLOUD_URL, userJwt: "jwt-fresh" }];
+
+		await useNodeStore.getState().hydrateCloudNodes();
+
+		const managed = useNodeStore.getState().nodes[0];
+		expect(managed?.token).toBeNull();
+		expect(managed?.userJwt).toBe("jwt-fresh");
 	});
 
 	// A managed node's `orgId`/`serverId` are the ONLY way any desktop surface can
@@ -386,14 +498,16 @@ describe("managed cloud node credentials", () => {
 	// and does nothing. This asserts they survive the fold.
 	test("a managed node keeps the ids that address its server row", async () => {
 		useNodeStore.setState({
-			localNodes: [{ name: "cloud-prod", url: CLOUD_URL, token: "stored" }],
+			localNodes: [
+				{ name: "cloud-prod", url: CLOUD_URL, token: "stored", userJwt: null },
+			],
 			nodes: [LOCAL],
 		});
 		managedNodes = [
 			{
 				name: "prod",
 				url: CLOUD_URL,
-				token: "jwt",
+				userJwt: "jwt",
 				orgId: "org_1",
 				serverId: "srv_1",
 			},
@@ -413,14 +527,16 @@ describe("managed cloud node credentials", () => {
 	// picker's whole gate is "hide unless both ids are present".
 	test("an unlinked managed node reports no server row rather than a stale one", async () => {
 		useNodeStore.setState({
-			localNodes: [{ name: "cloud-prod", url: CLOUD_URL, token: "stored" }],
+			localNodes: [
+				{ name: "cloud-prod", url: CLOUD_URL, token: "stored", userJwt: null },
+			],
 			nodes: [LOCAL],
 		});
 		managedNodes = [
 			{
 				name: "prod",
 				url: CLOUD_URL,
-				token: "jwt",
+				userJwt: "jwt",
 				orgId: "org_1",
 				serverId: null,
 			},

@@ -43,8 +43,9 @@ export function useSkillPacks() {
 	const target: ApiTarget = {
 		url: activeNode.url,
 		token: activeNode.token ?? null,
+		userJwt: activeNode.userJwt ?? null,
 	};
-	const { url, token } = target;
+	const { url, token, userJwt } = target;
 	const qc = useQueryClient();
 
 	const [opening, setOpening] = useState<string | null>(null);
@@ -58,7 +59,8 @@ export function useSkillPacks() {
 
 	const detailQuery = useQuery({
 		queryKey: ["skills", "packs", "detail", url, openedId],
-		queryFn: () => fetchSkillPackDetail({ url, token }, openedId as string),
+		queryFn: () =>
+			fetchSkillPackDetail({ url, token, userJwt }, openedId as string),
 		enabled: openedId !== null,
 	});
 
@@ -66,7 +68,7 @@ export function useSkillPacks() {
 	// so installing a pack invalidates the pack list (counts) AND the catalog list
 	// (installed flags) — one mutation, both caches.
 	const installMutation = useMutation({
-		mutationFn: (id: string) => installSkillPack({ url, token }, id),
+		mutationFn: (id: string) => installSkillPack({ url, token, userJwt }, id),
 		onSettled: () => {
 			Promise.resolve(
 				qc.invalidateQueries({ queryKey: ["skills", "packs", url] })

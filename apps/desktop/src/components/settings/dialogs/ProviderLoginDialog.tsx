@@ -90,12 +90,15 @@ export function ProviderLoginDialog({
 	// the cleanup cancels with must not be the expired one from 15 minutes ago.
 	const nodeUrl = activeNode.url;
 	const nodeToken = activeNode.token ?? null;
+	const nodeUserJwt = activeNode.userJwt ?? null;
 	const tokenRef = useRef(nodeToken);
+	const userJwtRef = useRef(nodeUserJwt);
 	// Declared BEFORE the flow effect so React runs it first in every commit,
 	// leaving the ref current by the time `run()` reads it.
 	useEffect(() => {
 		tokenRef.current = nodeToken;
-	}, [nodeToken]);
+		userJwtRef.current = nodeUserJwt;
+	}, [nodeToken, nodeUserJwt]);
 	const [sessionId, setSessionId] = useState<string | null>(null);
 	const [authUrl, setAuthUrl] = useState<string | null>(null);
 	const [instructions, setInstructions] = useState<string | null>(null);
@@ -190,7 +193,12 @@ export function ProviderLoginDialog({
 		// Resolved per call, not once: the token is whatever the last cloud
 		// refresh left in the ref, which is the only one the node will still
 		// accept. The url is the effect's real dependency.
-		const target = () => toTarget({ token: tokenRef.current, url: nodeUrl });
+		const target = () =>
+			toTarget({
+				token: tokenRef.current,
+				url: nodeUrl,
+				userJwt: userJwtRef.current,
+			});
 
 		const run = async () => {
 			setAuthUrl(null);

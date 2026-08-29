@@ -176,8 +176,8 @@ export function GatewayPostureCard({
 	const [coverageSaving, setCoverageSaving] = useState(false);
 	const [error, setError] = useState<string | null>(null);
 	const requestTarget = useMemo(
-		() => ({ url: target.url, token: target.token }),
-		[target.url, target.token]
+		() => ({ url: target.url, token: target.token, userJwt: target.userJwt }),
+		[target.url, target.token, target.userJwt]
 	);
 
 	const refresh = useCallback(async () => {

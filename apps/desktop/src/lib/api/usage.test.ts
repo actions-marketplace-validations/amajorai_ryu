@@ -77,7 +77,7 @@ describe("subscription provider usage eligibility", () => {
 		}) as typeof fetch;
 
 		const snapshot = await fetchProviderAccountUsage(
-			{ token: "node-token", url: "http://127.0.0.1:8980" },
+			{ token: "node-token", url: "http://127.0.0.1:8980", userJwt: null },
 			"claude-pro-max",
 			"acct/work/account"
 		);

@@ -119,7 +119,11 @@ describe("the routes this client calls exist in Core", () => {
 
 // ── Wire tests ────────────────────────────────────────────────────────────────
 
-const TARGET: ApiTarget = { url: "http://127.0.0.1:7777", token: null };
+const TARGET: ApiTarget = {
+	url: "http://127.0.0.1:7777",
+	token: null,
+	userJwt: null,
+};
 
 interface Call {
 	body: string | null;

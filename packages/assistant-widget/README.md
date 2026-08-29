@@ -41,7 +41,24 @@ existing layout. Floating surfaces default to the compact, minimal composer. Pas
 `recentChats` and `onSelectRecentChat` to get the same four-row handoff used by Desktop.
 
 For lower-level composition, use `RyuAssistantWidgetFrame`,
-`RyuAssistantWidgetHeader`, and `RyuAssistantRecentChats` separately.
+`RyuAssistantWidgetHeader`, `RyuAssistantRecentChats`, and
+`RyuAssistantComposer` separately. `RyuAssistantChat` uses `RyuAssistantComposer` by default for
+floating surfaces, so hosts can reuse the same composer without rebuilding its controls.
+
+## Complete public-site assistant
+
+`RyuAssistantWidget` is the reusable browser-local / local-node surface used by the public
+sites. It includes the Island-style launcher morph, the shared chat surface, the Browser/Local
+node switcher, browser-model preparation, and the direct non-persistent Core connection path:
+
+```tsx
+import { RyuAssistantWidget } from "@ryu/assistant-widget";
+
+<RyuAssistantWidget docsBaseUrl="https://docs.ryuhq.com" />;
+```
+
+Use `inline openOnMount showLauncher={false}` for an expanded page section. For a custom trigger
+or a host-owned runtime, compose `RyuAssistantMorph` with `RyuAssistantChat` instead.
 
 ## Hosted iframe
 
@@ -60,6 +77,8 @@ Keep the hosted page responsible for its own authentication and transport; never
 Ryu Core token in a public embed URL.
 
 `RyuAssistantWidget` remains the complete browser-local / local-node documentation assistant
-used by the public sites. `RyuAssistantCoreChat` is the direct Core-backed path, while
-`RyuAssistantChat` is the lower-level state/transport-injected path. The latter two reuse the
-same surface primitives without copying the Desktop layout.
+used by the public sites. It includes the Island-style launcher morph, the shared chat surface,
+browser-local model preparation, and the explicit local-node connection path. Use
+`inline openOnMount showLauncher={false}` for an expanded page section. `RyuAssistantCoreChat` is
+the direct Core-backed path, while `RyuAssistantChat` is the lower-level state/transport-injected
+path. The latter two reuse the same surface primitives without copying the Desktop layout.

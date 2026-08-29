@@ -94,6 +94,8 @@ export interface CatalogInstallButtonProps {
 export interface CatalogNode {
 	token: string | null;
 	url: string;
+	/** Managed-node user JWT, when the host has one. */
+	userJwt?: string | null;
 }
 
 /** The catalog realms that can be reviewed by the configured agent. */

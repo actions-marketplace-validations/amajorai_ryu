@@ -27,6 +27,7 @@ export function useRegisterDocLinks(spaceId: string): void {
 	const activeNode = useActiveNode();
 	const { url } = activeNode;
 	const token = activeNode.token ?? null;
+	const userJwt = activeNode.userJwt ?? null;
 	const { openTab } = useTabsContext();
 
 	// Synchronous title→doc cache for `resolveByTitle` (used during render).
@@ -34,7 +35,7 @@ export function useRegisterDocLinks(spaceId: string): void {
 
 	useEffect(() => {
 		let cancelled = false;
-		const target: ApiTarget = { url, token };
+		const target: ApiTarget = { url, token, userJwt };
 
 		fetchDocuments(target, spaceId)
 			.then((docs) => {
@@ -74,5 +75,5 @@ export function useRegisterDocLinks(spaceId: string): void {
 			cancelled = true;
 			setDocLinkProvider(null);
 		};
-	}, [url, token, spaceId, openTab]);
+	}, [url, token, userJwt, spaceId, openTab]);
 }

@@ -90,7 +90,11 @@ function isTauri(): boolean {
 
 export function NodeAccessSettings() {
 	const node = useActiveNode();
-	const target: ApiTarget = { url: node.url, token: node.token ?? null };
+	const target: ApiTarget = {
+		url: node.url,
+		token: node.token,
+		userJwt: node.userJwt ?? null,
+	};
 	const [token, setToken] = useState<string | null>(null);
 	const [source, setSource] = useState<TokenSource>("none");
 	const [revealed, setRevealed] = useState(false);

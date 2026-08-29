@@ -103,12 +103,12 @@ export async function fetchNodeSandboxes(
 
 /** A newly created persistent sandbox (normalized to camelCase). */
 export interface CreatedSandbox {
+	/** The remote backend that owns the workspace. */
+	backend: string;
 	/** Stable run id — pass this to {@link execSandbox} / {@link destroySandbox}. */
 	runId: string;
 	/** The real provider workspace id backing the run. */
 	workspaceId: string;
-	/** The remote backend that owns the workspace. */
-	backend: string;
 }
 
 /** The result of one `execSandbox` command (normalized to camelCase). */

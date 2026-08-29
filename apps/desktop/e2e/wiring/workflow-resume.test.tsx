@@ -59,7 +59,7 @@ afterEach(async () => {
 describe("workflow resume UI wiring", () => {
 	it("submits the run id and response, guards while pending, then confirms success", async () => {
 		let resolveResume: (() => void) | undefined;
-		const calls: Array<[string, string]> = [];
+		const calls: [string, string][] = [];
 		const onResume = (runId: string, payload: string) => {
 			calls.push([runId, payload]);
 			return new Promise<void>((resolve) => {
@@ -71,7 +71,9 @@ describe("workflow resume UI wiring", () => {
 			"input[aria-label='Workflow response']"
 		);
 		const form = view.querySelector<HTMLFormElement>("form");
-		const button = view.querySelector<HTMLButtonElement>("button[type='submit']");
+		const button = view.querySelector<HTMLButtonElement>(
+			"button[type='submit']"
+		);
 		if (!(input && form && button)) {
 			throw new Error("workflow resume form did not render");
 		}
@@ -81,26 +83,25 @@ describe("workflow resume UI wiring", () => {
 				HTMLInputElement.prototype,
 				"value"
 			)?.set;
+			input.focus();
+			input.dispatchEvent(new Event("focusin", { bubbles: true }));
 			setInputValue?.call(input, "approved");
+			input.dispatchEvent(new Event("input", { bubbles: true }));
 			input.dispatchEvent(
-				new InputEvent("input", {
-					bubbles: true,
-					data: "approved",
-					inputType: "insertText",
-				})
+				new KeyboardEvent("keyup", { bubbles: true, key: "d" })
+			);
+			await new Promise<void>((resolve) => setTimeout(resolve, 0));
+		});
+
+		await act(async () => {
+			form.dispatchEvent(
+				new Event("submit", { bubbles: true, cancelable: true })
 			);
 			await Promise.resolve();
 		});
 
-		await act(async () => {
-			form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
-			await Promise.resolve();
-		});
-
-		// The callback receives the stable run id and the controlled response
-		// value (empty here; happy-dom cannot synthesize Base UI's native input
-		// value tracker reliably). A real user edit follows the same path.
-		expect(calls).toEqual([["run-1", ""]]);
+		// The callback receives the stable run id and the response entered above.
+		expect(calls).toEqual([["run-1", "approved"]]);
 		expect(button.textContent).toBe("Resuming…");
 		expect(button.disabled).toBe(true);
 		expect(input.disabled).toBe(true);
@@ -127,7 +128,9 @@ describe("workflow resume UI wiring", () => {
 		}
 
 		await act(async () => {
-			form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+			form.dispatchEvent(
+				new Event("submit", { bubbles: true, cancelable: true })
+			);
 			await Promise.resolve();
 		});
 

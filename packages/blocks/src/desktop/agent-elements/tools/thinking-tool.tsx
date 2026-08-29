@@ -66,9 +66,7 @@ export function ThinkingCollapsed({
 		return `${trimmed.split(/\s+/).filter(Boolean).length} words`;
 	}, [reasoningText, tokenCount]);
 
-	const summary = durationLabel
-		? `Thought for ${durationLabel}`
-		: "Thought";
+	const summary = durationLabel ? `Thought for ${durationLabel}` : "Thought";
 
 	const items = useMemo(
 		() => [

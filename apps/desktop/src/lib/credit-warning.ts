@@ -52,4 +52,3 @@ export function creditBalanceStatus(
 		? { kind: "low", remainingPercent }
 		: { kind: "healthy", remainingPercent };
 }
-

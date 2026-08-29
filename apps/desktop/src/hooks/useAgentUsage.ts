@@ -25,7 +25,7 @@ export function useAgentUsage(agentId: string | null): UsageSnapshot | null {
 		queryKey: ["agent-usage", node.url, agentId],
 		queryFn: () =>
 			fetchAgentUsage(
-				{ url: node.url, token: node.token ?? null },
+				{ url: node.url, token: node.token, userJwt: node.userJwt ?? null },
 				agentId ?? ""
 			),
 		enabled,

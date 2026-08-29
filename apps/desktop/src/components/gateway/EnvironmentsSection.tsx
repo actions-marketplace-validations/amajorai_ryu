@@ -45,7 +45,7 @@ export function EnvironmentsSection() {
 		queryKey: queryKey(node.url, node.token ?? null),
 		queryFn: ({ signal }) =>
 			fetchGatewayGovernance(
-				{ url: node.url, token: node.token ?? null },
+				{ url: node.url, token: node.token, userJwt: node.userJwt ?? null },
 				signal
 			),
 	});

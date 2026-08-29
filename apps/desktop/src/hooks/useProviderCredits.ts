@@ -37,7 +37,7 @@ export function useProviderCredits(
 		queryKey: ["provider-credits", node.url, providerId],
 		queryFn: () =>
 			fetchProviderCredits(
-				{ url: node.url, token: node.token ?? null },
+				{ url: node.url, token: node.token, userJwt: node.userJwt ?? null },
 				providerId ?? ""
 			),
 		enabled,

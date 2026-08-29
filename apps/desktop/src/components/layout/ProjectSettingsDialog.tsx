@@ -161,7 +161,7 @@ export function ProjectSettingsDialog({
 				root: string;
 			}>;
 		}>(
-			{ url: node.url, token: node.token ?? null },
+			{ url: node.url, token: node.token, userJwt: node.userJwt ?? null },
 			"/api/org-project-mappings"
 		)
 			.then(({ mappings }) => {
@@ -256,7 +256,11 @@ export function ProjectSettingsDialog({
 		setSaving(true);
 		try {
 			await writeProjectFile(targetPath, markdownRef.current);
-			const apiTarget = { url: node.url, token: node.token ?? null };
+			const apiTarget = {
+				url: node.url,
+				token: node.token,
+				userJwt: node.userJwt ?? null,
+			};
 			if (mappingOrganizationId.trim() && mappingProjectId.trim()) {
 				await request(apiTarget, "/api/org-project-mappings", {
 					body: {

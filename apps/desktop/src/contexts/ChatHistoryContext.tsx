@@ -251,9 +251,14 @@ function coreFetch(
 	url: string,
 	token: string | null | undefined,
 	path: string,
-	options?: AuthenticatedFetchOptions
+	options?: AuthenticatedFetchOptions,
+	userJwt?: string | null
 ): Promise<Response> {
-	return authenticatedFetch({ url, token: token ?? null }, path, options);
+	return authenticatedFetch(
+		{ url, token: token ?? null, userJwt: userJwt ?? null },
+		path,
+		options
+	);
 }
 
 /** The title a conversation carries until it has been named — the only string
@@ -329,10 +334,10 @@ export function ChatHistoryProvider({ children }: { children: ReactNode }) {
 	const wantPreview = useMessagingRows() || sidebarChatPreview;
 
 	const refresh = useCallback(() => {
-		const { url, token } = activeNode;
+		const { url, token, userJwt } = activeNode;
 		const query = wantPreview ? "?preview=1" : "";
 		setConversationsLoading(true);
-		coreFetch(url, token, `/api/conversations${query}`)
+		coreFetch(url, token, `/api/conversations${query}`, undefined, userJwt)
 			.then((res) =>
 				res.ok ? res.json() : Promise.reject(new Error(`HTTP ${res.status}`))
 			)
@@ -422,8 +427,12 @@ export function ChatHistoryProvider({ children }: { children: ReactNode }) {
 
 	const removeConversationFromProject = useCallback(
 		async (id: string): Promise<boolean> => {
-			const { url, token } = activeNode;
-			const success = await setConversationFolderApi({ url, token }, id, null);
+			const { url, token, userJwt } = activeNode;
+			const success = await setConversationFolderApi(
+				{ url, token, userJwt },
+				id,
+				null
+			);
 			if (success) {
 				setConversations((prev) =>
 					prev.map((conversation) =>
@@ -466,10 +475,14 @@ export function ChatHistoryProvider({ children }: { children: ReactNode }) {
 	const deleteConversation = useCallback(
 		(id: string) => {
 			setConversations((prev) => prev.filter((c) => c.id !== id));
-			const { url, token } = activeNode;
-			coreFetch(url, token, `/api/conversations/${encodeURIComponent(id)}`, {
-				method: "DELETE",
-			}).catch(() => {
+			const { url, token, userJwt } = activeNode;
+			coreFetch(
+				url,
+				token,
+				`/api/conversations/${encodeURIComponent(id)}`,
+				{ method: "DELETE" },
+				userJwt
+			).catch(() => {
 				// Best-effort: the row is already gone from the UI.
 			});
 		},
@@ -487,10 +500,10 @@ export function ChatHistoryProvider({ children }: { children: ReactNode }) {
 			);
 			// Write through with the typed client (best-effort): the optimistic local
 			// title already shows; a failed write just means it isn't server-backed.
-			const { url, token } = activeNode;
-			Promise.resolve(setConversationTitle({ url, token }, id, trimmed)).catch(
-				() => undefined
-			);
+			const { url, token, userJwt } = activeNode;
+			Promise.resolve(
+				setConversationTitle({ url, token, userJwt }, id, trimmed)
+			).catch(() => undefined);
 		},
 		[activeNode]
 	);
@@ -500,10 +513,10 @@ export function ChatHistoryProvider({ children }: { children: ReactNode }) {
 			setConversations((prev) =>
 				prev.map((c) => (c.id === id ? { ...c, icon } : c))
 			);
-			const { url, token } = activeNode;
-			Promise.resolve(setConversationIcon({ url, token }, id, icon)).catch(
-				() => undefined
-			);
+			const { url, token, userJwt } = activeNode;
+			Promise.resolve(
+				setConversationIcon({ url, token, userJwt }, id, icon)
+			).catch(() => undefined);
 		},
 		[activeNode]
 	);
@@ -517,9 +530,9 @@ export function ChatHistoryProvider({ children }: { children: ReactNode }) {
 						: conversation
 				)
 			);
-			const { url, token } = activeNode;
+			const { url, token, userJwt } = activeNode;
 			const success = await setConversationVisibilityApi(
-				{ url, token },
+				{ url, token, userJwt },
 				id,
 				visibility
 			);
@@ -540,12 +553,14 @@ export function ChatHistoryProvider({ children }: { children: ReactNode }) {
 
 	const loadMessagesResult = useCallback(
 		async (id: string): Promise<LoadMessagesResult> => {
-			const { url, token } = activeNode;
+			const { url, token, userJwt } = activeNode;
 			try {
 				const res = await coreFetch(
 					url,
 					token,
-					`/api/conversations/${encodeURIComponent(id)}`
+					`/api/conversations/${encodeURIComponent(id)}`,
+					undefined,
+					userJwt
 				);
 				// 404 is an ANSWER, not a failure: the node is up and says this
 				// conversation is gone (deleted, or never persisted). That is the
@@ -571,7 +586,7 @@ export function ChatHistoryProvider({ children }: { children: ReactNode }) {
 
 	const loadMessagesPageResult = useCallback(
 		async (id: string, before?: string): Promise<LoadMessagesResult> => {
-			const { url, token } = activeNode;
+			const { url, token, userJwt } = activeNode;
 			const query = new URLSearchParams({
 				limit: String(CHAT_HISTORY_PAGE_SIZE),
 			});
@@ -582,7 +597,9 @@ export function ChatHistoryProvider({ children }: { children: ReactNode }) {
 				const res = await coreFetch(
 					url,
 					token,
-					`/api/conversations/${encodeURIComponent(id)}?${query.toString()}`
+					`/api/conversations/${encodeURIComponent(id)}?${query.toString()}`,
+					undefined,
+					userJwt
 				);
 				if (res.status === 404) {
 					return {
@@ -621,7 +638,7 @@ export function ChatHistoryProvider({ children }: { children: ReactNode }) {
 
 	const forkConversation = useCallback(
 		async (id: string, messageId?: string): Promise<string | null> => {
-			const { url, token } = activeNode;
+			const { url, token, userJwt } = activeNode;
 			try {
 				const res = await coreFetch(
 					url,
@@ -630,7 +647,8 @@ export function ChatHistoryProvider({ children }: { children: ReactNode }) {
 					{
 						method: "POST",
 						body: JSON.stringify(messageId ? { message_id: messageId } : {}),
-					}
+					},
+					userJwt
 				);
 				if (!res.ok) {
 					return null;
@@ -658,13 +676,14 @@ export function ChatHistoryProvider({ children }: { children: ReactNode }) {
 			messageId: string,
 			content: string
 		): Promise<string | null> => {
-			const { url, token } = activeNode;
+			const { url, token, userJwt } = activeNode;
 			try {
 				const res = await coreFetch(
 					url,
 					token,
 					`/api/conversations/${encodeURIComponent(id)}/messages/${encodeURIComponent(messageId)}/edit`,
-					{ method: "POST", body: JSON.stringify({ content }) }
+					{ method: "POST", body: JSON.stringify({ content }) },
+					userJwt
 				);
 				if (!res.ok) {
 					return null;
@@ -680,13 +699,14 @@ export function ChatHistoryProvider({ children }: { children: ReactNode }) {
 
 	const regenerateMessage = useCallback(
 		async (id: string, messageId: string): Promise<boolean> => {
-			const { url, token } = activeNode;
+			const { url, token, userJwt } = activeNode;
 			try {
 				const res = await coreFetch(
 					url,
 					token,
 					`/api/conversations/${encodeURIComponent(id)}/messages/${encodeURIComponent(messageId)}/regenerate`,
-					{ method: "POST" }
+					{ method: "POST" },
+					userJwt
 				);
 				return res.ok;
 			} catch {
@@ -698,13 +718,14 @@ export function ChatHistoryProvider({ children }: { children: ReactNode }) {
 
 	const selectVersion = useCallback(
 		async (id: string, versionId: string): Promise<boolean> => {
-			const { url, token } = activeNode;
+			const { url, token, userJwt } = activeNode;
 			try {
 				const res = await coreFetch(
 					url,
 					token,
 					`/api/conversations/${encodeURIComponent(id)}/messages/${encodeURIComponent(versionId)}/select`,
-					{ method: "POST" }
+					{ method: "POST" },
+					userJwt
 				);
 				return res.ok;
 			} catch {

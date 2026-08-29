@@ -1,9 +1,9 @@
 import { describe, expect, test } from "bun:test";
 import {
-	SlashCommandContributionSchema,
 	app,
 	defineApp,
 	definePlugin,
+	SlashCommandContributionSchema,
 } from "./index.ts";
 
 const slashCommand = {

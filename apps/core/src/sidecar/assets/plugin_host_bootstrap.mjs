@@ -48,7 +48,7 @@ function log(msg, extra) {
 // native test sidecar enforces.
 function authorized(req) {
 	if (!EXT_TOKEN) {
-		return true; // no token configured (never in a real spawn) → do not lock out
+		return false;
 	}
 	const header = req.headers.authorization || "";
 	const provided = header.startsWith("Bearer ") ? header.slice(7) : "";
@@ -143,7 +143,9 @@ async function* responseChunks(stream) {
 		}
 		return;
 	}
-	throw new TypeError("response stream must be async iterable or a ReadableStream");
+	throw new TypeError(
+		"response stream must be async iterable or a ReadableStream"
+	);
 }
 
 async function sendStream(res, status, headers, stream) {

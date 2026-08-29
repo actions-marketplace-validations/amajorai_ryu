@@ -16,16 +16,16 @@ export type SectionTitleSize = keyof typeof sectionTitleSizes;
 
 export const sectionTitleClass = sectionTitleSizes.default;
 
-type SectionTitleProps = {
-	title: string;
-	suffix?: ReactNode;
+interface SectionTitleProps {
 	as?: "h1" | "h2";
-	size?: SectionTitleSize;
 	className?: string;
 	colors?: string[];
 	delay?: number;
 	duration?: number;
-};
+	size?: SectionTitleSize;
+	suffix?: ReactNode;
+	title: string;
+}
 
 export function SectionTitle({
 	title,

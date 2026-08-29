@@ -69,6 +69,7 @@ export function useEngines(): UseEnginesResult {
 	// re-run on every render — an infinite refetch loop that flickers the list.
 	const url = activeNode.url;
 	const token = activeNode.token ?? null;
+	const userJwt = activeNode.userJwt ?? null;
 
 	const [engines, setEngines] = useState<EngineEntry[]>([]);
 	const [activeEngine, setActiveEngine] = useState<ActiveEngine | null>(null);
@@ -79,9 +80,9 @@ export function useEngines(): UseEnginesResult {
 		setLoading(true);
 		setError(null);
 		try {
-			const target: ApiTarget = { url, token };
+			const target: ApiTarget = { url, token, userJwt };
 			const [catalog, active] = await Promise.all([
-				fetchCatalog(url, token),
+				fetchCatalog(url, token, undefined, userJwt),
 				fetchActiveEngine(target).catch(() => null),
 			]);
 			// The swappable local engines are exactly the catalog's providers.
@@ -108,7 +109,7 @@ export function useEngines(): UseEnginesResult {
 		} finally {
 			setLoading(false);
 		}
-	}, [url, token]);
+	}, [url, token, userJwt]);
 
 	useEffect(() => {
 		reload().catch(() => undefined);
@@ -122,27 +123,27 @@ export function useEngines(): UseEnginesResult {
 	// having re-downloaded nothing.
 	const install = useCallback(
 		async (name: string, force = false) => {
-			await installSidecar(url, token, name, force);
+			await installSidecar(url, token, name, force, undefined, userJwt);
 			await reload();
 		},
-		[url, token, reload]
+		[url, token, userJwt, reload]
 	);
 
 	const uninstall = useCallback(
 		async (name: string) => {
-			await uninstallSidecar(url, token, name);
+			await uninstallSidecar(url, token, name, userJwt);
 			await reload();
 		},
-		[url, token, reload]
+		[url, token, userJwt, reload]
 	);
 
 	const activate = useCallback(
 		async (name: string) => {
-			const swap = await apiSetActiveEngine({ url, token }, name);
+			const swap = await apiSetActiveEngine({ url, token, userJwt }, name);
 			await reload();
 			return swap;
 		},
-		[url, token, reload]
+		[url, token, userJwt, reload]
 	);
 
 	return {

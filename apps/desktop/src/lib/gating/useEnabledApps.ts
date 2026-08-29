@@ -20,7 +20,12 @@ export function useEnabledApps(): ReadonlySet<string> | undefined {
 	const node = useActiveNode();
 	const { data } = useQuery({
 		queryKey: ["gating-enabled-apps", node.url, node.token],
-		queryFn: () => fetchApps({ url: node.url, token: node.token ?? null }),
+		queryFn: () =>
+			fetchApps({
+				url: node.url,
+				token: node.token,
+				userJwt: node.userJwt ?? null,
+			}),
 		staleTime: 60_000,
 		retry: false,
 	});

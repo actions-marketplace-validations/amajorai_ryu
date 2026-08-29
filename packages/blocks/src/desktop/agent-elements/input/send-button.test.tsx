@@ -4,10 +4,7 @@ import { SendButton } from "./send-button.tsx";
 
 test("uses a call affordance for the empty voice-mode composer", () => {
 	const markup = renderToStaticMarkup(
-		<SendButton
-			state="idle"
-			voiceMode={{ onStart: () => undefined }}
-		/>
+		<SendButton state="idle" voiceMode={{ onStart: () => undefined }} />
 	);
 
 	expect(markup).toContain('aria-label="Start voice call"');

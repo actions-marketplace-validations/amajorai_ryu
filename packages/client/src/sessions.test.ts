@@ -5,8 +5,8 @@
 // URL-encoding of the id path segment.
 
 import { afterEach, describe, expect, test } from "bun:test";
-import { installFetch } from "./test-fetch.ts";
 import { SessionsAPI } from "./sessions.ts";
+import { installFetch } from "./test-fetch.ts";
 import type { RyuClientOptions } from "./types.ts";
 
 const realFetch = globalThis.fetch;
@@ -18,7 +18,7 @@ const OPTIONS: RyuClientOptions = { baseUrl: "http://localhost:7980" };
 
 describe("SessionsAPI.list", () => {
 	test("maps snake_case conversations, defaulting nullables", async () => {
-		installFetch((() =>
+		installFetch(() =>
 			Promise.resolve(
 				Response.json({
 					conversations: [
@@ -26,7 +26,8 @@ describe("SessionsAPI.list", () => {
 						{ id: "c2" },
 					],
 				})
-			)));
+			)
+		);
 		const list = await new SessionsAPI(OPTIONS).list();
 		expect(list[0]).toEqual({
 			id: "c1",
@@ -45,8 +46,7 @@ describe("SessionsAPI.list", () => {
 	});
 
 	test("returns [] when conversations is absent", async () => {
-		installFetch((() =>
-			Promise.resolve(new Response("{}"))));
+		installFetch(() => Promise.resolve(new Response("{}")));
 		expect(await new SessionsAPI(OPTIONS).list()).toEqual([]);
 	});
 });
@@ -54,10 +54,10 @@ describe("SessionsAPI.list", () => {
 describe("SessionsAPI.get", () => {
 	test("maps the unwrapped detail object and encodes the id", async () => {
 		let capturedUrl: string | undefined;
-		installFetch(((input: RequestInfo | URL) => {
+		installFetch((input: RequestInfo | URL) => {
 			capturedUrl = String(input);
 			return Promise.resolve(Response.json({ id: "a/b", title: "X" }));
-		}));
+		});
 		const conv = await new SessionsAPI(OPTIONS).get("a/b");
 		expect(conv).toEqual({
 			id: "a/b",

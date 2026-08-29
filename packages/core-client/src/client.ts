@@ -3,7 +3,8 @@
 // Platform-agnostic HTTP plumbing for the typed Core/Gateway client modules.
 // Every domain module (agents, system, engines, chat, ...) builds on these
 // helpers so bearer auth and base-URL handling live in exactly one place. The
-// base URL + token always come from the caller's active node ({ url, token }),
+// base URL + credentials always come from the caller's active node
+// ({ url, token, userJwt }),
 // never hardcoded — Core listens on :7980 but the active node may be remote.
 //
 // This module intentionally has NO platform dependencies (no localStorage, no
@@ -12,7 +13,7 @@
 // buyer-token / presence headers, the mobile secure-store token) are layered on
 // top by each app, not here.
 
-/** The subset of a node the api layer needs: base URL + optional bearer token. */
+/** The subset of a node the api layer needs: base URL + scoped credentials. */
 export interface ApiTarget {
 	token: string | null;
 	url: string;
@@ -52,19 +53,25 @@ export function setSurfaceProvider(fn: () => string | null): void {
 	surfaceProvider = fn;
 }
 
-/** Build request headers, attaching the bearer token and surface when present. */
+/**
+ * Build request headers. A node bearer wins; an org-bound managed node may use
+ * its short-lived user JWT as the admission bearer when no node bearer exists.
+ * The same JWT is also sent in its explicit identity header for downstream RBAC.
+ */
 export function makeHeaders(
 	token: string | null,
-	userJwt: string | null = userJwtProvider()
+	userJwt?: string | null
 ): Record<string, string> {
 	const headers: Record<string, string> = {
 		"Content-Type": "application/json",
 	};
-	if (token) {
-		headers.Authorization = `Bearer ${token}`;
+	const identityJwt = userJwt ?? userJwtProvider();
+	const admissionBearer = token ?? (userJwt?.trim() ? userJwt : null);
+	if (admissionBearer) {
+		headers.Authorization = `Bearer ${admissionBearer}`;
 	}
-	if (userJwt) {
-		headers[USER_JWT_HEADER] = userJwt;
+	if (identityJwt) {
+		headers[USER_JWT_HEADER] = identityJwt;
 	}
 	// Every core-client call flows through here, so setting the provider once at
 	// app entry makes ALL requests (incl. the direct-fetch fetchApps) carry the
@@ -170,7 +177,7 @@ export async function request<T>(
 	const resp = await fetch(apiUrl(target, path), {
 		method: options.method ?? "GET",
 		headers: {
-			...makeHeaders(target.token, target.userJwt ?? userJwtProvider()),
+			...makeHeaders(target.token, target.userJwt),
 			...options.headers,
 		},
 		body: options.body === undefined ? undefined : JSON.stringify(options.body),

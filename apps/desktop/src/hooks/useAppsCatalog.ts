@@ -236,8 +236,9 @@ export function useAppsCatalog(
 	const target: ApiTarget = {
 		url: activeNode.url,
 		token: activeNode.token ?? null,
+		userJwt: activeNode.userJwt ?? null,
 	};
-	const { url, token } = target;
+	const { url, token, userJwt } = target;
 	const qc = useQueryClient();
 
 	const [query, setQuery] = useState(initialQuery);
@@ -287,7 +288,7 @@ export function useAppsCatalog(
 
 	const addMarketplaceMutation = useMutation({
 		mutationFn: (params: AddMarketplaceParams) =>
-			addMarketplaceSource({ url, token }, params),
+			addMarketplaceSource({ url, token, userJwt }, params),
 		onSuccess: () => {
 			Promise.resolve(
 				qc.invalidateQueries({ queryKey: ["plugins", "sources", url] })
@@ -401,7 +402,7 @@ export function useAppsCatalog(
 		],
 		queryFn: () =>
 			fetchPluginCatalogDetail(
-				{ url, token },
+				{ url, token, userJwt },
 				selectedId as string,
 				origin,
 				origin ? undefined : activeSource
@@ -474,12 +475,12 @@ export function useAppsCatalog(
 			}
 			const portableTarget = portablePackageTarget(item.entry);
 			if (portableTarget && !item.installed) {
-				await installPortablePackage({ url, token }, portableTarget);
+				await installPortablePackage({ url, token, userJwt }, portableTarget);
 				return;
 			}
 			if (!item.installed && item.entry.source !== "built-in") {
 				await installPluginFromCatalog(
-					{ url, token },
+					{ url, token, userJwt },
 					item.entry.id,
 					readBuyerToken(),
 					channel
@@ -489,7 +490,7 @@ export function useAppsCatalog(
 			// A built-in is shipped with Core, so its version IS Core's version and
 			// there is no separate train to follow — a channel is meaningless here
 			// and is deliberately not forwarded rather than quietly ignored downstream.
-			await installApp({ url, token }, item.entry.id);
+			await installApp({ url, token, userJwt }, item.entry.id);
 		},
 		// Both halves of the shared flag live on the mutation lifecycle, never in a
 		// component effect: a card that unmounts mid-add (scrolled out of a
@@ -527,7 +528,7 @@ export function useAppsCatalog(
 			}
 			const portableTarget = portablePackageTarget(item.entry);
 			if (portableTarget) {
-				await installPortablePackage({ url, token }, portableTarget, {
+				await installPortablePackage({ url, token, userJwt }, portableTarget, {
 					update: item.installed,
 					version: version.version,
 				});
@@ -535,14 +536,14 @@ export function useAppsCatalog(
 			}
 			if (item.installed) {
 				await updateInstalledPluginAtVersion(
-					{ url, token },
+					{ url, token, userJwt },
 					item.entry.id,
 					version.version
 				);
 				return;
 			}
 			await installPluginFromCatalogAtVersion(
-				{ url, token },
+				{ url, token, userJwt },
 				item.entry.id,
 				version.version,
 				readBuyerToken()
@@ -557,7 +558,8 @@ export function useAppsCatalog(
 	});
 
 	const installUrlMutation = useMutation({
-		mutationFn: (appUrl: string) => installAppFromUrl({ url, token }, appUrl),
+		mutationFn: (appUrl: string) =>
+			installAppFromUrl({ url, token, userJwt }, appUrl),
 		// No catalog id to key a card by — this one is driven from a URL field that
 		// owns its own busy state.
 		onSettled: async () => {
@@ -582,14 +584,14 @@ export function useAppsCatalog(
 			const portableTarget = portablePackageTarget(item.entry);
 			if (portableTarget) {
 				return setPortablePackageEnabled(
-					{ url, token },
+					{ url, token, userJwt },
 					portableTarget,
 					enabled
 				);
 			}
 			return enabled
-				? enableApp({ url, token }, item.entry.id)
-				: disableApp({ url, token }, item.entry.id);
+				? enableApp({ url, token, userJwt }, item.entry.id)
+				: disableApp({ url, token, userJwt }, item.entry.id);
 		},
 		// Enable/disable share the flag with add: the card's control is the same
 		// control, and the item is equally un-clickable during either.
@@ -664,7 +666,7 @@ export function useAppsCatalog(
 	// without a `force`, because the request itself is the authority.
 	const switchChannelMutation = useMutation({
 		mutationFn: ({ id, channel }: { channel: string | null; id: string }) =>
-			updateInstalledPlugin({ url, token }, id, channel),
+			updateInstalledPlugin({ url, token, userJwt }, id, channel),
 		// Shares the per-listing busy flag with add/enable: it is the same row, and
 		// it is equally un-clickable while Core is re-resolving it.
 		onMutate: ({ id }) => beginInstall(id),

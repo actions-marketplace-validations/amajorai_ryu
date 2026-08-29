@@ -61,12 +61,13 @@ export function useStorePrefetch(): void {
 	const qc = useQueryClient();
 	const url = activeNode.url;
 	const token = activeNode.token ?? null;
+	const userJwt = activeNode.userJwt ?? null;
 
 	useEffect(() => {
 		if (!url) {
 			return;
 		}
-		const target: ApiTarget = { url, token };
+		const target: ApiTarget = { url, token, userJwt };
 		const ignore = () => undefined;
 
 		// Apps + Plugins — both tabs read ONE catalog query (the variant filter is
@@ -120,5 +121,5 @@ export function useStorePrefetch(): void {
 				org: MODEL_LIST_DEFAULTS.org,
 			})
 		).catch(ignore);
-	}, [qc, url, token]);
+	}, [qc, url, token, userJwt]);
 }

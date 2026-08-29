@@ -22,6 +22,9 @@ import {
 	Clock01Icon,
 	Copy01Icon,
 	Delete01Icon,
+	GitBranchIcon,
+	GridIcon,
+	Link01Icon,
 	LockedIcon,
 	Message01Icon,
 	Refresh01Icon,
@@ -79,8 +82,13 @@ import {
 } from "./agent-banner-dialog.tsx";
 import { formatToolDisplayName } from "./agent-elements/tools/tool-registry.ts";
 import {
+	AGENT_INTEGRATION_SNIPPET_LANGS,
+	type AgentIntegrationSnippetLang,
+} from "./agent-integration-snippets.ts";
+import {
 	AGENT_TAB_LABELS,
 	type AgentSettingsEntry,
+	type AgentSettingsTab,
 	revealAgentSetting,
 	searchAgentSettings,
 } from "./agent-settings-search.ts";
@@ -1169,105 +1177,230 @@ export function AgentByoaView({
 	);
 }
 
-// ── Connect with code ─────────────────────────────────────────────────────────
+// ── Integrations ─────────────────────────────────────────────────────────────
 
-export type SnippetLang = "curl" | "typescript" | "sdk";
+interface IntegrationCardProps {
+	code: string;
+	description: string;
+	icon: ReactNode;
+	title: string;
+}
 
-export const SNIPPET_LANGS: { id: SnippetLang; label: string }[] = [
-	{ id: "curl", label: "cURL" },
-	{ id: "typescript", label: "TypeScript" },
-	{ id: "sdk", label: "Ryu SDK" },
-];
+function IntegrationCard({
+	code,
+	description,
+	icon,
+	title,
+}: IntegrationCardProps) {
+	return (
+		<div className="flex min-w-0 flex-col gap-3 rounded-xl border border-border/70 bg-background p-3.5">
+			<div className="flex items-center gap-2">
+				<div className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-muted text-foreground">
+					{icon}
+				</div>
+				<h4 className="min-w-0 font-medium text-sm">{title}</h4>
+			</div>
+			<p className="text-muted-foreground text-xs leading-relaxed">
+				{description}
+			</p>
+			<pre className="max-h-40 overflow-auto rounded-md bg-muted/70 p-2.5 font-mono text-[10px] leading-relaxed">
+				<code translate="no">{code}</code>
+			</pre>
+		</div>
+	);
+}
 
-export interface AgentConnectViewProps {
+export interface AgentIntegrationsViewProps {
 	agentId: string;
+	byoaPanel?: ReactNode;
 	copied?: boolean;
+	coreUrl: string;
+	githubActionsSnippet: string;
 	hasToken?: boolean;
-	lang?: SnippetLang;
+	lang?: AgentIntegrationSnippetLang;
 	onCopy?: () => void;
-	onLangChange?: (lang: SnippetLang) => void;
+	onLangChange?: (lang: AgentIntegrationSnippetLang) => void;
+	onOpenDocs?: () => void;
 	snippet: string;
 }
 
-export function AgentConnectView({
+export function AgentIntegrationsView({
 	agentId,
+	byoaPanel,
+	copied = false,
+	coreUrl,
+	githubActionsSnippet,
 	hasToken = false,
-	lang = "curl",
-	snippet,
-	copied,
-	onLangChange,
+	lang = "typescript",
 	onCopy,
-}: AgentConnectViewProps) {
+	onLangChange,
+	onOpenDocs,
+	snippet,
+}: AgentIntegrationsViewProps) {
 	return (
-		<SettingsSection
-			caption={
-				<>
-					Call this agent from your own code. Point requests at this node's
-					address with the agent id{" "}
-					<code className="rounded bg-muted px-1 font-mono text-[11px]">
-						{agentId}
-					</code>
-					{hasToken ? (
-						<>
-							{" "}
-							and your node token. The reply streams in Vercel AI SDK format.
-						</>
-					) : (
-						<>. This local node accepts unauthenticated requests.</>
-					)}
-				</>
-			}
-			headerAction={
-				<Badge className="font-mono" variant="secondary">
-					{agentId}
-				</Badge>
-			}
-			title="Connect with code"
-		>
-			<SettingsCard className="flex flex-col gap-3">
-				<div className="flex items-center gap-1">
-					{SNIPPET_LANGS.map((l) => (
+		<div className="flex flex-col gap-6">
+			<SettingsSection
+				caption="Call the saved agent from a Node app, Python service, Go program, or any client that can send JSON over HTTP. The agent's tools, rules, and Gateway policies still apply."
+				headerAction={
+					<div className="flex items-center gap-1.5">
+						<Badge className="font-mono" variant="secondary">
+							<span translate="no">{agentId}</span>
+						</Badge>
+						<Badge variant="outline">HTTP + SSE</Badge>
+					</div>
+				}
+				title="Call your agent from code"
+			>
+				<SettingsCard className="flex flex-col gap-3">
+					<div className="flex flex-wrap items-center gap-1">
+						{AGENT_INTEGRATION_SNIPPET_LANGS.map((option) => (
+							<Button
+								aria-pressed={lang === option.id}
+								key={option.id}
+								onClick={() => onLangChange?.(option.id)}
+								size="sm"
+								type="button"
+								variant={lang === option.id ? "secondary" : "ghost"}
+							>
+								{option.label}
+							</Button>
+						))}
 						<Button
-							key={l.id}
-							onClick={() => onLangChange?.(l.id)}
-							size="sm"
-							variant={lang === l.id ? "secondary" : "ghost"}
+							aria-label={copied ? "Code sample copied" : "Copy code sample"}
+							className="ml-auto"
+							onClick={onCopy}
+							size="icon-sm"
+							type="button"
+							variant="ghost"
 						>
-							{l.label}
+							{copied ? (
+								<HugeiconsIcon
+									aria-hidden="true"
+									className="size-3 text-green-600"
+									icon={Tick01Icon}
+								/>
+							) : (
+								<HugeiconsIcon
+									aria-hidden="true"
+									className="size-3"
+									icon={Copy01Icon}
+								/>
+							)}
 						</Button>
-					))}
-					<Button
-						className="ml-auto"
-						onClick={onCopy}
-						size="icon-sm"
-						variant="ghost"
-					>
-						{copied ? (
-							<HugeiconsIcon
-								className="size-3 text-green-600"
-								icon={Tick01Icon}
-							/>
-						) : (
-							<HugeiconsIcon className="size-3" icon={Copy01Icon} />
-						)}
-					</Button>
-				</div>
+					</div>
 
-				<pre className="overflow-x-auto rounded-md border bg-background p-3 font-mono text-[11px] leading-relaxed">
-					<code>{snippet}</code>
-				</pre>
-
-				{hasToken ? (
+					<pre className="max-h-[28rem] overflow-auto rounded-md border bg-background p-3 font-mono text-[11px] leading-relaxed">
+						<code translate="no">{snippet}</code>
+					</pre>
 					<p className="text-muted-foreground text-xs">
-						Replace{" "}
-						<code className="rounded bg-muted px-1 font-mono text-[11px]">
-							YOUR_NODE_TOKEN
+						The TypeScript example uses{" "}
+						<code
+							className="rounded bg-muted px-1 font-mono text-[11px]"
+							translate="no"
+						>
+							@ryuhq/client
 						</code>{" "}
-						with this node's auth token (the machine secret used to reach Core).
+						to call a saved agent. Use{" "}
+						<code
+							className="rounded bg-muted px-1 font-mono text-[11px]"
+							translate="no"
+						>
+							@ryuhq/sdk
+						</code>{" "}
+						when you are authoring a new agent, tool, or app.
 					</p>
-				) : null}
-			</SettingsCard>
-		</SettingsSection>
+
+					<div className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1 text-xs">
+						<p className="text-muted-foreground">
+							Endpoint{" "}
+							<code
+								className="rounded bg-muted px-1 font-mono text-[11px]"
+								translate="no"
+							>
+								{coreUrl}/api/chat/stream
+							</code>
+						</p>
+						{onOpenDocs ? (
+							<Button
+								onClick={onOpenDocs}
+								size="sm"
+								type="button"
+								variant="link"
+							>
+								Read integration docs
+							</Button>
+						) : null}
+					</div>
+
+					<p aria-live="polite" className="text-muted-foreground text-xs">
+						{hasToken ? (
+							<>
+								This node requires auth. Keep its token in{" "}
+								<code
+									className="rounded bg-muted px-1 font-mono text-[11px]"
+									translate="no"
+								>
+									RYU_TOKEN
+								</code>
+								and out of source control.
+							</>
+						) : (
+							"This local node currently accepts requests without a token."
+						)}
+					</p>
+				</SettingsCard>
+			</SettingsSection>
+
+			<SettingsSection
+				caption="Use the path that matches where the work happens. Accounts and app permissions stay in the Connections tab."
+				title="Other ways to use this agent"
+			>
+				<div className="grid gap-3 md:grid-cols-3">
+					<IntegrationCard
+						code={githubActionsSnippet}
+						description="Run the saved agent from pull requests, releases, and other CI jobs."
+						icon={
+							<HugeiconsIcon
+								aria-hidden="true"
+								className="size-4"
+								icon={GitBranchIcon}
+							/>
+						}
+						title="GitHub Actions"
+					/>
+					<IntegrationCard
+						code={
+							"bunx create-ryu-app my-agent-app --template ryu-app\nbunx ryu pack ."
+						}
+						description="Wrap an agent tool or result in an interactive widget that renders inside chat."
+						icon={
+							<HugeiconsIcon
+								aria-hidden="true"
+								className="size-4"
+								icon={GridIcon}
+							/>
+						}
+						title="Build a Ryu App"
+					/>
+					<IntegrationCard
+						code={`ryu-mcp serve\nRYU_CORE_URL=${coreUrl}${
+							hasToken ? "\nRYU_CORE_TOKEN=$RYU_TOKEN" : ""
+						}`}
+						description="Expose governed Ryu tools to Claude, Codex, or another MCP host."
+						icon={
+							<HugeiconsIcon
+								aria-hidden="true"
+								className="size-4"
+								icon={Link01Icon}
+							/>
+						}
+						title="MCP host"
+					/>
+				</div>
+			</SettingsSection>
+
+			{byoaPanel}
+		</div>
 	);
 }
 
@@ -1639,7 +1772,6 @@ export interface AgentSettingsFormProps {
 	agentTitle?: string;
 	/** Injected: the current agent's Gateway token budget editor. */
 	budgetPanel?: ReactNode;
-	byoaPanel?: ReactNode;
 	/** Injected: the per-agent Calendar view, rendered as its own tab. Omit to
 	 *  hide the tab. */
 	calendarPanel?: ReactNode;
@@ -1667,9 +1799,6 @@ export interface AgentSettingsFormProps {
 	composioToolkitItems: SlotOption[];
 	composioTriggers: ComposioTriggerRow[];
 	connectedAccountId: string;
-
-	// Connect / BYOA panels (injected — own hooks)
-	connectPanel?: ReactNode;
 	customCron: string;
 	customTone: string;
 	dailyTime: string;
@@ -1690,8 +1819,13 @@ export interface AgentSettingsFormProps {
 	historyPanel?: ReactNode;
 	/** Injected: the per-agent Identity Vault profile picker (empty = none). */
 	identityPanel?: ReactNode;
+	/** Optional starting tab for storyboards and other presentational hosts. */
+	initialTab?: AgentSettingsTab;
 	/** Injected rich editor node for Instructions; falls back to a textarea. */
 	instructionsEditor?: ReactNode;
+
+	/** Injected: code samples and external integration paths for this agent. */
+	integrationsPanel?: ReactNode;
 	isBuiltIn: boolean;
 	isLocked: boolean;
 	isNew: boolean;
@@ -2089,6 +2223,7 @@ export function AgentSettingsForm(props: AgentSettingsFormProps) {
 		isNew,
 		isLocked,
 		instructionsEditor,
+		initialTab,
 		agentSetupComposer,
 		promptStudioPanel,
 		rulesPanel,
@@ -2155,6 +2290,7 @@ export function AgentSettingsForm(props: AgentSettingsFormProps) {
 		codexConfig,
 		gatewayRoutingConfig,
 		budgetPanel,
+		integrationsPanel,
 		scheduleEnabled,
 		onScheduleEnabledChange,
 		schedulePhrase,
@@ -2179,8 +2315,6 @@ export function AgentSettingsForm(props: AgentSettingsFormProps) {
 		triggerError,
 		onSubscribeTrigger,
 		advancedInference,
-		connectPanel,
-		byoaPanel,
 		employeeBadge,
 		formError,
 		saving,
@@ -2195,8 +2329,10 @@ export function AgentSettingsForm(props: AgentSettingsFormProps) {
 	// "Open Prompt Studio" shortcut can switch tabs programmatically.
 	// Opens on Behavior — what the agent does is the first question, not which
 	// engine serves it.
-	const [activeTab, setActiveTab] = useState("behavior");
-	// Sixty-odd settings behind seven pills: the same "which tab is it under"
+	const [activeTab, setActiveTab] = useState<AgentSettingsTab>(
+		initialTab ?? "behavior"
+	);
+	// Sixty-odd settings behind eight pills: the same "which tab is it under"
 	// problem the settings dialogs already solved with a row-level index. Same
 	// answer here — `agent-settings-search.ts` indexes the ROWS, and picking a hit
 	// switches to its tab and flashes it.
@@ -3004,7 +3140,7 @@ export function AgentSettingsForm(props: AgentSettingsFormProps) {
 							className="min-h-32"
 							disabled={isLocked}
 							id="agent-prompt"
-							readOnly={isLocked}
+							readOnly
 							value={systemPrompt}
 						/>
 					)}
@@ -3108,8 +3244,6 @@ export function AgentSettingsForm(props: AgentSettingsFormProps) {
 	const advancedPanel = (
 		<section aria-label="Advanced" className="flex flex-col gap-5">
 			{advancedInference}
-			{connectPanel}
-			{byoaPanel}
 		</section>
 	);
 
@@ -3198,9 +3332,9 @@ export function AgentSettingsForm(props: AgentSettingsFormProps) {
 			</Tabs>
 		) : null;
 
-	// Seven groups, each answering one question a person actually has, with the
+	// Eight groups, each answering one question a person actually has, with the
 	// answer spelled out under the strip. This replaces an eleven-pill row whose
-	// labels (Model · Trigger · Tools · Connections · Rules · Instructions ·
+	// labels (Model · Trigger · Tools · Connections · Integrations · Rules · Instructions ·
 	// Advanced · Prompt Studio · Evals · Calendar · History) gave no hint which
 	// one held the setting you were looking for.
 	const editorTabs: {
@@ -3237,6 +3371,16 @@ export function AgentSettingsForm(props: AgentSettingsFormProps) {
 			id: "connections",
 			label: "Connections",
 		},
+		...(integrationsPanel
+			? [
+					{
+						content: integrationsPanel,
+						hint: "Call this agent from code, CI, MCP hosts, or a Ryu App.",
+						id: "integrations",
+						label: "Integrations",
+					},
+				]
+			: []),
 		{
 			content: triggersPanel,
 			hint: "When it should run on its own, without you asking.",
@@ -3265,7 +3409,7 @@ export function AgentSettingsForm(props: AgentSettingsFormProps) {
 			: []),
 		{
 			content: advancedPanel,
-			hint: "Sampling, extra model slots, and bring-your-own-agent wiring. Safe to ignore.",
+			hint: "Sampling, extra model slots, and other low-level controls. Safe to ignore.",
 			id: "advanced",
 			label: "Advanced",
 		},
@@ -3275,6 +3419,11 @@ export function AgentSettingsForm(props: AgentSettingsFormProps) {
 			setActiveTab("behavior");
 		}
 	}, [activeTab, showStandaloneModelPanel]);
+	useEffect(() => {
+		if (!integrationsPanel && activeTab === "integrations") {
+			setActiveTab("behavior");
+		}
+	}, [activeTab, integrationsPanel]);
 
 	const activeHint = editorTabs.find((tab) => tab.id === activeTab)?.hint ?? "";
 

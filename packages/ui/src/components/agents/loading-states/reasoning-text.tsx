@@ -26,24 +26,24 @@ const CASCADE_STAGGER = 0.025;
 export type ReasoningTextVariant = "cascade" | "swap" | "scramble";
 
 export interface ReasoningTextProps {
-	/** Phrases cycled through while the agent works. */
-	phrases?: string[];
-	/** Animation used when the active phrase changes. */
-	variant?: ReasoningTextVariant;
-	/** Milliseconds each phrase remains visible. */
-	interval?: number;
-	/** Seconds taken for one shimmer pass. */
-	shimmerDuration?: number;
+	className?: string;
 	/** Optional leading visual. Defaults to a terminal-style ASCII loader. */
 	indicator?: ReactNode;
-	className?: string;
+	/** Milliseconds each phrase remains visible. */
+	interval?: number;
+	/** Phrases cycled through while the agent works. */
+	phrases?: string[];
+	/** Seconds taken for one shimmer pass. */
+	shimmerDuration?: number;
+	/** Animation used when the active phrase changes. */
+	variant?: ReasoningTextVariant;
 }
 
-type PhraseProps = {
+interface PhraseProps {
 	phrase: string;
 	reduce: boolean;
 	shimmerDuration: number;
-};
+}
 
 function CascadePhrase({ phrase, reduce, shimmerDuration }: PhraseProps) {
 	const text = `${phrase}…`;
@@ -170,9 +170,12 @@ export function ReasoningText({
 			return;
 		}
 
-		const timer = window.setInterval(() => {
-			setIndex((current) => (current + 1) % safePhrases.length);
-		}, Math.max(600, interval));
+		const timer = window.setInterval(
+			() => {
+				setIndex((current) => (current + 1) % safePhrases.length);
+			},
+			Math.max(600, interval)
+		);
 
 		return () => window.clearInterval(timer);
 	}, [interval, safePhrases.length]);
@@ -194,7 +197,12 @@ export function ReasoningText({
 					className="inline-flex size-3 shrink-0 items-center justify-center"
 				>
 					{indicator ?? (
-						<Loader label="Reasoning" size={14} speed={0.8} variant="ascii-line" />
+						<Loader
+							label="Reasoning"
+							size={14}
+							speed={0.8}
+							variant="ascii-line"
+						/>
 					)}
 				</span>
 

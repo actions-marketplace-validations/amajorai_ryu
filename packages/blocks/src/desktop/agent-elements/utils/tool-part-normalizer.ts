@@ -1,4 +1,4 @@
-﻿type AnyRecord = Record<string, any>;
+type AnyRecord = Record<string, any>;
 
 function isRecord(value: unknown): value is AnyRecord {
 	return typeof value === "object" && value !== null;

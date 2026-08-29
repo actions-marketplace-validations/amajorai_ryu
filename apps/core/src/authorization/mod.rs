@@ -253,6 +253,10 @@ pub enum CredentialKind {
     None,
     OwnerRecoveryToken,
     PairedCapability { grant_id: String },
+    /// A Better Auth user JWT accepted by an org-bound managed node. The JWT is
+    /// verified against the control-plane JWKS and its role is lowered into the
+    /// Core capability vocabulary before route authorization.
+    ManagedUserJwt,
     HostedOAuth,
     ManagedDelegation,
     PluginHostGrant,

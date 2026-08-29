@@ -1,6 +1,6 @@
 // Searchable index of the agent editor's own settings.
 //
-// The editor holds seven tabs and roughly sixty settings. Before this, finding
+// The editor holds eight tabs and roughly sixty settings. Before this, finding
 // one meant knowing which tab it was filed under — the same problem the two
 // settings dialogs had before `settings-index.ts`, and solved the same way: a
 // declared list of ROWS, not tabs, so "where do I turn off memory writing" has an
@@ -22,6 +22,7 @@ export type AgentSettingsTab =
 	| "advanced"
 	| "behavior"
 	| "connections"
+	| "integrations"
 	| "model"
 	| "prompt-studio"
 	| "tools"
@@ -46,6 +47,7 @@ export const AGENT_TAB_LABELS: Record<AgentSettingsTab, string> = {
 	model: "Model",
 	tools: "Tools & knowledge",
 	connections: "Connections",
+	integrations: "Integrations",
 	triggers: "Triggers",
 	activity: "Activity",
 	"prompt-studio": "Prompt Studio",
@@ -177,10 +179,31 @@ export const AGENT_SETTINGS_ENTRIES: AgentSettingsEntry[] = [
 	},
 	{
 		id: "agent.connect-with-code",
-		label: "Connect with code",
+		label: "Call your agent from code",
 		group: "",
-		tab: "connections",
+		tab: "integrations",
 		keywords: "api sdk snippet endpoint webhook reach it",
+	},
+	{
+		id: "agent.github-actions",
+		label: "GitHub Actions",
+		group: "Other ways to use this agent",
+		tab: "integrations",
+		keywords: "ci cd pull request release automation workflow",
+	},
+	{
+		id: "agent.ryu-app",
+		label: "Build a Ryu App",
+		group: "Other ways to use this agent",
+		tab: "integrations",
+		keywords: "widget chat ui app create-ryu-app",
+	},
+	{
+		id: "agent.mcp-host",
+		label: "MCP host",
+		group: "Other ways to use this agent",
+		tab: "integrations",
+		keywords: "model context protocol tools claude codex",
 	},
 
 	// ── Triggers ──────────────────────────────────────────────────────────────
@@ -249,7 +272,7 @@ export const AGENT_SETTINGS_ENTRIES: AgentSettingsEntry[] = [
 		id: "agent.byoa",
 		label: "Bring external agent",
 		group: "",
-		tab: "advanced",
+		tab: "integrations",
 		keywords: "byoa claude code codex opencode acp bridge own agent",
 	},
 ];

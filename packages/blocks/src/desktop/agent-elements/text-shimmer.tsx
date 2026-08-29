@@ -1,4 +1,4 @@
-﻿import { cn } from "@ryu/ui/lib/utils";
+import { cn } from "@ryu/ui/lib/utils";
 import React from "react";
 
 export interface TextShimmerProps {

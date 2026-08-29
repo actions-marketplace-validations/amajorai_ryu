@@ -20,5 +20,8 @@ export function useLiveActivities(): void {
 	useContributedLiveActivities();
 }
 
-export type { LiveActivity, LiveActivityStatus } from "@ryu/app-host/live-activity";
+export type {
+	LiveActivity,
+	LiveActivityStatus,
+} from "@ryu/app-host/live-activity";
 export { isLiveStatus } from "@ryu/app-host/live-activity";

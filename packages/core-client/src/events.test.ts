@@ -17,7 +17,11 @@ afterEach(() => {
 	globalThis.fetch = realFetch;
 });
 
-const target: ApiTarget = { url: "http://127.0.0.1:7980", token: "t" };
+const target: ApiTarget = {
+	url: "http://127.0.0.1:7980",
+	token: "t",
+	userJwt: null,
+};
 
 function streamOnce(chunks: string[], init?: ResponseInit): void {
 	const encoder = new TextEncoder();

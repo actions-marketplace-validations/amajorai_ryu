@@ -30,7 +30,7 @@ export async function streamDesktopNotifications(
 ): Promise<void> {
 	const resp = await fetch(apiUrl(target, "/api/events/notifications/stream"), {
 		method: "GET",
-		headers: makeHeaders(target.token),
+		headers: makeHeaders(target.token, target.userJwt),
 		signal,
 	});
 	if (!(resp.ok && resp.body)) {

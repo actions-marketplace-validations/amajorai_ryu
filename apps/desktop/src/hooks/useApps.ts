@@ -81,8 +81,9 @@ export function useApps(): UseAppsResult {
 	const target: ApiTarget = {
 		url: activeNode.url,
 		token: activeNode.token ?? null,
+		userJwt: activeNode.userJwt ?? null,
 	};
-	const { url, token } = target;
+	const { url, token, userJwt } = target;
 
 	const [apps, setApps] = useState<AppInfo[]>([]);
 	const [loading, setLoading] = useState(true);
@@ -100,7 +101,7 @@ export function useApps(): UseAppsResult {
 	const reload = useCallback(async () => {
 		setLoading(true);
 		setError(null);
-		const node: ApiTarget = { url, token };
+		const node: ApiTarget = { url, token, userJwt };
 		try {
 			const list = await fetchApps(node);
 			setApps(list);
@@ -127,7 +128,7 @@ export function useApps(): UseAppsResult {
 				prev.map((a) => (a.id === id ? { ...a, enabled: enable } : a))
 			);
 
-			const node: ApiTarget = { url, token };
+			const node: ApiTarget = { url, token, userJwt };
 			try {
 				const record: AppToggleResult = enable
 					? await apiEnableApp(node, id)
@@ -180,7 +181,7 @@ export function useApps(): UseAppsResult {
 	const uninstall = useCallback(
 		async (id: string, options?: { cascade?: boolean }) => {
 			setToggleError(null);
-			const node: ApiTarget = { url, token };
+			const node: ApiTarget = { url, token, userJwt };
 			try {
 				const result = await apiUninstallApp(node, id, options);
 				surfaceExternallyManaged(result);
@@ -213,7 +214,7 @@ export function useApps(): UseAppsResult {
 
 	const install = useCallback(
 		async (id: string) => {
-			const node: ApiTarget = { url, token };
+			const node: ApiTarget = { url, token, userJwt };
 			const record = await apiInstallApp(node, id);
 			// Mark app as installed (disabled) in local state.
 			setApps((prev) =>

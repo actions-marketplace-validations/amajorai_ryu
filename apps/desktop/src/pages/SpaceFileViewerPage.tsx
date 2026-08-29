@@ -78,7 +78,11 @@ export default function SpaceFileViewerPage({
 		const controller = new AbortController();
 		setError(null);
 		setLoaded(null);
-		const target = { token: node.token ?? null, url: node.url };
+		const target = {
+			token: node.token,
+			userJwt: node.userJwt ?? null,
+			url: node.url,
+		};
 		Promise.all([
 			fetchDocuments(target, spaceId),
 			fetchSpaceFileBlob(target, spaceId, documentId, controller.signal),
@@ -142,7 +146,7 @@ export default function SpaceFileViewerPage({
 		try {
 			const blob = await editorRef.current.exportFile();
 			await replaceSpaceFileBlob(
-				{ token: node.token ?? null, url: node.url },
+				{ token: node.token, userJwt: node.userJwt ?? null, url: node.url },
 				spaceId,
 				documentId,
 				blob,

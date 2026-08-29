@@ -66,7 +66,7 @@ describe("agent setup model slot wire format", () => {
 			})) as unknown as typeof globalThis.fetch;
 		try {
 			const agent = await fetchAgent(
-				{ token: null, url: "http://127.0.0.1:7980" },
+				{ token: null, url: "http://127.0.0.1:7980", userJwt: null },
 				"researcher"
 			);
 			expect(agent.engine).toBe("acp:pi");

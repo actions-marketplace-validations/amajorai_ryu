@@ -319,11 +319,14 @@ async function* streamUpstream(model, payload) {
 					object: "chat.completion.chunk",
 					created: Math.floor(Date.now() / 1000),
 					model,
-					choices: [{ index: 0, delta: { content: event.delta }, finish_reason: null }],
+					choices: [
+						{ index: 0, delta: { content: event.delta }, finish_reason: null },
+					],
 				})}\n\n`;
 			}
 			if (event.type === "response.completed") {
-				const finishReason = event.response?.status === "incomplete" ? "length" : "stop";
+				const finishReason =
+					event.response?.status === "incomplete" ? "length" : "stop";
 				yield `data: ${JSON.stringify({
 					id: responseId,
 					object: "chat.completion.chunk",
@@ -348,7 +351,7 @@ async function* streamUpstream(model, payload) {
 			}
 		}
 	}
-	if (!sentDone) {
+	if (sentDone) {
 		yield "data: [DONE]\n\n";
 	} else {
 		yield "data: [DONE]\n\n";

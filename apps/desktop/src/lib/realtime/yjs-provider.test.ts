@@ -60,7 +60,7 @@ const originalWebSocket = globalThis.WebSocket;
 function makeProvider(onStatusChange?: (s: RyuYjsStatus) => void) {
 	return new RyuYjsProvider({
 		roomId: "db_test",
-		target: { url: "http://127.0.0.1:8980", token: null },
+		target: { url: "http://127.0.0.1:8980", token: null, userJwt: null },
 		jwt: null,
 		handlers: { onStatusChange },
 	});

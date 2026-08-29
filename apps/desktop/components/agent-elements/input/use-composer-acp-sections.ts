@@ -199,6 +199,7 @@ export function useComposerAcpSections({
 			listInstalledModels({
 				url: activeNode.url,
 				token: activeNode.token ?? null,
+				userJwt: activeNode.userJwt ?? null,
 			}),
 		enabled: isRyuAgent,
 		staleTime: 60_000,
@@ -209,6 +210,7 @@ export function useComposerAcpSections({
 			getActiveModel({
 				url: activeNode.url,
 				token: activeNode.token ?? null,
+				userJwt: activeNode.userJwt ?? null,
 			}),
 		enabled: isRyuAgent,
 		staleTime: 30_000,

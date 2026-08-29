@@ -2,60 +2,60 @@
 
 // beui.dev/components/motion/preview-rail
 
-import { EASE_OUT, SPRING_LAYOUT } from "@ryu/ui/lib/ease";
 import { useHoverCapable } from "@ryu/ui/hooks/use-hover-capable";
+import { EASE_OUT, SPRING_LAYOUT } from "@ryu/ui/lib/ease";
 import { cn } from "@ryu/ui/lib/utils";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import { type ReactNode, useId, useState } from "react";
 
 export interface PreviewRailItem {
-	id: string;
-	label: string;
 	ariaLabel?: string;
-	description?: ReactNode;
-	href?: string;
-	target?: "_blank" | "_self" | "_parent" | "_top";
-	rel?: string;
 	/** Arbitrary consumer payload carried through to `renderPreview`. */
 	data?: unknown;
+	description?: ReactNode;
+	href?: string;
+	id: string;
+	label: string;
+	rel?: string;
+	target?: "_blank" | "_self" | "_parent" | "_top";
 }
 
 export interface PreviewRailProps {
-	items: PreviewRailItem[];
-	label?: string;
-	orientation?: "vertical" | "horizontal";
 	activeId?: string;
-	defaultActiveId?: string;
-	onActiveChange?: (id: string) => void;
-	onItemSelect?: (item: PreviewRailItem) => void;
-	renderPreview?: (item: PreviewRailItem) => ReactNode;
-	showPreview?: boolean;
-	previewSide?: "before" | "after";
-	highlightActive?: boolean;
-	itemSize?: number;
 	children?: ReactNode;
 	className?: string;
-	railClassName?: string;
-	previewContainerClassName?: string;
+	defaultActiveId?: string;
+	highlightActive?: boolean;
+	itemSize?: number;
+	items: PreviewRailItem[];
+	label?: string;
+	onActiveChange?: (id: string) => void;
+	onItemSelect?: (item: PreviewRailItem) => void;
+	orientation?: "vertical" | "horizontal";
 	previewClassName?: string;
+	previewContainerClassName?: string;
+	previewSide?: "before" | "after";
+	railClassName?: string;
+	renderPreview?: (item: PreviewRailItem) => ReactNode;
+	showPreview?: boolean;
 }
 
 function DefaultPreview({ item }: { item: PreviewRailItem }) {
 	return (
 		<div
-			data-slot="preview-rail-card"
 			className="rounded-2xl border border-border bg-card p-4 shadow-sm"
+			data-slot="preview-rail-card"
 		>
 			<p
-				data-slot="preview-rail-title"
 				className="font-medium text-card-foreground"
+				data-slot="preview-rail-title"
 			>
 				{item.label}
 			</p>
 			{item.description ? (
 				<div
+					className="mt-1 text-muted-foreground text-sm leading-6"
 					data-slot="preview-rail-description"
-					className="mt-1 text-sm leading-6 text-muted-foreground"
 				>
 					{item.description}
 				</div>
@@ -113,14 +113,14 @@ export function PreviewRail({
 
 	return (
 		<motion.div
-			layoutRoot
 			className={cn(
-				"isolate relative flex w-full overflow-visible",
+				"relative isolate flex w-full overflow-visible",
 				isHorizontal
 					? "min-h-64 flex-col items-center justify-center"
 					: "min-h-80",
 				className
 			)}
+			layoutRoot
 			onBlur={(event) => {
 				if (!event.currentTarget.contains(event.relatedTarget)) {
 					setFocusedId(null);
@@ -132,7 +132,7 @@ export function PreviewRail({
 				className={cn(
 					"relative z-10 grid shrink-0",
 					isHorizontal
-						? "h-12 w-fit max-w-full self-center justify-center"
+						? "h-12 w-fit max-w-full justify-center self-center"
 						: "w-12 content-center",
 					railClassName
 				)}
@@ -266,9 +266,7 @@ export function PreviewRail({
 								isHorizontal ? "justify-center" : undefined
 							)}
 							key={item.id}
-							style={
-								isHorizontal ? { width: itemSize } : { height: itemSize }
-							}
+							style={isHorizontal ? { width: itemSize } : { height: itemSize }}
 						>
 							{item.id === displayedId ? (
 								<div

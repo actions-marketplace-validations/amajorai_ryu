@@ -103,6 +103,7 @@ export function PrivacySettings() {
 		() => ({
 			url: activeNode.url,
 			token: activeNode.token ?? null,
+			userJwt: activeNode.userJwt ?? null,
 		}),
 		[activeNode.url, activeNode.token]
 	);

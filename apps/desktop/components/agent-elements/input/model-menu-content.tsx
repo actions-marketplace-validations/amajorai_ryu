@@ -188,8 +188,8 @@ export function ModelMenuContent({
 }) {
 	const node = useActiveNode();
 	const target = useMemo(
-		() => ({ url: node.url, token: node.token ?? null }),
-		[node.url, node.token]
+		() => ({ url: node.url, token: node.token, userJwt: node.userJwt ?? null }),
+		[node.url, node.token, node.userJwt]
 	);
 	const [query, setQuery] = useState("");
 	const normalizedQuery = query.trim().toLowerCase();

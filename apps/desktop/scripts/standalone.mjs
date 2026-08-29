@@ -133,7 +133,7 @@ function buildUiIfNeeded(appDir, manifest) {
 		return readFileSync(companionHtml, "utf8");
 	}
 	let path = uiEntryPath(appDir, uiDir, entry);
-	if (!path && !uiDir) {
+	if (!(path || uiDir)) {
 		const packagePath = join(appDir, "package.json");
 		const packageJson = existsSync(packagePath) ? readJson(packagePath) : null;
 		const buildScript = packageJson?.scripts?.build;

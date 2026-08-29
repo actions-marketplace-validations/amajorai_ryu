@@ -41,13 +41,20 @@
       "!plugins-store/*/*/tools",
       "!plugins-store/*/*/plugin.json",
       "!plugins-store/*/*/mcp.json",
+      "!apps-store/*/hooks",
+      "!apps-store/*/adapters",
+      "!apps-store/*/ui/companion.html",
       "!tools/oxlint/anti-slop",
       "!apps-store/*/tools",
       "!registry/registry.json",
       "!apps/core/Python",
       "!apps/core/src/plugin_manifest/fixtures",
       "!apps/web/public/openapi.json",
+      "!crates/sdk/core/specs/core-openapi.json",
+      "!crates/sdk/napi/index.js",
+      "!crates/sdk/napi/index.d.ts",
       "!apps/desktop/e2e/harness/*.html",
+      "!apps/desktop/e2e/harness/media-proof-dist",
       "!apps/fumadocs",
       "!apps/raycast",
       "!.codex-mcp-proof.html",
@@ -233,13 +240,29 @@
       }
     },
     {
-      "includes": ["crates/sdk/napi/index.js"],
+      "includes": ["crates/sdk/napi/index.js", "crates/sdk/napi/index.d.ts"],
       "linter": {
+        "enabled": false
+      },
+      "formatter": {
         "enabled": false
       }
     },
     {
       "includes": ["tools/toolsmith/harness.mjs"],
+      "linter": {
+        "rules": {
+          "suspicious": {
+            "noMisplacedAssertion": "off"
+          }
+        }
+      }
+    },
+    {
+      "includes": [
+        "tools/generate-marketplace.test.mjs",
+        "tools/publish-workflows.test.mjs"
+      ],
       "linter": {
         "rules": {
           "suspicious": {

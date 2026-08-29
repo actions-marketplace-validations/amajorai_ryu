@@ -99,6 +99,7 @@ export default function SpaceDocEditorPage({
 	const node = useActiveNode();
 	const nodeUrl = node.url;
 	const nodeToken = node.token ?? null;
+	const nodeUserJwt = node.userJwt ?? null;
 	const oidcUser = useAppStore((s) => s.oidcUser);
 
 	// Wire `[[wikilinks]]` / `@mentions` in this Space's editor to real documents.
@@ -238,7 +239,7 @@ export default function SpaceDocEditorPage({
 				void handleRemoteReset();
 			},
 			onSyncedChange: handleSyncedChange,
-			target: { token: nodeToken, url: nodeUrl },
+			target: { token: nodeToken, url: nodeUrl, userJwt: nodeUserJwt },
 			user: cursorUser,
 		};
 	}, [
@@ -248,6 +249,7 @@ export default function SpaceDocEditorPage({
 		jwt,
 		nodeToken,
 		nodeUrl,
+		nodeUserJwt,
 		cursorUser,
 		handleSyncedChange,
 		handleRemoteReset,
@@ -332,7 +334,11 @@ export default function SpaceDocEditorPage({
 
 	// Server-backed page version history (snapshot / diff / restore).
 	const versionSource = useMemo<VersionSource>(() => {
-		const target = { token: nodeToken, url: nodeUrl };
+		const target = {
+			token: nodeToken,
+			url: nodeUrl,
+			userJwt: nodeUserJwt,
+		};
 		return {
 			list: () =>
 				listDocumentVersions(target, spaceId, documentId).then((vs) =>
@@ -358,7 +364,7 @@ export default function SpaceDocEditorPage({
 			restore: (versionId) =>
 				restoreDocumentVersion(target, spaceId, documentId, versionId),
 		};
-	}, [nodeToken, nodeUrl, spaceId, documentId, flush]);
+	}, [nodeToken, nodeUrl, nodeUserJwt, spaceId, documentId, flush]);
 
 	// After a restore, re-fetch the document and re-mount the editor so the
 	// restored content is shown (the flush timer is cleared to avoid clobbering it

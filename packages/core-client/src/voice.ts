@@ -24,7 +24,7 @@ export async function transcribeAudio(
 	// Don't use makeHeaders' JSON content-type — FormData sets its own multipart
 	// boundary. Carry only the bearer token when present.
 	const headers: Record<string, string> = {};
-	const auth = makeHeaders(target.token).Authorization;
+	const auth = makeHeaders(target.token, target.userJwt).Authorization;
 	if (auth) {
 		headers.Authorization = auth;
 	}
@@ -87,7 +87,7 @@ export async function listSpeechProcessingEngines(
 	const resp = await fetch(
 		apiUrl(target, "/api/voice/speech-processing-engines"),
 		{
-			headers: makeHeaders(target.token),
+			headers: makeHeaders(target.token, target.userJwt),
 		}
 	);
 	if (!resp.ok) {
@@ -108,7 +108,7 @@ export async function installSpeechProcessingModel(
 		apiUrl(target, "/api/voice/speech-processing-model/install"),
 		{
 			method: "POST",
-			headers: makeHeaders(target.token),
+			headers: makeHeaders(target.token, target.userJwt),
 			body: JSON.stringify({ engine }),
 		}
 	);
@@ -134,7 +134,7 @@ export async function processSpeechText(
 ): Promise<string> {
 	const resp = await fetch(apiUrl(target, "/api/voice/speech-processing"), {
 		method: "POST",
-		headers: makeHeaders(target.token),
+		headers: makeHeaders(target.token, target.userJwt),
 		body: JSON.stringify({
 			text,
 			engine: options.engine,
@@ -179,7 +179,7 @@ export interface TtsEngine {
  * the sidecar registry). Always includes the built-in `outetts`. */
 export async function listTtsEngines(target: ApiTarget): Promise<TtsEngine[]> {
 	const resp = await fetch(apiUrl(target, "/api/voice/tts-engines"), {
-		headers: makeHeaders(target.token),
+		headers: makeHeaders(target.token, target.userJwt),
 	});
 	if (!resp.ok) {
 		throw new Error(`tts-engines failed: ${resp.status}`);
@@ -205,7 +205,7 @@ export interface TtsModel {
  * + run), distinct from the raw HF text-to-speech browse in the Models tab. */
 export async function listTtsModels(target: ApiTarget): Promise<TtsModel[]> {
 	const resp = await fetch(apiUrl(target, "/api/voice/tts-models"), {
-		headers: makeHeaders(target.token),
+		headers: makeHeaders(target.token, target.userJwt),
 	});
 	if (!resp.ok) {
 		throw new Error(`tts-models failed: ${resp.status}`);
@@ -223,7 +223,7 @@ export async function installTtsModel(
 ): Promise<void> {
 	const resp = await fetch(apiUrl(target, "/api/voice/tts-models/install"), {
 		method: "POST",
-		headers: makeHeaders(target.token),
+		headers: makeHeaders(target.token, target.userJwt),
 		body: JSON.stringify({ engine, model_name: modelName }),
 	});
 	if (!resp.ok) {
@@ -264,7 +264,7 @@ export async function speakText(
 ): Promise<Blob> {
 	const resp = await fetch(apiUrl(target, "/api/voice/speak"), {
 		method: "POST",
-		headers: makeHeaders(target.token),
+		headers: makeHeaders(target.token, target.userJwt),
 		body: JSON.stringify({
 			text,
 			engine: options.engine,

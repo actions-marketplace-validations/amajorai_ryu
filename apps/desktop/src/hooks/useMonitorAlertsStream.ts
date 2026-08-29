@@ -44,11 +44,12 @@ export function useMonitorAlertsStream(): void {
 	const node = useActiveNode();
 	const url = node.url;
 	const token = node.token ?? null;
+	const userJwt = node.userJwt ?? null;
 	const qc = useQueryClient();
 
 	useEffect(() => {
 		const controller = new AbortController();
-		const target: ApiTarget = { url, token };
+		const target: ApiTarget = { url, token, userJwt };
 
 		const onAlert = (alert: Alert) => {
 			toast.error({ title: alert.title, description: alert.message });
@@ -66,5 +67,5 @@ export function useMonitorAlertsStream(): void {
 		return () => {
 			controller.abort();
 		};
-	}, [url, token, qc]);
+	}, [url, token, userJwt, qc]);
 }

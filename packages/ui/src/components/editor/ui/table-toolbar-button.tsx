@@ -221,8 +221,7 @@ function TablePicker() {
 				continue;
 			}
 			for (let j = 0; j < row.length; j++) {
-				row[j] =
-					i >= 0 && i <= rowIndex && j >= 0 && j <= colIndex ? 1 : 0;
+				row[j] = i >= 0 && i <= rowIndex && j >= 0 && j <= colIndex ? 1 : 0;
 			}
 		}
 

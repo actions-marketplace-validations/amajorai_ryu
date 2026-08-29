@@ -59,7 +59,9 @@ const git = (...a) => {
  * nightly" expressible at all.
  */
 const pickPrev = () => {
-	const tags = git("tag", "--list", "--sort=-v:refname").split("\n").filter(Boolean);
+	const tags = git("tag", "--list", "--sort=-v:refname")
+		.split("\n")
+		.filter(Boolean);
 	const sameChannel = tags.find((t) => t.includes(`-${channel}.`));
 	if (sameChannel) {
 		return sameChannel;
@@ -67,7 +69,8 @@ const pickPrev = () => {
 	return tags.find((t) => /^v\d+\.\d+\.\d+$/.test(t)) || "";
 };
 
-const prev = typeof args.get("prev") === "string" ? args.get("prev") : pickPrev();
+const prev =
+	typeof args.get("prev") === "string" ? args.get("prev") : pickPrev();
 const head = git("rev-parse", "HEAD");
 const range = prev ? `${prev}..${head}` : head;
 
@@ -120,7 +123,11 @@ const compare = prev
 const plain = () => {
 	const lines = [heading, ""];
 	// A rolling build can span many syncs; keep the body a sane length.
-	lines.push(...(bullets.length ? bullets.slice(0, 60) : entries.map((e) => `- ${e.subject}`)));
+	lines.push(
+		...(bullets.length
+			? bullets.slice(0, 60)
+			: entries.map((e) => `- ${e.subject}`))
+	);
 	if (bullets.length > 60) {
 		lines.push("", `_${bullets.length - 60} further entries omitted._`);
 	}
@@ -147,7 +154,7 @@ try {
 			body: JSON.stringify({
 				model: process.env.OPENCODE_MODEL || "mimo-v2.5",
 				temperature: 0.2,
-				max_tokens: Number(process.env.OPENCODE_MAX_TOKENS || 16000),
+				max_tokens: Number(process.env.OPENCODE_MAX_TOKENS || 16_000),
 				messages: [
 					{
 						role: "system",

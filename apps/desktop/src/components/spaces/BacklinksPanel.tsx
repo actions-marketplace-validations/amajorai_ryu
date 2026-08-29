@@ -20,12 +20,13 @@ export function BacklinksPanel({
 	const node = useActiveNode();
 	const { url } = node;
 	const token = node.token ?? null;
+	const userJwt = node.userJwt ?? null;
 	const { openTab } = useTabsContext();
 	const [links, setLinks] = useState<SpaceDocLink[]>([]);
 
 	useEffect(() => {
 		let cancelled = false;
-		fetchBacklinks({ url, token }, spaceId, documentId)
+		fetchBacklinks({ url, token, userJwt }, spaceId, documentId)
 			.then((result) => {
 				if (!cancelled) {
 					setLinks(result);
@@ -39,7 +40,7 @@ export function BacklinksPanel({
 		return () => {
 			cancelled = true;
 		};
-	}, [url, token, spaceId, documentId]);
+	}, [url, token, userJwt, spaceId, documentId]);
 
 	if (links.length === 0) {
 		return null;

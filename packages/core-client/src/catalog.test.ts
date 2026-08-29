@@ -27,7 +27,7 @@ describe("catalog client", () => {
 		}) as typeof fetch;
 		try {
 			await expect(
-				fetchServices({ token: null, url: "http://node" })
+				fetchServices({ token: null, url: "http://node", userJwt: null })
 			).resolves.toEqual([
 				expect.objectContaining({ name: "voice", running: true }),
 			]);

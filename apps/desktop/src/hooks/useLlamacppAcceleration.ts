@@ -38,6 +38,7 @@ export function useLlamacppAcceleration(): UseLlamacppAccelerationResult {
 	// every render, which would make `reload` re-run forever.
 	const url = activeNode.url;
 	const token = activeNode.token ?? null;
+	const userJwt = activeNode.userJwt ?? null;
 
 	const [acceleration, setAcceleration] = useState<LlamacppAcceleration | null>(
 		null
@@ -50,7 +51,7 @@ export function useLlamacppAcceleration(): UseLlamacppAccelerationResult {
 		setLoading(true);
 		setError(null);
 		try {
-			const target: ApiTarget = { url, token };
+			const target: ApiTarget = { url, token, userJwt };
 			setAcceleration(await fetchLlamacppAcceleration(target));
 		} catch (e) {
 			setError(
@@ -59,7 +60,7 @@ export function useLlamacppAcceleration(): UseLlamacppAccelerationResult {
 		} finally {
 			setLoading(false);
 		}
-	}, [url, token]);
+	}, [url, token, userJwt]);
 
 	useEffect(() => {
 		reload().catch(() => undefined);
@@ -70,7 +71,7 @@ export function useLlamacppAcceleration(): UseLlamacppAccelerationResult {
 			setSwitching(true);
 			setError(null);
 			try {
-				await setLlamacppAcceleration({ url, token }, variant);
+				await setLlamacppAcceleration({ url, token, userJwt }, variant);
 				await reload();
 			} catch (e) {
 				setError(e instanceof Error ? e.message : "Could not switch the build");
@@ -81,7 +82,7 @@ export function useLlamacppAcceleration(): UseLlamacppAccelerationResult {
 				setSwitching(false);
 			}
 		},
-		[url, token, reload]
+		[url, token, userJwt, reload]
 	);
 
 	return { acceleration, loading, switching, error, reload, select };

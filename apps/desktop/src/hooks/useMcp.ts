@@ -52,8 +52,9 @@ export function useMcp(): UseMcpResult {
 	const target: ApiTarget = {
 		url: activeNode.url,
 		token: activeNode.token ?? null,
+		userJwt: activeNode.userJwt ?? null,
 	};
-	const { url, token } = target;
+	const { url, token, userJwt } = target;
 
 	const [servers, setServers] = useState<McpServer[]>([]);
 	const [tools, setTools] = useState<McpTool[]>([]);
@@ -65,7 +66,7 @@ export function useMcp(): UseMcpResult {
 	const reload = useCallback(async () => {
 		setLoading(true);
 		setError(null);
-		const node: ApiTarget = { url, token };
+		const node: ApiTarget = { url, token, userJwt };
 		try {
 			const [serverList, toolList, agentList] = await Promise.all([
 				fetchMcpServers(node),
@@ -91,13 +92,16 @@ export function useMcp(): UseMcpResult {
 
 	const callTool = useCallback(
 		(tool: string, agentId: string, args: unknown) =>
-			apiCallMcpTool({ url, token }, { tool, agentId, arguments: args }),
+			apiCallMcpTool(
+				{ url, token, userJwt },
+				{ tool, agentId, arguments: args }
+			),
 		[url, token]
 	);
 
 	const createServer = useCallback(
 		async (input: CreateMcpServerInput): Promise<CreateMcpServerResult> => {
-			const result = await apiCreateMcpServer({ url, token }, input);
+			const result = await apiCreateMcpServer({ url, token, userJwt }, input);
 			if (result.ok) {
 				// Reload the server + tool list so the new server appears without
 				// requiring a manual refresh.
@@ -113,7 +117,11 @@ export function useMcp(): UseMcpResult {
 			name: string,
 			input: UpdateMcpServerInput
 		): Promise<UpdateMcpServerResult> => {
-			const result = await apiUpdateMcpServer({ url, token }, name, input);
+			const result = await apiUpdateMcpServer(
+				{ url, token, userJwt },
+				name,
+				input
+			);
 			if (result.ok) {
 				await reload();
 			}
@@ -124,7 +132,7 @@ export function useMcp(): UseMcpResult {
 
 	const deleteServer = useCallback(
 		async (name: string) => {
-			const result = await apiDeleteMcpServer({ url, token }, name);
+			const result = await apiDeleteMcpServer({ url, token, userJwt }, name);
 			if (result.ok) {
 				await reload();
 			}

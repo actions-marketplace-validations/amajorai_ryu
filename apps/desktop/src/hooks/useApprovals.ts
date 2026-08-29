@@ -21,7 +21,11 @@ export interface UseApprovalsResult {
 
 export function useApprovals(): UseApprovalsResult {
 	const node = useActiveNode();
-	const target: ApiTarget = { url: node.url, token: node.token ?? null };
+	const target: ApiTarget = {
+		url: node.url,
+		token: node.token,
+		userJwt: node.userJwt ?? null,
+	};
 	const qc = useQueryClient();
 
 	const listKey = ["approvals", "list", target.url] as const;

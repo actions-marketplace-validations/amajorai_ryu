@@ -39,28 +39,28 @@ const {
 describe("community agent install cache keys", () => {
 	test("separates node URL, node token, and account", () => {
 		const base = communityAgentInstallCacheKey(
-			{ url: "https://node-a.example/", token: "token-a" },
+			{ url: "https://node-a.example/", token: "token-a", userJwt: null },
 			"account-a",
 			"listing-1"
 		);
 
 		expect(
 			communityAgentInstallCacheKey(
-				{ url: "https://node-b.example", token: "token-a" },
+				{ url: "https://node-b.example", token: "token-a", userJwt: null },
 				"account-a",
 				"listing-1"
 			)
 		).not.toBe(base);
 		expect(
 			communityAgentInstallCacheKey(
-				{ url: "https://node-a.example", token: "token-b" },
+				{ url: "https://node-a.example", token: "token-b", userJwt: null },
 				"account-a",
 				"listing-1"
 			)
 		).not.toBe(base);
 		expect(
 			communityAgentInstallCacheKey(
-				{ url: "https://node-a.example", token: "token-a" },
+				{ url: "https://node-a.example", token: "token-a", userJwt: null },
 				"account-b",
 				"listing-1"
 			)
@@ -70,13 +70,13 @@ describe("community agent install cache keys", () => {
 	test("treats a trailing slash as the same node URL", () => {
 		expect(
 			communityAgentInstallCacheKey(
-				{ url: "https://node-a.example/", token: null },
+				{ url: "https://node-a.example/", token: null, userJwt: null },
 				null,
 				"listing-1"
 			)
 		).toBe(
 			communityAgentInstallCacheKey(
-				{ url: "https://node-a.example", token: null },
+				{ url: "https://node-a.example", token: null, userJwt: null },
 				null,
 				"listing-1"
 			)
@@ -85,27 +85,27 @@ describe("community agent install cache keys", () => {
 
 	test("idempotency key is scoped to node, account, and listing, not token", () => {
 		const key = communityAgentInstallIdempotencyKey(
-			{ url: "https://node-a.example/", token: "token-a" },
+			{ url: "https://node-a.example/", token: "token-a", userJwt: null },
 			"account-a",
 			"listing-1"
 		);
 		expect(
 			communityAgentInstallIdempotencyKey(
-				{ url: "https://node-a.example", token: "token-b" },
+				{ url: "https://node-a.example", token: "token-b", userJwt: null },
 				"account-a",
 				"listing-1"
 			)
 		).toBe(key);
 		expect(
 			communityAgentInstallIdempotencyKey(
-				{ url: "https://node-b.example", token: "token-a" },
+				{ url: "https://node-b.example", token: "token-a", userJwt: null },
 				"account-a",
 				"listing-1"
 			)
 		).not.toBe(key);
 		expect(
 			communityAgentInstallIdempotencyKey(
-				{ url: "https://node-a.example", token: "token-a" },
+				{ url: "https://node-a.example", token: "token-a", userJwt: null },
 				"account-b",
 				"listing-1"
 			)

@@ -1,4 +1,4 @@
-﻿import { AgentActivity } from "@ryu/ui/components/agents/agent-activity";
+import { AgentActivity } from "@ryu/ui/components/agents/agent-activity";
 import { formatNumber } from "@ryu/ui/lib/number-format.ts";
 import { memo, useMemo } from "react";
 import { useToolComplete } from "../hooks/use-tool-complete.ts";

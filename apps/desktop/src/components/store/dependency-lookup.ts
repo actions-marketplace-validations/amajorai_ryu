@@ -29,9 +29,10 @@ export function useDesktopDependencyLookup(): DependencyLookup {
 	const node = useActiveNode();
 	const url = node.url;
 	const token = node.token ?? null;
+	const userJwt = node.userJwt ?? null;
 	const { data } = useQuery({
 		queryKey: ["apps", "list", url],
-		queryFn: () => fetchApps({ url, token }),
+		queryFn: () => fetchApps({ url, token, userJwt }),
 		// A dependency tree is descriptive, not transactional: a slightly stale
 		// enabled bit is corrected by the lifecycle mutations, which invalidate this
 		// very key.

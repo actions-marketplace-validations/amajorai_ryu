@@ -1,4 +1,4 @@
-﻿import {
+import {
 	Alert02Icon,
 	ArrowDataTransferHorizontalIcon,
 	ArrowDown02Icon,

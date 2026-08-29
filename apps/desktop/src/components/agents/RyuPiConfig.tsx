@@ -42,7 +42,11 @@ export function RyuPiConfig() {
 	const activeModelQuery = useQuery({
 		queryKey: ["models", "active", activeNode.url],
 		queryFn: () =>
-			getActiveModel({ url: activeNode.url, token: activeNode.token ?? null }),
+			getActiveModel({
+				url: activeNode.url,
+				token: activeNode.token,
+				userJwt: activeNode.userJwt ?? null,
+			}),
 	});
 
 	// Locally fine-tuned (merged) models, offered as ready-to-pick gateway models.
@@ -55,6 +59,7 @@ export function RyuPiConfig() {
 			listInstalledModels({
 				url: activeNode.url,
 				token: activeNode.token ?? null,
+				userJwt: activeNode.userJwt ?? null,
 			}),
 	});
 	const installedStems = useMemo(
@@ -64,7 +69,11 @@ export function RyuPiConfig() {
 	const setActiveMutation = useMutation({
 		mutationFn: (stem: string) =>
 			setActiveModel(
-				{ url: activeNode.url, token: activeNode.token ?? null },
+				{
+					url: activeNode.url,
+					token: activeNode.token,
+					userJwt: activeNode.userJwt ?? null,
+				},
 				stem
 			),
 		onSuccess: (res) => {

@@ -82,8 +82,8 @@ export function useStoreSectionCounts(
 ): Record<string, number | undefined> {
 	const node = useActiveNode();
 	const target = useMemo(
-		() => ({ url: node.url, token: node.token ?? null }),
-		[node.url, node.token]
+		() => ({ url: node.url, token: node.token, userJwt: node.userJwt ?? null }),
+		[node.url, node.token, node.userJwt]
 	);
 
 	const pluginsQuery = useInfiniteQuery({
@@ -140,7 +140,8 @@ export function useStoreSectionCounts(
 	});
 	const enginesQuery = useQuery({
 		queryKey: ["catalog", "sidecars", target.url],
-		queryFn: () => fetchCatalog(target.url, target.token),
+		queryFn: () =>
+			fetchCatalog(target.url, target.token, undefined, target.userJwt),
 		staleTime: 5 * 60_000,
 	});
 	const sandbox = useSandboxBackends();

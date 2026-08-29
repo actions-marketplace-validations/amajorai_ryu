@@ -9,8 +9,8 @@
 // and it still works there (it just fills its own tab).
 
 import {
-	Chat01Icon,
 	Calendar04Icon,
+	Chat01Icon,
 	DashboardSquare01Icon,
 	InboxIcon,
 	LibraryIcon,

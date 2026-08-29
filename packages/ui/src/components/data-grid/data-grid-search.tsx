@@ -7,11 +7,11 @@ import { useDebouncedCallback } from "@ryu/ui/hooks/use-debounced-callback.ts";
 import type { SearchState } from "@ryu/ui/types/data-grid.ts";
 import { ChevronDown, ChevronUp, X } from "lucide-react";
 import {
-		type ChangeEvent,
-		type CompositionEvent,
-		type KeyboardEvent as ReactKeyboardEvent,
+	type ChangeEvent,
+	type CompositionEvent,
 	memo,
 	type PointerEvent,
+	type KeyboardEvent as ReactKeyboardEvent,
 	useEffect,
 	useRef,
 	useState,
@@ -143,7 +143,7 @@ function DataGridSearchImpl({
 		debouncedSearch(value);
 	}
 
-		function onKeyDown(event: ReactKeyboardEvent<HTMLInputElement>) {
+	function onKeyDown(event: ReactKeyboardEvent<HTMLInputElement>) {
 		event.stopPropagation();
 
 		if (event.key === "Enter") {

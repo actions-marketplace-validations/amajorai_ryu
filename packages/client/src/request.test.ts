@@ -5,8 +5,8 @@
 // empty-body → undefined, and non-2xx → Error carrying status + response body).
 
 import { afterEach, describe, expect, test } from "bun:test";
-import { installFetch } from "./test-fetch.ts";
 import { buildHeaders, buildUrl, request } from "./request.ts";
+import { installFetch } from "./test-fetch.ts";
 import type { RyuClientOptions } from "./types.ts";
 
 const realFetch = globalThis.fetch;

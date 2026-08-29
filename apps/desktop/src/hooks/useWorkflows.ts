@@ -39,6 +39,7 @@ export function useWorkflows(): UseWorkflowsResult {
 	const activeNode = useActiveNode();
 	const url = activeNode.url;
 	const token = activeNode.token ?? null;
+	const userJwt = activeNode.userJwt ?? null;
 
 	const [workflows, setWorkflows] = useState<Workflow[]>([]);
 	const [loading, setLoading] = useState(true);
@@ -47,7 +48,7 @@ export function useWorkflows(): UseWorkflowsResult {
 	const reload = useCallback(async () => {
 		setLoading(true);
 		setError(null);
-		const target: ApiTarget = { url, token };
+		const target: ApiTarget = { url, token, userJwt };
 		try {
 			const list = await fetchWorkflows(target);
 			setWorkflows(list);
@@ -56,7 +57,7 @@ export function useWorkflows(): UseWorkflowsResult {
 		} finally {
 			setLoading(false);
 		}
-	}, [url, token]);
+	}, [url, token, userJwt]);
 
 	useEffect(() => {
 		reload().catch(() => undefined);
@@ -76,7 +77,10 @@ export function useWorkflows(): UseWorkflowsResult {
 
 	const create = useCallback(
 		async (definition: unknown) => {
-			const workflow = await apiCreateWorkflow({ url, token }, definition);
+			const workflow = await apiCreateWorkflow(
+				{ url, token, userJwt },
+				definition
+			);
 			setWorkflows((prev) => {
 				const next = prev.filter((w) => w.id !== workflow.id);
 				return [workflow, ...next];
@@ -84,28 +88,28 @@ export function useWorkflows(): UseWorkflowsResult {
 			notifyWorkflowsChanged();
 			return workflow;
 		},
-		[url, token]
+		[url, token, userJwt]
 	);
 
 	const remove = useCallback(
 		async (id: string) => {
-			await apiDeleteWorkflow({ url, token }, id);
+			await apiDeleteWorkflow({ url, token, userJwt }, id);
 			setWorkflows((prev) => prev.filter((w) => w.id !== id));
 			notifyWorkflowsChanged();
 		},
-		[url, token]
+		[url, token, userJwt]
 	);
 
 	const run = useCallback(
 		async (id: string, input: Record<string, string>) =>
-			await apiRunWorkflow({ url, token }, id, input),
-		[url, token]
+			await apiRunWorkflow({ url, token, userJwt }, id, input),
+		[url, token, userJwt]
 	);
 
 	const resume = useCallback(
 		async (runId: string, payload: string) =>
-			await apiResumeWorkflow({ url, token }, runId, payload),
-		[url, token]
+			await apiResumeWorkflow({ url, token, userJwt }, runId, payload),
+		[url, token, userJwt]
 	);
 
 	return { workflows, loading, error, reload, create, remove, run, resume };

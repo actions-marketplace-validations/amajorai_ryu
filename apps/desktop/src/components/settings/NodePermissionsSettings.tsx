@@ -46,7 +46,11 @@ function kindLabel(kind: string): string {
 
 export function NodePermissionsSettings() {
 	const node = useActiveNode();
-	const target: ApiTarget = { url: node.url, token: node.token ?? null };
+	const target: ApiTarget = {
+		url: node.url,
+		token: node.token,
+		userJwt: node.userJwt ?? null,
+	};
 
 	const [resources, setResources] = useState<ResourceRef[]>([]);
 	const [selected, setSelected] = useState<ResourceRef | null>(null);

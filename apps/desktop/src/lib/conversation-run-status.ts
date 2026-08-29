@@ -13,14 +13,14 @@ export type ConversationRunStatus =
 	| "running";
 
 export interface ConversationRunStatusMeta {
-	/** Brief, visible label. */
-	label: string;
 	/** Explains whether the work can make progress without the user. */
 	description: string;
 	/** Tailwind tone for compact desktop status indicators. */
 	dotClass: string;
 	/** Whether the row title should show active work. */
 	isRunning: boolean;
+	/** Brief, visible label. */
+	label: string;
 	/** Whether the status needs attention even when the chat is marked read. */
 	needsAttention: boolean;
 }
@@ -28,28 +28,32 @@ export interface ConversationRunStatusMeta {
 const STATUS_META: Record<ConversationRunStatus, ConversationRunStatusMeta> = {
 	running: {
 		label: "In progress",
-		description: "Working now. It reconnects automatically while the local engine is still running.",
+		description:
+			"Working now. It reconnects automatically while the local engine is still running.",
 		dotClass: "animate-pulse bg-primary",
 		isRunning: true,
 		needsAttention: false,
 	},
 	awaiting_input: {
 		label: "Needs input",
-		description: "Waiting for your response. It will not continue automatically.",
+		description:
+			"Waiting for your response. It will not continue automatically.",
 		dotClass: "bg-amber-500",
 		isRunning: false,
 		needsAttention: true,
 	},
 	interrupted: {
 		label: "Interrupted",
-		description: "Stopped when Ryu or its local engine restarted. The partial reply was saved; continue it manually.",
+		description:
+			"Stopped when Ryu or its local engine restarted. The partial reply was saved; continue it manually.",
 		dotClass: "bg-amber-500",
 		isRunning: false,
 		needsAttention: true,
 	},
 	failed: {
 		label: "Failed",
-		description: "Stopped because the run failed. Open the chat to review it and try again.",
+		description:
+			"Stopped because the run failed. Open the chat to review it and try again.",
 		dotClass: "bg-destructive",
 		isRunning: false,
 		needsAttention: true,
@@ -70,11 +74,13 @@ export function conversationRunStatusMeta(
 	if (!status) {
 		return null;
 	}
-	return STATUS_META[status as ConversationRunStatus] ?? {
-		label: status.replaceAll("_", " "),
-		description: `Run status: ${status.replaceAll("_", " ")}.`,
-		dotClass: "bg-muted-foreground",
-		isRunning: false,
-		needsAttention: true,
-	};
+	return (
+		STATUS_META[status as ConversationRunStatus] ?? {
+			label: status.replaceAll("_", " "),
+			description: `Run status: ${status.replaceAll("_", " ")}.`,
+			dotClass: "bg-muted-foreground",
+			isRunning: false,
+			needsAttention: true,
+		}
+	);
 }

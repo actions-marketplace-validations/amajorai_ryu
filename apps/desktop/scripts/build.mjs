@@ -1,4 +1,8 @@
 import { spawn } from "node:child_process";
+import { createRequire } from "node:module";
+
+const require = createRequire(import.meta.url);
+const tauriCli = require.resolve("@tauri-apps/cli/tauri.js");
 
 const buildArguments = ["build", ...process.argv.slice(2)];
 
@@ -12,9 +16,8 @@ if (!(process.env.TAURI_SIGNING_PRIVATE_KEY ?? "").trim()) {
 	);
 }
 
-const child = spawn("tauri", buildArguments, {
+const child = spawn(process.execPath, [tauriCli, ...buildArguments], {
 	stdio: "inherit",
-	shell: process.platform === "win32",
 });
 
 child.on("exit", (code) => process.exit(code ?? 1));

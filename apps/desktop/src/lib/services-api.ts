@@ -44,9 +44,10 @@ export interface ExternalAgent {
 
 export async function fetchExternalAgents(
 	nodeUrl: string,
-	token: string | null
+	token: string | null,
+	userJwt: string | null = null
 ): Promise<ExternalAgent[]> {
-	const headers = makeHeaders(token);
+	const headers = makeHeaders(token, userJwt);
 	const resp = await fetch(`${nodeUrl}/api/agents`, { headers });
 	if (!resp.ok) {
 		throw new Error(`agents fetch failed: ${resp.status}`);
@@ -74,10 +75,17 @@ export interface DependencyStatus {
 	name: string;
 }
 
-function makeHeaders(token: string | null): HeadersInit {
+function makeHeaders(
+	token: string | null,
+	userJwt: string | null = null
+): HeadersInit {
 	const headers: HeadersInit = { "Content-Type": "application/json" };
-	if (token) {
-		headers.Authorization = `Bearer ${token}`;
+	const admissionBearer = token ?? userJwt;
+	if (admissionBearer) {
+		headers.Authorization = `Bearer ${admissionBearer}`;
+	}
+	if (userJwt) {
+		headers["x-ryu-user-jwt"] = userJwt;
 	}
 	return headers;
 }
@@ -96,11 +104,12 @@ async function postAction(
 	token: string | null,
 	path: string,
 	label: string,
-	signal?: AbortSignal
+	signal?: AbortSignal,
+	userJwt: string | null = null
 ): Promise<void> {
 	const resp = await fetch(`${nodeUrl}${path}`, {
 		method: "POST",
-		headers: makeHeaders(token),
+		headers: makeHeaders(token, userJwt),
 		signal,
 	});
 	let body: { success?: boolean; error?: string } | null = null;
@@ -127,10 +136,11 @@ async function postAction(
 export async function fetchCatalog(
 	nodeUrl: string,
 	token: string | null,
-	signal?: AbortSignal
+	signal?: AbortSignal,
+	userJwt: string | null = null
 ): Promise<CatalogItem[]> {
 	const resp = await fetch(`${nodeUrl}/api/catalog`, {
-		headers: makeHeaders(token),
+		headers: makeHeaders(token, userJwt),
 		signal,
 	});
 	if (!resp.ok) {
@@ -168,10 +178,11 @@ export async function fetchCatalog(
 
 export async function fetchSidecarStatus(
 	nodeUrl: string,
-	token: string | null
+	token: string | null,
+	userJwt: string | null = null
 ): Promise<Record<string, boolean>> {
 	const resp = await fetch(`${nodeUrl}/api/sidecar/status`, {
-		headers: makeHeaders(token),
+		headers: makeHeaders(token, userJwt),
 	});
 	if (!resp.ok) {
 		throw new Error(`sidecar status failed: ${resp.status}`);
@@ -188,10 +199,11 @@ export async function fetchSidecarStatus(
 
 export async function fetchDependencies(
 	nodeUrl: string,
-	token: string | null
+	token: string | null,
+	userJwt: string | null = null
 ): Promise<DependencyStatus[]> {
 	const resp = await fetch(`${nodeUrl}/api/dependencies/check`, {
-		headers: makeHeaders(token),
+		headers: makeHeaders(token, userJwt),
 	});
 	if (!resp.ok) {
 		throw new Error(`deps check failed: ${resp.status}`);
@@ -220,7 +232,8 @@ export async function installSidecar(
 	token: string | null,
 	name: string,
 	force = false,
-	signal?: AbortSignal
+	signal?: AbortSignal,
+	userJwt: string | null = null
 ): Promise<void> {
 	const query = force ? "?force=true" : "";
 	await postAction(
@@ -228,54 +241,103 @@ export async function installSidecar(
 		token,
 		`/api/setup/${name}/install${query}`,
 		force ? "update" : "install",
-		signal
+		signal,
+		userJwt
 	);
 }
 
 export async function uninstallSidecar(
 	nodeUrl: string,
 	token: string | null,
-	name: string
+	name: string,
+	userJwt: string | null = null
 ): Promise<void> {
-	await postAction(nodeUrl, token, `/api/setup/${name}/uninstall`, "uninstall");
+	await postAction(
+		nodeUrl,
+		token,
+		`/api/setup/${name}/uninstall`,
+		"uninstall",
+		undefined,
+		userJwt
+	);
 }
 
 export async function startSidecar(
 	nodeUrl: string,
 	token: string | null,
-	name: string
+	name: string,
+	userJwt: string | null = null
 ): Promise<void> {
-	await postAction(nodeUrl, token, `/api/sidecar/${name}/start`, "start");
+	await postAction(
+		nodeUrl,
+		token,
+		`/api/sidecar/${name}/start`,
+		"start",
+		undefined,
+		userJwt
+	);
 }
 
 export async function stopSidecar(
 	nodeUrl: string,
 	token: string | null,
-	name: string
+	name: string,
+	userJwt: string | null = null
 ): Promise<void> {
-	await postAction(nodeUrl, token, `/api/sidecar/${name}/stop`, "stop");
+	await postAction(
+		nodeUrl,
+		token,
+		`/api/sidecar/${name}/stop`,
+		"stop",
+		undefined,
+		userJwt
+	);
 }
 
 export async function restartSidecar(
 	nodeUrl: string,
 	token: string | null,
-	name: string
+	name: string,
+	userJwt: string | null = null
 ): Promise<void> {
-	await postAction(nodeUrl, token, `/api/sidecar/${name}/restart`, "restart");
+	await postAction(
+		nodeUrl,
+		token,
+		`/api/sidecar/${name}/restart`,
+		"restart",
+		undefined,
+		userJwt
+	);
 }
 
 export async function startAll(
 	nodeUrl: string,
-	token: string | null
+	token: string | null,
+	userJwt: string | null = null
 ): Promise<void> {
-	await postAction(nodeUrl, token, "/api/sidecar/start-all", "start all");
+	await postAction(
+		nodeUrl,
+		token,
+		"/api/sidecar/start-all",
+		"start all",
+		undefined,
+		userJwt
+	);
 }
 
 export async function stopAll(
 	nodeUrl: string,
-	token: string | null
+	token: string | null,
+	userJwt: string | null = null
 ): Promise<void> {
-	await postAction(nodeUrl, token, "/api/sidecar/stop-all", "stop all");
+	await postAction(
+		nodeUrl,
+		token,
+		"/api/sidecar/stop-all",
+		"stop all",
+		undefined,
+		userJwt
+	);
 }
 
 // ── Sandbox backend (M6 / issues #190, #191) ─────────────────────────────────
@@ -296,10 +358,11 @@ export interface SandboxStatus {
 
 export async function fetchSandboxStatus(
 	nodeUrl: string,
-	token: string | null
+	token: string | null,
+	userJwt: string | null = null
 ): Promise<SandboxStatus> {
 	const resp = await fetch(`${nodeUrl}/api/mcp/sandbox/status`, {
-		headers: makeHeaders(token),
+		headers: makeHeaders(token, userJwt),
 	});
 	if (!resp.ok) {
 		// Core may not yet expose this endpoint (older build) — degrade gracefully.
@@ -323,11 +386,12 @@ export async function fetchSandboxStatus(
 
 export async function enableSandbox(
 	nodeUrl: string,
-	token: string | null
+	token: string | null,
+	userJwt: string | null = null
 ): Promise<void> {
 	const resp = await fetch(`${nodeUrl}/api/mcp/sandbox/enable`, {
 		method: "POST",
-		headers: makeHeaders(token),
+		headers: makeHeaders(token, userJwt),
 	});
 	if (!resp.ok) {
 		throw new Error(`sandbox enable failed: ${resp.status}`);
@@ -336,11 +400,12 @@ export async function enableSandbox(
 
 export async function disableSandbox(
 	nodeUrl: string,
-	token: string | null
+	token: string | null,
+	userJwt: string | null = null
 ): Promise<void> {
 	const resp = await fetch(`${nodeUrl}/api/mcp/sandbox/disable`, {
 		method: "POST",
-		headers: makeHeaders(token),
+		headers: makeHeaders(token, userJwt),
 	});
 	if (!resp.ok) {
 		throw new Error(`sandbox disable failed: ${resp.status}`);
@@ -349,11 +414,12 @@ export async function disableSandbox(
 
 export async function installMissingDeps(
 	nodeUrl: string,
-	token: string | null
+	token: string | null,
+	userJwt: string | null = null
 ): Promise<Record<string, "installed" | "already_installed" | "failed">> {
 	const resp = await fetch(`${nodeUrl}/api/dependencies/install`, {
 		method: "POST",
-		headers: makeHeaders(token),
+		headers: makeHeaders(token, userJwt),
 	});
 	if (!resp.ok) {
 		throw new Error(`deps install failed: ${resp.status}`);

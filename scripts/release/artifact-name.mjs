@@ -166,7 +166,9 @@ export function assertSuffixContract(names) {
 		}
 	}
 	if (problems.length > 0) {
-		throw new Error(`artifact-name: suffix contract violated\n  ${problems.join("\n  ")}`);
+		throw new Error(
+			`artifact-name: suffix contract violated\n  ${problems.join("\n  ")}`
+		);
 	}
 }
 
@@ -183,7 +185,9 @@ function main() {
 	const productName = config.productName;
 	const version = config.version;
 	if (!(productName && version)) {
-		throw new Error("artifact-name: tauri.conf.json has no productName/version");
+		throw new Error(
+			"artifact-name: tauri.conf.json has no productName/version"
+		);
 	}
 
 	const planned = [];
@@ -206,9 +210,14 @@ function main() {
 			renameSync(join(dir, from), join(dir, to));
 		}
 	}
-	log(`${planned.length} renamed in ${dir}/ (productName "${productName}", version ${version})`);
+	log(
+		`${planned.length} renamed in ${dir}/ (productName "${productName}", version ${version})`
+	);
 }
 
-if (process.argv[1] && resolve(process.argv[1]) === resolve(fileURLToPath(import.meta.url))) {
+if (
+	process.argv[1] &&
+	resolve(process.argv[1]) === resolve(fileURLToPath(import.meta.url))
+) {
 	main();
 }

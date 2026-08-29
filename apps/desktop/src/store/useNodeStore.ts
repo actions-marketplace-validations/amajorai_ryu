@@ -1,6 +1,9 @@
 import { create } from "zustand";
 import { DEFAULT_CORE_URL } from "@/lib/core-url.ts";
-import { fetchManagedNodes } from "@/src/lib/api/managed-nodes.ts";
+import {
+	fetchManagedNodes,
+	type ManagedNode,
+} from "@/src/lib/api/managed-nodes.ts";
 import { enforcePlanCap } from "@/src/lib/gating/planCapBridge.ts";
 // `init()` runs from App.tsx's first effect, so `refresh()` was the earliest IPC
 // the app made — early enough that Tauri had not always injected its bridge, which
@@ -42,6 +45,8 @@ export interface Node {
 	serverId?: string | null;
 	token: string | null;
 	url: string;
+	/** Short-lived Better Auth JWT for a managed node; memory-only. */
+	userJwt?: string | null;
 }
 
 interface NodesData {
@@ -122,10 +127,10 @@ interface NodeState {
 	 * Refresh ONLY the auth token on already-added cloud nodes. The control-plane
 	 * mints a short-lived (~15 min) user JWT per `/nodes` fetch, so a token grabbed
 	 * once at init expires mid-session and every authed call to the node then 401s.
-	 * This re-fetches and swaps the token in place — it never adds/removes nodes,
-	 * never touches selection, and on a transient empty/failed fetch keeps the
-	 * existing tokens (so a network blip can't wipe the picker). Driven by a timer
-	 * under the TTL plus window-focus (to cover laptop sleep/wake).
+	 * This re-fetches the authoritative managed-node scope without touching
+	 * selection. A transient failed fetch keeps the existing nodes; a successful
+	 * refresh adds newly visible nodes and removes nodes that left the scope. Driven
+	 * by a timer under the TTL plus window-focus (to cover laptop sleep/wake).
 	 */
 	refreshCloudTokens: () => Promise<void>;
 	removeNode: (name: string) => Promise<void>;
@@ -152,10 +157,20 @@ export const LOCAL_FALLBACK: Node = {
 	name: "local",
 	url: DEFAULT_CORE_URL,
 	token: null,
+	userJwt: null,
 };
 
 /** Strip a trailing slash so two spellings of the same URL dedupe. */
 const normalizeUrl = (url: string) => url.replace(/\/$/, "");
+
+/**
+ * Better Auth user JWTs are compact JWTs. A legacy managed-node entry stored
+ * one in `Node.token` before the credential names were separated; never let
+ * that stale identity win over the current node bearer slot.
+ */
+function looksLikeUserJwt(token: string | null): boolean {
+	return token?.split(".").length === 3;
+}
 
 /**
  * True when a node is the local Core process (the desktop host), false for any
@@ -187,11 +202,11 @@ function loadDismissedCloudUrls(): string[] {
 
 /**
  * Decorate the local node list with the "Cloud" (managed) flag — and the LIVE
- * control-plane token — for any node whose URL matches a managed cloud node the
+ * control-plane user JWT — for any node whose URL matches a managed cloud node the
  * org can reach. A managed node that is NOT added locally is never injected here
  * — it surfaces as a suggestion instead (see {@link computeSuggestions}).
  *
- * WHY THE TOKEN IS ADOPTED HERE: the control plane mints a short-lived (~15 min)
+ * WHY THE JWT IS ADOPTED HERE: the control plane mints a short-lived (~15 min)
  * user JWT per `/nodes` fetch, and {@link useNodeStore.refreshCloudTokens} exists
  * to keep an added cloud node's credential fresh. It swapped the token only into
  * `cloudNodes` though, while every caller reads the merged `nodes` — so the
@@ -209,18 +224,22 @@ function decorateLocal(local: Node[], cloud: Node[]): Node[] {
 		if (!match) {
 			return n;
 		}
-		// Keep the stored token when the control plane minted none (an older server,
-		// or a signed-out fetch): a stale credential still beats no credential.
-		//
 		// `orgId`/`serverId` come from the CLOUD record and must be carried across.
 		// The local record is whatever Tauri persisted in `nodes.json` — name, url,
 		// token — so spreading it alone silently drops both ids, and every surface
 		// that needs them (the quiet-hour picker) reads `undefined` and hides
 		// itself. That is a feature that looks shipped and does nothing.
+		const legacyUserJwt = looksLikeUserJwt(n.token) ? n.token : null;
 		return {
 			...n,
+			// A JWT-shaped value in the persisted node-token slot is from the old
+			// managed-node response. Clear it in memory; explicit opaque node
+			// bearers remain valid for self-hosted nodes.
+			token: legacyUserJwt ? null : n.token,
 			managed: true,
-			token: match.token ?? n.token,
+			// `null` is authoritative here. Reusing an expired managed JWT would
+			// make a failed refresh look like a valid node until every request 401s.
+			userJwt: match.userJwt ?? null,
 			orgId: match.orgId ?? null,
 			serverId: match.serverId ?? null,
 		};
@@ -255,6 +274,21 @@ function computeSuggestions(
 	});
 }
 
+/** Convert the control-plane scope into the in-memory cloud-node shape. */
+function cloudNodesFromManaged(managed: ManagedNode[]): Node[] {
+	return managed
+		.filter((node) => Boolean(node.url?.trim()))
+		.map((node) => ({
+			name: `cloud-${node.name}`,
+			url: node.url,
+			token: null,
+			userJwt: node.userJwt ?? null,
+			managed: true,
+			orgId: node.orgId ?? null,
+			serverId: node.serverId ?? null,
+		}));
+}
+
 /** Short timeout (ms) for the auto-select reachability probe. */
 const PROBE_TIMEOUT_MS = 2000;
 
@@ -287,8 +321,12 @@ function loadAutoSelect(): boolean {
 async function probeNode(node: Node): Promise<boolean> {
 	const base = node.url.replace(/\/$/, "");
 	const headers: Record<string, string> = {};
-	if (node.token) {
-		headers.Authorization = `Bearer ${node.token}`;
+	const bearer = node.token ?? node.userJwt;
+	if (bearer) {
+		headers.Authorization = `Bearer ${bearer}`;
+	}
+	if (node.userJwt) {
+		headers["x-ryu-user-jwt"] = node.userJwt;
 	}
 	try {
 		const res = await fetch(`${base}/api/health`, {
@@ -577,27 +615,18 @@ export const useNodeStore = create<NodeState>((set, get) => ({
 
 	hydrateCloudNodes: async () => {
 		const managed = await fetchManagedNodes();
+		if (managed === null) {
+			return;
+		}
 		// Name managed nodes off the control-plane name, prefixed so they can't
 		// collide with a local node's name in the picker. Carry the per-org
-		// data-plane token (WS4) so the node authenticates to the hosted gateway;
-		// it degrades to null on an older control plane that doesn't mint one yet.
+		// short-lived user JWT separately from a node bearer. Core validates it
+		// against the control-plane JWKS and narrows it to the node's organization.
 		// A managed node that advertised no reachable URL is DROPPED, not carried
 		// with `url: ""`. An empty base makes `apiUrl` throw before it fetches, so
 		// such a node would sit in the picker looking selectable and then fail every
 		// call with "No node URL configured" — worse than not offering it at all.
-		const cloud: Node[] = managed
-			.filter((m) => Boolean(m.url?.trim()))
-			.map((m) => ({
-				name: `cloud-${m.name}`,
-				url: m.url,
-				token: m.token ?? null,
-				managed: true,
-				// Carried, not dropped: these two are the only way any desktop surface
-				// can address this node's server row (resize, quiet-hour zone). They
-				// are also the only fields here that are ids rather than transport.
-				orgId: m.orgId ?? null,
-				serverId: m.serverId ?? null,
-			}));
+		const cloud = cloudNodesFromManaged(managed);
 		set((s) => ({
 			cloudNodes: cloud,
 			// Added cloud nodes decorate as "Cloud"; the rest surface as suggestions
@@ -624,24 +653,39 @@ export const useNodeStore = create<NodeState>((set, get) => ({
 			return;
 		}
 		const managed = await fetchManagedNodes();
-		// A transient failure / offline server returns []; do NOT wipe the added
-		// cloud nodes on that — keep the existing tokens and try again next tick.
-		if (managed.length === 0) {
+		// A transient failure / offline server returns null; do NOT wipe the added
+		// cloud nodes on that. Keep the existing JWT and try again next tick.
+		if (managed === null) {
 			return;
 		}
-		const freshByName = new Map(
-			managed.map((m) => [`cloud-${m.name}`, m.token ?? null])
-		);
+		const cloud = cloudNodesFromManaged(managed);
 		set((s) => {
-			// Swap the token in place only for nodes still present; never add/remove
-			// nodes or recompute suggestions (discovery stays with hydrateCloudNodes).
-			const cloud = s.cloudNodes.map((n) =>
-				freshByName.has(n.name)
-					? { ...n, token: freshByName.get(n.name) ?? null }
-					: n
+			// A successful scope refresh is authoritative. Remove managed nodes that
+			// disappeared from it, while retaining all local/LAN nodes and preserving
+			// the previous cloud set when the refresh was unavailable above.
+			const previousCloudUrls = new Set(
+				s.cloudNodes.map((node) => normalizeUrl(node.url))
 			);
-			return { cloudNodes: cloud, nodes: mergeNodes(s.localNodes, cloud) };
+			const cloudUrls = new Set(cloud.map((node) => normalizeUrl(node.url)));
+			const localNodes = s.localNodes.filter(
+				(node) =>
+					!previousCloudUrls.has(normalizeUrl(node.url)) ||
+					cloudUrls.has(normalizeUrl(node.url))
+			);
+			return {
+				cloudNodes: cloud,
+				localNodes,
+				nodes: mergeNodes(localNodes, cloud),
+				suggestedCloudNodes: computeSuggestions(
+					localNodes,
+					cloud,
+					s.dismissedCloudUrls
+				),
+			};
 		});
+		if (cloud.length === 0) {
+			stopCloudTokenRefresh();
+		}
 	},
 
 	init: async () => {

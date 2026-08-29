@@ -1,4 +1,4 @@
-﻿import { AgentActivity } from "@ryu/ui/components/agents/agent-activity";
+import { AgentActivity } from "@ryu/ui/components/agents/agent-activity";
 import { memo, useEffect, useMemo, useState } from "react";
 import { getToolStatus } from "../utils/format-tool.ts";
 import { toolRegistry } from "./tool-registry.ts";
@@ -92,9 +92,9 @@ export const SubagentTool = memo(function SubagentTool({
 
 	const items = useMemo(
 		() =>
-			nestedTools.slice(0, MAX_VISIBLE_TOOLS).map((nestedPart, idx) =>
-				toTraceItem(nestedPart, idx)
-			),
+			nestedTools
+				.slice(0, MAX_VISIBLE_TOOLS)
+				.map((nestedPart, idx) => toTraceItem(nestedPart, idx)),
 		[nestedTools]
 	);
 

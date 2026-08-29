@@ -1,4 +1,4 @@
-﻿import { Target01Icon } from "@hugeicons/core-free-icons";
+import { Target01Icon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { Avatar, AvatarFallback, AvatarImage } from "@ryu/ui/components/avatar";
 import { Bubble, BubbleContent } from "@ryu/ui/components/bubble";

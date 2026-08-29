@@ -22,7 +22,11 @@ export function useEngineModels(): Record<string, ModelOption[]> {
 	const { data } = useQuery({
 		queryKey: ["engine-models", node.url],
 		queryFn: () =>
-			fetchEngineModels({ url: node.url, token: node.token ?? null }),
+			fetchEngineModels({
+				url: node.url,
+				token: node.token,
+				userJwt: node.userJwt ?? null,
+			}),
 		staleTime: ONE_HOUR_MS,
 	});
 	return data ?? EMPTY_MODELS;

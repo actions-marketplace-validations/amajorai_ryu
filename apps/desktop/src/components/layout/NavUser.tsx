@@ -143,7 +143,7 @@ export function DesktopWebAccountLinks({
 			</DropdownMenuItem>
 			<DropdownMenuItem onClick={() => onOpenWeb("/api-keys")}>
 				<KeyRound className="mr-2 size-4" />
-				API keys
+				Personal access tokens
 			</DropdownMenuItem>
 		</>
 	);

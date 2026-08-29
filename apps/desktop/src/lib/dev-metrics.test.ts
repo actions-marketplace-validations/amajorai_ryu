@@ -33,6 +33,7 @@ function unstubAllGlobals(): void {
 	}
 	stubbedGlobals.clear();
 }
+
 import {
 	clearDevMetrics,
 	getDevMetricsText,

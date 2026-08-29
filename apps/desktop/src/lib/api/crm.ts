@@ -391,7 +391,7 @@ async function send<T>(
 	path: string,
 	init?: RequestInitLite
 ): Promise<T> {
-	const headers = makeHeaders(target.token);
+	const headers = makeHeaders(target.token, target.userJwt);
 	if (init?.raw !== undefined) {
 		headers["Content-Type"] = "text/csv";
 	}

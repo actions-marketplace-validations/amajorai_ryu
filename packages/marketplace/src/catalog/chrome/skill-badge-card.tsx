@@ -21,8 +21,8 @@ import { HugeiconsIcon } from "@hugeicons/react";
 import { DitherAvatar } from "@ryu/ui/components/dither-kit/avatar.tsx";
 import { cn } from "@ryu/ui/lib/utils.ts";
 import { type CSSProperties, useState } from "react";
-import type { SkillCard } from "../types.ts";
 import { titleCase } from "../friendly.ts";
+import type { SkillCard } from "../types.ts";
 
 /** GitHub owner avatar for a skill id (`owner/repo/slug` → owner). */
 export function skillAvatarUrl(card: SkillCard): string | null {
@@ -56,18 +56,19 @@ export default function SkillBadgeCard({
 }) {
 	const [imgFailed, setImgFailed] = useState(false);
 	const avatar = skillAvatarUrl(card);
-	const art = avatar && !imgFailed ? (
-		// biome-ignore lint/performance/noImgElement: a remote raster avatar is the
-		// skill's identity mark; no bundle can pre-optimize a GitHub owner's avatar.
-		<img
-			alt=""
-			className="size-full object-cover"
-			onError={() => setImgFailed(true)}
-			src={avatar}
-		/>
-	) : (
-		<DitherAvatar className="size-full" name={card.id} />
-	);
+	const art =
+		avatar && !imgFailed ? (
+			// biome-ignore lint/performance/noImgElement: a remote raster avatar is the
+			// skill's identity mark; no bundle can pre-optimize a GitHub owner's avatar.
+			<img
+				alt=""
+				className="size-full object-cover"
+				onError={() => setImgFailed(true)}
+				src={avatar}
+			/>
+		) : (
+			<DitherAvatar className="size-full" name={card.id} />
+		);
 
 	return (
 		<div
@@ -101,7 +102,7 @@ export default function SkillBadgeCard({
 								titleCase(card.slug)}
 						</p>
 					</div>
-					<span className="truncate text-[10px] font-medium tracking-wide text-muted-foreground uppercase">
+					<span className="truncate font-medium text-[10px] text-muted-foreground uppercase tracking-wide">
 						{card.source}
 					</span>
 				</div>
@@ -109,8 +110,10 @@ export default function SkillBadgeCard({
 			{/* The lifecycle control rides the corner, above the card face. */}
 			<div className="absolute top-2 right-2 z-20">
 				<button
-					aria-label={installed ? `${card.name} is installed` : `Add ${card.name}`}
-					className="flex size-8 cursor-pointer items-center justify-center rounded-full border border-border/70 bg-background/90 text-xs font-medium shadow-sm backdrop-blur transition-colors hover:bg-accent focus-visible:ring-3 focus-visible:ring-ring/40"
+					aria-label={
+						installed ? `${card.name} is installed` : `Add ${card.name}`
+					}
+					className="flex size-8 cursor-pointer items-center justify-center rounded-full border border-border/70 bg-background/90 font-medium text-xs shadow-sm backdrop-blur transition-colors hover:bg-accent focus-visible:ring-3 focus-visible:ring-ring/40"
 					onClick={(event) => {
 						event.stopPropagation();
 						onInstall();

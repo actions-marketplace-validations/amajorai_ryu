@@ -40,7 +40,11 @@ import { friendlyModelDisplay } from "@/src/lib/catalog/friendly.ts";
  */
 export function EditorEmbeddingSettings() {
 	const node = useActiveNode();
-	const target: ApiTarget = { url: node.url, token: node.token ?? null };
+	const target: ApiTarget = {
+		url: node.url,
+		token: node.token,
+		userJwt: node.userJwt ?? null,
+	};
 
 	return (
 		<div className="space-y-4">

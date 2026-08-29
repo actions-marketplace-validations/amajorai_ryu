@@ -83,6 +83,7 @@ test("lifecycle routes encode a scoped plugin id exactly once", async () => {
 	const target: ApiTarget = {
 		token: "node-token",
 		url: "http://127.0.0.1:7980",
+		userJwt: null,
 	};
 	const scopedId = "@ryu/mail";
 
@@ -105,22 +106,32 @@ test("lifecycle routes encode a scoped plugin id exactly once", async () => {
 });
 
 test("catalog install forwards the plugin id without a purchase gate", async () => {
-	let request: { body: string; url: string } | null = null;
+	const request: { current: { body: string; url: string } | null } = {
+		current: null,
+	};
 	globalThis.fetch = Object.assign(
 		(input: RequestInfo | URL, init?: RequestInit) => {
-			request = { body: String(init?.body), url: String(input) };
+			request.current = { body: String(init?.body), url: String(input) };
 			return Promise.resolve(Response.json({ success: true }));
 		},
 		{ preconnect: realFetch.preconnect }
 	);
 
 	await installPluginFromCatalog(
-		{ token: "node-token", url: "http://127.0.0.1:7980" },
+		{
+			token: "node-token",
+			url: "http://127.0.0.1:7980",
+			userJwt: null,
+		},
 		"@ryu/paid-plugin"
 	);
 
-	expect(request).toEqual({
-		body: JSON.stringify({ id: "@ryu/paid-plugin" }),
-		url: "http://127.0.0.1:7980/api/plugins/catalog/install",
-	});
+	const captured = request.current;
+	if (!captured) {
+		throw new Error("catalog install did not make a request");
+	}
+	expect(captured.body).toBe(JSON.stringify({ id: "@ryu/paid-plugin" }));
+	expect(captured.url).toBe(
+		"http://127.0.0.1:7980/api/plugins/catalog/install"
+	);
 });

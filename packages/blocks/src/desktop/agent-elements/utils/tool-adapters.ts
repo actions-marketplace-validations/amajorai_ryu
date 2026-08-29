@@ -1,4 +1,4 @@
-﻿import type { StepState, TimelineStep } from "../types/timeline.ts";
+import type { StepState, TimelineStep } from "../types/timeline.ts";
 
 function calculateDiffStatsFromPatch(
 	patches: Array<{ lines?: string[] }>

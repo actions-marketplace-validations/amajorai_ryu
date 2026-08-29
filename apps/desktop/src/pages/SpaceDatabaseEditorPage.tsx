@@ -234,6 +234,7 @@ export default function SpaceDatabaseEditorPage({
 		ready: loaded,
 		url: node.url,
 		token: node.token ?? null,
+		userJwt: node.userJwt ?? null,
 		getSeed,
 		onSnapshot,
 		onReset: () => {

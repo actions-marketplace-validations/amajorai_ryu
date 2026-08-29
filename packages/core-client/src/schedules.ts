@@ -175,7 +175,7 @@ export async function createJob(
 ): Promise<ScheduledJob> {
 	const resp = await fetch(apiUrl(target, "/heartbeat/jobs"), {
 		method: "POST",
-		headers: makeHeaders(target.token),
+		headers: makeHeaders(target.token, target.userJwt),
 		body: JSON.stringify({
 			name: input.name,
 			schedule: toScheduleBody(input.schedule),

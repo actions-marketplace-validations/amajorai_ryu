@@ -1,7 +1,7 @@
-﻿import {
-	TodoList,
+import {
 	type TodoItem as BeuiTodoItem,
 	type TodoItemStatus as BeuiTodoStatus,
+	TodoList,
 } from "@ryu/ui/components/agents/todo-list";
 import { memo, useMemo } from "react";
 import { areToolPropsEqual } from "../utils/format-tool.ts";

@@ -593,7 +593,11 @@ export function ResourcePermissions({
 	resourceName?: string;
 }) {
 	const node = useActiveNode();
-	const target: ApiTarget = { url: node.url, token: node.token ?? null };
+	const target: ApiTarget = {
+		url: node.url,
+		token: node.token,
+		userJwt: node.userJwt ?? null,
+	};
 
 	const [vocabulary, setVocabulary] = useState<Vocabulary | null>(null);
 	const [directory, setDirectory] = useState<PrincipalDirectory | null>(null);

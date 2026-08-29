@@ -126,12 +126,17 @@ export function useCapabilityLayers(
 	// depending on it directly would hand every consumer a new `select` each pass.
 	const url = target.url;
 	const token = target.token;
+	const userJwt = target.userJwt;
 	const select = useCallback(
 		async (capability: string, providerId: string) => {
-			await setCapabilityBinding({ token, url }, capability, providerId);
+			await setCapabilityBinding(
+				{ token, url, userJwt },
+				capability,
+				providerId
+			);
 			await refetch();
 		},
-		[refetch, token, url]
+		[refetch, token, url, userJwt]
 	);
 
 	return {

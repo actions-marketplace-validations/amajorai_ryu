@@ -15,6 +15,15 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
 /**
+ * Canonicalize source text without changing its code or whitespace semantics.
+ * Working-tree checkouts may expose CRLF while generated manifest wire strings
+ * use LF; line terminators are the only transport detail normalized here.
+ */
+export function normalizeLineEndings(value) {
+	return value.replace(/\r\n?/g, "\n");
+}
+
+/**
  * Find the manifest entry that carries this tool's body.
  *
  * Returns `{ manifest, manifestPath, seat }`, where `seat` is `null` when the
@@ -105,7 +114,7 @@ export function checkBodyDrift(seat, spec, code) {
 		return problems;
 	}
 
-	if (seat.config.code !== code) {
+	if (normalizeLineEndings(seat.config.code) !== normalizeLineEndings(code)) {
 		problems.push(
 			`manifest \`code\` for '${spec.tool}' has drifted from ${spec.code_file}. The file is the source form — run \`node tools/toolsmith/index.mjs sync <dir>\` to reseal.`
 		);

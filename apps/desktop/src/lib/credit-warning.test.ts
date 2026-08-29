@@ -19,8 +19,7 @@ describe("creditBalanceStatus", () => {
 	it("warns at the low-credit threshold", () => {
 		expect(
 			creditBalanceStatus({
-				balanceMicroUsd:
-					(MONTHLY_POOL * LOW_CREDIT_REMAINING_PERCENT) / 100,
+				balanceMicroUsd: (MONTHLY_POOL * LOW_CREDIT_REMAINING_PERCENT) / 100,
 				monthlyCreditPoolMicroUsd: MONTHLY_POOL,
 			})
 		).toEqual({ kind: "low", remainingPercent: LOW_CREDIT_REMAINING_PERCENT });
@@ -53,4 +52,3 @@ describe("creditBalanceStatus", () => {
 		).toEqual({ kind: "healthy", remainingPercent: null });
 	});
 });
-

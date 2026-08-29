@@ -11,25 +11,25 @@
 
 /** One pack row in the Packs shelf. */
 export interface SkillPackCard {
-	/** Stable id. For a repo pack it is `owner/repo`; custom packs use a slug. */
-	id: string;
-	/** Display name. */
-	name: string;
-	/** One-line "what this pack contains". */
-	description: string;
 	/** True for the catalog Ryu ships (non-removable, system-managed). */
 	builtin: boolean;
+	/** One-line "what this pack contains". */
+	description: string;
+	/** Stable id. For a repo pack it is `owner/repo`; custom packs use a slug. */
+	id: string;
 	/** How many skills resolve into this pack (0 while resolving/failed). */
 	memberCount: number;
+	/** Display name. */
+	name: string;
 }
 
 /** One resolved member skill of a pack. */
 export interface SkillPackMember {
+	description?: string | null;
 	/** Full skill id (`owner/repo/slug`, or the repo+leaf for a repo pack). */
 	id: string;
-	name: string;
-	description?: string | null;
 	installed: boolean;
+	name: string;
 }
 
 /** A pack with its resolved members (the "open the pack" detail view). */
@@ -40,10 +40,10 @@ export interface SkillPackDetail extends SkillPackCard {
 /** What the Packs shelf consumes from its injected data hook. */
 export interface SkillPacksState {
 	error: string | null;
-	/** The pack whose install is in flight, or null. */
-	installing: string | null;
 	/** Install every member of a pack; resolves to the slugs that landed. */
 	install: (id: string) => Promise<string[]>;
+	/** The pack whose install is in flight, or null. */
+	installing: string | null;
 	loading: boolean;
 	/** Open a pack to reveal its member skills; `null`/"" closes it. */
 	open: (id: string) => void;

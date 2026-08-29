@@ -71,7 +71,8 @@ describe("extractSubagents", () => {
 					state: "output-available",
 					input: {
 						description: "Review restore compatibility",
-						prompt: "Review restored workspace tabs and report compatibility risks.",
+						prompt:
+							"Review restored workspace tabs and report compatibility risks.",
 					},
 					callProviderMetadata: {
 						ryu: { startedAt, completedAt, durationMs: 42_000 },
@@ -122,11 +123,11 @@ describe("extractSubagents", () => {
 			]),
 		]);
 
-		expect(subagents.map(({ status, errored }) => ({ status, errored }))).toEqual(
-			[
-				{ status: "running", errored: false },
-				{ status: "done", errored: true },
-			]
-		);
+		expect(
+			subagents.map(({ status, errored }) => ({ status, errored }))
+		).toEqual([
+			{ status: "running", errored: false },
+			{ status: "done", errored: true },
+		]);
 	});
 });

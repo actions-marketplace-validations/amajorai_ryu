@@ -93,7 +93,7 @@ function MonitorViz() {
 				<span className="font-heading font-medium text-2xl text-foreground tabular-nums">
 					${price}
 				</span>
-				<span className="font-heading text-foreground/30 text-xs line-through tabular-nums">
+				<span className="font-heading text-foreground/30 text-xs tabular-nums line-through">
 					$129
 				</span>
 			</div>

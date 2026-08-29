@@ -170,7 +170,7 @@ async function postJson<T>(
 ): Promise<T> {
 	const resp = await fetch(apiUrl(target, path), {
 		method: "POST",
-		headers: makeHeaders(target.token),
+		headers: makeHeaders(target.token, target.userJwt),
 		body: JSON.stringify(body),
 	});
 	if (!resp.ok) {
@@ -182,7 +182,7 @@ async function postJson<T>(
 
 export async function fetchWorkflows(target: ApiTarget): Promise<Workflow[]> {
 	const resp = await fetch(apiUrl(target, "/workflows"), {
-		headers: makeHeaders(target.token),
+		headers: makeHeaders(target.token, target.userJwt),
 	});
 	if (!resp.ok) {
 		throw await errorFromResponse(resp, "/workflows");
@@ -198,7 +198,7 @@ export async function fetchWorkflow(
 	id: string
 ): Promise<Workflow> {
 	const resp = await fetch(apiUrl(target, `/workflows/${id}`), {
-		headers: makeHeaders(target.token),
+		headers: makeHeaders(target.token, target.userJwt),
 	});
 	if (!resp.ok) {
 		throw await errorFromResponse(resp, `/workflows/${id}`);
@@ -227,7 +227,7 @@ export async function deleteWorkflow(
 ): Promise<void> {
 	const resp = await fetch(apiUrl(target, `/workflows/${id}`), {
 		method: "DELETE",
-		headers: makeHeaders(target.token),
+		headers: makeHeaders(target.token, target.userJwt),
 	});
 	if (!resp.ok) {
 		throw await errorFromResponse(resp, `/workflows/${id}`);
@@ -254,7 +254,7 @@ export async function getWorkflowRun(
 	runId: string
 ): Promise<WorkflowRun> {
 	const resp = await fetch(apiUrl(target, `/workflows/runs/${runId}`), {
-		headers: makeHeaders(target.token),
+		headers: makeHeaders(target.token, target.userJwt),
 	});
 	if (!resp.ok) {
 		throw await errorFromResponse(resp, `/workflows/runs/${runId}`);
@@ -363,7 +363,7 @@ export async function fetchWorkflowTemplates(
 	target: ApiTarget
 ): Promise<WorkflowTemplateMeta[]> {
 	const resp = await fetch(apiUrl(target, "/api/workflows/catalog"), {
-		headers: makeHeaders(target.token),
+		headers: makeHeaders(target.token, target.userJwt),
 	});
 	if (!resp.ok) {
 		throw await errorFromResponse(resp, "/api/workflows/catalog");
@@ -381,7 +381,7 @@ export async function fetchWorkflowTemplate(
 ): Promise<WorkflowTemplateDetail> {
 	const path = `/api/workflows/catalog/${id}`;
 	const resp = await fetch(apiUrl(target, path), {
-		headers: makeHeaders(target.token),
+		headers: makeHeaders(target.token, target.userJwt),
 	});
 	if (!resp.ok) {
 		throw await errorFromResponse(resp, path);
@@ -447,7 +447,7 @@ export async function listWorkflowVersions(
 	id: string
 ): Promise<WorkflowVersionMeta[]> {
 	const resp = await fetch(apiUrl(target, `/workflows/${id}/versions`), {
-		headers: makeHeaders(target.token),
+		headers: makeHeaders(target.token, target.userJwt),
 	});
 	if (!resp.ok) {
 		throw await errorFromResponse(resp, `/workflows/${id}/versions`);
@@ -465,7 +465,7 @@ export async function getWorkflowVersionDefinition(
 ): Promise<Record<string, unknown>> {
 	const resp = await fetch(
 		apiUrl(target, `/workflows/${id}/versions/${versionId}`),
-		{ headers: makeHeaders(target.token) }
+		{ headers: makeHeaders(target.token, target.userJwt) }
 	);
 	if (!resp.ok) {
 		throw await errorFromResponse(

@@ -72,8 +72,9 @@ export function useAgents(): UseAgentsResult {
 	const target: ApiTarget = {
 		url: activeNode.url,
 		token: activeNode.token ?? null,
+		userJwt: activeNode.userJwt ?? null,
 	};
-	const { url, token } = target;
+	const { url, token, userJwt } = target;
 
 	const { guard, limitFor } = useEntityCap();
 
@@ -86,7 +87,7 @@ export function useAgents(): UseAgentsResult {
 	const reload = useCallback(async () => {
 		setLoading(true);
 		setError(null);
-		const node: ApiTarget = { url, token };
+		const node: ApiTarget = { url, token, userJwt };
 		try {
 			const [agentList, engineList, active] = await Promise.all([
 				fetchAgents(node),
@@ -121,7 +122,7 @@ export function useAgents(): UseAgentsResult {
 			if (!guard("maxAgents", agents.length)) {
 				throw new PlanCapError("maxAgents", limitFor("maxAgents"));
 			}
-			const agent = await apiCreateAgent({ url, token }, input);
+			const agent = await apiCreateAgent({ url, token, userJwt }, input);
 			setAgents((prev) => [recordToSummary(agent), ...prev]);
 			return agent;
 		},
@@ -130,7 +131,7 @@ export function useAgents(): UseAgentsResult {
 
 	const update = useCallback(
 		async (id: string, input: AgentInput) => {
-			const agent = await apiUpdateAgent({ url, token }, id, input);
+			const agent = await apiUpdateAgent({ url, token, userJwt }, id, input);
 			setAgents((prev) =>
 				prev.map((a) => (a.id === id ? { ...a, ...recordToSummary(agent) } : a))
 			);
@@ -141,7 +142,7 @@ export function useAgents(): UseAgentsResult {
 
 	const remove = useCallback(
 		async (id: string) => {
-			await apiDeleteAgent({ url, token }, id);
+			await apiDeleteAgent({ url, token, userJwt }, id);
 			setAgents((prev) => prev.filter((a) => a.id !== id));
 		},
 		[url, token]

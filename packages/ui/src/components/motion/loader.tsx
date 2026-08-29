@@ -45,27 +45,31 @@ const ASCII_SETS: Record<string, string[]> = {
 };
 
 export interface LoaderProps {
-	/** Which animation to render. */
-	variant?: LoaderVariant;
+	className?: string;
+	/** Accessible label announced to screen readers. */
+	label?: string;
 	/** Base square size in px. Everything scales from this. */
 	size?: number;
 	/** Seconds per animation cycle. */
 	speed?: number;
-	/** Accessible label announced to screen readers. */
-	label?: string;
-	className?: string;
+	/** Which animation to render. */
+	variant?: LoaderVariant;
 }
 
 // Reduced motion keeps a calm opacity pulse and drops every transform.
 const REDUCED = {
 	animate: { opacity: [1, 0.4, 1] },
-	transition: { duration: 1.4, ease: EASE_IN_OUT, repeat: Infinity },
+	transition: {
+		duration: 1.4,
+		ease: EASE_IN_OUT,
+		repeat: Number.POSITIVE_INFINITY,
+	},
 };
 
 interface PartProps {
+	reduce: boolean;
 	size: number;
 	speed: number;
-	reduce: boolean;
 }
 
 function Spinner({ size, speed, reduce }: PartProps) {
@@ -78,7 +82,11 @@ function Spinner({ size, speed, reduce }: PartProps) {
 			transition={
 				reduce
 					? REDUCED.transition
-					: { duration: speed, ease: "linear", repeat: Infinity }
+					: {
+							duration: speed,
+							ease: "linear",
+							repeat: Number.POSITIVE_INFINITY,
+						}
 			}
 			viewBox={`0 0 ${size} ${size}`}
 			width={size}
@@ -120,7 +128,7 @@ function Dots({ size, speed, reduce }: PartProps) {
 					transition={{
 						duration: speed,
 						ease: EASE_IN_OUT,
-						repeat: Infinity,
+						repeat: Number.POSITIVE_INFINITY,
 						delay: i * speed * 0.16,
 					}}
 				/>
@@ -136,9 +144,7 @@ function Bars({ size, speed, reduce }: PartProps) {
 			{[0, 1, 2, 3].map((i) => (
 				<motion.span
 					animate={
-						reduce
-							? { opacity: [0.4, 1, 0.4] }
-							: { scaleY: [0.35, 1, 0.35] }
+						reduce ? { opacity: [0.4, 1, 0.4] } : { scaleY: [0.35, 1, 0.35] }
 					}
 					className="w-1 origin-bottom rounded-full bg-current"
 					key={i}
@@ -146,7 +152,7 @@ function Bars({ size, speed, reduce }: PartProps) {
 					transition={{
 						duration: speed,
 						ease: EASE_IN_OUT,
-						repeat: Infinity,
+						repeat: Number.POSITIVE_INFINITY,
 						delay: i * speed * 0.12,
 					}}
 				/>
@@ -201,15 +207,17 @@ export function Loader({
 			)}
 			role="status"
 		>
-			{variant === "spinner" && <Spinner size={size} speed={speed} reduce={reduce} />}
-			{variant === "dots" && <Dots size={size} speed={speed} reduce={reduce} />}
-			{variant === "bars" && <Bars size={size} speed={speed} reduce={reduce} />}
+			{variant === "spinner" && (
+				<Spinner reduce={reduce} size={size} speed={speed} />
+			)}
+			{variant === "dots" && <Dots reduce={reduce} size={size} speed={speed} />}
+			{variant === "bars" && <Bars reduce={reduce} size={size} speed={speed} />}
 			{ASCII_SETS[variant] && (
 				<Ascii
 					frames={ASCII_SETS[variant]}
+					reduce={reduce}
 					size={size}
 					speed={speed}
-					reduce={reduce}
 				/>
 			)}
 			<span className="sr-only">{label}</span>

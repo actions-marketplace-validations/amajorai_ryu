@@ -20,6 +20,7 @@ import type {
 	ComposerMenuGroup,
 	ComposerMenuItem,
 } from "@ryu/blocks/desktop/agent-elements/input/composer-menu";
+import type { ChatVoiceMode } from "@ryu/blocks/desktop/agent-elements/types";
 import { toast } from "@ryu/ui/components/sileo.tsx";
 import type { ReactNode } from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -128,11 +129,8 @@ export interface ComposerSlot {
 	 * installed app.
 	 */
 	triggerSections: ComposerSettingsSection[];
-	/**
-	 * Render this near the surface root: the full-screen voice-mode overlay while a
-	 * session is open, else `null`.
-	 */
-	voiceModeOverlay: ReactNode;
+	/** Render the shared composer inside the active voice-mode call surface. */
+	voiceMode: ChatVoiceMode;
 }
 
 /**
@@ -208,7 +206,7 @@ export interface ComposerSlotOptions {
  * `InputBar` slot (agent/model/thinking controls + voice + voice mode + attach +
  * compact), the staged-image `attachments` for `AgentChat`, a `takeImages()` the
  * surface folds into its send, the composed `sections` for the empty-state logo,
- * and the `voiceModeOverlay` to render.
+ * and the voice-mode slot that can own the shared composer.
  */
 export function useComposerSlot(
 	runtime: ComposerRuntime,
@@ -455,8 +453,9 @@ export function useComposerSlot(
 	);
 
 	// ChatGPT-style continuous voice mode — its own entry point, separate from the
-	// push-to-talk dictation above. The surface renders `voiceModeOverlay`.
-	const voiceMode = useVoiceMode(target, {
+	// push-to-talk dictation above. The active call surface receives the exact
+	// composer node owned by AgentChat.
+	const voiceModeState = useVoiceMode(target, {
 		// A surface can sit on no agent at all (the launchpad before a pick), which
 		// voice mode reads as "use the node default".
 		agentId: runtime.agentId ?? undefined,
@@ -487,7 +486,7 @@ export function useComposerSlot(
 		left: leftActions,
 		minimal,
 		onGenerateImage,
-		onStartVoiceMode: voiceMode.start,
+		onStartVoiceMode: voiceModeState.start,
 		placeholder,
 		right: rightActions,
 		sections,
@@ -500,7 +499,7 @@ export function useComposerSlot(
 		left: leftActions,
 		minimal,
 		onGenerateImage,
-		onStartVoiceMode: voiceMode.start,
+		onStartVoiceMode: voiceModeState.start,
 		placeholder,
 		right: rightActions,
 		sections,
@@ -543,9 +542,14 @@ export function useComposerSlot(
 		[transcribe]
 	);
 
-	const voiceModeOverlay = voiceMode.active ? (
-		<VoiceModeSurface voice={voiceMode} />
-	) : null;
+	const voiceMode: ChatVoiceMode = voiceModeState.active
+		? {
+				active: true,
+				render: (composer) => (
+					<VoiceModeSurface composer={composer} voice={voiceModeState} />
+				),
+			}
+		: { active: false };
 
 	return {
 		attachClip,
@@ -566,6 +570,6 @@ export function useComposerSlot(
 		triggerSections,
 		takeClipText,
 		takeImages,
-		voiceModeOverlay,
+		voiceMode,
 	};
 }

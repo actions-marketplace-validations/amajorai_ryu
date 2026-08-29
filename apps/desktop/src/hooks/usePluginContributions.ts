@@ -98,7 +98,11 @@ export function usePluginContributionsQuery() {
 	return useQuery({
 		queryKey: ["plugin-contributions", node.url, node.token],
 		queryFn: () =>
-			getPluginContributions({ url: node.url, token: node.token ?? null }),
+			getPluginContributions({
+				url: node.url,
+				token: node.token,
+				userJwt: node.userJwt ?? null,
+			}),
 		// Best-effort surface: a stale window avoids hammering Core, and any error
 		// simply leaves `data` undefined → the stable EMPTY payload below. `retry`
 		// is off so an older Core lacking this endpoint fails once, quietly, rather

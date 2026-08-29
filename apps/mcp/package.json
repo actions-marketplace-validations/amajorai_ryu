@@ -9,6 +9,7 @@
   "scripts": {
     "dev": "bun run src/index.ts",
     "start": "bun run src/index.ts",
+    "test": "bun test",
     "check": "bun run --silent src/index.ts < /dev/null || true"
   },
   "dependencies": {

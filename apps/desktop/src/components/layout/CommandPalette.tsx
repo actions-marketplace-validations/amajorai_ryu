@@ -180,6 +180,7 @@ export function CommandPalette() {
 	const target: ApiTarget = {
 		url: activeNode.url,
 		token: activeNode.token ?? null,
+		userJwt: activeNode.userJwt ?? null,
 	};
 	// Enabled plugins' declarative contributions (companions + slash commands +
 	// app-registered sidebar buttons), shared via react-query cache with the

@@ -1844,7 +1844,9 @@ export const auth = betterAuth({
 		deviceAuthorization({
 			verificationUri: `${process.env.FRONTEND_URL || "http://localhost:3001"}/device`,
 			validateClient: (clientId) =>
-				["ryu-desktop", "ryu-cli", "ryu-extension"].includes(clientId),
+				["ryu-desktop", "ryu-cli", "ryu-mcp", "ryu-extension"].includes(
+					clientId
+				),
 		}),
 		// The built-in GET /device only returns { user_code, status } — it hides the
 		// requesting clientId/scope. The approve consent screen needs to name the app

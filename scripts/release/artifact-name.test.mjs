@@ -79,7 +79,11 @@ test("assemble-channel-feed's four platform matchers still resolve", () => {
 	};
 	for (const [key, re] of Object.entries(feed)) {
 		const hits = out.filter((n) => re.test(n) && !n.endsWith(".sig"));
-		assert.equal(hits.length, 1, `${key}: expected exactly one match, got ${hits.join(", ")}`);
+		assert.equal(
+			hits.length,
+			1,
+			`${key}: expected exactly one match, got ${hits.join(", ")}`
+		);
 	}
 });
 
@@ -87,7 +91,10 @@ test("every artifact keeps a signature named exactly <artifact>.sig", () => {
 	const out = stableSet();
 	for (const sig of out.filter((n) => n.endsWith(".sig"))) {
 		const parent = sig.slice(0, -4);
-		assert.ok(out.includes(parent), `orphan ${sig}: no artifact named ${parent}`);
+		assert.ok(
+			out.includes(parent),
+			`orphan ${sig}: no artifact named ${parent}`
+		);
 	}
 });
 
@@ -110,7 +117,10 @@ test("the marketing site's download patterns still resolve", () => {
 	// …and the companion-app exclusion must NOT swallow the desktop bundles.
 	const nonDesktop = /^ryu-(island|browser|cli|core|gateway)[-_]/i;
 	for (const n of out) {
-		assert.ok(!nonDesktop.test(n), `${n} would be excluded as a non-desktop asset`);
+		assert.ok(
+			!nonDesktop.test(n),
+			`${n} would be excluded as a non-desktop asset`
+		);
 	}
 });
 
@@ -129,21 +139,31 @@ test("prerelease versions round-trip", () => {
 
 test("foreign and already-renamed files are left alone", () => {
 	assert.equal(rename("ryu-island-mac-arm64.dmg", STABLE, V), null);
-	assert.equal(rename("Ryu.Desktop.Research_Preview.0.1.7_aarch64.dmg", STABLE, V), null);
+	assert.equal(
+		rename("Ryu.Desktop.Research_Preview.0.1.7_aarch64.dmg", STABLE, V),
+		null
+	);
 });
 
 test("the guard rejects a set that breaks a matcher", () => {
 	// A rename that dropped the arch suffix from the updater bundle — the exact
 	// v0.1.5 macOS-no-update shape.
 	assert.throws(
-		() => assertSuffixContract(["Ryu.Desktop.Research_Preview.0.1.7.app.tar.gz"]),
+		() =>
+			assertSuffixContract(["Ryu.Desktop.Research_Preview.0.1.7.app.tar.gz"]),
 		/updater bundle/
 	);
 	// A name GitHub would rewrite.
-	assert.throws(() => assertSuffixContract(["Ryu (Research Preview)_0.1.7_x64.dmg"]), /space or paren/);
+	assert.throws(
+		() => assertSuffixContract(["Ryu (Research Preview)_0.1.7_x64.dmg"]),
+		/space or paren/
+	);
 	// A signature whose parent is not present.
 	assert.throws(
-		() => assertSuffixContract(["Ryu.Desktop.Research_Preview.0.1.7_amd64.AppImage.sig"]),
+		() =>
+			assertSuffixContract([
+				"Ryu.Desktop.Research_Preview.0.1.7_amd64.AppImage.sig",
+			]),
 		/orphan signature/
 	);
 });

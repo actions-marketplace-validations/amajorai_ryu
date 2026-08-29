@@ -1,4 +1,10 @@
-import { type RefObject, useCallback, useEffect, useRef, useState } from "react";
+import {
+	type RefObject,
+	useCallback,
+	useEffect,
+	useRef,
+	useState,
+} from "react";
 
 /**
  * The scroll-derived state the desktop transcript used to get from the shadcn
@@ -45,7 +51,7 @@ export function useTranscriptAnchor({
 		(messageId: string, options?: { behavior?: ScrollBehavior }) => {
 			const viewport = viewportRef.current;
 			const el = elementsRef.current.get(messageId);
-			if (!viewport || !el) {
+			if (!(viewport && el)) {
 				return false;
 			}
 			const behavior = options?.behavior ?? "smooth";

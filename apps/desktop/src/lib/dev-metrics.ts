@@ -291,76 +291,76 @@ export function summarizeTurns(samples: readonly TurnSample[]): TurnStat {
  */
 export const instrumentedFetch: typeof fetch = Object.assign(
 	(input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
-	if (!isDevMetricsEnabled()) {
-		return fetch(input, init);
-	}
-	const started = performance.now();
-	const at = Date.now();
-	const url =
-		typeof input === "string"
-			? input
-			: input instanceof URL
-				? input.href
-				: input.url;
-	const path = pathOf(url);
+		if (!isDevMetricsEnabled()) {
+			return fetch(input, init);
+		}
+		const started = performance.now();
+		const at = Date.now();
+		const url =
+			typeof input === "string"
+				? input
+				: input instanceof URL
+					? input.href
+					: input.url;
+		const path = pathOf(url);
 
-	return fetch(input, init).then(
-		(response) => {
-			if (!response.body) {
+		return fetch(input, init).then(
+			(response) => {
+				if (!response.body) {
+					recordTurnSample({
+						at,
+						path,
+						status: response.status,
+						ttftMs: null,
+						ms: performance.now() - started,
+						bytes: 0,
+						chunks: 0,
+					});
+					return response;
+				}
+				let ttftMs: number | null = null;
+				let bytes = 0;
+				let chunks = 0;
+				const meter = new TransformStream<Uint8Array, Uint8Array>({
+					transform(chunk, controller) {
+						if (ttftMs === null) {
+							ttftMs = performance.now() - started;
+						}
+						bytes += chunk.byteLength;
+						chunks++;
+						controller.enqueue(chunk);
+					},
+					flush() {
+						recordTurnSample({
+							at,
+							path,
+							status: response.status,
+							ttftMs,
+							ms: performance.now() - started,
+							bytes,
+							chunks,
+						});
+					},
+				});
+				return new Response(response.body.pipeThrough(meter), {
+					status: response.status,
+					statusText: response.statusText,
+					headers: response.headers,
+				});
+			},
+			(error: unknown) => {
 				recordTurnSample({
 					at,
 					path,
-					status: response.status,
+					status: 0,
 					ttftMs: null,
 					ms: performance.now() - started,
 					bytes: 0,
 					chunks: 0,
 				});
-				return response;
+				throw error;
 			}
-			let ttftMs: number | null = null;
-			let bytes = 0;
-			let chunks = 0;
-			const meter = new TransformStream<Uint8Array, Uint8Array>({
-				transform(chunk, controller) {
-					if (ttftMs === null) {
-						ttftMs = performance.now() - started;
-					}
-					bytes += chunk.byteLength;
-					chunks++;
-					controller.enqueue(chunk);
-				},
-				flush() {
-					recordTurnSample({
-						at,
-						path,
-						status: response.status,
-						ttftMs,
-						ms: performance.now() - started,
-						bytes,
-						chunks,
-					});
-				},
-			});
-			return new Response(response.body.pipeThrough(meter), {
-				status: response.status,
-				statusText: response.statusText,
-				headers: response.headers,
-			});
-		},
-		(error: unknown) => {
-			recordTurnSample({
-				at,
-				path,
-				status: 0,
-				ttftMs: null,
-				ms: performance.now() - started,
-				bytes: 0,
-				chunks: 0,
-			});
-			throw error;
-		}
-	);
+		);
 	},
 	{ preconnect: fetch.preconnect }
 );

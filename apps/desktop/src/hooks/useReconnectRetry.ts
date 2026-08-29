@@ -110,6 +110,7 @@ export function useReconnectRetry(): ReconnectRetryState {
 		retryInFlight.current = true;
 		const target = {
 			token: activeNode.token ?? null,
+			userJwt: activeNode.userJwt ?? null,
 			url: activeNode.url,
 		};
 		try {

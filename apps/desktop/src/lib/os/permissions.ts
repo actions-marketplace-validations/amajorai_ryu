@@ -128,7 +128,9 @@ export async function requestAccessibilityPermission(): Promise<boolean> {
  */
 export async function requestScreenRecordingPermission(): Promise<boolean> {
 	try {
-		return await invokeWhenReady<boolean>("request_screen_recording_permission");
+		return await invokeWhenReady<boolean>(
+			"request_screen_recording_permission"
+		);
 	} catch {
 		return false;
 	}
@@ -178,7 +180,9 @@ export async function checkInputMonitoringPermission(): Promise<boolean> {
  */
 export async function requestInputMonitoringPermission(): Promise<boolean> {
 	try {
-		return await invokeWhenReady<boolean>("request_input_monitoring_permission");
+		return await invokeWhenReady<boolean>(
+			"request_input_monitoring_permission"
+		);
 	} catch {
 		return false;
 	}

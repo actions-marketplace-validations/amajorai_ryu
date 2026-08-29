@@ -27,6 +27,7 @@ export interface RyuAssistantChatProps
 	closeTitle?: string;
 	density?: AgentChatProps["density"];
 	divider?: boolean;
+	emptyStatePosition?: AgentChatProps["emptyStatePosition"];
 	footer?: ReactNode;
 	minimal?: boolean;
 	onClose?: () => void;
@@ -39,7 +40,8 @@ export interface RyuAssistantChatProps
 	title?: ReactNode;
 }
 
-function MinimalInputBar(props: InputBarProps) {
+/** Shared compact composer used by floating assistant surfaces. */
+export function RyuAssistantComposer(props: InputBarProps) {
 	return (
 		<InputBar
 			{...props}
@@ -59,6 +61,7 @@ export function RyuAssistantChat({
 	closeTitle,
 	divider,
 	density,
+	emptyStatePosition,
 	footer,
 	minimal,
 	onClose,
@@ -87,7 +90,7 @@ export function RyuAssistantChat({
 			</>
 		) : undefined;
 	const resolvedSlots = isMinimal
-		? { ...slots, InputBar: slots?.InputBar ?? MinimalInputBar }
+		? { ...slots, InputBar: slots?.InputBar ?? RyuAssistantComposer }
 		: slots;
 
 	return (
@@ -109,7 +112,7 @@ export function RyuAssistantChat({
 					density={isMinimal ? "compact" : density}
 					emptyStateFooter={emptyStateFooter}
 					emptyStatePosition={
-						isMinimal ? "default" : chatProps.emptyStatePosition
+						emptyStatePosition ?? (isMinimal ? "default" : undefined)
 					}
 					slots={resolvedSlots}
 				/>

@@ -43,6 +43,7 @@ export function useMeetingStream(): void {
 	const node = useActiveNode();
 	const url = node.url;
 	const token = node.token ?? null;
+	const userJwt = node.userJwt ?? null;
 	const qc = useQueryClient();
 	const enabledApps = useEnabledApps();
 	const meetingsEnabled = enabledApps?.has(MEETINGS_APP_ID) ?? false;
@@ -58,7 +59,7 @@ export function useMeetingStream(): void {
 		let cancelled = false;
 		let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 		const controller = new AbortController();
-		const target: ApiTarget = { url, token };
+		const target: ApiTarget = { url, token, userJwt };
 		const { applyEvent, seedFromMeetings, reset } =
 			useMeetingRecordingStore.getState();
 
@@ -137,5 +138,5 @@ export function useMeetingStream(): void {
 			}
 			reset();
 		};
-	}, [url, token, qc, meetingsEnabled]);
+	}, [url, token, userJwt, qc, meetingsEnabled]);
 }

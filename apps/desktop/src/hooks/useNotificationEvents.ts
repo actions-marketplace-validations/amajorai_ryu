@@ -72,6 +72,7 @@ export function useNotificationEvents(): void {
 	const node = useActiveNode();
 	const url = node.url;
 	const token = node.token ?? null;
+	const userJwt = node.userJwt ?? null;
 	const { data: session } = useSession();
 	const meId = session?.user?.id ?? getActiveUserId() ?? null;
 	const qc = useQueryClient();
@@ -94,7 +95,7 @@ export function useNotificationEvents(): void {
 		let cancelled = false;
 		let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 		const controller = new AbortController();
-		const target: ApiTarget = { url, token };
+		const target: ApiTarget = { url, token, userJwt };
 
 		const onEvent = (event: UserNotificationEvent) => {
 			const notify =
@@ -141,5 +142,5 @@ export function useNotificationEvents(): void {
 				clearTimeout(reconnectTimer);
 			}
 		};
-	}, [url, token, meId, qc, openTab]);
+	}, [url, token, userJwt, meId, qc, openTab]);
 }

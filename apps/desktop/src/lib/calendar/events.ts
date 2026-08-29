@@ -211,10 +211,7 @@ function intervalOccurrences(
 	// High-frequency: one aggregate marker per day with a count.
 	if (stepSeconds < HIGH_FREQUENCY_SECONDS) {
 		const events: CalendarEvent[] = [];
-		for (
-			let day = startOfLocalDay(windowStart);
-			day.getTime() < endMs;
-		) {
+		for (let day = startOfLocalDay(windowStart); day.getTime() < endMs; ) {
 			const nextDay = new Date(day);
 			nextDay.setDate(nextDay.getDate() + 1);
 			const dayStartMs = Math.max(day.getTime(), startMs);

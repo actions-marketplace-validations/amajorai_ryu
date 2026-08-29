@@ -77,9 +77,9 @@ export function LicensesTab() {
 			<LicensesBody
 				licenses={licenses}
 				loadFailed={loadFailed}
-			loading={loading}
-			onBrowse={openMarketplace}
-			onRetry={() => refresh()}
+				loading={loading}
+				onBrowse={openMarketplace}
+				onRetry={() => refresh()}
 			/>
 		</div>
 	);

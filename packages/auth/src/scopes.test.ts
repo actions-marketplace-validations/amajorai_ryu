@@ -1,16 +1,17 @@
 import { describe, expect, it } from "bun:test";
 import {
 	defaultPermissionsForRole,
-	intersectStatements,
-	intersectOAuthScopes,
 	findUnknownOAuthScopes,
+	intersectOAuthScopes,
+	intersectStatements,
 	OIDC_STANDARD_SCOPES,
+	parseOAuthScopes,
+	permissionsForPersonalToken,
 	RYU_CAPABILITIES,
 	RYU_OAUTH_SCOPES,
 	RYU_SUPPORTED_SCOPES,
 	type RyuStatements,
 	scopesToStatements,
-	parseOAuthScopes,
 	statementsToScopes,
 } from "./scopes.ts";
 
@@ -27,9 +28,9 @@ describe("OAuth scope boundary helpers", () => {
 	});
 
 	it("identifies unknown scopes instead of silently widening", () => {
-		expect(findUnknownOAuthScopes(["openid", "tools:read", "root:all"])).toEqual([
-			"root:all",
-		]);
+		expect(
+			findUnknownOAuthScopes(["openid", "tools:read", "root:all"])
+		).toEqual(["root:all"]);
 	});
 
 	it("intersects requested capabilities and strips OIDC scopes", () => {
@@ -215,5 +216,32 @@ describe("defaultPermissionsForRole", () => {
 		expect(defaultPermissionsForRole(undefined)).toEqual(
 			defaultPermissionsForRole("user")
 		);
+	});
+});
+
+describe("permissionsForPersonalToken", () => {
+	it("gives a classic token the complete role ceiling", () => {
+		const ceiling = defaultPermissionsForRole("user");
+
+		expect(
+			permissionsForPersonalToken({
+				ceiling,
+				scopes: [],
+				tokenType: "classic",
+			})
+		).toEqual(ceiling);
+	});
+
+	it("keeps fine-grained tokens inside the role ceiling", () => {
+		expect(
+			permissionsForPersonalToken({
+				ceiling: defaultPermissionsForRole("user"),
+				scopes: ["chat:write", "agents:manage", "files:read"],
+				tokenType: "fine-grained",
+			})
+		).toEqual({
+			chat: ["write"],
+			files: ["read"],
+		});
 	});
 });

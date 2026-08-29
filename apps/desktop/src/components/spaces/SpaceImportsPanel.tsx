@@ -540,7 +540,165 @@ export function SpaceImportsPanel({
 						</CardDescription>
 					</CardHeader>
 					<CardContent className="flex flex-col gap-4">
-						{!configured ? (
+						{configured ? (
+							availableToolkits.length === 0 ? (
+								<div className="flex flex-wrap items-center justify-between gap-3 rounded-md border p-3 text-sm">
+									<span>
+										Connect an app to make its import actions available here.
+									</span>
+									<Button
+										onClick={onManageConnections}
+										size="sm"
+										variant="outline"
+									>
+										Manage connections
+									</Button>
+								</div>
+							) : (
+								<>
+									<div className="grid gap-3 md:grid-cols-2">
+										<div className="flex flex-col gap-1.5">
+											<Label htmlFor="space-import-toolkit">
+												Connected app
+											</Label>
+											<Select onValueChange={setToolkit} value={toolkit}>
+												<SelectTrigger id="space-import-toolkit">
+													<SelectValue placeholder="Choose an app">
+														{(value) =>
+															availableToolkits.find(
+																(item) => item.slug === value
+															)?.name ?? value
+														}
+													</SelectValue>
+												</SelectTrigger>
+												<SelectContent>
+													{availableToolkits.map((item) => (
+														<SelectItem key={item.slug} value={item.slug}>
+															{item.name}
+														</SelectItem>
+													))}
+												</SelectContent>
+											</Select>
+										</div>
+										<div className="flex flex-col gap-1.5">
+											<Label htmlFor="space-import-action">Read action</Label>
+											<Select onValueChange={setActionName} value={actionName}>
+												<SelectTrigger id="space-import-action">
+													<SelectValue placeholder="Choose data to import">
+														{(value) =>
+															readActions.find((item) => item.name === value)
+																?.displayName ?? value
+														}
+													</SelectValue>
+												</SelectTrigger>
+												<SelectContent>
+													{readActions.map((item) => (
+														<SelectItem key={item.name} value={item.name}>
+															{item.displayName}
+														</SelectItem>
+													))}
+												</SelectContent>
+											</Select>
+										</div>
+									</div>
+									{selectedAction?.description ? (
+										<p className="text-muted-foreground text-xs">
+											{selectedAction.description}
+										</p>
+									) : null}
+									<div className="grid gap-3 md:grid-cols-2">
+										{Object.entries(
+											selectedAction?.inputSchema.properties ?? {}
+										).map(([name, property]) => (
+											<ArgumentField
+												key={name}
+												name={name}
+												onChange={(value) =>
+													setArgumentValues((current) => ({
+														...current,
+														[name]: value,
+													}))
+												}
+												property={property}
+												required={
+													selectedAction?.inputSchema.required?.includes(
+														name
+													) ?? false
+												}
+												value={
+													argumentValues[name] ?? defaultArgumentValue(property)
+												}
+											/>
+										))}
+										<div className="flex flex-col gap-1.5">
+											<Label htmlFor="space-import-title">Title</Label>
+											<Input
+												id="space-import-title"
+												onChange={(event) => setImportTitle(event.target.value)}
+												placeholder={
+													selectedAction?.displayName ?? "Imported data"
+												}
+												value={importTitle}
+											/>
+										</div>
+										<div className="flex flex-col gap-1.5">
+											<Label htmlFor="space-import-destination">
+												Destination
+											</Label>
+											<Select
+												onValueChange={(value) =>
+													setDestinationKind(
+														value as "auto" | "page" | "database"
+													)
+												}
+												value={destinationKind}
+											>
+												<SelectTrigger id="space-import-destination">
+													<SelectValue>
+														{(value) => {
+															if (value === "page") {
+																return "Page";
+															}
+															if (value === "database") {
+																return "Database";
+															}
+															return "Choose from result";
+														}}
+													</SelectValue>
+												</SelectTrigger>
+												<SelectContent>
+													<SelectItem value="auto">
+														Choose from result
+													</SelectItem>
+													<SelectItem value="page">Page</SelectItem>
+													<SelectItem value="database">Database</SelectItem>
+												</SelectContent>
+											</Select>
+										</div>
+									</div>
+									{composioError ? (
+										<p className="text-destructive text-sm">{composioError}</p>
+									) : null}
+									<Button
+										disabled={!selectedAction}
+										loading={composioBusy}
+										onClick={() => startComposioImport().catch(() => undefined)}
+										size="sm"
+										type="button"
+									>
+										{composioBusy ? null : (
+											<HugeiconsIcon
+												className="size-4"
+												icon={CloudDownloadIcon}
+											/>
+										)}
+										Import from{" "}
+										{availableToolkits.find((item) => item.slug === toolkit)
+											?.name ?? "app"}
+									</Button>
+								</>
+							)
+						) : (
 							<div className="flex flex-wrap items-center justify-between gap-3 rounded-md border p-3 text-sm">
 								<span>Configure Composio in Connections before importing.</span>
 								<Button
@@ -552,157 +710,6 @@ export function SpaceImportsPanel({
 									connections
 								</Button>
 							</div>
-						) : availableToolkits.length === 0 ? (
-							<div className="flex flex-wrap items-center justify-between gap-3 rounded-md border p-3 text-sm">
-								<span>
-									Connect an app to make its import actions available here.
-								</span>
-								<Button
-									onClick={onManageConnections}
-									size="sm"
-									variant="outline"
-								>
-									Manage connections
-								</Button>
-							</div>
-						) : (
-							<>
-								<div className="grid gap-3 md:grid-cols-2">
-									<div className="flex flex-col gap-1.5">
-										<Label htmlFor="space-import-toolkit">Connected app</Label>
-										<Select onValueChange={setToolkit} value={toolkit}>
-											<SelectTrigger id="space-import-toolkit">
-												<SelectValue placeholder="Choose an app">
-													{(value) =>
-														availableToolkits.find(
-															(item) => item.slug === value
-														)?.name ?? value
-													}
-												</SelectValue>
-											</SelectTrigger>
-											<SelectContent>
-												{availableToolkits.map((item) => (
-													<SelectItem key={item.slug} value={item.slug}>
-														{item.name}
-													</SelectItem>
-												))}
-											</SelectContent>
-										</Select>
-									</div>
-									<div className="flex flex-col gap-1.5">
-										<Label htmlFor="space-import-action">Read action</Label>
-										<Select onValueChange={setActionName} value={actionName}>
-											<SelectTrigger id="space-import-action">
-												<SelectValue placeholder="Choose data to import">
-													{(value) =>
-														readActions.find((item) => item.name === value)
-															?.displayName ?? value
-													}
-												</SelectValue>
-											</SelectTrigger>
-											<SelectContent>
-												{readActions.map((item) => (
-													<SelectItem key={item.name} value={item.name}>
-														{item.displayName}
-													</SelectItem>
-												))}
-											</SelectContent>
-										</Select>
-									</div>
-								</div>
-								{selectedAction?.description ? (
-									<p className="text-muted-foreground text-xs">
-										{selectedAction.description}
-									</p>
-								) : null}
-								<div className="grid gap-3 md:grid-cols-2">
-									{Object.entries(
-										selectedAction?.inputSchema.properties ?? {}
-									).map(([name, property]) => (
-										<ArgumentField
-											key={name}
-											name={name}
-											onChange={(value) =>
-												setArgumentValues((current) => ({
-													...current,
-													[name]: value,
-												}))
-											}
-											property={property}
-											required={
-												selectedAction?.inputSchema.required?.includes(name) ??
-												false
-											}
-											value={
-												argumentValues[name] ?? defaultArgumentValue(property)
-											}
-										/>
-									))}
-									<div className="flex flex-col gap-1.5">
-										<Label htmlFor="space-import-title">Title</Label>
-										<Input
-											id="space-import-title"
-											onChange={(event) => setImportTitle(event.target.value)}
-											placeholder={
-												selectedAction?.displayName ?? "Imported data"
-											}
-											value={importTitle}
-										/>
-									</div>
-									<div className="flex flex-col gap-1.5">
-										<Label htmlFor="space-import-destination">
-											Destination
-										</Label>
-										<Select
-											onValueChange={(value) =>
-												setDestinationKind(
-													value as "auto" | "page" | "database"
-												)
-											}
-											value={destinationKind}
-										>
-											<SelectTrigger id="space-import-destination">
-												<SelectValue>
-													{(value) => {
-														if (value === "page") {
-															return "Page";
-														}
-														if (value === "database") {
-															return "Database";
-														}
-														return "Choose from result";
-													}}
-												</SelectValue>
-											</SelectTrigger>
-											<SelectContent>
-												<SelectItem value="auto">Choose from result</SelectItem>
-												<SelectItem value="page">Page</SelectItem>
-												<SelectItem value="database">Database</SelectItem>
-											</SelectContent>
-										</Select>
-									</div>
-								</div>
-								{composioError ? (
-									<p className="text-destructive text-sm">{composioError}</p>
-								) : null}
-								<Button
-									disabled={!selectedAction}
-									loading={composioBusy}
-									onClick={() => startComposioImport().catch(() => undefined)}
-									size="sm"
-									type="button"
-								>
-									{!composioBusy ? (
-										<HugeiconsIcon
-											className="size-4"
-											icon={CloudDownloadIcon}
-										/>
-									) : null}
-									Import from{" "}
-									{availableToolkits.find((item) => item.slug === toolkit)
-										?.name ?? "app"}
-								</Button>
-							</>
 						)}
 					</CardContent>
 				</Card>

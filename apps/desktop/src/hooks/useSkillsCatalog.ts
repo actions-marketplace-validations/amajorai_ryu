@@ -154,8 +154,9 @@ export function useSkillsCatalog(initialQuery = ""): UseSkillsCatalogResult {
 	const target: ApiTarget = {
 		url: activeNode.url,
 		token: activeNode.token ?? null,
+		userJwt: activeNode.userJwt ?? null,
 	};
-	const { url, token } = target;
+	const { url, token, userJwt } = target;
 	const qc = useQueryClient();
 
 	const [query, setQuery] = useState(initialQuery);
@@ -194,7 +195,7 @@ export function useSkillsCatalog(initialQuery = ""): UseSkillsCatalogResult {
 
 	const addMarketplaceMutation = useMutation({
 		mutationFn: (params: AddMarketplaceParams) =>
-			addMarketplaceSource({ url, token }, params),
+			addMarketplaceSource({ url, token, userJwt }, params),
 		onSuccess: () => {
 			Promise.resolve(
 				qc.invalidateQueries({ queryKey: ["skills", "sources", url] })
@@ -208,7 +209,8 @@ export function useSkillsCatalog(initialQuery = ""): UseSkillsCatalogResult {
 	);
 
 	const removeMarketplaceMutation = useMutation({
-		mutationFn: (id: string) => removeMarketplaceSource({ url, token }, id),
+		mutationFn: (id: string) =>
+			removeMarketplaceSource({ url, token, userJwt }, id),
 		onSuccess: (_data, id) => {
 			if (sourceOverride === id) {
 				setSourceOverride(null);
@@ -228,7 +230,7 @@ export function useSkillsCatalog(initialQuery = ""): UseSkillsCatalogResult {
 
 	const reorderMarketplaceMutation = useMutation({
 		mutationFn: ({ id, direction }: { id: string; direction: "up" | "down" }) =>
-			reorderMarketplaceSource({ url, token }, id, direction),
+			reorderMarketplaceSource({ url, token, userJwt }, id, direction),
 		onSuccess: () => {
 			Promise.resolve(
 				qc.invalidateQueries({ queryKey: ["skills", "sources", url] })
@@ -258,7 +260,7 @@ export function useSkillsCatalog(initialQuery = ""): UseSkillsCatalogResult {
 		queryKey: ["skills", "detail", url, selectedId, detailSource],
 		queryFn: () =>
 			fetchSkillDetail(
-				{ url, token },
+				{ url, token, userJwt },
 				selectedId as string,
 				detailSource === ALL_SKILL_SOURCES_ID ? undefined : detailSource
 			),
@@ -267,7 +269,7 @@ export function useSkillsCatalog(initialQuery = ""): UseSkillsCatalogResult {
 
 	const installMutation = useMutation({
 		mutationFn: (vars: { id: string; source?: string }) =>
-			installSkill({ url, token }, vars.id, vars.source),
+			installSkill({ url, token, userJwt }, vars.id, vars.source),
 		onMutate: async (vars) => {
 			const key = ["skills", "detail", url, vars.id, detailSource];
 			await qc.cancelQueries({ queryKey: key });
@@ -304,7 +306,7 @@ export function useSkillsCatalog(initialQuery = ""): UseSkillsCatalogResult {
 
 	const setActiveMutation = useMutation({
 		mutationFn: (vars: { id: string; active: boolean }) =>
-			setSkillActive({ url, token }, vars.id, vars.active),
+			setSkillActive({ url, token, userJwt }, vars.id, vars.active),
 		onMutate: (vars) => {
 			setTogglingSkill(vars.id);
 		},

@@ -85,7 +85,7 @@ test("docsync decode fails closed on empty buffer and unknown tag", () => {
 
 test("realtimeWsUrl upgrades scheme and attaches token + jwt", () => {
 	const url = realtimeWsUrl(
-		{ url: "http://127.0.0.1:7980", token: "node-secret" },
+		{ url: "http://127.0.0.1:7980", token: "node-secret", userJwt: null },
 		{ roomId: "conv_1", kind: "conversation", jwt: "user.jwt.token" }
 	);
 	const parsed = new URL(url);
@@ -97,7 +97,7 @@ test("realtimeWsUrl upgrades scheme and attaches token + jwt", () => {
 
 test("realtimeWsUrl uses wss for an https node and omits an absent jwt", () => {
 	const url = realtimeWsUrl(
-		{ url: "https://node.example.com", token: null },
+		{ url: "https://node.example.com", token: null, userJwt: null },
 		{ roomId: "doc_1", kind: "document" }
 	);
 	const parsed = new URL(url);
@@ -114,7 +114,7 @@ test("application room options carry app_id only in the join frame contract", ()
 		data: null,
 	});
 	const url = realtimeWsUrl(
-		{ url: "http://127.0.0.1:7980", token: "node-secret" },
+		{ url: "http://127.0.0.1:7980", token: "node-secret", userJwt: null },
 		{
 			appId: "com.example.app",
 			kind: "application",

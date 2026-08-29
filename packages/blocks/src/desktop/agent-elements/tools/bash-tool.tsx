@@ -1,4 +1,7 @@
-﻿import { ToolResult, ToolResultOutput } from "@ryu/ui/components/agents/tool-result";
+import {
+	ToolResult,
+	ToolResultOutput,
+} from "@ryu/ui/components/agents/tool-result";
 import { memo } from "react";
 import { useToolComplete } from "../hooks/use-tool-complete.ts";
 import type { StepState, TimelineStep } from "../types/timeline.ts";

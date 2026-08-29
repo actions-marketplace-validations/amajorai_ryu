@@ -61,6 +61,7 @@ export function useRealtimeRoom(
 	const node = useActiveNode();
 	const { url } = node;
 	const token = node.token ?? null;
+	const userJwt = node.userJwt ?? null;
 
 	const handlersRef = useRef<RealtimeHandlers | undefined>(handlers);
 	handlersRef.current = handlers;
@@ -116,7 +117,7 @@ export function useRealtimeRoom(
 				return;
 			}
 			const conn = new RealtimeConnection(
-				{ url, token },
+				{ url, token, userJwt },
 				{ roomId, kind, jwt, handlers: composed, clientId }
 			);
 			connectionRef.current = conn;
@@ -138,7 +139,7 @@ export function useRealtimeRoom(
 			setResolvedClientId(null);
 			setMemberId(null);
 		};
-	}, [roomId, kind, url, token, clientId]);
+	}, [roomId, kind, url, token, userJwt, clientId]);
 
 	const publishPresence = useCallback((data: unknown) => {
 		connectionRef.current?.publishPresence(data);

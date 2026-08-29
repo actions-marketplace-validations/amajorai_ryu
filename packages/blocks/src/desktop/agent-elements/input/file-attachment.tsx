@@ -1,4 +1,4 @@
-﻿import { Button } from "@ryu/ui/components/button";
+import { Button } from "@ryu/ui/components/button";
 import { cn } from "@ryu/ui/lib/utils";
 import { IconX as X } from "@tabler/icons-react";
 import { useRef, useState } from "react";

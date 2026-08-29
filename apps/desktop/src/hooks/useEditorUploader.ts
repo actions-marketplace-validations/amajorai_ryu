@@ -18,7 +18,7 @@ export function useEditorUploader(): void {
 			const node = getNode();
 			const base = node.url.replace(/\/$/, "");
 			const uploaded = await uploadUserFile(
-				{ url: node.url, token: node.token ?? null },
+				{ url: node.url, token: node.token, userJwt: node.userJwt ?? null },
 				file
 			);
 			return {

@@ -150,6 +150,7 @@ export function NodeFolderBrowser({
 	const activeNode = useActiveNode();
 	const nodeUrl = activeNode.url;
 	const nodeToken = activeNode.token ?? null;
+	const nodeUserJwt = activeNode.userJwt ?? null;
 
 	const [roots, setRoots] = useState<DirectoryEntry[]>([]);
 	const [expanded, setExpanded] = useState<ReadonlySet<string>>(new Set());
@@ -175,7 +176,7 @@ export function NodeFolderBrowser({
 			setLoadingPaths((prev) => new Set(prev).add(path));
 			try {
 				const listing = await listDirectory(
-					{ url: nodeUrl, token: nodeToken },
+					{ url: nodeUrl, token: nodeToken, userJwt: nodeUserJwt },
 					path
 				);
 				setChildrenByPath((prev) => new Map(prev).set(path, listing.entries));
@@ -190,7 +191,7 @@ export function NodeFolderBrowser({
 				});
 			}
 		},
-		[nodeUrl, nodeToken]
+		[nodeUrl, nodeToken, nodeUserJwt]
 	);
 
 	const handleToggle = useCallback(
@@ -216,7 +217,11 @@ export function NodeFolderBrowser({
 	// Used on open, on node change, and when the path input is cleared.
 	const buildDefaultRoots = useCallback(async () => {
 		const reqId = ++listReqId.current;
-		const target: ApiTarget = { url: nodeUrl, token: nodeToken };
+		const target: ApiTarget = {
+			url: nodeUrl,
+			token: nodeToken,
+			userJwt: nodeUserJwt,
+		};
 		setLoading(true);
 		setError(null);
 		setPathInvalid(false);
@@ -262,7 +267,7 @@ export function NodeFolderBrowser({
 				setLoading(false);
 			}
 		}
-	}, [nodeUrl, nodeToken]);
+	}, [nodeUrl, nodeToken, nodeUserJwt]);
 
 	// Re-root the tree at a typed path so the tree reflects what the user typed.
 	// Guarded by the same request id so out-of-order responses can't win, and
@@ -270,7 +275,11 @@ export function NodeFolderBrowser({
 	const focusPath = useCallback(
 		async (rawPath: string) => {
 			const reqId = ++listReqId.current;
-			const target: ApiTarget = { url: nodeUrl, token: nodeToken };
+			const target: ApiTarget = {
+				url: nodeUrl,
+				token: nodeToken,
+				userJwt: nodeUserJwt,
+			};
 			try {
 				const listing = await listDirectory(target, rawPath);
 				if (reqId !== listReqId.current) {
@@ -293,7 +302,7 @@ export function NodeFolderBrowser({
 				}
 			}
 		},
-		[nodeUrl, nodeToken]
+		[nodeUrl, nodeToken, nodeUserJwt]
 	);
 
 	// Debounce typed-path lists; an empty field returns to the default roots.

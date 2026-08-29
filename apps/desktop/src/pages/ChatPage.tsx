@@ -32,6 +32,7 @@ import type {
 	MentionItem as AgentElementMentionItem,
 	AgentMessageContext,
 	AgentMessageIdentity,
+	ChatVoiceMode,
 	ContributedMessageAction,
 	ContributedSelectionAction,
 	MessageActionContext,
@@ -139,7 +140,7 @@ import {
 	PanelToggleButtons,
 	WorkspacePanels,
 } from "@/src/components/panels/WorkspacePanels.tsx";
-import { VoiceModeOverlay } from "@/src/components/voice/VoiceModeOverlay.tsx";
+import { VoiceModeSurface } from "@/src/components/voice/VoiceModeSurface.tsx";
 import { useChatHistoryContext } from "@/src/contexts/ChatHistoryContext.tsx";
 import { useSpacesContext } from "@/src/contexts/SpacesContext.tsx";
 import { useSystemStatusContext } from "@/src/contexts/SystemStatusContext.tsx";
@@ -1092,7 +1093,7 @@ async function fetchArtifactContent(
 ): Promise<string | null> {
 	try {
 		const res = await fetch(apiUrl(target, url), {
-			headers: makeHeaders(target.token),
+			headers: makeHeaders(target.token, target.userJwt),
 		});
 		if (!res.ok) {
 			return null;
@@ -1719,6 +1720,7 @@ export default function ChatPage({
 		const toolTarget: ApiTarget = {
 			url: activeNodeForTools.url,
 			token: activeNodeForTools.token ?? null,
+			userJwt: activeNodeForTools.userJwt ?? null,
 		};
 		fetchAgent(toolTarget, agentId)
 			.then((agent) => {
@@ -1865,7 +1867,11 @@ export default function ChatPage({
 
 	const activeNode = useActiveNode();
 	const chatTarget: ApiTarget = useMemo(
-		() => ({ url: activeNode.url, token: activeNode.token ?? null }),
+		() => ({
+			url: activeNode.url,
+			token: activeNode.token,
+			userJwt: activeNode.userJwt ?? null,
+		}),
 		[activeNode.url, activeNode.token]
 	);
 	const [projectDrafts, setProjectDrafts] = useState<
@@ -2659,6 +2665,14 @@ export default function ChatPage({
 		ttsEngine: desktopTts.engine,
 		ttsVoice: desktopTts.voice || undefined,
 	});
+	const voiceModeSlot: ChatVoiceMode = voiceMode.active
+		? {
+				active: true,
+				render: (composer: ReactNode) => (
+					<VoiceModeSurface composer={composer} voice={voiceMode} />
+				),
+			}
+		: { active: false };
 
 	// Interactive ACP tool-permission prompts. When an agent in a gating mode
 	// asks to run a tool, Core streams a `data-ryu-permission` part; we surface
@@ -7262,7 +7276,6 @@ export default function ChatPage({
 				subagentRequest={subagentReq}
 			>
 				<div className="flex h-full flex-col overflow-hidden">
-					{voiceMode.active && <VoiceModeOverlay voice={voiceMode} />}
 					<SubagentActivityChips
 						onOpen={handleOpenSubagent}
 						subagents={subagentSummaries}
@@ -7426,6 +7439,7 @@ export default function ChatPage({
 								status={effectiveStatus}
 								toolRenderers={EMPTY_TOOL_RENDERERS}
 								versions={versions}
+								voiceMode={voiceModeSlot}
 							/>
 						</WidgetHostContext.Provider>
 						{/* The Pinned summary sidebar (project ▸ branch ▸ worktree + git

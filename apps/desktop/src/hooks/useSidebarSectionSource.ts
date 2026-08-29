@@ -61,7 +61,7 @@ function queryForSection(
 			}
 			const response = await fetch(apiUrl(target, sourceRequest.path), {
 				method: sourceRequest.method,
-				headers: makeHeaders(target.token),
+				headers: makeHeaders(target.token, target.userJwt),
 			});
 			return response.ok ? ((await response.json()) as unknown) : null;
 		},

@@ -129,41 +129,46 @@ export function useStoreHome(): UseStoreHomeResult {
 	const target: ApiTarget = {
 		url: activeNode.url,
 		token: activeNode.token ?? null,
+		userJwt: activeNode.userJwt ?? null,
 	};
-	const { url, token } = target;
+	const { url, token, userJwt } = target;
 
 	// Node realms — Core (:7980). Each uses the realm's default ranking with no
 	// query, which is exactly the "browse the best of this realm" feed we want.
 	const modelsQuery = useQuery({
 		queryKey: ["store-home", "models", url],
 		queryFn: () =>
-			searchModels({ url, token }, { sort: "trending", limit: PER_ROW_LIMIT }),
+			searchModels(
+				{ url, token, userJwt },
+				{ sort: "trending", limit: PER_ROW_LIMIT }
+			),
 	});
 
 	const skillsQuery = useQuery({
 		queryKey: ["store-home", "skills", url],
 		queryFn: () =>
 			searchSkills(
-				{ url, token },
+				{ url, token, userJwt },
 				{ limit: PER_ROW_LIMIT, source: ALL_SKILL_SOURCES_ID }
 			),
 	});
 
 	const mcpQuery = useQuery({
 		queryKey: ["store-home", "mcp", url],
-		queryFn: () => searchMcpCatalog({ url, token }, { limit: PER_ROW_LIMIT }),
+		queryFn: () =>
+			searchMcpCatalog({ url, token, userJwt }, { limit: PER_ROW_LIMIT }),
 	});
 
 	// Plugins + Agents have no search endpoint — reuse the sections' full-catalog
 	// query keys so the cache dedupes with their tabs instead of double-fetching.
 	const appsQuery = useQuery({
 		queryKey: ["apps", "catalog", url],
-		queryFn: () => fetchAppsCatalog({ url, token }),
+		queryFn: () => fetchAppsCatalog({ url, token, userJwt }),
 	});
 
 	const agentsQuery = useQuery({
 		queryKey: ["agents", "catalog", url],
-		queryFn: () => fetchAgentCatalog({ url, token }),
+		queryFn: () => fetchAgentCatalog({ url, token, userJwt }),
 	});
 
 	// The plugin catalog carries discovery metadata only — no installed flag — so
@@ -172,7 +177,7 @@ export function useStoreHome(): UseStoreHomeResult {
 	// never disagree about what is already on the node.
 	const appsInstalledQuery = useQuery({
 		queryKey: ["apps", "list", url],
-		queryFn: () => fetchApps({ url, token }),
+		queryFn: () => fetchApps({ url, token, userJwt }),
 	});
 
 	const recommendationsQuery = useQuery({
@@ -271,8 +276,8 @@ export function useStoreHome(): UseStoreHomeResult {
 					// Built-ins are already on disk — their add is a lifecycle record, not
 					// a download. Anything else has to be fetched from the catalog first.
 					card.builtIn
-						? installApp({ url, token }, card.id)
-						: installPluginFromCatalog({ url, token }, card.id, null),
+						? installApp({ url, token, userJwt }, card.id)
+						: installPluginFromCatalog({ url, token, userJwt }, card.id, null),
 				[
 					["apps", "list", url],
 					["apps", "catalog", url],
@@ -286,16 +291,21 @@ export function useStoreHome(): UseStoreHomeResult {
 				runAdd(
 					card.id,
 					() =>
-						installSkill({ url, token }, card.id, card.registryId ?? undefined),
+						installSkill(
+							{ url, token, userJwt },
+							card.id,
+							card.registryId ?? undefined
+						),
 					[["store-home", "skills", url], ["skills"]]
 				),
 			mcp: (card) =>
-				runAdd(card.id, () => installMcpServer({ url, token }, card.id), [
-					["store-home", "mcp", url],
-					["mcp"],
-				]),
+				runAdd(
+					card.id,
+					() => installMcpServer({ url, token, userJwt }, card.id),
+					[["store-home", "mcp", url], ["mcp"]]
+				),
 			agents: (card) =>
-				runAdd(card.id, () => installAgent({ url, token }, card.id), [
+				runAdd(card.id, () => installAgent({ url, token, userJwt }, card.id), [
 					["agents", "catalog", url],
 				]),
 			models: (card) =>
@@ -303,7 +313,7 @@ export function useStoreHome(): UseStoreHomeResult {
 					card.id,
 					() =>
 						installModelSnapshot(
-							{ url, token },
+							{ url, token, userJwt },
 							card.id,
 							card.modelFormat ?? "gguf"
 						),

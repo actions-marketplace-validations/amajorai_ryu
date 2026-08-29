@@ -261,6 +261,7 @@ export default function SpaceDatabaseRowPage({
 		ready: dbLoaded,
 		url: node.url,
 		token: node.token ?? null,
+		userJwt: node.userJwt ?? null,
 		getSeed,
 		onSnapshot,
 	});

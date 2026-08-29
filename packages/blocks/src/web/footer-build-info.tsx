@@ -1,12 +1,12 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { GITHUB_SVGL, SvglIcon } from "./svgl-icon.tsx";
 import {
 	GITHUB_RELEASES_REPO,
 	GITHUB_REPO,
 	LATEST_RELEASE_API,
 } from "./download.tsx";
+import { GITHUB_SVGL, SvglIcon } from "./svgl-icon.tsx";
 
 const siteVersion = process.env.NEXT_PUBLIC_APP_VERSION;
 const gitCommit = process.env.NEXT_PUBLIC_GIT_COMMIT;
@@ -51,7 +51,7 @@ export default function FooterBuildInfo() {
 				rel="noopener noreferrer"
 				target="_blank"
 			>
-				<SvglIcon spec={GITHUB_SVGL} size={16} />
+				<SvglIcon size={16} spec={GITHUB_SVGL} />
 			</a>
 			{latestRelease ? (
 				<a

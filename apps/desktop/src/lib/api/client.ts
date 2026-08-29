@@ -3,7 +3,7 @@
 // Shared HTTP plumbing for the typed Core/Gateway client modules. Every domain
 // module (agents, system, engines, chat, ...) builds on these helpers so bearer
 // auth and base-URL handling live in exactly one place. The base URL + token
-// always come from the node store (`getActiveNode()` -> { url, token }), never
+// always come from the node store (`getActiveNode()` -> { url, token, userJwt }), never
 // hardcoded — Core listens on :7980 but the active node may be remote.
 
 import { TOKEN_KEY } from "@/lib/auth-client.ts";
@@ -15,24 +15,45 @@ import {
 import { getRealtimeJwt } from "@/src/lib/realtime/jwt.ts";
 import type { Node } from "@/src/store/useNodeStore.ts";
 
-/** The subset of a node the api layer needs: base URL + optional bearer token. */
+export const USER_JWT_HEADER = "x-ryu-user-jwt";
+
+/** The subset of a node the api layer needs: base URL + scoped credentials. */
 export interface ApiTarget {
 	token: string | null;
 	url: string;
+	/** Managed-node user JWT; not a node secret and never persisted as one. */
+	userJwt?: string | null;
 }
 
 /** Narrow a full node (or any url/token pair) down to an {@link ApiTarget}. */
-export function toTarget(node: Pick<Node, "url" | "token">): ApiTarget {
-	return { url: node.url, token: node.token ?? null };
+export function toTarget(
+	node: Pick<Node, "url" | "token" | "userJwt">
+): ApiTarget {
+	return {
+		url: node.url,
+		token: node.token ?? null,
+		userJwt: node.userJwt ?? null,
+	};
 }
 
-/** Build request headers, attaching the bearer token when present. */
-export function makeHeaders(token: string | null): Record<string, string> {
+/**
+ * Build request headers for a direct-fetch call site. A node bearer wins; a
+ * managed target may fall back to its short-lived user JWT and carries that JWT
+ * in the explicit identity header as well.
+ */
+export function makeHeaders(
+	token: string | null,
+	userJwt: string | null = null
+): Record<string, string> {
 	const headers: Record<string, string> = {
 		"Content-Type": "application/json",
 	};
-	if (token) {
-		headers.Authorization = `Bearer ${token}`;
+	const admissionBearer = token ?? userJwt;
+	if (admissionBearer) {
+		headers.Authorization = `Bearer ${admissionBearer}`;
+	}
+	if (userJwt) {
+		headers[USER_JWT_HEADER] = userJwt;
 	}
 	return headers;
 }
@@ -197,11 +218,10 @@ export function identityHeaders(): Record<string, string> {
  * this is a JWKS-verifiable Better-Auth JWT that Core checks offline (see
  * apps/core/src/identity_verify) to resolve the caller's org role and effective
  * permissions, so a config / workflow / space write can be gated per-user. It
- * rides ALONGSIDE the node-token `Authorization` header, never replacing it: the
- * node token is the machine trust boundary, this names the human behind it.
+ * rides alongside a node-token `Authorization` header when one exists. For a
+ * managed node with no node secret, the same short-lived JWT is also the scoped
+ * admission bearer; this header keeps downstream handlers on the same identity.
  */
-export const USER_JWT_HEADER = "x-ryu-user-jwt";
-
 /** Authentication and attribution are host-owned; raw callers may add transport
  * headers, but cannot replace or remove the identity attached by this module. */
 const PROTECTED_REQUEST_HEADERS = new Set([
@@ -220,7 +240,12 @@ const PROTECTED_REQUEST_HEADERS = new Set([
  * out or the control plane is unreachable, so a local-first single-user node
  * keeps working with just its node token (Core then falls back to full trust).
  */
-async function verifiedUserHeader(): Promise<Record<string, string>> {
+async function verifiedUserHeader(
+	managedUserJwt?: string | null
+): Promise<Record<string, string>> {
+	if (managedUserJwt?.trim()) {
+		return { [USER_JWT_HEADER]: managedUserJwt };
+	}
 	try {
 		const jwt = await getRealtimeJwt();
 		if (jwt) {
@@ -408,9 +433,11 @@ export async function requestHeaders(
 	options: { skipUserJwt?: boolean } = {}
 ): Promise<Record<string, string>> {
 	const headers: Record<string, string> = {
-		...makeHeaders(target.token),
+		// Local and self-hosted nodes use their node bearer. Managed nodes fall back
+		// to the short-lived user JWT returned by the control plane.
+		...makeHeaders(target.token, target.userJwt ?? null),
 		...identityHeaders(),
-		...(options.skipUserJwt ? {} : await verifiedUserHeader()),
+		...(options.skipUserJwt ? {} : await verifiedUserHeader(target.userJwt)),
 	};
 	for (const [name, value] of Object.entries(extra ?? {})) {
 		if (PROTECTED_REQUEST_HEADERS.has(name.toLowerCase())) {

@@ -720,7 +720,7 @@ describe("withResolvedInspectorModels", () => {
 		}) as unknown as typeof fetch;
 		try {
 			await updateGatewayConfig(
-				{ url: "http://127.0.0.1:7980", token: null },
+				{ url: "http://127.0.0.1:7980", token: null, userJwt: null },
 				firewall({ ...DEFAULT_INSPECTOR, enabled: true, model: "" })
 			);
 		} finally {
@@ -1672,6 +1672,7 @@ async function fetchWithBody(
 		return await fetchGatewayConfig({
 			url: "http://127.0.0.1:7980",
 			token: null,
+			userJwt: null,
 		});
 	} finally {
 		globalThis.fetch = originalFetch;

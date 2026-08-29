@@ -30,6 +30,7 @@ const target = (over?: Partial<ApiTarget>): ApiTarget => ({
 	url: "http://127.0.0.1:7980",
 	token: null,
 	...over,
+	userJwt: null,
 });
 
 describe("bumpPatchVersion", () => {

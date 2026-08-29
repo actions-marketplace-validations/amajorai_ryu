@@ -1,4 +1,4 @@
-﻿import { ToolResult } from "@ryu/ui/components/agents/tool-result";
+import { ToolResult } from "@ryu/ui/components/agents/tool-result";
 import { Button } from "@ryu/ui/components/button";
 import { cn } from "@ryu/ui/lib/utils";
 import { memo, useState } from "react";
@@ -85,8 +85,12 @@ export const PlanTool = memo(function PlanTool({
 							No plan summary provided.
 						</p>
 					)}
-					{!isAlreadyApproved ? (
-						<div className="flex items-center gap-2 border-t border-border/60 pt-2">
+					{isAlreadyApproved ? (
+						<p className="text-emerald-600 text-xs dark:text-emerald-400">
+							{approveText}
+						</p>
+					) : (
+						<div className="flex items-center gap-2 border-border/60 border-t pt-2">
 							<Button
 								className={cn("h-7 px-2.5 text-xs")}
 								disabled={isPending}
@@ -97,10 +101,6 @@ export const PlanTool = memo(function PlanTool({
 								{approveText}
 							</Button>
 						</div>
-					) : (
-						<p className="text-emerald-600 text-xs dark:text-emerald-400">
-							{approveText}
-						</p>
 					)}
 				</div>
 			</ToolResult>

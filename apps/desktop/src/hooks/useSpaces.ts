@@ -153,6 +153,7 @@ export function useSpaces(): UseSpacesResult {
 	const activeNode = useActiveNode();
 	const { url } = activeNode;
 	const token = activeNode.token ?? null;
+	const userJwt = activeNode.userJwt ?? null;
 
 	const { guard } = useEntityCap();
 
@@ -178,7 +179,7 @@ export function useSpaces(): UseSpacesResult {
 		setLoading(true);
 		setError(null);
 		setAppDisabled(null);
-		const target: ApiTarget = { url, token };
+		const target: ApiTarget = { url, token, userJwt };
 		try {
 			setSpaces(await fetchSpaces(target));
 		} catch (e) {
@@ -192,7 +193,7 @@ export function useSpaces(): UseSpacesResult {
 		} finally {
 			setLoading(false);
 		}
-	}, [url, token]);
+	}, [url, token, userJwt]);
 
 	useEffect(() => {
 		reload().catch(() => undefined);
@@ -214,7 +215,7 @@ export function useSpaces(): UseSpacesResult {
 				return null;
 			}
 			const created = await apiCreateSpace(
-				{ url, token },
+				{ url, token, userJwt },
 				name,
 				description,
 				retrievalMode,
@@ -223,54 +224,59 @@ export function useSpaces(): UseSpacesResult {
 			await reload();
 			return created.retrievalMode;
 		},
-		[url, token, reload, guard, spaces.length]
+		[url, token, userJwt, reload, guard, spaces.length]
 	);
 
 	const remove = useCallback(
 		async (id: string) => {
-			await apiDeleteSpace({ url, token }, id);
+			await apiDeleteSpace({ url, token, userJwt }, id);
 			setSpaces((prev) => prev.filter((s) => s.id !== id));
 		},
-		[url, token]
+		[url, token, userJwt]
 	);
 
 	const rename = useCallback(
 		async (id: string, name: string) => {
-			await apiRenameSpace({ url, token }, id, name);
+			await apiRenameSpace({ url, token, userJwt }, id, name);
 			setSpaces((prev) =>
 				prev.map((space) =>
 					space.id === id ? { ...space, name, updatedAt: Date.now() } : space
 				)
 			);
 		},
-		[url, token]
+		[url, token, userJwt]
 	);
 
 	const listDocuments = useCallback(
-		(spaceId: string) => fetchDocuments({ url, token }, spaceId),
-		[url, token]
+		(spaceId: string) => fetchDocuments({ url, token, userJwt }, spaceId),
+		[url, token, userJwt]
 	);
 
 	const ingest = useCallback(
 		async (spaceId: string, title: string, content: string) => {
-			await apiIngestDocument({ url, token }, spaceId, title, content);
+			await apiIngestDocument({ url, token, userJwt }, spaceId, title, content);
 			bumpDocumentRevision(spaceId);
 			// Refresh the list so the space's document count stays accurate.
 			await reload();
-			return fetchDocuments({ url, token }, spaceId);
+			return fetchDocuments({ url, token, userJwt }, spaceId);
 		},
-		[url, token, bumpDocumentRevision, reload]
+		[url, token, userJwt, bumpDocumentRevision, reload]
 	);
 
 	const search = useCallback(
 		(spaceId: string, query: string) =>
-			apiSearchSpace({ url, token }, spaceId, query),
-		[url, token]
+			apiSearchSpace({ url, token, userJwt }, spaceId, query),
+		[url, token, userJwt]
 	);
 
 	const createPage = useCallback(
 		async (spaceId: string, title: string, parentId?: string) => {
-			const id = await apiCreatePage({ url, token }, spaceId, title, parentId);
+			const id = await apiCreatePage(
+				{ url, token, userJwt },
+				spaceId,
+				title,
+				parentId
+			);
 			bumpDocumentRevision(spaceId);
 			// A parented "row page" is hidden from listings, so no reload is needed.
 			if (!parentId) {
@@ -278,27 +284,35 @@ export function useSpaces(): UseSpacesResult {
 			}
 			return id;
 		},
-		[url, token, bumpDocumentRevision, reload]
+		[url, token, userJwt, bumpDocumentRevision, reload]
 	);
 
 	const createDatabase = useCallback(
 		async (spaceId: string, title: string) => {
-			const id = await apiCreateDatabase({ url, token }, spaceId, title);
+			const id = await apiCreateDatabase(
+				{ url, token, userJwt },
+				spaceId,
+				title
+			);
 			bumpDocumentRevision(spaceId);
 			await reload();
 			return id;
 		},
-		[url, token, bumpDocumentRevision, reload]
+		[url, token, userJwt, bumpDocumentRevision, reload]
 	);
 
 	const createWhiteboard = useCallback(
 		async (spaceId: string, title: string) => {
-			const id = await apiCreateWhiteboard({ url, token }, spaceId, title);
+			const id = await apiCreateWhiteboard(
+				{ url, token, userJwt },
+				spaceId,
+				title
+			);
 			bumpDocumentRevision(spaceId);
 			await reload();
 			return id;
 		},
-		[url, token, bumpDocumentRevision, reload]
+		[url, token, userJwt, bumpDocumentRevision, reload]
 	);
 
 	const uploadFile = useCallback(
@@ -308,7 +322,7 @@ export function useSpaces(): UseSpacesResult {
 			opts?: { onProgress?: (fraction: number) => void; signal?: AbortSignal }
 		) => {
 			const uploaded = await apiUploadSpaceFile(
-				{ url, token },
+				{ url, token, userJwt },
 				spaceId,
 				file,
 				opts
@@ -316,13 +330,13 @@ export function useSpaces(): UseSpacesResult {
 			bumpDocumentRevision(spaceId);
 			return uploaded;
 		},
-		[url, token, bumpDocumentRevision]
+		[url, token, userJwt, bumpDocumentRevision]
 	);
 
 	const getDocument = useCallback(
 		(spaceId: string, documentId: string) =>
-			fetchDocument({ url, token }, spaceId, documentId),
-		[url, token]
+			fetchDocument({ url, token, userJwt }, spaceId, documentId),
+		[url, token, userJwt]
 	);
 
 	const saveDocument = useCallback(
@@ -333,7 +347,7 @@ export function useSpaces(): UseSpacesResult {
 			source: string
 		) => {
 			await apiUpdateDocument(
-				{ url, token },
+				{ url, token, userJwt },
 				spaceId,
 				documentId,
 				title,
@@ -341,13 +355,13 @@ export function useSpaces(): UseSpacesResult {
 			);
 			bumpDocumentRevision(spaceId);
 		},
-		[url, token, bumpDocumentRevision]
+		[url, token, userJwt, bumpDocumentRevision]
 	);
 
 	const removeDocument = useCallback(
 		async (spaceId: string, documentId: string) => {
 			const removed = await apiDeleteDocument(
-				{ url, token },
+				{ url, token, userJwt },
 				spaceId,
 				documentId
 			);
@@ -357,15 +371,15 @@ export function useSpaces(): UseSpacesResult {
 			await reload();
 			return removed;
 		},
-		[url, token, bumpDocumentRevision, reload]
+		[url, token, userJwt, bumpDocumentRevision, reload]
 	);
 
 	const setSpaceIcon = useCallback(
 		async (id: string, icon: GlyphValue) => {
-			await apiSetSpaceIcon({ url, token }, id, icon);
+			await apiSetSpaceIcon({ url, token, userJwt }, id, icon);
 			setSpaces((prev) => prev.map((s) => (s.id === id ? { ...s, icon } : s)));
 		},
-		[url, token]
+		[url, token, userJwt]
 	);
 
 	const setSpaceVisibility = useCallback(
@@ -374,7 +388,12 @@ export function useSpaces(): UseSpacesResult {
 			visibility: ResourceVisibility,
 			teamId?: string | null
 		) => {
-			await apiSetSpaceVisibility({ url, token }, id, visibility, teamId);
+			await apiSetSpaceVisibility(
+				{ url, token, userJwt },
+				id,
+				visibility,
+				teamId
+			);
 			setSpaces((prev) =>
 				prev.map((space) =>
 					space.id === id
@@ -387,13 +406,13 @@ export function useSpaces(): UseSpacesResult {
 				)
 			);
 		},
-		[url, token]
+		[url, token, userJwt]
 	);
 
 	const setRetrievalMode = useCallback(
 		async (id: string, mode: RetrievalMode, options = {}) => {
 			const change = await apiSetSpaceRetrievalMode(
-				{ url, token },
+				{ url, token, userJwt },
 				id,
 				mode,
 				options
@@ -409,15 +428,20 @@ export function useSpaces(): UseSpacesResult {
 			);
 			return change;
 		},
-		[url, token]
+		[url, token, userJwt]
 	);
 
 	const setDocumentIcon = useCallback(
 		async (spaceId: string, documentId: string, icon: GlyphValue) => {
-			await apiSetDocumentIcon({ url, token }, spaceId, documentId, icon);
+			await apiSetDocumentIcon(
+				{ url, token, userJwt },
+				spaceId,
+				documentId,
+				icon
+			);
 			bumpDocumentRevision(spaceId);
 		},
-		[url, token, bumpDocumentRevision]
+		[url, token, userJwt, bumpDocumentRevision]
 	);
 
 	return {

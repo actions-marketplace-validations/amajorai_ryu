@@ -64,7 +64,10 @@ export function getConversationLearningExclusion(
 	target: ApiTarget,
 	conversationId: string
 ): Promise<{ conversation_id: string; excluded: boolean }> {
-	return request(target, `/api/learn/exclude/${encodeURIComponent(conversationId)}`);
+	return request(
+		target,
+		`/api/learn/exclude/${encodeURIComponent(conversationId)}`
+	);
 }
 
 /** Persist the per-conversation learning exclusion and update buffered rows. */
@@ -72,7 +75,11 @@ export function setConversationLearningExclusion(
 	target: ApiTarget,
 	conversationId: string,
 	excluded: boolean
-): Promise<{ conversation_id: string; excluded: boolean; rows_updated: number }> {
+): Promise<{
+	conversation_id: string;
+	excluded: boolean;
+	rows_updated: number;
+}> {
 	return request(target, "/api/learn/exclude", {
 		method: "POST",
 		body: { conversation_id: conversationId, excluded },

@@ -17,11 +17,11 @@ import {
 	EmptyMedia,
 	EmptyTitle,
 } from "@ryu/ui/components/empty";
+import { useTabsContext } from "@/src/contexts/TabsContext.tsx";
 import { useActiveNode } from "@/src/hooks/useActiveNode.ts";
 import { useApps } from "@/src/hooks/useApps.ts";
 import { usePluginSettingsTabs } from "@/src/hooks/usePluginSettingsTabs.ts";
 import { toTarget } from "@/src/lib/api/client.ts";
-import { useTabsContext } from "@/src/contexts/TabsContext.tsx";
 import { PluginSettingsFields } from "./PluginSettingsFields.tsx";
 import { SettingsSection } from "./shared/settings-items.tsx";
 

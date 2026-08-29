@@ -21,7 +21,7 @@ import {
 	SettingsIconTile,
 	type SettingsTint,
 } from "@ryu/blocks/desktop/settings-nav.tsx";
-import { AuthorizedAppsTab, ReferralsTab } from "@ryu/settings";
+import { OAuthAppsTab, ReferralsTab } from "@ryu/settings";
 import { Button } from "@ryu/ui/components/button.tsx";
 import { Dialog, DialogContent } from "@ryu/ui/components/dialog.tsx";
 import { Input } from "@ryu/ui/components/input.tsx";
@@ -68,6 +68,7 @@ import { DeveloperTab } from "./DeveloperTab.tsx";
 import { EntitySettings } from "./EntitySettings.tsx";
 import { GeneralTab } from "./GeneralTab.tsx";
 import { KeyboardShortcutsTab } from "./KeyboardShortcutsTab.tsx";
+import { RyuAppsTab } from "./RyuAppsTab.tsx";
 import { ServicesOrgSwitcher } from "./ServicesOrgSwitcher.tsx";
 import { SessionsTab } from "./SessionsTab.tsx";
 import { SettingsSearchResults } from "./SettingsSearchResults.tsx";
@@ -174,14 +175,20 @@ const NAV_GROUPS: NavGroup[] = [
 			},
 			{
 				value: "sessions",
-				label: "Sessions",
+				label: "Sessions & devices",
 				icon: SecurityCheckIcon,
 				tint: "teal",
 			},
 			{
-				value: "authorized-apps",
-				label: "Authorized Apps",
+				value: "ryu-apps",
+				label: "Ryu apps",
 				icon: Package01Icon,
+				tint: "gray",
+			},
+			{
+				value: "authorized-apps",
+				label: "OAuth apps",
+				icon: UserMultiple02Icon,
 				tint: "gray",
 			},
 		],
@@ -298,8 +305,10 @@ function SectionContent({ value }: { value: SectionValue }) {
 			return <AccountTab />;
 		case "sessions":
 			return <SessionsTab />;
+		case "ryu-apps":
+			return <RyuAppsTab />;
 		case "authorized-apps":
-			return <AuthorizedAppsTab />;
+			return <OAuthAppsTab />;
 		case "appearance":
 			return <AppearanceTab />;
 		case "keyboard":

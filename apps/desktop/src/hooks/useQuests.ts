@@ -38,7 +38,11 @@ export interface UseQuestsResult {
 
 export function useQuests(): UseQuestsResult {
 	const node = useActiveNode();
-	const target: ApiTarget = { url: node.url, token: node.token ?? null };
+	const target: ApiTarget = {
+		url: node.url,
+		token: node.token,
+		userJwt: node.userJwt ?? null,
+	};
 	const qc = useQueryClient();
 
 	const listKey = ["quests", "list", target.url] as const;

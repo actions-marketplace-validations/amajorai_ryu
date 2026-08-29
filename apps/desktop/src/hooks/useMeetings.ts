@@ -32,7 +32,11 @@ export interface UseMeetingsResult {
 
 export function useMeetings(): UseMeetingsResult {
 	const node = useActiveNode();
-	const target: ApiTarget = { url: node.url, token: node.token ?? null };
+	const target: ApiTarget = {
+		url: node.url,
+		token: node.token,
+		userJwt: node.userJwt ?? null,
+	};
 	const qc = useQueryClient();
 	const [selectedId, setSelectedId] = useState<string | null>(null);
 

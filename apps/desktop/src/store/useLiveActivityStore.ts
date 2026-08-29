@@ -12,25 +12,25 @@
 // `plugin:<pluginId>:<activityId>:<rowId>`), so a producer upserts in place and
 // a running item never flickers.
 
-import { create } from "zustand";
-import { useShallow } from "zustand/react/shallow";
 import type {
 	LiveActivity,
 	LiveActivityStatus,
 } from "@ryu/app-host/live-activity";
 import { isLiveStatus } from "@ryu/app-host/live-activity";
+import { create } from "zustand";
+import { useShallow } from "zustand/react/shallow";
 
 interface LiveActivityState {
+	/** All tracked activities, keyed by id. */
+	activities: Record<string, LiveActivity>;
 	/** Replace the whole set (a streamed snapshot, e.g. the runs snapshot). */
 	applySnapshot: (activities: LiveActivity[]) => void;
-	/** Upsert one activity by id (a live delta). */
-	upsert: (activity: LiveActivity) => void;
 	/** Drop one activity (removed/decided server-side). */
 	remove: (id: string) => void;
 	/** Clear the local registry (e.g. on node switch before re-subscribing). */
 	reset: () => void;
-	/** All tracked activities, keyed by id. */
-	activities: Record<string, LiveActivity>;
+	/** Upsert one activity by id (a live delta). */
+	upsert: (activity: LiveActivity) => void;
 }
 
 export const useLiveActivityStore = create<LiveActivityState>((set) => ({

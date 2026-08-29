@@ -1,4 +1,4 @@
-﻿import { FileDiff } from "@ryu/ui/components/agents/file-diff";
+import { FileDiff } from "@ryu/ui/components/agents/file-diff";
 import { Pencil } from "lucide-react";
 import { memo, useMemo } from "react";
 import { useToolComplete } from "../hooks/use-tool-complete.ts";

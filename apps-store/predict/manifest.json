@@ -1,6 +1,6 @@
 {
-  "tags": ["autocomplete","predictions","typing","productivity"],
-  "author": {"name":"Ryu","url":"https://ryuhq.com"},
+  "tags": ["autocomplete", "predictions", "typing", "productivity"],
+  "author": { "name": "Ryu", "url": "https://ryuhq.com" },
   "repository": "https://github.com/amajorai/ryu-predict",
   "homepage": "https://github.com/amajorai/ryu-predict",
   "privacyPolicyUrl": "https://ryuhq.com/privacy",
@@ -63,7 +63,19 @@
     }
   ],
   "contributes": {
-  "chat_widget_templates": [{"id":"predict.chat","title":"Autocomplete widget","description":"Autocomplete chat widget metadata is coming soon; no render tool is available yet.","triggers":["autocomplete widget"],"examples":["Show me a autocomplete widget"],"backing":{},"display_mode":"inline","safe_action_ids":[],"availability":"coming-soon"}],
+    "chat_widget_templates": [
+      {
+        "id": "predict.chat",
+        "title": "Autocomplete widget",
+        "description": "Autocomplete chat widget metadata is coming soon; no render tool is available yet.",
+        "triggers": ["autocomplete widget"],
+        "examples": ["Show me a autocomplete widget"],
+        "backing": {},
+        "display_mode": "inline",
+        "safe_action_ids": [],
+        "availability": "coming-soon"
+      }
+    ],
     "settings_tabs": [
       {
         "id": "predict.settings",

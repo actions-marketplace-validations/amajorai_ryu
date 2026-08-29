@@ -32,7 +32,11 @@ describe("recordQuestEvent", () => {
 		}) as typeof fetch;
 
 		const result = await recordQuestEvent(
-			{ token: "better-auth-token", url: "https://app.example.test" },
+			{
+				token: "better-auth-token",
+				url: "https://app.example.test",
+				userJwt: null,
+			},
 			"referral_sync",
 			"mobile"
 		);

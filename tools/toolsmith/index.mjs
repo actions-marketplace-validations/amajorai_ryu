@@ -20,6 +20,7 @@ import {
 	checkBodyDrift,
 	checkManifestContract,
 	findManifestSeat,
+	normalizeLineEndings,
 } from "./manifest.mjs";
 import { formatViolations, scanPurity } from "./purity.mjs";
 
@@ -117,7 +118,12 @@ function loadToolPackage(dir) {
 	if (!existsSync(codePath)) {
 		die(`${casesPath} points at ${spec.code_file}, which does not exist`);
 	}
-	return { spec, kind, codePath, code: readFileSync(codePath, "utf8") };
+	return {
+		spec,
+		kind,
+		codePath,
+		code: normalizeLineEndings(readFileSync(codePath, "utf8")),
+	};
 }
 
 /**

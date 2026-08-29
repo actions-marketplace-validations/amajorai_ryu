@@ -33,7 +33,11 @@ export function useHumanMentionDirectory({
 	const query = useQuery({
 		enabled: enabled && Boolean(node.url),
 		queryFn: () =>
-			listMentionTargetUsers({ token: node.token ?? null, url: node.url }),
+			listMentionTargetUsers({
+				token: node.token,
+				userJwt: node.userJwt ?? null,
+				url: node.url,
+			}),
 		queryKey: [
 			"human-mention-directory",
 			node.url,

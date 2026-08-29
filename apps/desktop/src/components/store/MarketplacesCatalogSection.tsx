@@ -80,7 +80,11 @@ function sourceQueryKey(target: ApiTarget) {
 
 export default function MarketplacesCatalogSection() {
 	const node = useActiveNode();
-	const target: ApiTarget = { token: node.token ?? null, url: node.url };
+	const target: ApiTarget = {
+		token: node.token,
+		userJwt: node.userJwt ?? null,
+		url: node.url,
+	};
 	const queryClient = useQueryClient();
 	const sourcesQuery = useQuery({
 		queryFn: () =>

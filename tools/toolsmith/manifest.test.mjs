@@ -141,6 +141,24 @@ test("an inline body matching the manifest reports no drift", () => {
 	);
 });
 
+test("line-ending-only differences do not report drift", () => {
+	const manifest = structuredClone(INLINE_MANIFEST);
+	manifest.runnables[0].config.code = "return 1;\n";
+	const { seat } = findManifestSeat(
+		pkg(manifest),
+		{ tool: "probe" },
+		"inline_tool"
+	);
+	assert.deepEqual(
+		checkBodyDrift(
+			seat,
+			{ tool: "probe", code_file: "tools/probe.js" },
+			"return 1;\r\n"
+		),
+		[]
+	);
+});
+
 test("an edited-but-unsealed body is reported as drift", () => {
 	// The whole reason `sync --check` exists: the manifest string is what Core
 	// loads, the file is what gets reviewed and tested.

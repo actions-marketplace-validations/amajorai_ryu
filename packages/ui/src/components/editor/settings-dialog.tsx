@@ -214,10 +214,11 @@ export const models: Model[] = [
 	{ label: "GLM 4.5V", value: "zai/glm-4.5v" },
 ];
 
-const DEFAULT_MODEL: Model = models[7] ?? models[0] ?? {
-	label: "GPT-4o Mini",
-	value: "openai/gpt-4o-mini",
-};
+const DEFAULT_MODEL: Model = models[7] ??
+	models[0] ?? {
+		label: "GPT-4o Mini",
+		value: "openai/gpt-4o-mini",
+	};
 
 export function SettingsDialog() {
 	const editor = useEditorRef();

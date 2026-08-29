@@ -22,7 +22,6 @@ function Column({ dark, label }: { dark: boolean; label: string }) {
 					level={7}
 					metalTheme={dark ? "dark" : "light"}
 					name="Grace Hopper"
-					role="Release engineer"
 					stats={[
 						{ label: "Tokens", value: "1.2M" },
 						{ label: "Requests", value: "8,410" },

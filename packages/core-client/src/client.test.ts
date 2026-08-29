@@ -32,6 +32,7 @@ const target = (over?: Partial<ApiTarget>): ApiTarget => ({
 	url: "http://127.0.0.1:7980",
 	token: null,
 	...over,
+	userJwt: null,
 });
 
 describe("apiUrl", () => {
@@ -72,6 +73,21 @@ describe("makeHeaders", () => {
 		});
 		jwt = "rotated-jwt";
 		expect(makeHeaders("node-token")[USER_JWT_HEADER]).toBe("rotated-jwt");
+	});
+
+	test("uses a managed user JWT as the bearer when no node token exists", () => {
+		expect(makeHeaders(null, "managed-user-jwt")).toMatchObject({
+			Authorization: "Bearer managed-user-jwt",
+			[USER_JWT_HEADER]: "managed-user-jwt",
+		});
+	});
+
+	test("does not use the rotating identity provider as a remote node bearer", () => {
+		setUserJwtProvider(() => "identity-only-jwt");
+		expect(makeHeaders(null)).toEqual({
+			"Content-Type": "application/json",
+			[USER_JWT_HEADER]: "identity-only-jwt",
+		});
 	});
 });
 
@@ -114,6 +130,20 @@ describe("request", () => {
 		const h = capturedInit?.headers as Record<string, string>;
 		expect(h.Authorization).toBe("Bearer t");
 		expect(h["X-Extra"]).toBe("1");
+	});
+
+	test("keeps provider identity out of Authorization for an unbound target", async () => {
+		let capturedInit: RequestInit | undefined;
+		setUserJwtProvider(() => "identity-only-jwt");
+		globalThis.fetch = ((_url: string, init: RequestInit) => {
+			capturedInit = init;
+			return Promise.resolve(new Response("{}", { status: 200 }));
+		}) as unknown as typeof fetch;
+
+		await request(target(), "/api/x");
+		const h = capturedInit?.headers as Record<string, string>;
+		expect(h.Authorization).toBeUndefined();
+		expect(h[USER_JWT_HEADER]).toBe("identity-only-jwt");
 	});
 
 	test("serializes a body and honors the method", async () => {

@@ -19,11 +19,11 @@
 // the branch, at which point the corrected wording becomes the overclaim.
 
 import { afterEach, describe, expect, test } from "bun:test";
-import { installFetch } from "./test-fetch.ts";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { RetrievalModeStatus } from "./index.ts";
 import { SpacesAPI } from "./spaces.ts";
+import { installFetch } from "./test-fetch.ts";
 import type { RyuClientOptions } from "./types.ts";
 
 const realFetch = globalThis.fetch;

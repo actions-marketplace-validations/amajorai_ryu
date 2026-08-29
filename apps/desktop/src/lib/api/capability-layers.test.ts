@@ -35,7 +35,11 @@ import {
 } from "./capability-layers.ts";
 import type { ApiTarget } from "./client.ts";
 
-const TARGET: ApiTarget = { url: "http://127.0.0.1:7777", token: null };
+const TARGET: ApiTarget = {
+	url: "http://127.0.0.1:7777",
+	token: null,
+	userJwt: null,
+};
 
 /** A provider with both serving flags off, overridden per case. */
 function provider(over: Partial<CapabilityProvider>): CapabilityProvider {

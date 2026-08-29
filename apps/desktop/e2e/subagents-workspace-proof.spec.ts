@@ -79,7 +79,9 @@ test("opens a task transcript in place and returns to the roster", async ({
 	expect(errors.consoleErrors).toEqual([]);
 });
 
-test("keeps an honest empty state before any task is delegated", async ({ page }) => {
+test("keeps an honest empty state before any task is delegated", async ({
+	page,
+}) => {
 	await page.goto(`${STORY_URL}?empty=1`);
 	await expect(
 		page.getByText("Subagents will appear here when this chat delegates work.")

@@ -300,7 +300,11 @@ export function InboxCenter({
 		markRead: announcementsFeed.markRead,
 	});
 	const node = useActiveNode();
-	const target = { url: node.url, token: node.token ?? null };
+	const target = {
+		url: node.url,
+		token: node.token,
+		userJwt: node.userJwt ?? null,
+	};
 	// The installed-app catalog (shared query with the Store), used to resolve a
 	// notification row's `source_app_id` to its app's icon + name.
 	const { data: apps } = useQuery(installedAppsQuery(target));

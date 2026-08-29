@@ -1953,20 +1953,117 @@ mod tests {
         items.iter().map(|s| s.to_string()).collect()
     }
 
+    fn test_absolute_path(path: &str) -> std::path::PathBuf {
+        #[cfg(windows)]
+        {
+            let name = path
+                .trim_start_matches('/')
+                .trim_start_matches('\\')
+                .replace('/', "_")
+                .replace('\\', "_");
+            std::env::temp_dir().join(format!("ryu-core-test-path-{name}"))
+        }
+        #[cfg(not(windows))]
+        {
+            std::path::PathBuf::from(path)
+        }
+    }
+
+    fn test_command_path(_name: &str) -> std::path::PathBuf {
+        #[cfg(windows)]
+        {
+            std::env::var_os("SystemRoot")
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|| std::path::PathBuf::from(r"C:\Windows"))
+                .join("System32")
+                .join("WindowsPowerShell")
+                .join("v1.0")
+                .join("powershell.exe")
+        }
+        #[cfg(not(windows))]
+        {
+            std::path::PathBuf::from(format!("/bin/{_name}"))
+        }
+    }
+
+    fn test_allowlist_entry(name: &str) -> String {
+        format!("{name}={}", test_command_path(name).display())
+    }
+
+    /// Return the platform-native child arguments used by command-tool tests.
+    /// Windows PowerShell's `-File` mode keeps the rendered values in `$args`,
+    /// rather than reparsing them as a `-Command` string, so metacharacter and
+    /// JSON tests retain their literal-argv coverage.
+    fn test_command_args(
+        command: &str,
+        placeholders: &[&str],
+    ) -> (Option<tempfile::TempDir>, Vec<String>) {
+        #[cfg(windows)]
+        {
+            let script_body = match command {
+                "echo" => "[Console]::WriteLine([String]::Join(' ', $args))\n",
+                "sleep" => "Start-Sleep -Seconds 30\n",
+                "dd" => "[byte[]]$bytes = New-Object byte[] 2097152\n[Console]::OpenStandardOutput().Write($bytes, 0, $bytes.Length)\n[Console]::Error.WriteLine('records')\n",
+                "env" => "Get-ChildItem Env: | ForEach-Object { '{0}={1}' -f $_.Name, $_.Value }\n",
+                "sh" => "[Console]::WriteLine('the-stdout')\n[Console]::Error.WriteLine('the-stderr')\n",
+                _ => panic!("unknown Windows test command: {command}"),
+            };
+            let dir = tempfile::tempdir().expect("test command tempdir");
+            let script = dir.path().join(format!("{command}.ps1"));
+            std::fs::write(&script, script_body).expect("write PowerShell test script");
+            let mut args = vec![
+                "-NoProfile".to_owned(),
+                "-ExecutionPolicy".to_owned(),
+                "Bypass".to_owned(),
+                "-File".to_owned(),
+                script.to_string_lossy().into_owned(),
+            ];
+            args.extend(placeholders.iter().map(|name| format!("{{{name}}}")));
+            (Some(dir), args)
+        }
+        #[cfg(not(windows))]
+        {
+            let args = match command {
+                "echo" => placeholders
+                    .iter()
+                    .map(|name| format!("{{{name}}}"))
+                    .collect(),
+                "sleep" => vec!["30".to_owned()],
+                "dd" => vec![
+                    "if=/dev/zero".to_owned(),
+                    "bs=1024".to_owned(),
+                    "count=2048".to_owned(),
+                ],
+                "env" => Vec::new(),
+                "sh" => vec![
+                    "-c".to_owned(),
+                    "printf 'the-stdout\\n'; printf 'the-stderr\\n' 1>&2".to_owned(),
+                ],
+                _ => panic!("unknown Unix test command: {command}"),
+            };
+            (None, args)
+        }
+    }
+
     #[test]
     fn parse_command_allowlist_keeps_only_absolute_named_entries() {
-        let map = parse_command_allowlist(
-            "echo=/bin/echo, sleep = /bin/sleep ; bad=relative/path, =/bin/x, noeq, dd=/bin/dd",
-        );
+        let echo = test_command_path("echo");
+        let sleep = test_command_path("sleep");
+        let invalid_name = test_command_path("invalid");
+        let dd = test_command_path("dd");
+        let map = parse_command_allowlist(&format!(
+            "echo={}, sleep = {} ; bad=relative/path, ={}, noeq, dd={}",
+            echo.display(),
+            sleep.display(),
+            invalid_name.display(),
+            dd.display()
+        ));
         assert_eq!(
             map.get("echo"),
-            Some(&std::path::PathBuf::from("/bin/echo"))
+            Some(&echo)
         );
-        assert_eq!(
-            map.get("sleep"),
-            Some(&std::path::PathBuf::from("/bin/sleep"))
-        );
-        assert_eq!(map.get("dd"), Some(&std::path::PathBuf::from("/bin/dd")));
+        assert_eq!(map.get("sleep"), Some(&sleep));
+        assert_eq!(map.get("dd"), Some(&dd));
         // Relative path, empty name, and malformed entries are dropped.
         assert!(!map.contains_key("bad"));
         assert_eq!(map.len(), 3);
@@ -2281,14 +2378,15 @@ mod tests {
     async fn command_tool_no_shell_metachars_are_literal() {
         let _lock = crate::sidecar::gateway::lock_gateway_env();
         let _env = CmdEnvGuard::armed();
-        std::env::set_var(ENV_COMMAND_TOOL_ALLOWLIST, "echo=/bin/echo");
+        std::env::set_var(ENV_COMMAND_TOOL_ALLOWLIST, test_allowlist_entry("echo"));
         // A value packed with shell metacharacters must arrive as ONE literal argv
         // element — proving there is no shell (this asserts literal argv, NOT scan
         // denial; the scan is disarmed in this test env).
         let payload = "; rm -rf / $(whoami) `id` && echo pwned";
+        let (_script_dir, command_args) = test_command_args("echo", &["msg"]);
         let out = run_command_tool(
             "echo",
-            &["{msg}".to_string()],
+            &command_args,
             None,
             &BTreeMap::new(),
             None,
@@ -2318,10 +2416,11 @@ mod tests {
     async fn command_tool_timeout_kills_child() {
         let _lock = crate::sidecar::gateway::lock_gateway_env();
         let _env = CmdEnvGuard::armed();
-        std::env::set_var(ENV_COMMAND_TOOL_ALLOWLIST, "sleep=/bin/sleep");
+        std::env::set_var(ENV_COMMAND_TOOL_ALLOWLIST, test_allowlist_entry("sleep"));
+        let (_script_dir, command_args) = test_command_args("sleep", &[]);
         let out = run_command_tool(
             "sleep",
-            &["30".to_string()],
+            &command_args,
             None,
             &BTreeMap::new(),
             None,
@@ -2353,17 +2452,15 @@ mod tests {
     async fn command_tool_output_cap_and_stderr_drain() {
         let _lock = crate::sidecar::gateway::lock_gateway_env();
         let _env = CmdEnvGuard::armed();
-        std::env::set_var(ENV_COMMAND_TOOL_ALLOWLIST, "dd=/bin/dd");
-        // dd writes ~2 MiB of zeros to stdout (> the 1 MiB cap) and stats to stderr;
+        std::env::set_var(ENV_COMMAND_TOOL_ALLOWLIST, test_allowlist_entry("dd"));
+        let (_script_dir, command_args) = test_command_args("dd", &[]);
+        // The test command writes ~2 MiB of zeros to stdout (> the 1 MiB cap) and
+        // reports on stderr;
         // the bounded read must cap stdout and the concurrent stderr drain must keep
         // the child from deadlocking on a full stderr pipe.
         let out = run_command_tool(
             "dd",
-            &[
-                "if=/dev/zero".to_string(),
-                "bs=1024".to_string(),
-                "count=2048".to_string(),
-            ],
+            &command_args,
             None,
             &BTreeMap::new(),
             None,
@@ -2391,7 +2488,7 @@ mod tests {
             len <= 2 * MAX_COMMAND_OUTPUT_BYTES,
             "merged output must stay bounded, was {len}"
         );
-        // dd reports its transfer stats on stderr — proof the merge fired.
+        // The test command reports its transfer on stderr — proof the merge fired.
         let stdout = out
             .get("stdout")
             .and_then(|v| v.as_str())
@@ -2406,11 +2503,12 @@ mod tests {
     async fn command_tool_json_output_parsed_and_invalid_errors() {
         let _lock = crate::sidecar::gateway::lock_gateway_env();
         let _env = CmdEnvGuard::armed();
-        std::env::set_var(ENV_COMMAND_TOOL_ALLOWLIST, "echo=/bin/echo");
+        std::env::set_var(ENV_COMMAND_TOOL_ALLOWLIST, test_allowlist_entry("echo"));
+        let (_script_dir, command_args) = test_command_args("echo", &["payload"]);
         // Valid JSON passed via an interpolated arg is parsed into the result.
         let out = run_command_tool(
             "echo",
-            &["{payload}".to_string()],
+            &command_args,
             None,
             &BTreeMap::new(),
             None,
@@ -2430,7 +2528,7 @@ mod tests {
         // the agent still receives the raw text as `content`, not a hard error.
         let soft = run_command_tool(
             "echo",
-            &["{payload}".to_string()],
+            &command_args,
             None,
             &BTreeMap::new(),
             None,
@@ -2459,7 +2557,8 @@ mod tests {
     async fn command_tool_env_injects_declared_and_scrubs_secrets() {
         let _lock = crate::sidecar::gateway::lock_gateway_env();
         let _env = CmdEnvGuard::armed();
-        std::env::set_var(ENV_COMMAND_TOOL_ALLOWLIST, "env=/usr/bin/env");
+        std::env::set_var(ENV_COMMAND_TOOL_ALLOWLIST, test_allowlist_entry("env"));
+        let (_script_dir, command_args) = test_command_args("env", &[]);
         // The source var sits in THIS plugin's own `RYU_PLUGIN_<ID>_` namespace, which
         // is what `may_read_env_secret` admits for a disk manifest. It used to be a
         // bare `RYU_CMD_TEST_SRC`; that only worked because the child-env `env:` arm
@@ -2476,7 +2575,7 @@ mod tests {
         );
         let out = run_command_tool(
             "env",
-            &[],
+            &command_args,
             None,
             &env_map,
             None,
@@ -2516,9 +2615,11 @@ mod tests {
         // is reserved for an UNKNOWN/unlisted key — the security control).
         let _lock = crate::sidecar::gateway::lock_gateway_env();
         let _env = CmdEnvGuard::armed();
+        let missing_dir = tempfile::tempdir().expect("missing command tempdir");
+        let missing_path = missing_dir.path().join("ghost-binary");
         std::env::set_var(
             ENV_COMMAND_TOOL_ALLOWLIST,
-            "ghost=/nonexistent/ghost/binary",
+            format!("ghost={}", missing_path.display()),
         );
         let out = run_command_tool(
             "ghost",
@@ -2588,29 +2689,25 @@ mod tests {
 
     #[test]
     fn merge_command_allowlist_env_wins_and_is_additive() {
+        let seed_spider = test_absolute_path("/seed/spider");
+        let seed_rtk = test_absolute_path("/seed/rtk");
+        let env_spider = test_absolute_path("/env/spider");
+        let env_extra = test_absolute_path("/env/extra");
         let mut seed = BTreeMap::new();
-        seed.insert(
-            "spider".to_owned(),
-            std::path::PathBuf::from("/seed/spider"),
-        );
-        seed.insert("rtk".to_owned(), std::path::PathBuf::from("/seed/rtk"));
-        let env = parse_command_allowlist("spider=/env/spider, extra=/env/extra");
+        seed.insert("spider".to_owned(), seed_spider.clone());
+        seed.insert("rtk".to_owned(), seed_rtk.clone());
+        let env = parse_command_allowlist(&format!(
+            "spider={}, extra={}",
+            env_spider.display(),
+            env_extra.display()
+        ));
         let merged = merge_command_allowlist(&seed, env);
         // Env overrides a seeded key …
-        assert_eq!(
-            merged.get("spider"),
-            Some(&std::path::PathBuf::from("/env/spider"))
-        );
+        assert_eq!(merged.get("spider"), Some(&env_spider));
         // … keeps a seed-only key …
-        assert_eq!(
-            merged.get("rtk"),
-            Some(&std::path::PathBuf::from("/seed/rtk"))
-        );
+        assert_eq!(merged.get("rtk"), Some(&seed_rtk));
         // … and adds an env-only key.
-        assert_eq!(
-            merged.get("extra"),
-            Some(&std::path::PathBuf::from("/env/extra"))
-        );
+        assert_eq!(merged.get("extra"), Some(&env_extra));
     }
 
     #[tokio::test]
@@ -2621,7 +2718,8 @@ mod tests {
         use crate::plugin_manifest::schema::extract_arg_bounds;
         let _lock = crate::sidecar::gateway::lock_gateway_env();
         let _env = CmdEnvGuard::armed();
-        std::env::set_var(ENV_COMMAND_TOOL_ALLOWLIST, "echo=/bin/echo");
+        std::env::set_var(ENV_COMMAND_TOOL_ALLOWLIST, test_allowlist_entry("echo"));
+        let (_script_dir, command_args) = test_command_args("echo", &["depth", "limit"]);
         let bounds = extract_arg_bounds(Some(&serde_json::json!({
             "properties": {
                 "depth": { "type": "integer", "default": 1, "maximum": 10 },
@@ -2631,7 +2729,7 @@ mod tests {
         // depth=9999 clamps to 10; limit=0 clamps to 1 — both echoed as integers.
         let out = run_command_tool(
             "echo",
-            &["{depth}".to_string(), "{limit}".to_string()],
+            &command_args,
             None,
             &BTreeMap::new(),
             None,
@@ -2653,9 +2751,10 @@ mod tests {
         assert_eq!(stdout.trim(), "10 1", "clamped integers, got: {stdout:?}");
 
         // Absent depth falls back to its schema default (1).
+        let (_script_dir2, command_args2) = test_command_args("echo", &["depth"]);
         let out2 = run_command_tool(
             "echo",
-            &["{depth}".to_string()],
+            &command_args2,
             None,
             &BTreeMap::new(),
             None,
@@ -3379,8 +3478,9 @@ mod tests {
     /// declaring `{"env": {"KEY": "env:ANTHROPIC_API_KEY"}}` on an allowlisted binary
     /// must not read Core's env.
     ///
-    /// This SPAWNS `/usr/bin/env` and reads the child's actual environment rather
-    /// than asserting `may_read_env_secret` directly. Asserting the predicate would
+    /// This spawns a platform-native environment command and reads the child's
+    /// actual environment rather than asserting `may_read_env_secret` directly.
+    /// Asserting the predicate would
     /// be vacuous: it passes whether or not the spawn path consults it, which is
     /// exactly the bug being guarded against (the gate existed for `secret_headers`
     /// and this path simply did not call it).
@@ -3388,7 +3488,8 @@ mod tests {
     async fn a_command_tools_child_env_obeys_the_same_namespace_gate_as_headers() {
         let _lock = crate::sidecar::gateway::lock_gateway_env();
         let _env = CmdEnvGuard::armed();
-        std::env::set_var(ENV_COMMAND_TOOL_ALLOWLIST, "env=/usr/bin/env");
+        std::env::set_var(ENV_COMMAND_TOOL_ALLOWLIST, test_allowlist_entry("env"));
+        let (_script_dir, command_args) = test_command_args("env", &[]);
 
         let disk_plugin = "evil";
         assert!(
@@ -3408,7 +3509,7 @@ mod tests {
 
         let out = run_command_tool(
             "env",
-            &[],
+            &command_args,
             None,
             &env_map,
             None,
@@ -3738,13 +3839,11 @@ mod tests {
     async fn command_tool_success_merges_stderr_into_output() {
         let _lock = crate::sidecar::gateway::lock_gateway_env();
         let _env = CmdEnvGuard::armed();
-        std::env::set_var(ENV_COMMAND_TOOL_ALLOWLIST, "sh=/bin/sh");
+        std::env::set_var(ENV_COMMAND_TOOL_ALLOWLIST, test_allowlist_entry("sh"));
+        let (_script_dir, command_args) = test_command_args("sh", &[]);
         let out = run_command_tool(
             "sh",
-            &[
-                "-c".to_string(),
-                "printf 'the-stdout\\n'; printf 'the-stderr\\n' 1>&2".to_string(),
-            ],
+            &command_args,
             None,
             &BTreeMap::new(),
             None,

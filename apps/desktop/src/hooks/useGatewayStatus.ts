@@ -32,7 +32,11 @@ export function useGatewayStatus(): UseGatewayStatus {
 
 	const poll = useCallback(async () => {
 		const node = getActiveNode();
-		const target: ApiTarget = { url: node.url, token: node.token ?? null };
+		const target: ApiTarget = {
+			url: node.url,
+			token: node.token,
+			userJwt: node.userJwt ?? null,
+		};
 		try {
 			const next = await fetchGatewayStatus(target);
 			setStatus(next);

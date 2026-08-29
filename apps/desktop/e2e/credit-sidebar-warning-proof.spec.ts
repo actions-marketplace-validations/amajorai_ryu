@@ -1,5 +1,5 @@
-import { expect, test } from "@playwright/test";
 import path from "node:path";
+import { expect, test } from "@playwright/test";
 
 test.describe.configure({ timeout: 90_000 });
 
@@ -30,7 +30,9 @@ test("shows the org wallet warning for the active managed node", async ({
 		"aria-valuenow",
 		"4"
 	);
-	await expect(wallet.getByRole("button", { name: "Add credits" })).toBeVisible();
+	await expect(
+		wallet.getByRole("button", { name: "Add credits" })
+	).toBeVisible();
 	await expect(wallet).toContainText(/Resets \w+ \d+/);
 	await page.screenshot({ fullPage: true, path: PROOF_SCREENSHOT });
 
@@ -38,6 +40,8 @@ test("shows the org wallet warning for the active managed node", async ({
 	await expect(page.getByTestId("settings-probe")).toHaveText("credits:open");
 
 	if (pageErrors.length > 0) {
-		throw new Error(`Credit sidebar proof logged errors: ${pageErrors.join(" | ")}`);
+		throw new Error(
+			`Credit sidebar proof logged errors: ${pageErrors.join(" | ")}`
+		);
 	}
 });

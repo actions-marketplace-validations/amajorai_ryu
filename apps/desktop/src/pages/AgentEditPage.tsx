@@ -1,12 +1,16 @@
-﻿import { LockedIcon, Rocket01Icon } from "@hugeicons/core-free-icons";
+import { LockedIcon, Rocket01Icon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import {
 	AgentByoaView,
-	AgentConnectView,
+	AgentIntegrationsView,
 	AgentSettingsForm,
 	type SlotOption,
-	type SnippetLang,
 } from "@ryu/blocks/desktop/agent-edit.tsx";
+import {
+	type AgentIntegrationSnippetLang,
+	buildAgentIntegrationSnippet,
+	buildGitHubActionsSnippet,
+} from "@ryu/blocks/desktop/agent-integration-snippets";
 import { Badge } from "@ryu/ui/components/badge.tsx";
 import { Button } from "@ryu/ui/components/button.tsx";
 import { Checkbox } from "@ryu/ui/components/checkbox.tsx";
@@ -18,6 +22,8 @@ import { composeRules, parseRules } from "@ryuhq/protocol/agent-rules";
 import { useQuery } from "@tanstack/react-query";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
+import { WEB_URL } from "@/lib/app-urls.ts";
+import { openExternal } from "@/lib/tauri-bridge.ts";
 import { AcpSessionControls } from "@/src/components/agents/AcpSessionControls.tsx";
 import { AgentBudgetPanel } from "@/src/components/agents/AgentBudgetPanel.tsx";
 import { AgentCalendarView } from "@/src/components/agents/AgentCalendarView.tsx";
@@ -210,95 +216,45 @@ function ByoaPanel({ target, agentId }: ByoaPanelProps) {
 
 // ── Connect with code panel ─────────────────────────────────────────────────────
 
-interface ConnectPanelProps {
+interface IntegrationsPanelProps {
 	agentId: string;
 	target: ApiTarget;
 }
 
 const TRAILING_SLASH_RE = /\/+$/;
 const PORT_SUFFIX_RE = /:\d+$/;
+const INTEGRATION_DOCS_PATH = "/docs/extend/develop/agent-integration-guide";
 
 /** Strip the trailing slash so we never build `…//api/chat/stream`. */
 function normalizeBase(url: string): string {
 	return url.replace(TRAILING_SLASH_RE, "");
 }
 
-/** Swap the Core port (7980) for the gateway port (7981) for SDK snippets. */
-function gatewayBaseFrom(url: string): string {
-	const base = normalizeBase(url);
-	return PORT_SUFFIX_RE.test(base)
-		? base.replace(PORT_SUFFIX_RE, ":7981")
-		: `${base}:7981`;
+function openIntegrationDocs(): void {
+	void openExternal(
+		`${WEB_URL.replace(TRAILING_SLASH_RE, "")}${INTEGRATION_DOCS_PATH}`
+	).catch(() => undefined);
 }
 
-function buildSnippet(
-	lang: SnippetLang,
-	base: string,
-	agentId: string,
-	hasToken: boolean
-): string {
-	const tokenPlaceholder = "YOUR_NODE_TOKEN";
-	if (lang === "curl") {
-		const authLine = hasToken
-			? `\n  -H "Authorization: Bearer ${tokenPlaceholder}" \\`
-			: "";
-		return `curl -N ${base}/api/chat/stream \\${authLine}
-  -H "Content-Type: application/json" \\
-  -d '{"agent_id":"${agentId}","messages":[{"role":"user","content":"Hello!"}]}'`;
-	}
-	if (lang === "typescript") {
-		const authProp = hasToken
-			? `\n    Authorization: "Bearer ${tokenPlaceholder}",`
-			: "";
-		return `// Stream a turn from the "${agentId}" agent on this Ryu node.
-const res = await fetch("${base}/api/chat/stream", {
-  method: "POST",
-  headers: {
-    "Content-Type": "application/json",${authProp}
-  },
-  body: JSON.stringify({
-    agent_id: "${agentId}",
-    messages: [{ role: "user", content: "Hello!" }],
-  }),
-});
-
-// The body streams Vercel AI SDK events — read them as they arrive.
-const reader = res.body!.getReader();
-const decoder = new TextDecoder();
-for (;;) {
-  const { value, done } = await reader.read();
-  if (done) break;
-  process.stdout.write(decoder.decode(value));
-}`;
-	}
-	// Ryu SDK — gateway-mandatory model client. Routes by model id; tag this
-	// agent's firewall/budget via a gateway key (see "Bring external agent").
-	const gatewayBase = gatewayBaseFrom(base);
-	return `import { defineModel } from "@ryuhq/sdk";
-
-// Every call is routed through this node's Ryu gateway. Generate a
-// gateway key in "Bring external agent" below to apply the "${agentId}"
-// agent's firewall, budget, and routing.
-const model = defineModel("your-model-id", {
-  baseUrl: "${gatewayBase}",
-  token: "YOUR_GATEWAY_KEY",
-});
-
-const reply = await model.chat([
-  { role: "user", content: "Hello!" },
-]);
-console.log(reply.content);`;
-}
-
-function ConnectPanel({ target, agentId }: ConnectPanelProps) {
-	const [lang, setLang] = useState<SnippetLang>("curl");
+function IntegrationsPanel({ target, agentId }: IntegrationsPanelProps) {
+	const [lang, setLang] = useState<AgentIntegrationSnippetLang>("typescript");
 	const [copied, setCopied] = useState(false);
 
 	const base = useMemo(() => normalizeBase(target.url), [target.url]);
 	const hasToken = Boolean(target.token);
 	const snippet = useMemo(
-		() => buildSnippet(lang, base, agentId, hasToken),
-		[lang, base, agentId, hasToken]
+		() =>
+			buildAgentIntegrationSnippet({
+				agentId,
+				baseUrl: base,
+				hasToken,
+				language: lang,
+			}),
+		[agentId, base, hasToken, lang]
+	);
+	const githubActionsSnippet = useMemo(
+		() => buildGitHubActionsSnippet(agentId),
+		[agentId]
 	);
 
 	const copySnippet = async () => {
@@ -307,24 +263,28 @@ function ConnectPanel({ target, agentId }: ConnectPanelProps) {
 			setCopied(true);
 			setTimeout(() => setCopied(false), 2000);
 		} catch {
-			// Clipboard access may be blocked in some Tauri contexts — ignore.
+			// Clipboard access may be blocked in some Tauri contexts.
 		}
 	};
 
 	return (
-		<AgentConnectView
+		<AgentIntegrationsView
 			agentId={agentId}
+			byoaPanel={<ByoaPanel agentId={agentId} target={target} />}
 			copied={copied}
+			coreUrl={base}
+			githubActionsSnippet={githubActionsSnippet}
 			hasToken={hasToken}
 			lang={lang}
-			onCopy={() => copySnippet()}
+			onCopy={() => {
+				void copySnippet();
+			}}
 			onLangChange={setLang}
+			onOpenDocs={openIntegrationDocs}
 			snippet={snippet}
 		/>
 	);
 }
-
-// ── Tone options ──────────────────────────────────────────────────────────────
 
 type ToneOption = "neutral" | "professional" | "friendly" | "pirate" | "custom";
 
@@ -457,7 +417,11 @@ export default function AgentEditPage({
 	const projectCwd = useWorkspaceStore((state) => state.folder);
 	const pluginContributions = usePluginContributions();
 	const target: ApiTarget = useMemo(
-		() => ({ url: activeNode.url, token: activeNode.token ?? null }),
+		() => ({
+			url: activeNode.url,
+			token: activeNode.token,
+			userJwt: activeNode.userJwt ?? null,
+		}),
 		[activeNode.url, activeNode.token]
 	);
 	const personalityProfilesQuery = useQuery({
@@ -1415,7 +1379,8 @@ export default function AgentEditPage({
 	);
 
 	// Page header lives in the shared TitleBar (no in-page header bar). Title = the
-	// agent's identity; the config surfaces (Prompt Studio / Evals / Calendar) are
+	// agent's identity; the config surfaces (Prompt Studio / Evals / Calendar /
+	// Integrations) are
 	// tabs inside the settings form, so the title bar carries no view toggle.
 	const titleBarTitle = useMemo(
 		() => (
@@ -1584,11 +1549,6 @@ export default function AgentEditPage({
 							/>
 						) : null
 					}
-					byoaPanel={
-						isNew || !agentId ? null : (
-							<ByoaPanel agentId={agentId} target={target} />
-						)
-					}
 					calendarPanel={
 						isNew || !agentId ? null : <AgentCalendarView agentId={agentId} />
 					}
@@ -1639,11 +1599,6 @@ export default function AgentEditPage({
 					composioToolkitItems={composioToolkitItems}
 					composioTriggers={composioTriggersQuery.data ?? []}
 					connectedAccountId={connectedAccountId}
-					connectPanel={
-						isNew || !agentId ? null : (
-							<ConnectPanel agentId={agentId} target={target} />
-						)
-					}
 					customCron={customCron}
 					customTone={customTone}
 					dailyTime={dailyTime}
@@ -1687,6 +1642,11 @@ export default function AgentEditPage({
 							onToggle={toggleIdentity}
 							selected={selectedIdentities}
 						/>
+					}
+					integrationsPanel={
+						isNew || !agentId ? null : (
+							<IntegrationsPanel agentId={agentId} target={target} />
+						)
 					}
 					isBuiltIn={isBuiltIn}
 					isLocked={isLocked}

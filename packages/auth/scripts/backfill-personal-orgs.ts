@@ -49,9 +49,7 @@ async function main(): Promise<void> {
 	if (!apply) {
 		console.log("\nDRY RUN — no writes. Pass --apply to create organizations.");
 		for (const user of targets) {
-			console.log(
-				`  would create default org for ${user.email} (${user._id})`
-			);
+			console.log(`  would create default org for ${user.email} (${user._id})`);
 		}
 		return;
 	}

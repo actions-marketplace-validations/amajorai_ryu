@@ -25,6 +25,7 @@ export function useNodeHealth() {
 			const health = await fetchHealth({
 				url: node.url,
 				token: node.token ?? null,
+				userJwt: node.userJwt ?? null,
 			});
 			return { ...health, compatible: isNodeCompatible(health.version) };
 		},

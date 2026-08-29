@@ -28,6 +28,8 @@ const markdownPlugin = EditorKit.find(
 interface CollabTarget {
 	token: string | null;
 	url: string;
+	/** Managed-node user JWT, when the room is hosted on a cloud node. */
+	userJwt?: string | null;
 }
 
 /** Everything {@link MarkdownEditor} needs to open a document collaboratively. */
@@ -113,7 +115,11 @@ export function MarkdownEditor({
 		}
 		return new RyuYjsProvider({
 			roomId: collab.documentId,
-			target: { url: collab.target.url, token: collab.target.token },
+			target: {
+				url: collab.target.url,
+				token: collab.target.token,
+				userJwt: collab.target.userJwt ?? null,
+			},
 			jwt: collab.jwt,
 			handlers: {
 				onJoinAck: (ack) => {

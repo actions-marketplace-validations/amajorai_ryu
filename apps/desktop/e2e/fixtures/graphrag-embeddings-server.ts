@@ -31,7 +31,7 @@ function embeddingFor(text: string, dimensions: number): number[] {
 	for (const token of tokens) {
 		const hash = hashToken(token);
 		const index = hash % dimensions;
-		const sign = (hash & 0x8000_0000) === 0 ? 1 : -1;
+		const sign = (hash & 0x80_00_00_00) === 0 ? 1 : -1;
 		embedding[index] += sign;
 	}
 	const magnitude = Math.sqrt(

@@ -13,13 +13,16 @@ The server speaks JSON-RPC over stdio and translates each tool call into a typed
 
 ## Configuration
 
-Configure the target node with two environment variables:
+Configure one Core target with these environment variables:
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
 | `RYU_CORE_URL` | `http://127.0.0.1:7980` | Base URL of the Ryu Core node. |
-| `RYU_CORE_TOKEN` | _(unset)_ | Optional node-admittance bearer (the node's `RYU_TOKEN` secret). When unset, no `Authorization` header is sent - fine for a local loopback node. |
-| `RYU_AUTH_URL` | `http://localhost:3000` | Control-plane (Better Auth) base URL, used only by the auth subcommands and `ryu_whoami`. |
+| `RYU_CORE_TOKEN` | _(unset)_ | The target node's bearer. When omitted for a loopback URL, the bridge reads that Core's local `node-auth.token`; a remote target must be given its own token. |
+| `RYU_DIR` | _(unset)_ | Core's relocated data directory; used when resolving a loopback `node-auth.token`. |
+| `RYU_AUTH_URL` | `http://localhost:3000` | Control-plane (Better Auth) base URL used by `login`, `logout`, and `whoami`. |
+| `RYU_HOME` | `~/.ryu` | Directory for this bridge's session unless `RYU_MCP_AUTH_FILE` is set. |
+| `RYU_MCP_AUTH_FILE` | `~/.ryu/mcp-auth.json` | Explicit path for this bridge's session file. |
 
 `tools/list` works even when Core is down (the tool definitions are static). Tool
 calls require a reachable Core node.
@@ -27,34 +30,53 @@ calls require a reachable Core node.
 ## Authentication
 
 `ryu-mcp` signs in with the **same OAuth 2.0 Device Authorization Grant (RFC 8628)**
-the desktop, mobile, and CLI clients use, through Ryu Core's proxy:
+the desktop, mobile, and CLI clients use, directly against the Ryu control plane:
 
 ```bash
-bun run apps/mcp/src/index.ts login     # opens your browser, polls Core, stores the bearer
+	bun run apps/mcp/src/index.ts login     # opens the Ryu /device approval page
 bun run apps/mcp/src/index.ts whoami    # prints the signed-in user
 bun run apps/mcp/src/index.ts logout    # clears the credential
 ```
 
-`login` calls `POST {RYU_CORE_URL}/api/auth/login`, opens the verification URL,
-then polls `GET /api/auth/status` until you approve it. Core performs the Better
-Auth device grant server-side and persists the bearer to the shared credential
-store `~/.ryu/auth.json` - so a `ryu-mcp login`, a `ryu login`, or a desktop
-sign-in all satisfy each other (single sign-on).
+`login` calls `POST {RYU_AUTH_URL}/api/auth/device/code`, opens the Ryu `/device`
+approval page, then polls `POST /api/auth/device/token` until you approve it.
+The bridge stores its own session in `~/.ryu/mcp-auth.json` (or the path in
+`RYU_MCP_AUTH_FILE`). The account is the same Ryu account, but the file is
+intentionally separate from Desktop's encrypted `auth.bin` vault and Core's
+encrypted node auth files.
 
 The stored credential is a **standard OAuth 2.0 Bearer access token** (a Better
-Auth control-plane session token) - exactly the bearer format MCP's own auth
-model expects. For a **stdio** server the host launches the process, so this
-user credential is carried out-of-band (the shared file), not over the MCP wire.
+Auth control-plane session token). For a **stdio** server the host launches the
+process, so this user credential is used only by `ryu_whoami`; it is not sent over
+the MCP wire.
 
 Two distinct tokens, deliberately kept separate:
 
 - **`Authorization: Bearer` to Core** is the **node-admittance** token
-  (`RYU_CORE_TOKEN` / the node's `RYU_TOKEN`). A local loopback node needs none.
+  (`RYU_CORE_TOKEN` / the node's `RYU_TOKEN`). A current local Core normally
+  mints `node-auth.token`, which the bridge reads automatically for loopback.
 - The **device-auth session token** identifies the **user** to the control plane
-  (powers `ryu_whoami`, sessions, billing). It is not a Core node bearer, so the
-  20 node tools above are unaffected by sign-in. (Carrying the user's identity
-  into a remote/multi-tenant node via the `x-ryu-user-jwt` header is a planned
-  follow-up; a local node does not need it.)
+  (powers `ryu_whoami`, sessions, billing). It is not a node bearer and does not
+  replace `RYU_CORE_TOKEN` for direct node calls.
+
+## Which MCP endpoint should you use?
+
+This package is the compatibility bridge for hosts that need a stdio process. A
+new external host should prefer Core's canonical HTTP endpoint:
+
+```text
+https://<node>/mcp/<agent-id>
+```
+
+For a Ryu Cloud or organization-bound node, use the hosted endpoint instead:
+
+```text
+https://<ryu-service>/mcp/<node-id>/<agent-id>
+```
+
+The hosted endpoint uses Better Auth OAuth + PKCE, checks the organization grant,
+then forwards a short-lived node-and-agent delegation. It never forwards the
+original user OAuth token to Core.
 
 ## Run it
 
@@ -73,8 +95,7 @@ Add this to your host's MCP config (e.g. `claude_desktop_config.json`):
       "command": "bun",
       "args": ["run", "apps/mcp/src/index.ts"],
       "env": {
-        "RYU_CORE_URL": "http://127.0.0.1:7980",
-        "RYU_CORE_TOKEN": ""
+        "RYU_CORE_URL": "http://127.0.0.1:7980"
       }
     }
   }

@@ -65,12 +65,12 @@ export function localTimeZone(): string {
  * DST is handled the same way Core's `next_quiet_window` handles it, and for
  * the same two nights:
  *
- *   * Spring forward, where the target hour does not exist. `new Date(y, m, d,
+ *   - Spring forward, where the target hour does not exist. `new Date(y, m, d,
  *     3, …)` silently NORMALISES a missing local hour to a real one, which
  *     would invent an instant the user was never offered — so a day whose
  *     resolved hour is not `QUIET_HOUR` is skipped to the next day instead,
  *     matching Core's `LocalResult::None` arm.
- *   * Fall back, where it exists twice. The constructor resolves to the EARLIER
+ *   - Fall back, where it exists twice. The constructor resolves to the EARLIER
  *     occurrence, which is Core's `Ambiguous(first, _)` choice, and is still
  *     genuinely quiet.
  */

@@ -35,13 +35,15 @@ function LiveActivityRow({
 			<span
 				aria-hidden
 				className="mt-0.5 flex size-6 shrink-0 items-center justify-center rounded-md"
-				style={{ backgroundColor: `color-mix(in srgb, ${tone} 15%, transparent)` }}
+				style={{
+					backgroundColor: `color-mix(in srgb, ${tone} 15%, transparent)`,
+				}}
 			>
 				<Icon className="size-3.5" icon={activity.icon ?? "activity-03"} />
 			</span>
 			<div className="min-w-0 flex-1">
 				<div className="flex items-center gap-1.5">
-					<span className="truncate text-xs font-medium text-foreground">
+					<span className="truncate font-medium text-foreground text-xs">
 						{activity.title}
 					</span>
 					<span
@@ -51,12 +53,15 @@ function LiveActivityRow({
 					/>
 				</div>
 				{activity.detail && (
-					<p className="mt-0.5 line-clamp-2 text-[11px] leading-snug text-muted-foreground">
+					<p className="mt-0.5 line-clamp-2 text-[11px] text-muted-foreground leading-snug">
 						{activity.detail}
 					</p>
 				)}
 				{activity.progress !== undefined && (
-					<div aria-hidden className="mt-1.5 h-1 overflow-hidden rounded-full bg-muted">
+					<div
+						aria-hidden
+						className="mt-1.5 h-1 overflow-hidden rounded-full bg-muted"
+					>
 						<div
 							className="h-full rounded-full transition-[width] duration-300"
 							style={{
@@ -110,7 +115,7 @@ export function LiveActivitiesSection() {
 	return (
 		<div className="flex flex-col gap-1.5 px-2 pb-1">
 			<div className="flex items-center gap-2 px-1">
-				<span className="text-[10px] font-medium tracking-wide text-muted-foreground uppercase">
+				<span className="font-medium text-[10px] text-muted-foreground uppercase tracking-wide">
 					Live
 				</span>
 				<div className="flex-1" />
