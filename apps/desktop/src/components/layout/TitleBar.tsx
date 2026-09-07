@@ -171,22 +171,22 @@ const GROUP_COLOR_CLASSES: Record<
 	},
 	blue: {
 		dot: "bg-info",
-		pill: "bg-info/20 text-info dark:text-info",
+		pill: "bg-info/20 text-status-info dark:text-status-info",
 		container: "bg-info/10 ring-info/25",
 	},
 	red: {
 		dot: "bg-destructive",
-		pill: "bg-destructive/20 text-destructive dark:text-destructive",
+		pill: "bg-destructive/20 text-status-destructive dark:text-status-destructive",
 		container: "bg-destructive/10 ring-destructive/25",
 	},
 	yellow: {
 		dot: "bg-warning",
-		pill: "bg-warning/20 text-warning dark:text-warning",
+		pill: "bg-warning/20 text-status-warning dark:text-status-warning",
 		container: "bg-warning/10 ring-warning/25",
 	},
 	green: {
 		dot: "bg-success",
-		pill: "bg-success/20 text-success dark:text-success",
+		pill: "bg-success/20 text-status-success dark:text-status-success",
 		container: "bg-success/10 ring-success/25",
 	},
 	pink: {

@@ -73,7 +73,7 @@ export function AcquisitionSourceStep({
 						})}
 					</RadioGroup>
 					{error ? (
-						<p className="mt-4 text-destructive text-sm" role="alert">
+						<p className="mt-4 text-sm text-status-destructive" role="alert">
 							{error}
 						</p>
 					) : null}

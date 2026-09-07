@@ -2,6 +2,7 @@
 
 import { Popover as PopoverPrimitive } from "@base-ui/react/popover";
 import { useLocalizedText } from "@ryu/i18n/react";
+import { useDirection } from "@ryu/ui/components/direction.tsx";
 import { composeRefs } from "@ryu/ui/lib/compose-refs.ts";
 import { cn } from "@ryu/ui/lib/utils.ts";
 import {
@@ -92,6 +93,7 @@ function PopoverContent({
 		"align" | "alignOffset" | "side" | "sideOffset"
 	>) {
 	const ctx = useContext(PopoverAnchorContext);
+	const direction = useDirection();
 	const localizedChildren = useLocalizedText(props.children, { literal: true });
 	return (
 		<PopoverPrimitive.Portal>
@@ -109,11 +111,12 @@ function PopoverContent({
 			>
 				<PopoverPrimitive.Popup
 					className={cn(
-						"data-[side=bottom]:slide-in-from-top-2 data-[side=inline-end]:slide-in-from-left-2 data-[side=inline-start]:slide-in-from-right-2 data-[side=left]:slide-in-from-right-2 data-[side=right]:slide-in-from-left-2 data-[side=top]:slide-in-from-bottom-2 data-open:fade-in-0 data-open:zoom-in-95 data-closed:fade-out-0 data-closed:zoom-out-95 relative z-50 flex w-72 origin-(--transform-origin) flex-col gap-4 rounded-3xl border border-border/50 bg-popover/70 p-4 text-popover-foreground text-sm outline-hidden backdrop-blur-2xl backdrop-saturate-150 duration-(--dropdown-open-dur) ease-(--dropdown-ease) before:pointer-events-none before:absolute before:inset-0 before:-z-1 before:rounded-[inherit] data-closed:animate-out data-open:animate-in data-closed:duration-(--dropdown-close-dur)",
+						"data-[side=bottom]:slide-in-from-top-2 data-[side=inline-end]:slide-in-from-start-2 data-[side=inline-start]:slide-in-from-end-2 data-[side=left]:slide-in-from-right-2 data-[side=right]:slide-in-from-left-2 data-[side=top]:slide-in-from-bottom-2 data-open:fade-in-0 data-open:zoom-in-95 data-closed:fade-out-0 data-closed:zoom-out-95 relative z-50 flex w-72 origin-(--transform-origin) flex-col gap-4 rounded-3xl border border-border/50 bg-popover/70 p-4 text-popover-foreground text-sm outline-hidden backdrop-blur-2xl backdrop-saturate-150 duration-(--dropdown-open-dur) ease-(--dropdown-ease) before:pointer-events-none before:absolute before:inset-0 before:-z-1 before:rounded-[inherit] data-closed:animate-out data-open:animate-in data-closed:duration-(--dropdown-close-dur)",
 						className
 					)}
 					data-slot="popover-content"
 					{...props}
+					dir={direction}
 				>
 					{localizedChildren}
 				</PopoverPrimitive.Popup>

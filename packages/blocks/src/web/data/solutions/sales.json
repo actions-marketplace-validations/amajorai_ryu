@@ -4,10 +4,10 @@
   "navLabel": "Sales",
   "category": "Sales & Marketing",
   "icon": "TrendingUp",
-  "tagline": "Research accounts, draft outreach, and update the CRM with agents wired into your stack.",
+  "tagline": "Research accounts and draft outreach using your connected CRM, email, and calendar.",
   "heroEyebrow": "Ryu for Sales",
-  "heroTitle": "An SDR that works the whole pipeline.",
-  "heroSubtitle": "Research prospects, write personalized outreach, prep call notes, and keep the CRM current, with agents connected to your email, calendar, and Salesforce or HubSpot. Less admin, more selling.",
+  "heroTitle": "Ryu for sales",
+  "heroSubtitle": "Research accounts and draft outreach using your connected CRM, email, and calendar.",
   "visualKey": "ConnectionsVisual",
   "intro": "Reps lose hours to research, follow-ups, and data entry. Ryu agents connect to the apps your deals live in through Connections, so they can read an account, draft the next touch, and update the record, taking real actions instead of just suggesting them.",
   "highlights": [

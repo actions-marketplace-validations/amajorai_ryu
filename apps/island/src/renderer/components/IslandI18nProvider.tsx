@@ -1,5 +1,6 @@
 import type { LanguagePack } from "@ryu/i18n/core";
 import { I18nProvider } from "@ryu/i18n/react";
+import { I18nDirectionProvider } from "@ryu/ui/components/direction.tsx";
 import { useEffect, useState } from "react";
 
 /** The Island is a separate Electron renderer, so it needs its own provider
@@ -33,5 +34,9 @@ export function IslandI18nProvider({
 		};
 	}, []);
 
-	return <I18nProvider packs={packs}>{children}</I18nProvider>;
+	return (
+		<I18nProvider packs={packs}>
+			<I18nDirectionProvider>{children}</I18nDirectionProvider>
+		</I18nProvider>
+	);
 }

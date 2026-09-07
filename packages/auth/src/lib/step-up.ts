@@ -436,3 +436,15 @@ export const STEP_UP_AUTH_PATHS: Record<string, StepUpScope> = {
 export function stepUpScopeForAuthPath(path: string): StepUpScope | null {
 	return STEP_UP_AUTH_PATHS[path] ?? null;
 }
+
+/** Native key mutations need an ownership lookup before choosing a scope. */
+export function isStepUpApiKeyMutation(path: string): boolean {
+	return path === "/api-key/delete" || path === "/api-key/update";
+}
+
+/** Resolve the credential scope from Better Auth's stored key configuration. */
+export function stepUpScopeForApiKeyConfig(
+	configId: unknown
+): StepUpScope | null {
+	return configId === "organization" ? "org.credentials" : null;
+}

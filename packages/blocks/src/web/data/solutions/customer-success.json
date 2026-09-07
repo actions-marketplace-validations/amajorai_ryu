@@ -4,10 +4,10 @@
   "navLabel": "Customer Success",
   "category": "Sales & Marketing",
   "icon": "HeartHandshake",
-  "tagline": "Spot churn risk, prep for QBRs, and keep every account moving with agents that know your book.",
+  "tagline": "Summarize account activity and prepare customer reviews from usage data, tickets, and notes.",
   "heroEyebrow": "Ryu for Customer Success",
-  "heroTitle": "An agent that watches every account so you don't have to.",
-  "heroSubtitle": "Pull usage, tickets, and notes into a health read on each account, draft the QBR deck, and flag the renewals at risk before they slip. Build a CSM agent as a card with your own playbook, model, and connected tools, governed end to end.",
+  "heroTitle": "Ryu for customer success",
+  "heroSubtitle": "Summarize account activity and prepare customer reviews from usage data, tickets, and notes.",
   "visualKey": "AgentsVisual",
   "intro": "Customer success is pattern-matching across too many accounts: who's slipping, who's ready to expand, what to say in the next call. The signals are scattered across your CRM, product analytics, and support tool. Ryu lets you build a CSM agent grounded in your playbook that pulls those signals together and drafts the next move for you to take.",
   "highlights": [

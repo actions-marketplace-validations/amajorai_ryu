@@ -166,7 +166,7 @@ const BlockCommentContent = ({ children, element }: PlateElementProps) => {
 
 				<PopoverContent
 					align="center"
-					className="max-h-[min(50dvh,calc(-24px+var(--radix-popper-available-height)))] w-[380px] min-w-[130px] max-w-[calc(100vw-24px)] overflow-y-auto p-0 data-[state=closed]:opacity-0"
+					className="max-h-[min(50dvh,calc(-24px+var(--available-height)))] w-[380px] min-w-[130px] max-w-[calc(100vw-24px)] overflow-y-auto p-0 data-closed:opacity-0"
 					onCloseAutoFocus={(e) => e.preventDefault()}
 					onOpenAutoFocus={(e) => e.preventDefault()}
 					side="bottom"
@@ -209,11 +209,11 @@ const BlockCommentContent = ({ children, element }: PlateElementProps) => {
 				</PopoverContent>
 
 				{totalCount > 0 && (
-					<div className="relative left-0 size-0 select-none">
+					<div className="relative start-0 size-0 select-none">
 						<PopoverTrigger
 							render={
 								<Button
-									className="!px-1.5 mt-1 ml-1 flex h-6 gap-1 py-0 text-muted-foreground/80 hover:text-muted-foreground/80 data-[active=true]:bg-muted"
+									className="!px-1.5 ms-1 mt-1 flex h-6 gap-1 py-0 text-muted-foreground/80 hover:text-muted-foreground/80 data-[active=true]:bg-muted"
 									contentEditable={false}
 									data-active={open}
 									variant="ghost"

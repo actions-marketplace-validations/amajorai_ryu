@@ -2,83 +2,58 @@ import { ArrowUpRight } from "lucide-react";
 import type { Route } from "next";
 import Link from "next/link";
 import { products } from "./data/products.tsx";
-import type { LandingCardTone } from "./landing-card-tones.ts";
-import {
-	LANDING_CARD_TONES,
-	landingCardSurfaceClass,
-} from "./landing-card-tones.ts";
-import { landingHeadlineClass } from "./landing-typography.ts";
-import { sectionSubtitleClass } from "./sections.tsx";
+import { SectionTitle, sectionSubtitleClass } from "./sections.tsx";
 
-const SERVICE_TONES: Record<string, LandingCardTone> = {
-	box: "orange",
-	gateway: "yellow",
-	mail: "blue",
-	notify: "purple",
+const SERVICE_DESCRIPTIONS: Record<string, string> = {
+	gateway:
+		"Route model and tool requests with shared access rules and budgets.",
+	box: "Give agents a persistent workspace for files and code.",
+	notify: "Send notifications through one API.",
+	mail: "Give agents an inbox to send and receive email.",
+	hire: "Call a specialist agent for a specific task.",
 };
-
-const SERVICE_ENDPOINTS: Record<string, string> = {
-	box: "Persistent workspace API",
-	gateway: "Model + tool gateway",
-	hire: "Pay-per-run specialists",
-	mail: "Agent inbox API",
-	notify: "POST /v1/events",
-};
-
-const STANDALONE_PRODUCTS = products.filter((product) => product.standalone);
 
 export function StandaloneServicesSection() {
 	return (
 		<section
 			aria-label="Standalone services"
-			className="mx-auto max-w-6xl px-6 py-20 md:py-28"
+			className="mx-auto max-w-6xl px-6 py-16 md:py-24"
 			data-testid="standalone-services"
 			id="standalone-services"
 		>
-			<div className="max-w-2xl">
-				<h2 className={landingHeadlineClass}>Use the pieces as services.</h2>
-				<p className={sectionSubtitleClass}>
-					Ryu Gateway, Box, Mail, Notify, and Hire each own a focused service
-					boundary. Connect only the service your product needs, or use them
-					together around one agent.
-				</p>
-			</div>
-
-			<div className="mt-12 grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
-				{STANDALONE_PRODUCTS.map((product) => {
-					const Icon = product.Icon;
-					const tone =
-						LANDING_CARD_TONES[SERVICE_TONES[product.slug] ?? "blue"];
-					return (
-						<Link
-							className={landingCardSurfaceClass(
-								SERVICE_TONES[product.slug] ?? "blue"
-							)}
-							data-testid={`standalone-service-${product.slug}`}
-							href={`/products/${product.slug}` as Route}
-							key={product.slug}
-						>
-							<div className={`flex items-center gap-2 text-sm ${tone.title}`}>
-								<Icon aria-hidden="true" className="size-4" />
-								<span>{product.name}</span>
-							</div>
-							<p
-								className={`mt-5 font-mono text-[10px] uppercase tracking-wider ${tone.eyebrow}`}
+			<div className="grid gap-10 md:grid-cols-[minmax(0,0.8fr)_minmax(0,1.2fr)] md:gap-16">
+				<div>
+					<SectionTitle title="Add Ryu to your product" />
+					<p className={sectionSubtitleClass}>
+						Use an individual service through its API. Keep your app and add the
+						capabilities you need.
+					</p>
+				</div>
+				<div className="space-y-6">
+					{products
+						.filter((product) => product.standalone)
+						.map((product) => (
+							<Link
+								className="group flex items-start justify-between gap-6 py-2 outline-offset-4 focus-visible:outline-2 focus-visible:outline-ring"
+								data-testid={`standalone-service-${product.slug}`}
+								href={`/products/${product.slug}` as Route}
+								key={product.slug}
 							>
-								{SERVICE_ENDPOINTS[product.slug] ?? "Standalone API"}
-							</p>
-							<p className={`mt-2 text-sm leading-relaxed ${tone.body}`}>
-								{product.tagline}
-							</p>
-							<div
-								className={`mt-8 flex items-center justify-between text-xs ${tone.ctaSecondary}`}
-							>
-								<span>Explore</span>
-								<ArrowUpRight aria-hidden="true" className="size-4" />
-							</div>
-						</Link>
-					);
-				})}
+								<div>
+									<h3 className="font-medium group-hover:underline group-hover:underline-offset-4">
+										{product.name}
+									</h3>
+									<p className="mt-2 max-w-md text-muted-foreground text-sm leading-relaxed">
+										{SERVICE_DESCRIPTIONS[product.slug] ?? product.tagline}
+									</p>
+								</div>
+								<ArrowUpRight
+									aria-hidden="true"
+									className="mt-1 size-4 shrink-0 text-muted-foreground"
+								/>
+							</Link>
+						))}
+				</div>
 			</div>
 		</section>
 	);

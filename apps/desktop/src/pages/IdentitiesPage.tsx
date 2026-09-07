@@ -150,7 +150,7 @@ export default function IdentitiesPage({
 		<div className="flex h-full flex-col overflow-hidden">
 			<div className="scroll-fade flex-1 overflow-y-auto p-6">
 				{error ? (
-					<p className="mb-3 text-destructive text-sm">{error}</p>
+					<p className="mb-3 text-sm text-status-destructive">{error}</p>
 				) : null}
 				{showCreate ? (
 					<CreateConnectionForm

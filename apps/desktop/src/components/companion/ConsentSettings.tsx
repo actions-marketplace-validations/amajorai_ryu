@@ -294,7 +294,7 @@ export default function ConsentSettings({
 				<button
 					className={`rounded-md border px-3 py-1.5 font-medium text-sm transition-colors ${
 						paused
-							? "border-warning/50 bg-warning/10 text-warning hover:bg-warning/20 dark:text-warning"
+							? "border-warning/50 bg-warning/10 text-status-warning hover:bg-warning/20 dark:text-status-warning"
 							: "hover:bg-accent hover:text-accent-foreground"
 					}`}
 					onClick={() => handlePauseToggle().catch(() => undefined)}

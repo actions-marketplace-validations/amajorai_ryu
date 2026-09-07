@@ -85,7 +85,7 @@ function renderSegment(segment: Segment, key: number): ReactNode {
 	if (segment.kind === "code") {
 		return (
 			<code
-				className="rounded bg-white/10 px-1 py-0.5 font-mono text-[0.8em]"
+				className="rounded bg-muted px-1 py-0.5 font-mono text-[0.8em]"
 				key={key}
 			>
 				{segment.value}
@@ -148,7 +148,7 @@ function renderBlocks(text: string): ReactNode[] {
 			if (inFence) {
 				blocks.push(
 					<pre
-						className="overflow-x-auto rounded-lg bg-black/40 p-2 font-mono text-[0.78rem] text-neutral-200"
+						className="overflow-x-auto rounded-lg bg-black/40 p-2 font-mono text-[0.78rem] text-foreground"
 						key={`code-${blockKey++}`}
 					>
 						<code>{fenceLines.join("\n")}</code>
@@ -176,7 +176,7 @@ function renderBlocks(text: string): ReactNode[] {
 	if (inFence && fenceLines.length > 0) {
 		blocks.push(
 			<pre
-				className="overflow-x-auto rounded-lg bg-black/40 p-2 font-mono text-[0.78rem] text-neutral-200"
+				className="overflow-x-auto rounded-lg bg-black/40 p-2 font-mono text-[0.78rem] text-foreground"
 				key={`code-${blockKey++}`}
 			>
 				<code>{fenceLines.join("\n")}</code>

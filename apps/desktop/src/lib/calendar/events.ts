@@ -506,6 +506,4 @@ export function buildRunStatusTimelineEntries(
 }
 
 /** Day key for a Date — exported so the grid keys cells the same way. */
-export function eventDayKey(d: Date): string {
-	return dayKey(d);
-}
+export { dayKey as eventDayKey };

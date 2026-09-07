@@ -148,14 +148,18 @@ export function ComputerUseSettings({
 					Device settings are unavailable while this device is offline.
 				</p>
 			)}
-			{error ? <p className="px-3 text-destructive text-sm">{error}</p> : null}
+			{error ? (
+				<p className="px-3 text-sm text-status-destructive">{error}</p>
+			) : null}
 			{canConfigure ? null : (
 				<p className="px-3 text-muted-foreground text-sm">
 					You can view this policy, but you need device configuration access to
 					change it.
 				</p>
 			)}
-			{saved ? <p className="px-3 text-sm text-success">Saved.</p> : null}
+			{saved ? (
+				<p className="px-3 text-sm text-status-success">Saved.</p>
+			) : null}
 		</SettingsSection>
 	);
 }

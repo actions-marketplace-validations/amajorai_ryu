@@ -63,7 +63,7 @@ export function TeamCardView({
 				{canManage && headerActions}
 			</CardHeader>
 			<CardContent className="space-y-4">
-				{error && <p className="text-destructive text-sm">{error}</p>}
+				{error && <p className="text-sm text-status-destructive">{error}</p>}
 
 				{loadingMembers ? (
 					<Skeleton className="h-10 w-full" />
@@ -167,7 +167,7 @@ export function TeamsLayout({
 				</div>
 			) : null}
 
-			{error && <p className="text-destructive text-sm">{error}</p>}
+			{error && <p className="text-sm text-status-destructive">{error}</p>}
 
 			{loading && (
 				<div className="grid gap-3">

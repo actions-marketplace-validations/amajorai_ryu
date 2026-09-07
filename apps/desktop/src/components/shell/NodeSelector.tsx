@@ -592,7 +592,11 @@ function NodeDependenciesSection({ target }: { target: ApiTarget }) {
 						key={dep.name}
 						label={dep.name}
 						value={
-							<span className={dep.installed ? "text-success" : "text-warning"}>
+							<span
+								className={
+									dep.installed ? "text-status-success" : "text-status-warning"
+								}
+							>
 								{dep.installed ? "Installed" : "Missing"}
 							</span>
 						}
@@ -819,7 +823,7 @@ export function AddNodeDialog({
 						size="lg"
 						value={token}
 					/>
-					{error && <p className="text-destructive text-xs">{error}</p>}
+					{error && <p className="text-status-destructive text-xs">{error}</p>}
 					<div className="space-y-1.5 border-border/50 border-t pt-3">
 						<button
 							className="flex w-full items-center gap-1.5 text-muted-foreground/70 text-xs hover:text-foreground disabled:opacity-50"
@@ -960,7 +964,7 @@ function ShareNodeDialog({
 							value={host}
 						/>
 						{isLoopback && (
-							<p className="text-[11px] text-warning">
+							<p className="text-[11px] text-status-warning">
 								Other devices can't reach a localhost address. Enter this
 								machine's LAN IP (e.g. 192.168.1.50) or Tailscale name.
 							</p>
@@ -1140,7 +1144,7 @@ function NodeItem({
 				{node.name !== "local" && onRemove && (
 					<button
 						aria-label={`Remove ${node.name}`}
-						className="shrink-0 opacity-0 hover:text-destructive group-hover:opacity-100"
+						className="shrink-0 opacity-0 hover:text-status-destructive group-hover:opacity-100"
 						onClick={(e) => {
 							e.stopPropagation();
 							onRemove();
@@ -1907,7 +1911,7 @@ function SandboxRow({
 				{formatElapsed(run.elapsedSeconds)}
 			</span>
 			<button
-				className="shrink-0 rounded-md px-1.5 py-0.5 text-[10px] text-muted-foreground hover:bg-accent hover:text-destructive disabled:opacity-50"
+				className="shrink-0 rounded-md px-1.5 py-0.5 text-[10px] text-muted-foreground hover:bg-accent hover:text-status-destructive disabled:opacity-50"
 				disabled={stopping}
 				onClick={handleStop}
 				type="button"
@@ -3149,7 +3153,9 @@ function MeshPeerRow({
 				<span className="flex-1 truncate text-left text-muted-foreground">
 					{label}
 				</span>
-				<span className="shrink-0 text-[10px] text-warning">needs token</span>
+				<span className="shrink-0 text-[10px] text-status-warning">
+					needs token
+				</span>
 			</div>
 		);
 	}
@@ -3407,7 +3413,7 @@ function ManagedNodeWallet({ node }: { node: Node | undefined }) {
 			className={cn(
 				"mt-1 rounded-xl text-xs",
 				warning
-					? "border border-warning/30 bg-warning/10 text-warning dark:text-warning"
+					? "border border-warning/30 bg-warning/10 text-status-warning dark:text-status-warning"
 					: "text-muted-foreground"
 			)}
 			data-credit-state={status?.kind ?? "loading"}

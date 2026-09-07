@@ -1222,7 +1222,7 @@ function McpServerSettingsDialog({
 						/>
 					</div>
 					{formError ? (
-						<p className="text-destructive text-sm">{formError}</p>
+						<p className="text-sm text-status-destructive">{formError}</p>
 					) : null}
 				</div>
 				<DialogFooter className="justify-between sm:justify-between">
@@ -1411,7 +1411,7 @@ function ToolDetail({
 							/>
 						</div>
 						{parseError ? (
-							<p className="text-destructive text-xs">{parseError}</p>
+							<p className="text-status-destructive text-xs">{parseError}</p>
 						) : null}
 						<div>
 							<Button loading={running} onClick={runCall} size="sm">
@@ -1425,7 +1425,7 @@ function ToolDetail({
 						className={`max-h-60 overflow-auto rounded border px-3 py-2 text-xs ${
 							result?.ok
 								? "bg-muted"
-								: "border-destructive/40 bg-destructive/10 text-destructive"
+								: "border-destructive/40 bg-destructive/10 text-status-destructive"
 						}`}
 					>
 						{resultText}
@@ -1748,7 +1748,7 @@ function AddServerDialog({
 					</div>
 
 					{formError ? (
-						<p className="text-destructive text-sm">{formError}</p>
+						<p className="text-sm text-status-destructive">{formError}</p>
 					) : null}
 				</div>
 

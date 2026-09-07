@@ -132,7 +132,7 @@ export function ChatSidebar({
 											</DropdownMenuTrigger>
 											<DropdownMenuContent align="end">
 												<DropdownMenuItem
-													className="text-destructive"
+													className="text-status-destructive"
 													onClick={(e) => {
 														e.stopPropagation();
 														onDeleteConversation(conv.id);

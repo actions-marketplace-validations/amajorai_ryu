@@ -494,7 +494,7 @@ function PermissionGroupSection({
 
 	return (
 		<Collapsible onOpenChange={setOpen} open={open}>
-			<CollapsibleTrigger className="flex w-full items-center justify-between gap-3 rounded-[10px] px-2 py-1.5 text-left hover:bg-muted/40">
+			<CollapsibleTrigger className="flex w-full items-center justify-between gap-3 rounded-lg px-2 py-1.5 text-left hover:bg-muted/40">
 				<span className="min-w-0 truncate font-medium text-xs">
 					{group.title}
 				</span>

@@ -342,11 +342,6 @@ export function parseRyuDeepLink(raw: string): DeepLinkIntent | null {
 	return null;
 }
 
-/** Percent-encode the reserved characters of a query value (space → `%20`). */
-function encodeQueryValue(value: string): string {
-	return encodeURIComponent(value);
-}
-
 /** Build a `ryu://` deep link from an intent (used to render "Open in Ryu"). */
 export function buildRyuDeepLink(intent: DeepLinkBuildInput): string {
 	if (intent.kind === "handoff") {
@@ -354,7 +349,7 @@ export function buildRyuDeepLink(intent: DeepLinkBuildInput): string {
 		if (!sourceNodeUrl) {
 			throw new Error("A handoff link requires a safe HTTP source node URL.");
 		}
-		return `ryu://handoff/${encodeURIComponent(intent.conversationId)}?source=${encodeQueryValue(sourceNodeUrl)}&v=0`;
+		return `ryu://handoff/${encodeURIComponent(intent.conversationId)}?source=${encodeURIComponent(sourceNodeUrl)}&v=0`;
 	}
 	if (intent.kind === "node") {
 		// The node link doubles as the CONNECTION STRING a user copies, pastes into
@@ -366,10 +361,10 @@ export function buildRyuDeepLink(intent: DeepLinkBuildInput): string {
 		// valid.
 		const params = [
 			`url=${intent.url}`,
-			`name=${encodeQueryValue(intent.name)}`,
+			`name=${encodeURIComponent(intent.name)}`,
 		];
 		if (intent.token) {
-			params.push(`token=${encodeQueryValue(intent.token)}`);
+			params.push(`token=${encodeURIComponent(intent.token)}`);
 		}
 		return `ryu://nodes/connect?${params.join("&")}`;
 	}
@@ -379,13 +374,13 @@ export function buildRyuDeepLink(intent: DeepLinkBuildInput): string {
 	if (intent.kind === "chat") {
 		const params: string[] = [];
 		if (intent.prompt) {
-			params.push(`prompt=${encodeQueryValue(intent.prompt)}`);
+			params.push(`prompt=${encodeURIComponent(intent.prompt)}`);
 		}
 		if (intent.agent) {
-			params.push(`agent=${encodeQueryValue(intent.agent)}`);
+			params.push(`agent=${encodeURIComponent(intent.agent)}`);
 		}
 		if (intent.project) {
-			params.push(`project=${encodeQueryValue(intent.project)}`);
+			params.push(`project=${encodeURIComponent(intent.project)}`);
 		}
 		const path = intent.conversationId
 			? encodeURIComponent(intent.conversationId)
@@ -410,6 +405,6 @@ export function buildRyuDeepLink(intent: DeepLinkBuildInput): string {
 	// a builder that emitted more than the parser reads would drift immediately.
 	const node = intent.node?.trim();
 	return node && HTTP_PREFIX.test(node)
-		? `${base}?node=${encodeQueryValue(node.replace(TRAILING_SLASHES, ""))}`
+		? `${base}?node=${encodeURIComponent(node.replace(TRAILING_SLASHES, ""))}`
 		: base;
 }

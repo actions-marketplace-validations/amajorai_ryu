@@ -101,7 +101,7 @@ export function AgentPublishDisclosure({
 								them before publishing.
 							</span>
 						) : (
-							<span className="text-destructive">None</span>
+							<span className="text-status-destructive">None</span>
 						)}
 					</SharedRow>
 					<SharedRow label="Model">
@@ -191,7 +191,7 @@ export function AgentPublishDisclosure({
 			</section>
 
 			{notes.blockedReason ? (
-				<p className="rounded-xl bg-destructive/10 p-3 text-destructive text-sm">
+				<p className="rounded-xl bg-destructive/10 p-3 text-sm text-status-destructive">
 					{notes.blockedReason}
 				</p>
 			) : null}

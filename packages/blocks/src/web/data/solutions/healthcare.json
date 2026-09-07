@@ -4,10 +4,10 @@
   "navLabel": "Healthcare",
   "category": "Industries",
   "icon": "HeartPulse",
-  "tagline": "Cut the admin load with agents that keep patient data on-device and on the record.",
+  "tagline": "Prepare administrative summaries and organize documents for staff to review.",
   "heroEyebrow": "Ryu for Healthcare",
-  "heroTitle": "Reclaim hours from paperwork without exposing patient data.",
-  "heroSubtitle": "Draft visit summaries, structure intake forms, and answer questions across your own protocols with agents that run on your machine. Patient information stays on-device by default, and every model call is governed and logged.",
+  "heroTitle": "Ryu for healthcare",
+  "heroSubtitle": "Prepare administrative summaries and organize documents for staff to review.",
   "visualKey": "GatewayVisual",
   "intro": "Clinical and operational staff lose hours to documentation, intake, and chasing information, but patient data can't be pasted into a public chatbot. Ryu runs capable agents locally so sensitive data stays on-device, with the Gateway redacting and logging anything that does leave. It helps a clinician work faster, it never makes the clinical call.",
   "highlights": [

@@ -148,7 +148,7 @@ function GhostActionPanel({
 
 			{loadError && (
 				<div
-					className="flex items-center justify-between gap-2 rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-destructive text-xs"
+					className="flex items-center justify-between gap-2 rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-status-destructive text-xs"
 					role="alert"
 				>
 					<span>
@@ -166,7 +166,7 @@ function GhostActionPanel({
 			)}
 
 			{!loadError && noAgentWarning && (
-				<p className="rounded-md border border-warning/30 bg-warning/10 px-3 py-2 text-warning text-xs dark:text-warning">
+				<p className="rounded-md border border-warning/30 bg-warning/10 px-3 py-2 text-status-warning text-xs dark:text-status-warning">
 					No agents set up yet — add one on the Agents page to enable desktop
 					actions.
 				</p>
@@ -251,8 +251,8 @@ function GhostActionPanel({
 				<output
 					className={`rounded-md border px-3 py-2 text-xs ${
 						ghost.result.ok
-							? "border-success/30 bg-success/10 text-success dark:text-success"
-							: "border-destructive/40 bg-destructive/10 text-destructive"
+							? "border-success/30 bg-success/10 text-status-success dark:text-status-success"
+							: "border-destructive/40 bg-destructive/10 text-status-destructive"
 					}`}
 				>
 					{ghost.result.ok ? (
@@ -277,7 +277,7 @@ function GhostActionPanel({
 			{/* Network / Core error (before a result arrives) */}
 			{ghost.error && !ghost.result && (
 				<div
-					className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-destructive text-xs"
+					className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-status-destructive text-xs"
 					role="alert"
 				>
 					{ghost.error}
@@ -380,8 +380,8 @@ function RecordingIndicator({ paused }: { paused: boolean }) {
 			aria-live="polite"
 			className={`flex items-center gap-1.5 rounded-md px-2 py-1 text-xs ${
 				paused
-					? "border border-warning/30 bg-warning/10 text-warning dark:text-warning"
-					: "border border-success/30 bg-success/10 text-success dark:text-success"
+					? "border border-warning/30 bg-warning/10 text-status-warning dark:text-status-warning"
+					: "border border-success/30 bg-success/10 text-status-success dark:text-status-success"
 			}`}
 		>
 			<span
@@ -618,7 +618,7 @@ export default function CompanionPage() {
 					{/* Inline error — never crashes, always visible in the overlay */}
 					{error && (
 						<div
-							className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-destructive text-xs"
+							className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-status-destructive text-xs"
 							role="alert"
 						>
 							{error}

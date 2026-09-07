@@ -1086,12 +1086,12 @@ function SubagentsList({
 							{(sub.changes.insertions > 0 || sub.changes.deletions > 0) && (
 								<span className="flex shrink-0 items-center gap-1 font-medium text-[11px] tabular-nums">
 									{sub.changes.insertions > 0 && (
-										<span className="text-emerald-600 dark:text-emerald-400/90">
+										<span className="text-status-success dark:text-status-success/90">
 											+{formatCount(sub.changes.insertions)}
 										</span>
 									)}
 									{sub.changes.deletions > 0 && (
-										<span className="text-red-600/90 dark:text-red-400/90">
+										<span className="text-status-destructive/90 dark:text-status-destructive/90">
 											-{formatCount(sub.changes.deletions)}
 										</span>
 									)}

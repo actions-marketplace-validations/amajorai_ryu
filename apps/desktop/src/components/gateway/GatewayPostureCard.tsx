@@ -142,9 +142,9 @@ function DoctorSummary({
 					))}
 				</div>
 			) : (
-				<div className="flex items-center gap-2 rounded-lg border border-emerald-500/20 bg-emerald-500/5 px-3 py-3 text-muted-foreground text-sm">
+				<div className="flex items-center gap-2 rounded-lg border border-success/20 bg-success/5 px-3 py-3 text-muted-foreground text-sm">
 					<HugeiconsIcon
-						className="size-4 text-emerald-500"
+						className="size-4 text-status-success"
 						icon={CheckmarkCircle02Icon}
 					/>
 					No configuration, security, or performance issues found.
@@ -543,7 +543,7 @@ export function GatewayPostureCard({
 					</div>
 				) : null}
 				{doctorFix && !doctorFix.dryRun && doctorFix.appliedFixes.length > 0 ? (
-					<p className="px-3 pt-2 text-emerald-600 text-xs dark:text-emerald-400">
+					<p className="px-3 pt-2 text-status-success text-xs">
 						Applied {doctorFix.appliedFixes.length} safe fix
 						{doctorFix.appliedFixes.length === 1 ? "" : "es"}; the report above
 						is current.

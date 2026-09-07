@@ -480,7 +480,7 @@ export default function StoreItemAction({
 				variant="secondary"
 			>
 				<HugeiconsIcon
-					className="size-3.5 text-emerald-500"
+					className="size-3.5 text-status-success"
 					icon={CheckmarkCircle02Icon}
 				/>
 				Installed

@@ -458,10 +458,10 @@ function TurnProgressFile({
 		>
 			<FileTypeIcon className="size-4 shrink-0" path={file.path} />
 			<span className="min-w-0 flex-1 truncate">{file.path}</span>
-			<span className="text-emerald-600 tabular-nums dark:text-emerald-400">
+			<span className="text-status-success tabular-nums">
 				+{formatNumber(file.insertions)}
 			</span>
-			<span className="text-red-600 tabular-nums dark:text-red-400">
+			<span className="text-status-destructive tabular-nums">
 				−{formatNumber(file.deletions)}
 			</span>
 		</button>
@@ -861,7 +861,7 @@ export const InputBar = memo(function InputBar({
 			<div
 				className={cn(
 					"min-w-0 truncate text-xs",
-					isDestructiveInfoBar ? "text-destructive" : "text-foreground"
+					isDestructiveInfoBar ? "text-status-destructive" : "text-foreground"
 				)}
 			>
 				{infoBarData.title && (
@@ -871,7 +871,7 @@ export const InputBar = memo(function InputBar({
 					<span
 						className={
 							isDestructiveInfoBar
-								? "text-destructive/80"
+								? "text-status-destructive/80"
 								: "text-muted-foreground/80"
 						}
 					>
@@ -910,7 +910,7 @@ export const InputBar = memo(function InputBar({
 						className={cn(
 							"size-6 shrink-0",
 							isDestructiveInfoBar
-								? "text-destructive/70 hover:text-destructive"
+								? "text-status-destructive/70 hover:text-status-destructive"
 								: "text-muted-foreground/70 hover:text-foreground"
 						)}
 						onClick={handleInfoBarClose}
@@ -1809,10 +1809,10 @@ export const InputBar = memo(function InputBar({
 										{formatNumber(effectiveChangeSummary.files)} file
 										{effectiveChangeSummary.files === 1 ? "" : "s"} changed
 									</span>
-									<span className="font-medium text-emerald-600 dark:text-emerald-400">
+									<span className="font-medium text-status-success">
 										+{formatNumber(effectiveChangeSummary.insertions)}
 									</span>
-									<span className="font-medium text-red-600 dark:text-red-400">
+									<span className="font-medium text-status-destructive">
 										-{formatNumber(effectiveChangeSummary.deletions)}
 									</span>
 								</PopoverTrigger>

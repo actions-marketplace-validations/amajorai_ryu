@@ -437,7 +437,7 @@ function ProviderTierEditor({
 		>
 			<div className="flex flex-col gap-3">
 				{reachable && loadError ? (
-					<p className="px-3.5 text-destructive text-sm">{loadError}</p>
+					<p className="px-3.5 text-sm text-status-destructive">{loadError}</p>
 				) : null}
 				{reachable ? null : (
 					<p className="px-3.5 text-muted-foreground text-sm">
@@ -477,12 +477,12 @@ function ProviderTierEditor({
 				</SettingsGroup>
 				<div className="flex items-center gap-3 px-3.5">
 					{saveOk ? (
-						<span className="text-sm text-success">
+						<span className="text-sm text-status-success">
 							Saved. Restart the gateway for changes to take effect.
 						</span>
 					) : null}
 					{saveError ? (
-						<span className="text-destructive text-sm">{saveError}</span>
+						<span className="text-sm text-status-destructive">{saveError}</span>
 					) : null}
 				</div>
 			</div>
@@ -543,7 +543,7 @@ function AccountKeysDisplay({
 		>
 			<div className="flex flex-col gap-3">
 				{reachable && loadError ? (
-					<p className="px-3.5 text-destructive text-sm">{loadError}</p>
+					<p className="px-3.5 text-sm text-status-destructive">{loadError}</p>
 				) : null}
 				{reachable ? null : (
 					<p className="px-3.5 text-muted-foreground text-sm">

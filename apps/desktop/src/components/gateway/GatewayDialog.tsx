@@ -453,12 +453,12 @@ function GatewayKeysCard({
 					</div>
 				) : null}
 				{reachable && !loading && loadError ? (
-					<p className="px-3 text-destructive text-sm">{loadError}</p>
+					<p className="px-3 text-sm text-status-destructive">{loadError}</p>
 				) : null}
 				{reachable && !(loading || loadError) ? (
 					<>
 						{requireAuth ? null : (
-							<div className="mx-3 flex items-start gap-2 rounded-md border border-warning bg-warning px-3 py-2 text-sm text-warning dark:border-warning dark:bg-warning dark:text-warning">
+							<div className="mx-3 flex items-start gap-2 rounded-md border border-warning bg-warning px-3 py-2 text-sm text-status-warning dark:border-warning dark:bg-warning dark:text-status-warning">
 								<HugeiconsIcon
 									className="mt-0.5 size-4 shrink-0"
 									icon={Shield01Icon}
@@ -720,7 +720,9 @@ function ProviderRow({
 				</div>
 			)}
 
-			{rowError ? <p className="text-destructive text-xs">{rowError}</p> : null}
+			{rowError ? (
+				<p className="text-status-destructive text-xs">{rowError}</p>
+			) : null}
 		</SettingsItem>
 	);
 }
@@ -968,7 +970,7 @@ function ComposioKeyCard({
 						</div>
 					)}
 					{rowError ? (
-						<p className="text-destructive text-xs">{rowError}</p>
+						<p className="text-status-destructive text-xs">{rowError}</p>
 					) : null}
 				</SettingsItem>
 			</SettingsGroup>
@@ -1166,7 +1168,7 @@ function MediaKeyCard({
 						</div>
 					)}
 					{rowError ? (
-						<p className="text-destructive text-xs">{rowError}</p>
+						<p className="text-status-destructive text-xs">{rowError}</p>
 					) : null}
 				</SettingsItem>
 			</SettingsGroup>
@@ -1525,7 +1527,9 @@ function BudgetRuleDialog({
 							{ALERT_TIER_TARGETS_NOTE}
 						</p>
 					</div>
-					{err ? <p className="text-destructive text-sm">{err}</p> : null}
+					{err ? (
+						<p className="text-sm text-status-destructive">{err}</p>
+					) : null}
 				</div>
 				<DialogFooter>
 					<Button
@@ -1687,7 +1691,9 @@ function ModelMappingDialog({
 							Rewrite the model name when forwarding to the provider.
 						</p>
 					</div>
-					{err ? <p className="text-destructive text-sm">{err}</p> : null}
+					{err ? (
+						<p className="text-sm text-status-destructive">{err}</p>
+					) : null}
 				</div>
 				<DialogFooter>
 					<Button
@@ -1899,7 +1905,9 @@ function ModalityMappingDialog({
 					<p className="text-muted-foreground text-xs">
 						{MODALITY_COPY[modality].note}
 					</p>
-					{err ? <p className="text-destructive text-sm">{err}</p> : null}
+					{err ? (
+						<p className="text-sm text-status-destructive">{err}</p>
+					) : null}
 				</div>
 				<DialogFooter>
 					<Button
@@ -1963,7 +1971,10 @@ function ModalityRowDescription({
 			{modalityProviderLabel(mapping.provider)}
 			{mapping.model ? ` → ${mapping.model}` : null}
 			{unavailable ? (
-				<span className="text-warning"> — not configured on this node</span>
+				<span className="text-status-warning">
+					{" "}
+					— not configured on this node
+				</span>
 			) : null}
 		</>
 	);
@@ -2003,7 +2014,7 @@ function ModalityRoutingRows({
 }) {
 	if (!served) {
 		return (
-			<p className="text-sm text-warning">
+			<p className="text-sm text-status-warning">
 				This gateway does not report its modality map, so it cannot be edited
 				here, and it cannot be preserved either: saving anything in this card
 				replaces the whole routing section, so a{" "}
@@ -2061,7 +2072,7 @@ function ModalityRoutingRows({
 									variant="ghost"
 								>
 									<HugeiconsIcon
-										className="size-3.5 text-destructive"
+										className="size-3.5 text-status-destructive"
 										icon={Delete01Icon}
 									/>
 									<span className="sr-only">
@@ -2491,7 +2502,7 @@ export function SmartRoutingCard({
 		>
 			<div className="flex flex-col gap-5 px-3">
 				{reachable && loadError ? (
-					<p className="text-destructive text-sm">{loadError}</p>
+					<p className="text-sm text-status-destructive">{loadError}</p>
 				) : null}
 				{reachable ? null : (
 					<p className="text-muted-foreground text-sm">
@@ -2500,7 +2511,7 @@ export function SmartRoutingCard({
 					</p>
 				)}
 				{served === false ? (
-					<p className="text-sm text-warning">
+					<p className="text-sm text-status-warning">
 						This gateway does not report its smart-routing config, so it cannot
 						be edited here, and it cannot be preserved either: saving anything
 						in this card replaces the whole routing section, so a{" "}
@@ -2622,7 +2633,7 @@ export function SmartRoutingCard({
 							</p>
 						) : null}
 						{classifierUnserved ? (
-							<p className="text-destructive text-xs">
+							<p className="text-status-destructive text-xs">
 								Smart routing is on with the local classify tier as its
 								classifier, but {classifierUnservedReason}, so the
 								classification call will fail and every request will quietly
@@ -2907,7 +2918,7 @@ export function SmartRoutingCard({
 												variant="ghost"
 											>
 												<HugeiconsIcon
-													className="size-3.5 text-destructive"
+													className="size-3.5 text-status-destructive"
 													icon={Delete01Icon}
 												/>
 												<span className="sr-only">Remove rule {idx + 1}</span>
@@ -2938,10 +2949,10 @@ export function SmartRoutingCard({
 				) : null}
 
 				{saveError ? (
-					<p className="text-destructive text-sm">{saveError}</p>
+					<p className="text-sm text-status-destructive">{saveError}</p>
 				) : null}
 				{saveOk ? (
-					<p className="text-sm text-success">
+					<p className="text-sm text-status-success">
 						Saved. New requests use the updated router.
 					</p>
 				) : null}
@@ -3181,7 +3192,7 @@ function RoutingCard({
 		>
 			<div className="flex flex-col gap-5 px-3">
 				{reachable && configError ? (
-					<p className="text-destructive text-sm">{configError}</p>
+					<p className="text-sm text-status-destructive">{configError}</p>
 				) : null}
 				{reachable ? null : (
 					<p className="text-muted-foreground text-sm">
@@ -3288,7 +3299,7 @@ function RoutingCard({
 												variant="ghost"
 											>
 												<HugeiconsIcon
-													className="size-3.5 text-destructive"
+													className="size-3.5 text-status-destructive"
 													icon={Delete01Icon}
 												/>
 												<span className="sr-only">
@@ -3383,7 +3394,7 @@ function RoutingCard({
 												variant="ghost"
 											>
 												<HugeiconsIcon
-													className="size-3.5 text-destructive"
+													className="size-3.5 text-status-destructive"
 													icon={Delete01Icon}
 												/>
 												<span className="sr-only">
@@ -3428,12 +3439,12 @@ function RoutingCard({
 						Save
 					</Button>
 					{saveOk ? (
-						<span className="text-sm text-success">
+						<span className="text-sm text-status-success">
 							Saved. Gateway will apply on next restart.
 						</span>
 					) : null}
 					{saveError ? (
-						<span className="text-destructive text-sm">{saveError}</span>
+						<span className="text-sm text-status-destructive">{saveError}</span>
 					) : null}
 				</div>
 			</div>
@@ -3704,7 +3715,7 @@ function BudgetsCard({
 				</div>
 			) : null}
 			{!loading && err ? (
-				<p className="px-3 text-destructive text-sm">{err}</p>
+				<p className="px-3 text-sm text-status-destructive">{err}</p>
 			) : null}
 			{loading || err ? null : (
 				<div className="flex flex-col gap-6">
@@ -3872,7 +3883,7 @@ function BudgetScopeSection({
 										variant="ghost"
 									>
 										<HugeiconsIcon
-											className="size-3.5 text-destructive"
+											className="size-3.5 text-status-destructive"
 											icon={Delete01Icon}
 										/>
 										<span className="sr-only">Remove budget for {id}</span>
@@ -4110,10 +4121,10 @@ function SessionBudgetEditor({
 					</p>
 				</div>
 				{saveError ? (
-					<p className="text-destructive text-sm">{saveError}</p>
+					<p className="text-sm text-status-destructive">{saveError}</p>
 				) : null}
 				{saveOk ? (
-					<p className="text-sm text-success">
+					<p className="text-sm text-status-success">
 						Saved. Changes take effect immediately.
 					</p>
 				) : null}
@@ -4787,7 +4798,7 @@ function CustomPatternsEditor({ ctx }: { ctx: ScopeCtx }) {
 									value={r.regex}
 								/>
 								{valid ? null : (
-									<p className="text-destructive text-xs">
+									<p className="text-status-destructive text-xs">
 										Invalid regex. Checked with the browser engine; the gateway
 										uses Rust regex syntax, which differs slightly.
 									</p>
@@ -4820,7 +4831,7 @@ function DlpCard({ ctx }: { ctx: ScopeCtx }) {
 		>
 			<div className="flex flex-col gap-3">
 				{isSanitize ? null : (
-					<p className="mx-3 rounded-md border border-warning bg-warning px-3 py-2 text-sm text-warning dark:border-warning dark:bg-warning dark:text-warning">
+					<p className="mx-3 rounded-md border border-warning bg-warning px-3 py-2 text-sm text-status-warning dark:border-warning dark:bg-warning dark:text-status-warning">
 						Redaction toggles apply only when the firewall policy is set to
 						Sanitize. Resolved policy for this scope:{" "}
 						{POLICY_LABELS[resolvedPolicy] ?? resolvedPolicy}.
@@ -5038,7 +5049,7 @@ function InspectorCard({
 								because a blank value would leave the local classifier stopped.
 							</p>
 							{unservedModel ? (
-								<p className="text-destructive text-xs">
+								<p className="text-status-destructive text-xs">
 									The inspector is on and pointed at the local classifier, but{" "}
 									{unservedReason}. The inspection call will fail, and the
 									inspector fails open, so it will allow every turn while still
@@ -5555,7 +5566,9 @@ function GuardrailsSection({
 						</p>
 					)}
 					{reachable && configError ? (
-						<p className="px-3 text-destructive text-sm">{configError}</p>
+						<p className="px-3 text-sm text-status-destructive">
+							{configError}
+						</p>
 					) : null}
 
 					<div className="flex flex-col gap-1.5 px-3">
@@ -5651,10 +5664,12 @@ function GuardrailsSection({
 							Save guardrails
 						</Button>
 						{saveOk ? (
-							<span className="text-sm text-success">Saved.</span>
+							<span className="text-sm text-status-success">Saved.</span>
 						) : null}
 						{saveError ? (
-							<span className="text-destructive text-sm">{saveError}</span>
+							<span className="text-sm text-status-destructive">
+								{saveError}
+							</span>
 						) : null}
 					</div>
 				</>
@@ -5872,7 +5887,7 @@ function AuditTable({ entries }: { entries: AuditEntry[] }) {
 										{entry.error ? "Failed" : "Recorded"}
 									</Badge>
 									{entry.error ? (
-										<div className="mt-1 max-w-48 break-words text-destructive">
+										<div className="mt-1 max-w-48 break-words text-status-destructive">
 											{entry.error}
 										</div>
 									) : null}
@@ -6239,7 +6254,7 @@ function RunEvalsPanel({ target }: { target: ApiTarget }) {
 				</div>
 
 				{runError ? (
-					<p className="text-destructive text-sm">{runError}</p>
+					<p className="text-sm text-status-destructive">{runError}</p>
 				) : null}
 
 				{result ? (
@@ -7010,7 +7025,7 @@ export function GatewayDialog({
 	onOpenChange: (open: boolean) => void;
 	open: boolean;
 }) {
-	const { status, loading, error, refresh } = useGatewayStatus();
+	const { status, loading, error, refresh } = useGatewayStatus(open);
 	const canConfigure = useGatewayConfigurable();
 	const getActiveNode = useActiveNodeGetter();
 	const [configProviders, setConfigProviders] =

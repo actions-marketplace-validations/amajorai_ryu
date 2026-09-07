@@ -238,7 +238,7 @@ function BackgroundProcessRow({
 			</span>
 			<button
 				aria-label={`Stop ${label}`}
-				className="grid size-6 shrink-0 place-items-center rounded-md text-muted-foreground opacity-0 transition-opacity hover:bg-destructive/10 hover:text-destructive focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-wait disabled:opacity-100 group-hover:opacity-100"
+				className="grid size-6 shrink-0 place-items-center rounded-md text-muted-foreground opacity-0 transition-opacity hover:bg-destructive/10 hover:text-status-destructive focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-wait disabled:opacity-100 group-hover:opacity-100"
 				disabled={stopping}
 				onClick={(event) => {
 					event.stopPropagation();
@@ -523,25 +523,29 @@ function EnvironmentDescription({
 			)}
 
 			{commit.status === "done" && (
-				<p className="flex items-center gap-1 text-emerald-600 text-xs dark:text-emerald-400">
+				<p className="flex items-center gap-1 text-status-success text-xs">
 					<HugeiconsIcon aria-hidden className="size-3.5" icon={Tick02Icon} />
 					{commit.label}
 				</p>
 			)}
 			{commit.status === "error" && (
-				<p className="break-words text-destructive text-xs">{commit.message}</p>
+				<p className="break-words text-status-destructive text-xs">
+					{commit.message}
+				</p>
 			)}
 			{remote.status === "done" && (
-				<p className="flex items-center gap-1 text-emerald-600 text-xs dark:text-emerald-400">
+				<p className="flex items-center gap-1 text-status-success text-xs">
 					<HugeiconsIcon aria-hidden className="size-3.5" icon={Tick02Icon} />
 					{remote.label}
 				</p>
 			)}
 			{remote.status === "error" && (
-				<p className="break-words text-destructive text-xs">{remote.message}</p>
+				<p className="break-words text-status-destructive text-xs">
+					{remote.message}
+				</p>
 			)}
 			{pullRequest.status === "done" && !existingPullRequest && (
-				<p className="flex items-center gap-1 text-emerald-600 text-xs dark:text-emerald-400">
+				<p className="flex items-center gap-1 text-status-success text-xs">
 					<HugeiconsIcon aria-hidden className="size-3.5" icon={Tick02Icon} />
 					{pullRequest.url ? (
 						<a
@@ -558,23 +562,23 @@ function EnvironmentDescription({
 				</p>
 			)}
 			{pullRequest.status === "error" && (
-				<p className="break-words text-destructive text-xs">
+				<p className="break-words text-status-destructive text-xs">
 					{pullRequest.message}
 				</p>
 			)}
 			{gitSetup.status === "done" && (
-				<p className="flex items-center gap-1 text-emerald-600 text-xs dark:text-emerald-400">
+				<p className="flex items-center gap-1 text-status-success text-xs">
 					<HugeiconsIcon aria-hidden className="size-3.5" icon={Tick02Icon} />
 					{gitSetup.label}
 				</p>
 			)}
 			{gitSetup.status === "error" && (
-				<p className="break-words text-destructive text-xs">
+				<p className="break-words text-status-destructive text-xs">
 					{gitSetup.message}
 				</p>
 			)}
 			{repositoryOperation.status === "done" && (
-				<p className="flex items-center gap-1 text-emerald-600 text-xs dark:text-emerald-400">
+				<p className="flex items-center gap-1 text-status-success text-xs">
 					<HugeiconsIcon aria-hidden className="size-3.5" icon={Tick02Icon} />
 					{repositoryOperation.url ? (
 						<a
@@ -591,7 +595,7 @@ function EnvironmentDescription({
 				</p>
 			)}
 			{repositoryOperation.status === "error" && (
-				<p className="break-words text-destructive text-xs">
+				<p className="break-words text-status-destructive text-xs">
 					{repositoryOperation.message}
 				</p>
 			)}
@@ -1306,7 +1310,7 @@ export function PinnedSummaryPanel({
 								/>
 							))}
 							{backgroundError && (
-								<p className="px-1.5 text-[10px] text-destructive">
+								<p className="px-1.5 text-[10px] text-status-destructive">
 									{backgroundError}
 								</p>
 							)}

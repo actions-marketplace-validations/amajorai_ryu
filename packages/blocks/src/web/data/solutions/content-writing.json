@@ -5,10 +5,10 @@
   "category": "Language & Content",
   "icon": "PenLine",
   "visualKey": "SkillsVisual",
-  "tagline": "Research, outline, and draft long-form content that sounds like you, not a chatbot.",
+  "tagline": "Research a topic and draft an article using your source material and style guide.",
   "heroEyebrow": "Ryu for Content Writing",
-  "heroTitle": "Long-form drafts grounded in your voice and your sources",
-  "heroSubtitle": "Ryu researches a topic, outlines it, and drafts in your house style, grounding every section on your past articles and source material so the writing stays on-brand and on-topic.",
+  "heroTitle": "Ryu for content writing",
+  "heroSubtitle": "Research a topic and draft an article using your source material and style guide.",
   "intro": "Generic AI content reads flat and ignores your brand voice, your sources, and what you have already published. Ryu grounds drafts on your style guide and existing articles, pulls in research with connected tools, and produces structured long-form copy that a writer shapes into the finished piece. Unpublished drafts can stay on a local model so nothing leaks before launch.",
   "highlights": [
     {

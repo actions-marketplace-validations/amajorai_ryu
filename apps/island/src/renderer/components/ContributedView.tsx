@@ -1,3 +1,4 @@
+import { useConfirmDialog } from "@ryu/ui/hooks/use-confirm-dialog.tsx";
 // The island SHELL around a plugin-contributed declarative view: `@ryu/blocks`'s
 // `IslandViewPanel` renders the spec (import-type-only on `@ryu/app-host`), and this
 // component owns everything that needs a privileged seam —
@@ -27,6 +28,8 @@ import type { PluginView } from "../../shared/ipc.ts";
 import { pluginHostInvoke } from "../host/island-plugin-host-invoke.ts";
 
 export function ContributedView({ view }: { view: PluginView }) {
+	const { confirm, confirmationDialog } = useConfirmDialog();
+
 	// Bumped after a successful action so the source re-fetches and the view
 	// re-renders from truth (mirrors the desktop `reloadToken`).
 	const [reloadToken, setReloadToken] = useState(0);
@@ -65,7 +68,7 @@ export function ContributedView({ view }: { view: PluginView }) {
 	const runAction = useCallback(
 		async (action: ViewAction, ctx: ViewActionContext) => {
 			// biome-ignore lint/suspicious/noAlert: the v1 declarative confirm gate — a spec-declared destructive-action prompt.
-			if (action.confirm && !window.confirm(action.confirm)) {
+			if (action.confirm && !(await confirm(action.confirm))) {
 				return;
 			}
 			try {
@@ -99,16 +102,21 @@ export function ContributedView({ view }: { view: PluginView }) {
 				// unchanged (the next source fetch re-renders from truth anyway).
 			}
 		},
-		[view]
+		[view, confirm]
 	);
 
 	return (
-		<IslandViewPanel
-			onAction={(action, ctx) => {
-				void runAction(action, ctx);
-			}}
-			sourceItems={sourceItems}
-			view={view}
-		/>
+		<>
+			{confirmationDialog}
+			{
+				<IslandViewPanel
+					onAction={(action, ctx) => {
+						void runAction(action, ctx);
+					}}
+					sourceItems={sourceItems}
+					view={view}
+				/>
+			}
+		</>
 	);
 }

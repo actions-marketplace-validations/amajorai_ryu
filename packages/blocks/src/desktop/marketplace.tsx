@@ -145,7 +145,7 @@ export function TrustBadge({ status }: { status: MarketplaceVerification }) {
 		return (
 			<Badge className="gap-1" variant="secondary">
 				<HugeiconsIcon
-					className="size-3 text-emerald-500"
+					className="size-3 text-status-success"
 					icon={ShieldKeyIcon}
 				/>
 				Verified
@@ -155,7 +155,10 @@ export function TrustBadge({ status }: { status: MarketplaceVerification }) {
 	if (status === "unsigned") {
 		return (
 			<Badge className="gap-1" variant="outline">
-				<HugeiconsIcon className="size-3 text-amber-500" icon={Alert02Icon} />
+				<HugeiconsIcon
+					className="size-3 text-status-warning"
+					icon={Alert02Icon}
+				/>
 				Unsigned
 			</Badge>
 		);
@@ -227,7 +230,7 @@ function MarketplaceCardRating({
 		<span className="mt-0.5 inline-flex items-center gap-1 text-muted-foreground text-xs">
 			<HugeiconsIcon
 				aria-hidden="true"
-				className="size-3 text-amber-400"
+				className="size-3 text-status-warning"
 				icon={StarIcon}
 			/>
 			<span className="font-medium text-foreground tabular-nums">
@@ -350,7 +353,7 @@ export function MarketplaceItemCard({
 					card.active ? (
 						<Badge className="gap-1" variant="secondary">
 							<HugeiconsIcon
-								className="size-3.5 text-emerald-500"
+								className="size-3.5 text-status-success"
 								icon={CheckmarkBadge04Icon}
 							/>
 							{i18n?.t("common.active") ?? "Active"}
@@ -370,7 +373,7 @@ export function MarketplaceItemCard({
 					card.owned ? (
 						<Badge className="gap-1" variant="secondary">
 							<HugeiconsIcon
-								className="size-3.5 text-emerald-500"
+								className="size-3.5 text-status-success"
 								icon={CheckmarkBadge04Icon}
 							/>
 							{i18n?.t("common.owned") ?? "Owned"}

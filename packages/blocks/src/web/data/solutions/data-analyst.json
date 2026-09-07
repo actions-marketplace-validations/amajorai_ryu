@@ -4,10 +4,10 @@
   "navLabel": "Data Analysis",
   "category": "Engineering & Product",
   "icon": "BarChart3",
-  "tagline": "Query, chart, and explain your data with agents that connect straight to your warehouse.",
+  "tagline": "Ask questions of your connected data. Review the generated query and its results.",
   "heroEyebrow": "Ryu for Data Analysis",
-  "heroTitle": "Answers from your data, with the SQL shown.",
-  "heroSubtitle": "Connect Postgres, your warehouse, and your BI tools, then ask questions in plain language. Ryu writes the query, runs it, and explains the result, with every step visible so you can verify before you ship a number to a stakeholder.",
+  "heroTitle": "Ryu for data analysis",
+  "heroSubtitle": "Ask questions of your connected data. Review the generated query and its results.",
   "visualKey": "CoreVisual",
   "intro": "Analysts lose hours translating vague requests into SQL and rebuilding the same pulls. Ryu connects to your databases through MCP, turns a question into a query you can read, and grounds answers in your real schema. Sensitive customer data can stay governed by the Gateway or never leave your machine at all.",
   "highlights": [

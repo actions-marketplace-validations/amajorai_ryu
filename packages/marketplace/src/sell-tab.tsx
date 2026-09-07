@@ -156,7 +156,7 @@ export function SellTab() {
 								{payoutsEnabled ? (
 									<Badge className="gap-1" variant="secondary">
 										<HugeiconsIcon
-											className="size-3.5 text-success"
+											className="size-3.5 text-status-success"
 											icon={CheckmarkBadge04Icon}
 										/>
 										Payouts enabled
@@ -170,7 +170,7 @@ export function SellTab() {
 								<span>Identity verified via Stripe Connect</span>
 							</div>
 						) : stripeIdentityStatus === "restricted" ? (
-							<p className="mt-3 text-destructive text-xs">
+							<p className="mt-3 text-status-destructive text-xs">
 								Stripe identity verification needs attention before the blue
 								publisher mark can be shown.
 							</p>
@@ -200,7 +200,9 @@ export function SellTab() {
 							{payoutButtonLabel(payoutsEnabled, onboardingStatus)}
 						</Button>
 						{error && !stripeUnavailable ? (
-							<p className="mt-3 text-destructive text-xs">{error.message}</p>
+							<p className="mt-3 text-status-destructive text-xs">
+								{error.message}
+							</p>
 						) : null}
 					</div>
 				)}
@@ -229,7 +231,7 @@ export function SellTab() {
 							Loading A Major Pass totals…
 						</div>
 					) : membership.error ? (
-						<p className="mt-4 text-destructive text-xs">
+						<p className="mt-4 text-status-destructive text-xs">
 							{membership.error.message}
 						</p>
 					) : membership.report ? (

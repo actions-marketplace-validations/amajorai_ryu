@@ -937,7 +937,9 @@ function PluginSourcePicker({
 								value={name}
 							/>
 						</div>
-						{addError && <p className="text-destructive text-xs">{addError}</p>}
+						{addError && (
+							<p className="text-status-destructive text-xs">{addError}</p>
+						)}
 						<Button
 							loading={addingMarketplace}
 							onClick={() => {
@@ -2074,7 +2076,7 @@ export function AuthBridgeConsent({
 	providers: CatalogModelProvider[];
 }) {
 	return (
-		<div className="rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-sm">
+		<div className="rounded-md border border-warning/40 bg-warning/10 px-3 py-2 text-sm">
 			<p className="font-medium">Handles provider credentials and traffic</p>
 			<p className="mt-1 text-muted-foreground text-xs leading-relaxed">
 				This plugin runs a local process that can handle the listed provider
@@ -2193,7 +2195,7 @@ function AppSecondaryActions({
 					</span>
 				) : null}
 			</div>
-			{error && <p className="text-destructive text-sm">{error}</p>}
+			{error && <p className="text-sm text-status-destructive">{error}</p>}
 
 			{/* Channel-switch confirmation. The version delta is the whole point of
 			    asking: every prerelease sorts BELOW its stable release, so moving
@@ -2559,7 +2561,7 @@ function AppDetailPanel({
 				<Spinner className="size-4" />
 			) : null}
 			{detailError && !isIntegrationDescriptor ? (
-				<p className="text-destructive text-sm">{detailError}</p>
+				<p className="text-sm text-status-destructive">{detailError}</p>
 			) : null}
 
 			<ListingDetailTabs
@@ -3126,7 +3128,7 @@ function DescriptorDetail({
 			<h3 className="font-medium text-sm">Integration details</h3>
 			{detailLoading ? <Spinner className="size-4" /> : null}
 			{detailError ? (
-				<p className="text-destructive text-sm">{detailError}</p>
+				<p className="text-sm text-status-destructive">{detailError}</p>
 			) : null}
 			{integrationUrl ? (
 				<p className="break-all font-mono text-muted-foreground text-xs">
@@ -3167,7 +3169,7 @@ function AppStatusBadge({
 		return (
 			<Badge className="shrink-0 gap-1" variant="secondary">
 				<HugeiconsIcon
-					className="size-3.5 text-success"
+					className="size-3.5 text-status-success"
 					icon={CheckmarkCircle02Icon}
 				/>
 				Enabled

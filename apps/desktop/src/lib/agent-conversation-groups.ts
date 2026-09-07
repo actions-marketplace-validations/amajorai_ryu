@@ -46,6 +46,33 @@ export function directAgentThreads(
 	);
 }
 
+/** Group direct threads in one pass instead of scanning history for every agent. */
+export function groupDirectAgentThreads(
+	conversations: Conversation[]
+): Map<string, Conversation[]> {
+	const groups = new Map<string, Conversation[]>();
+	for (const conversation of conversations) {
+		if (conversation.archived) {
+			continue;
+		}
+		const ids = conversationParticipantIds(conversation);
+		const id = ids[0];
+		if (ids.length !== 1 || !id) {
+			continue;
+		}
+		const group = groups.get(id);
+		if (group) {
+			group.push(conversation);
+		} else {
+			groups.set(id, [conversation]);
+		}
+	}
+	for (const [id, threads] of groups) {
+		groups.set(id, sortConversationsByActivity(threads));
+	}
+	return groups;
+}
+
 /** Conversations that cannot be represented beneath one known bot row. */
 export function conversationsForOtherChats(
 	conversations: Conversation[],

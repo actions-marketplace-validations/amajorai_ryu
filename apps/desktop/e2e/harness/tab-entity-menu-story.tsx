@@ -58,6 +58,16 @@ const CONTRIBUTIONS = {
 	],
 };
 
+// The packaging proof serves a real SDK-produced bundle projected through the
+// same plugin ownership field as Core. Other menu stories keep their fixtures.
+if (new URLSearchParams(location.search).has("packed")) {
+	const response = await fetch("/__packed-chat-title");
+	if (!response.ok) {
+		throw new Error("Packed contribution fixture is unavailable");
+	}
+	Object.assign(CONTRIBUTIONS, await response.json());
+}
+
 const CHAT_TAB: Tab = {
 	id: "tab-chat",
 	path: "/chat",
@@ -163,5 +173,11 @@ function Story() {
 
 const container = document.getElementById("root");
 if (container) {
-	createRoot(container).render(<Story />);
+	const root = createRoot(container);
+	root.render(<Story />);
+	import.meta.hot?.dispose(() => {
+		root.unmount();
+		queryClient.clear();
+		globalThis.fetch = realFetch;
+	});
 }

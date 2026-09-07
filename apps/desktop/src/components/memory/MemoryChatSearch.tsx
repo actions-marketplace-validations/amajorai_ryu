@@ -285,7 +285,7 @@ export function MemoryChatSearch({
 				</div>
 			</div>
 			{preferenceError ? (
-				<p className="text-destructive text-sm" role="alert">
+				<p className="text-sm text-status-destructive" role="alert">
 					{preferenceError === "load"
 						? "Couldn&apos;t load the Remember chats setting."
 						: "Couldn&apos;t update chat remembering. Please try again."}

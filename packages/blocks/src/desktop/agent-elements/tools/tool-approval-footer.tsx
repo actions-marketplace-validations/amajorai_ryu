@@ -115,7 +115,7 @@ export const ToolApprovalFooter = memo(function ToolApprovalFooter({
 				className={cn(
 					"inline-flex items-center gap-1.5 font-medium text-[11px]",
 					decision === "rejected"
-						? "text-rose-600 dark:text-rose-400"
+						? "text-status-destructive"
 						: "text-muted-foreground"
 				)}
 			>

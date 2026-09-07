@@ -1,278 +1,60 @@
 "use client";
 
-import { FIRST_PURCHASE_VOUCHER_CODE } from "@ryu/auth/lib/vouchers";
 import { buttonVariants } from "@ryu/ui/components/button";
 import { ChromaticTextReveal } from "@ryu/ui/components/motion/chromatic-text-reveal";
 import PageHeader from "@ryu/ui/components/page-header";
 import { cn } from "@ryu/ui/lib/utils";
-import {
-	ChevronRight,
-	Cloud,
-	LockKeyhole,
-	Plug,
-	Timer,
-	Workflow,
-} from "lucide-react";
 import Image from "next/image";
 import Link from "next/link";
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { DOCS_URL } from "./data/resources.tsx";
 import { DownloadMenu } from "./download-menu.tsx";
-import {
-	InstallLocalMock,
-	SevenMinuteMock,
-	StillRunningMock,
-	TrustReceiptMock,
-} from "./emotional-story-mockups.tsx";
 import HeroWorkflowLoop, {
 	HeroUseCaseSwitcher,
 } from "./hero-workflow-loop.tsx";
 import { landingHeadlineClass } from "./landing-typography.ts";
 import ProductLandingCtas from "./product-landing-ctas.tsx";
 import { ProductRealmSelector } from "./product-realm-selector.tsx";
-import ScratchCard from "./scratch-card.tsx";
 import {
 	BentoGrid,
 	type BentoItem,
 	SectionTitle,
 	sectionSubtitleClass,
 } from "./sections.tsx";
-import { StaggerLines } from "./stagger-lines.tsx";
 import { StandaloneServicesSection } from "./standalone-services-section.tsx";
-import StartupPrograms from "./startup-programs.tsx";
 
-const LANDING_SCRATCH_CHANCE = 0.1;
-const LANDING_SCRATCH_ROLLED_KEY = "ryu:landing-scratch-rolled";
-const LANDING_SCRATCH_DISMISSED_KEY = "ryu:landing-scratch-dismissed";
-
-const MANAGED_DEPLOYMENT_STEPS = [
+const INTEGRATION_ITEMS: BentoItem[] = [
 	{
-		description: "We put the agent and its approved tools in the cloud.",
-		icon: Cloud,
-		label: "Deploy",
-		status: "Configured",
-	},
-	{
+		title: "Use your models",
 		description:
-			"We watch the run, handle the upkeep, and keep the workflow available.",
-		icon: Timer,
-		label: "Operate",
-		status: "Maintained",
+			"Connect the providers and AI subscriptions your team already uses.",
 	},
 	{
-		description:
-			"Your team sees the result, the access, and the record of what happened.",
-		icon: LockKeyhole,
-		label: "Stay in control",
-		status: "Governed",
-	},
-] as const;
-
-const INTEGRATION_BENTO_ITEMS: BentoItem[] = [
-	{
-		description: "Bring the models and provider access you already use.",
-		title: "Use existing AI",
-		visual: <InstallLocalMock />,
-	},
-	{
-		description: "Connect approved files and systems to the work.",
-		span: "md:col-span-2",
 		title: "Connect your tools",
-		visual: <SevenMinuteMock />,
+		description:
+			"Give agents access to the files and services they need for the task.",
 	},
 	{
-		description: "Keep approvals, audit, and cost with the result.",
-		span: "md:col-span-2",
-		title: "Secure each run",
-		visual: <TrustReceiptMock />,
+		title: "Set access and spending limits",
+		description:
+			"Choose which actions need approval and review the run history.",
 	},
 	{
-		description: "Ryu deploys the runtime and keeps it running.",
-		title: "Deploy to Cloud",
-		visual: <StillRunningMock />,
+		title: "Run in the cloud",
+		description:
+			"Deploy the workflow so it can run when your laptop is closed.",
 	},
 ];
 
-function LandingSectionHeader({
-	className,
-	subtitle,
-	title,
-}: {
-	className?: string;
-	subtitle: string;
-	title: string;
-}) {
-	return (
-		<StaggerLines className={cn("max-w-2xl", className)}>
-			<SectionTitle title={title} />
-			<p className={sectionSubtitleClass}>{subtitle}</p>
-		</StaggerLines>
-	);
-}
-
-function ManagedDeployment() {
-	return (
-		<section
-			className="bg-muted/20"
-			data-testid="managed-deployment"
-			id="managed-deployment"
-		>
-			<div className="mx-auto max-w-6xl px-6 py-20 md:py-28">
-				<div className="grid gap-10 lg:grid-cols-[minmax(0,0.8fr)_minmax(0,1.2fr)] lg:items-center lg:gap-16">
-					<div className="max-w-xl">
-						<LandingSectionHeader
-							className="max-w-xl"
-							subtitle="Ryu is the integration layer for AI. We deploy the runtime, keep it running, and give you one place to use and oversee it."
-							title="We deploy and keep it running."
-						/>
-						<Link
-							className="mt-6 inline-flex items-center gap-2 font-medium text-foreground text-sm underline-offset-4 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-							href="/console"
-						>
-							See the control surface
-							<ChevronRight aria-hidden="true" className="size-4" />
-						</Link>
-					</div>
-
-					<div className="rounded-[2rem] bg-background p-5 shadow-[0_24px_70px_-48px_rgba(15,23,42,0.55)] ring-1 ring-black/[0.06] sm:p-7 dark:ring-white/[0.08]">
-						<div className="flex items-center justify-between gap-4 pb-4">
-							<div>
-								<p className="font-medium text-foreground text-sm">
-									What Ryu handles
-								</p>
-								<p className="mt-1 text-muted-foreground text-xs">
-									The work between your idea and a dependable run.
-								</p>
-							</div>
-							<span className="rounded-full bg-muted px-2.5 py-1 font-medium text-[10px] text-muted-foreground uppercase tracking-wider">
-								Cloud
-							</span>
-						</div>
-
-						<ol className="mt-6 space-y-5">
-							{MANAGED_DEPLOYMENT_STEPS.map((step) => {
-								const Icon = step.icon;
-								return (
-									<li className="relative flex gap-3.5" key={step.label}>
-										<span className="relative z-10 flex size-10 shrink-0 items-center justify-center rounded-xl bg-muted text-foreground/65">
-											<Icon aria-hidden="true" className="size-4" />
-										</span>
-										<span className="min-w-0 flex-1 pt-0.5">
-											<span className="flex flex-wrap items-center justify-between gap-2">
-												<span className="font-medium text-foreground text-sm">
-													{step.label}
-												</span>
-												<span className="text-[10px] text-muted-foreground uppercase tracking-wider">
-													{step.status}
-												</span>
-											</span>
-											<span className="mt-1 block text-muted-foreground text-sm leading-relaxed">
-												{step.description}
-											</span>
-										</span>
-									</li>
-								);
-							})}
-						</ol>
-					</div>
-				</div>
-			</div>
-		</section>
-	);
-}
-
-/** A small, sampled launch drop. The voucher itself is already provisioned and
- * scoped by the billing authority; this component only decides who sees the
- * optional presentation, never who is eligible at checkout. */
-function LandingScratchOffer() {
-	const [visible, setVisible] = useState(false);
-
-	useEffect(() => {
-		try {
-			const preview =
-				process.env.NODE_ENV !== "production" &&
-				new URLSearchParams(window.location.search).get("scratch") === "1";
-			if (window.sessionStorage.getItem(LANDING_SCRATCH_DISMISSED_KEY)) {
-				return;
-			}
-			if (
-				!preview &&
-				window.sessionStorage.getItem(LANDING_SCRATCH_ROLLED_KEY)
-			) {
-				return;
-			}
-			if (!preview) {
-				window.sessionStorage.setItem(LANDING_SCRATCH_ROLLED_KEY, "1");
-			}
-			setVisible(preview || Math.random() < LANDING_SCRATCH_CHANCE);
-		} catch {
-			// Privacy modes can deny sessionStorage; the card remains a best-effort
-			// sampled enhancement and must never break the landing page.
-			setVisible(Math.random() < LANDING_SCRATCH_CHANCE);
-		}
-	}, []);
-
-	if (!visible) {
-		return null;
-	}
-
-	return (
-		<section
-			aria-labelledby="landing-scratch-heading"
-			className="mt-14 overflow-hidden rounded-[2rem] border border-primary/15 bg-muted/20 px-6 py-8 md:px-10 md:py-10"
-			data-testid="landing-scratch-offer"
-		>
-			<div className="grid items-center gap-8 lg:grid-cols-[minmax(0,1fr)_minmax(20rem,24rem)]">
-				<div className="max-w-xl">
-					<p className="font-medium text-primary text-xs uppercase tracking-[0.18em]">
-						A random launch drop
-					</p>
-					<h2
-						className="mt-3 text-balance font-medium text-2xl leading-tight tracking-[-0.04em] md:text-3xl"
-						id="landing-scratch-heading"
-					>
-						A little luck for your first run.
-					</h2>
-					<p className="mt-3 max-w-md text-muted-foreground text-sm leading-relaxed">
-						You found one of the launch drops. Scratch the foil to reveal a
-						first-month offer, then bring the code to checkout.
-					</p>
-					<p className="mt-5 text-muted-foreground text-xs">
-						One reveal per browser session · Pro monthly plan only
-					</p>
-				</div>
-				<ScratchCard
-					ariaLabel="Scratch the launch offer foil to reveal the voucher code"
-					caption="Use it on the Pro monthly plan · first month only."
-					className="max-w-none bg-background shadow-md"
-					code={FIRST_PURCHASE_VOUCHER_CODE}
-					discountLabel="10%"
-					headline="Scratch to reveal your launch offer"
-					onNeverShowAgain={() => {
-						try {
-							window.sessionStorage.setItem(LANDING_SCRATCH_DISMISSED_KEY, "1");
-						} catch {
-							// The local dismiss still applies for this render.
-						}
-						setVisible(false);
-					}}
-					overlayLabel="Scratch to reveal"
-					revealAnnouncement="Your first-month launch offer is revealed."
-				/>
-			</div>
-		</section>
-	);
-}
-
 export default function RealmsHero() {
 	const [scenarioIndex, setScenarioIndex] = useState(0);
-
 	return (
-		<main className="bg-background text-foreground" data-testid="realms-hero">
-			<section className="mx-auto max-w-6xl px-6 pt-16 pb-20 md:pt-24 md:pb-24">
+		<div className="bg-background text-foreground" data-testid="realms-hero">
+			<section className="mx-auto max-w-6xl px-6 pt-16 pb-16 md:pt-24 md:pb-24">
 				<div className="max-w-2xl">
 					<PageHeader
 						className="max-w-xl"
+						stagger={false}
 						title={
 							<>
 								We deploy and run AI agents
@@ -289,8 +71,7 @@ export default function RealmsHero() {
 						}
 						titleClassName={landingHeadlineClass}
 					/>
-
-					<div className="mt-8 flex flex-col gap-3 sm:flex-row">
+					<div className="mt-8 flex flex-wrap items-center gap-3">
 						<DownloadMenu
 							label="Download"
 							separatorClassName="bg-primary-foreground/10 data-vertical:mx-0"
@@ -309,13 +90,12 @@ export default function RealmsHero() {
 						</a>
 					</div>
 				</div>
-
-				<div className="mx-auto mt-16 max-w-5xl">
+				<div className="mt-14" data-product-visual>
 					<HeroUseCaseSwitcher
 						current={scenarioIndex}
 						onPick={setScenarioIndex}
 					/>
-					<div className="relative mt-4 flex min-h-[28rem] items-center justify-center overflow-hidden rounded-2xl bg-[#8ecbec] px-4 py-6 md:min-h-[34rem] md:px-8 md:py-10">
+					<div className="relative mt-4 flex min-h-[28rem] items-center justify-center overflow-hidden rounded-xl bg-muted px-4 py-6 md:min-h-[34rem] md:px-8 md:py-10">
 						<Image
 							alt=""
 							aria-hidden="true"
@@ -323,7 +103,7 @@ export default function RealmsHero() {
 							data-testid="hero-workflow-background"
 							height={1440}
 							priority
-							sizes="(max-width: 1024px) calc(100vw - 32px), 1024px"
+							sizes="(max-width: 1152px) calc(100vw - 48px), 1104px"
 							src="/background.png"
 							width={2520}
 						/>
@@ -335,162 +115,70 @@ export default function RealmsHero() {
 						</div>
 					</div>
 				</div>
-
-				<div className="mx-auto mt-12 max-w-5xl">
-					<ProductRealmSelector />
-				</div>
-
-				<div className="mx-auto max-w-5xl">
-					<LandingScratchOffer />
-				</div>
-
-				<div className="mt-14 grid gap-3 pt-6 text-sm sm:grid-cols-3">
-					<div className="flex gap-3">
-						<Workflow
-							aria-hidden="true"
-							className="mt-0.5 size-4 shrink-0 text-emerald-600"
-						/>
-						<div>
-							<p className="font-medium text-foreground/80">
-								Useful on day one
-							</p>
-							<p className="mt-1 text-muted-foreground text-xs leading-relaxed">
-								Start from a process you already run.
-							</p>
-						</div>
-					</div>
-					<div className="flex gap-3">
-						<Timer
-							aria-hidden="true"
-							className="mt-0.5 size-4 shrink-0 text-[#8f7bf2]"
-						/>
-						<div>
-							<p className="font-medium text-foreground/80">
-								Live in a few minutes
-							</p>
-							<p className="mt-1 text-muted-foreground text-xs leading-relaxed">
-								Start from the job you need done, not a blank repo or an
-								infrastructure project.
-							</p>
-						</div>
-					</div>
-					<div className="flex gap-3">
-						<Cloud
-							aria-hidden="true"
-							className="mt-0.5 size-4 shrink-0 text-[#d97706]"
-						/>
-						<div>
-							<p className="font-medium text-foreground/80">
-								Managed in the cloud
-							</p>
-							<p className="mt-1 text-muted-foreground text-xs leading-relaxed">
-								We deploy and keep it running, with permissions and audit
-								history in place.
-							</p>
-						</div>
-					</div>
-				</div>
 			</section>
-
-			<section className="bg-muted/20" id="how-it-works">
-				<div className="mx-auto max-w-6xl px-6 py-20 md:py-28">
-					<LandingSectionHeader
-						subtitle="Tell Ryu the job you need done. Ryu connects the tools you already use, then runs the workflow in the cloud without another platform to build."
-						title="Start a working deployment in a few minutes."
-					/>
-
-					<div className="mt-12 grid gap-3 md:grid-cols-3">
-						<div className="rounded-2xl bg-background p-5 ring-1 ring-black/[0.06] dark:ring-white/[0.08]">
-							<Workflow
-								aria-hidden="true"
-								className="size-5 text-foreground/70"
-							/>
-							<h3 className="mt-7 font-medium text-foreground text-lg tracking-tight">
-								Choose one job
-							</h3>
-							<p className="mt-2 text-muted-foreground text-sm leading-relaxed">
-								Start with a repeatable task your team needs done every week.
-							</p>
-						</div>
-						<div className="rounded-2xl bg-background p-5 ring-1 ring-black/[0.06] dark:ring-white/[0.08]">
-							<Plug aria-hidden="true" className="size-5 text-foreground/70" />
-							<h3 className="mt-7 font-medium text-foreground text-lg tracking-tight">
-								Connect your tools
-							</h3>
-							<p className="mt-2 text-muted-foreground text-sm leading-relaxed">
-								Use the systems your team already relies on, with only the
-								access the run needs.
-							</p>
-						</div>
-						<div className="rounded-2xl bg-background p-5 ring-1 ring-black/[0.06] dark:ring-white/[0.08]">
-							<Cloud aria-hidden="true" className="size-5 text-foreground/70" />
-							<h3 className="mt-7 font-medium text-foreground text-lg tracking-tight">
-								We keep it running
-							</h3>
-							<p className="mt-2 text-muted-foreground text-sm leading-relaxed">
-								Ryu deploys the workflow, handles the upkeep, and keeps the run
-								governed.
-							</p>
-						</div>
-					</div>
+			<div className="mx-auto max-w-6xl px-6 py-16">
+				<ProductRealmSelector />
+			</div>
+			<section
+				className="mx-auto max-w-6xl px-6 py-16 md:py-24"
+				id="integration-layer"
+			>
+				<div className="mb-12 max-w-2xl">
+					<SectionTitle title="Connect your agents to the work" />
+					<p className={sectionSubtitleClass}>
+						Use Ryu with your existing tools. Control what agents can access,
+						what they can spend, and when they need your approval.
+					</p>
 				</div>
+				<BentoGrid items={INTEGRATION_ITEMS} />
 			</section>
-
-			<section className="mx-auto max-w-6xl px-6 py-20 md:py-28">
-				<div className="grid items-center gap-8 rounded-[2rem] bg-[#16151a] px-6 py-8 text-white md:grid-cols-[1fr_auto] md:px-10 md:py-10">
+			<section
+				className="bg-muted/40"
+				data-testid="managed-deployment"
+				id="managed-deployment"
+			>
+				<div className="mx-auto grid max-w-6xl gap-10 px-6 py-16 md:grid-cols-2 md:gap-16 md:py-24">
 					<div>
-						<h2 className="max-w-2xl text-balance font-medium text-xl leading-tight tracking-tight md:text-2xl">
-							Ryu runs the AI layer.
-						</h2>
-						<p className="mt-3 max-w-xl font-medium text-white/60 text-xl leading-tight tracking-tight md:text-2xl">
-							Use the apps, tools, models, and workflows you already have
-							without building and maintaining another runtime.
-						</p>
-					</div>
-					<div className="md:min-w-52 md:text-right">
-						<p className="font-medium text-2xl tracking-[-0.04em]">
-							A few minutes
-						</p>
-						<p className="mt-1 text-sm text-white/55">
-							to get your first workflow running
+						<SectionTitle title="We run the infrastructure" />
+						<p className={sectionSubtitleClass}>
+							Ryu is the integration layer for AI. We deploy and maintain the
+							runtime so your team can focus on the workflows it needs.
 						</p>
 						<Link
-							className={cn(
-								buttonVariants({ variant: "secondary" }),
-								"mt-5 rounded-full bg-white text-[#16151a] hover:bg-white/90"
-							)}
-							href="/pricing"
+							className="mt-6 inline-flex font-medium text-sm underline underline-offset-4 focus-visible:outline-2 focus-visible:outline-ring"
+							href="/console"
 						>
-							View plans
+							See Ryu Console
 						</Link>
 					</div>
+					<dl className="space-y-8">
+						<div>
+							<dt className="font-medium">Deployment and maintenance</dt>
+							<dd className="mt-2 text-muted-foreground leading-relaxed">
+								Run agents and their connected tools in the cloud.
+							</dd>
+						</div>
+						<div>
+							<dt className="font-medium">Permissions and approvals</dt>
+							<dd className="mt-2 text-muted-foreground leading-relaxed">
+								Decide which tools an agent can use and which actions your team
+								reviews.
+							</dd>
+						</div>
+						<div>
+							<dt className="font-medium">Usage and run history</dt>
+							<dd className="mt-2 text-muted-foreground leading-relaxed">
+								Check costs, results, and errors from the same console.
+							</dd>
+						</div>
+					</dl>
 				</div>
 			</section>
-
-			<section id="integration-layer">
-				<div className="mx-auto max-w-6xl px-6 py-20 md:py-28">
-					<LandingSectionHeader
-						subtitle="Ryu connects existing apps, tools, models, and workflows through one composable integration layer."
-						title="Connect the pieces. Run the work."
-					/>
-					<div className="mt-12">
-						<BentoGrid items={INTEGRATION_BENTO_ITEMS} />
-					</div>
-				</div>
-			</section>
-
-			<ManagedDeployment />
 			<StandaloneServicesSection />
-
-			<section>
-				<div className="mx-auto flex max-w-6xl flex-col items-center px-6 py-20 text-center md:py-28">
-					<p className="max-w-2xl text-balance font-medium text-3xl text-foreground leading-tight tracking-[-0.04em] md:text-5xl">
-						Run autonomous AI in the cloud.
-					</p>
-					<ProductLandingCtas className="mt-8" />
-				</div>
+			<section className="mx-auto max-w-6xl px-6 py-16 md:py-24">
+				<SectionTitle title="Try Ryu with your team" />
+				<ProductLandingCtas className="mt-8 items-start" />
 			</section>
-			<StartupPrograms />
-		</main>
+		</div>
 	);
 }

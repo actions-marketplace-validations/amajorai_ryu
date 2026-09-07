@@ -20,8 +20,8 @@ const captionVariants = cva("max-w-full", {
 	variants: {
 		align: {
 			center: "mx-auto",
-			left: "mr-auto",
-			right: "ml-auto",
+			left: "me-auto",
+			right: "ms-auto",
 		},
 	},
 });

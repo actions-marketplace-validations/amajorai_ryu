@@ -121,7 +121,7 @@ export function WorktreeHandoffControl({
 						>
 							<HugeiconsIcon
 								aria-hidden
-								className="mt-1 size-4 shrink-0 text-orange-500"
+								className="mt-1 size-4 shrink-0 text-status-warning"
 								icon={AlertCircleIcon}
 								strokeWidth={1.8}
 							/>

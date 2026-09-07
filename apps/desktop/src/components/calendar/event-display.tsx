@@ -58,7 +58,9 @@ export function EventRow({ event }: { event: CalendarEvent }) {
 		icon =
 			event.outcome === "success" ? CheckmarkCircle02Icon : CancelCircleIcon;
 		iconColor =
-			event.outcome === "success" ? "text-success" : "text-destructive";
+			event.outcome === "success"
+				? "text-status-success"
+				: "text-status-destructive";
 	}
 
 	return (
@@ -88,7 +90,7 @@ export function EventRow({ event }: { event: CalendarEvent }) {
 				) : null}
 			</div>
 			{event.kind === "past" && event.outcome === "failure" && event.error ? (
-				<p className="line-clamp-2 pl-6 text-destructive text-xs">
+				<p className="line-clamp-2 pl-6 text-status-destructive text-xs">
 					{event.error}
 				</p>
 			) : null}

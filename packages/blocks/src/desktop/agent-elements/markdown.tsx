@@ -349,7 +349,7 @@ function MermaidBlock({
 						options={DIAGRAM_COPY_OPTIONS}
 					/>
 				</div>
-				<p className="px-1 text-destructive text-xs">{error}</p>
+				<p className="px-1 text-status-destructive text-xs">{error}</p>
 				<pre className="max-h-56 overflow-auto rounded-lg bg-background/70 p-3 text-xs">
 					<code>{code}</code>
 				</pre>

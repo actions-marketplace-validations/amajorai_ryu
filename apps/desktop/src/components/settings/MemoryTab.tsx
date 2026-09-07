@@ -836,7 +836,7 @@ export function MemoryTab() {
 					</form>
 
 					{searchError ? (
-						<p className="text-destructive text-sm">{searchError}</p>
+						<p className="text-sm text-status-destructive">{searchError}</p>
 					) : null}
 
 					{results !== null && results.length === 0 && !searchError ? (
@@ -905,7 +905,7 @@ export function MemoryTab() {
 							<p className="text-muted-foreground text-sm">{indexStatus}</p>
 						) : null}
 						{indexError ? (
-							<p className="text-destructive text-sm">{indexError}</p>
+							<p className="text-sm text-status-destructive">{indexError}</p>
 						) : null}
 						<div className="flex justify-end">
 							<Button

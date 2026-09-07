@@ -275,7 +275,7 @@ function LowBalanceAlertCard() {
 					</div>
 				</div>
 				{lastError ? (
-					<p className="text-destructive text-xs">
+					<p className="text-status-destructive text-xs">
 						Last alert email failed: {lastError}
 					</p>
 				) : null}
@@ -893,7 +893,7 @@ export function BillingTab() {
 										</span>
 									)}
 									{isTrialing && daysLeftInTrial > 0 && (
-										<span className="font-medium text-destructive text-xs">
+										<span className="font-medium text-status-destructive text-xs">
 											Trial ends in {daysLeftInTrial} day
 											{daysLeftInTrial === 1 ? "" : "s"}
 										</span>
@@ -946,7 +946,7 @@ export function BillingTab() {
 											day: "numeric",
 										})}
 										{lifetime.expired && (
-											<span className="mt-1 block font-medium text-destructive">
+											<span className="mt-1 block font-medium text-status-destructive">
 												Updates expired. Buy lifetime access again at the
 												current price to extend them.
 											</span>

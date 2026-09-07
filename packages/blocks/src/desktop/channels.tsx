@@ -1100,7 +1100,9 @@ export function ChannelsView({
 		<div className="flex h-full flex-col overflow-hidden">
 			<div className="scroll-fade flex-1 overflow-y-auto">
 				<div className="mx-auto max-w-xl space-y-5 p-6">
-					{error ? <p className="text-destructive text-sm">{error}</p> : null}
+					{error ? (
+						<p className="text-sm text-status-destructive">{error}</p>
+					) : null}
 					{selected?.bindingWarning ? (
 						<Alert>
 							<AlertTitle>Agent binding needs attention</AlertTitle>
@@ -1512,7 +1514,7 @@ export function ChannelsView({
 								</p>
 							) : null}
 							{form.dmPolicy === "open" ? (
-								<p className="text-destructive text-xs">
+								<p className="text-status-destructive text-xs">
 									Every direct message will be answered and billed to you.
 								</p>
 							) : null}
@@ -1968,7 +1970,7 @@ export function ChannelsView({
 					</div>
 
 					{formError ? (
-						<p className="text-destructive text-sm">{formError}</p>
+						<p className="text-sm text-status-destructive">{formError}</p>
 					) : null}
 
 					<div className="flex items-center gap-2">

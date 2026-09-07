@@ -255,7 +255,7 @@ export function OAuthAppRegistrationDialog({
 						</div>
 
 						{createMutation.isError ? (
-							<p className="text-destructive text-sm" role="alert">
+							<p className="text-sm text-status-destructive" role="alert">
 								{errorMessage(
 									createMutation.error,
 									"Failed to create OAuth app"

@@ -35,7 +35,7 @@ export function ActivationTaskStep({
 			<Card className="w-full max-w-2xl border border-border/60">
 				<CardHeader>
 					<div className="flex items-center gap-2 text-muted-foreground text-xs">
-						<Check className="size-3.5 text-success" />
+						<Check className="size-3.5 text-status-success" />
 						Connected context ready
 					</div>
 					<CardTitle>{draft.title}</CardTitle>
@@ -55,7 +55,7 @@ export function ActivationTaskStep({
 						Ryu lives where you already work — nothing to change.
 					</div>
 					{error ? (
-						<p className="mt-3 text-destructive text-sm" role="alert">
+						<p className="mt-3 text-sm text-status-destructive" role="alert">
 							{error}
 						</p>
 					) : null}

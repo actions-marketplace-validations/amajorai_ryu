@@ -121,7 +121,7 @@ export default function StepUpVerify({
 				</div>
 			)}
 			{freeText && error ? (
-				<p className="text-destructive text-sm">{error}</p>
+				<p className="text-sm text-status-destructive">{error}</p>
 			) : null}
 
 			<Button

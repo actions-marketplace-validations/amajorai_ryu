@@ -116,7 +116,7 @@ export function NodePersonalizationStep({
 						})}
 					</RadioGroup>
 					{canConfigure ? null : (
-						<p className="text-destructive text-sm" role="alert">
+						<p className="text-sm text-status-destructive" role="alert">
 							This node still needs setup, but only a node administrator can
 							choose its shared context.
 						</p>
@@ -156,7 +156,7 @@ export function NodePersonalizationStep({
 					) : null}
 
 					{error ? (
-						<p className="text-destructive text-sm" role="alert">
+						<p className="text-sm text-status-destructive" role="alert">
 							{error}
 						</p>
 					) : null}

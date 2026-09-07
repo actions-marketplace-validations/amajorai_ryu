@@ -33,8 +33,6 @@ import { join } from "node:path";
 import { app } from "electron";
 import type { ConsentPatch, ConsentState } from "../../shared/ipc.ts";
 import {
-	chatAllowed,
-	consentPromptNeeded,
 	contextReadAllowed,
 	engineAllowed,
 	normalizeConsent,
@@ -118,11 +116,6 @@ export function isContextReadAllowed(): boolean {
 	return contextReadAllowed(getConsent());
 }
 
-/** True only when chat is granted (defaults true unless explicitly declined). */
-export function isChatAllowed(): boolean {
-	return chatAllowed(getConsent());
-}
-
 /**
  * Gate the proactive suggestion engine. The engine reads screen context and then
  * suggests, so it needs BOTH `contextRead` and `proactive` granted. Any engine
@@ -130,9 +123,4 @@ export function isChatAllowed(): boolean {
  */
 export function shouldRunEngine(): boolean {
 	return engineAllowed(getConsent());
-}
-
-/** True when the first-run consent card still needs an answer. */
-export function needsConsentPrompt(): boolean {
-	return consentPromptNeeded(getConsent());
 }

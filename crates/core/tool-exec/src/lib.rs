@@ -42,9 +42,12 @@
 
 pub mod schema;
 
+mod framing;
 mod invoker;
 mod parked;
 mod win_process;
+
+pub(crate) use framing::{kill_and_reap, write_line_until, BoundedFrameReader, MAX_LOG_LINES};
 
 #[cfg(feature = "tool-exec-deno")]
 mod deno_backend;

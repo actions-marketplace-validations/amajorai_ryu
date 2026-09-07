@@ -4,10 +4,10 @@
   "navLabel": "Data Science",
   "category": "Engineering & Product",
   "icon": "Brain",
-  "tagline": "Explore, model, and document experiments with agents that keep your data on your machine.",
+  "tagline": "Profile datasets, prepare analysis code, and document experiment results.",
   "heroEyebrow": "Ryu for Data Science",
-  "heroTitle": "An agent that does the grunt work of the notebook.",
-  "heroSubtitle": "Profile a dataset, draft feature pipelines, and write the model evaluation while you keep your hands on the science. Ryu runs locally so training data stays private, wraps any engine, and grounds answers in your own experiment history.",
+  "heroTitle": "Ryu for data science",
+  "heroSubtitle": "Profile datasets, prepare analysis code, and document experiment results.",
   "visualKey": "CoreVisual",
   "intro": "Data science is mostly the unglamorous middle: cleaning, profiling, feature engineering, and writing up results. Ryu runs agents that handle that grind on your machine, so proprietary datasets never leave, and grounds them on your past notebooks and methods so suggestions match how your team actually works.",
   "highlights": [

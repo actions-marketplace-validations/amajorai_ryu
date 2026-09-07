@@ -622,6 +622,15 @@ function directionForLocale(locale: string): LanguageDirection {
 	return /^(ar|fa|he|ur|ps|dv)(?:-|$)/iu.test(locale) ? "rtl" : "ltr";
 }
 
+function localeLanguageAndScript(locale: string): string {
+	try {
+		const maximized = new Intl.Locale(locale).maximize();
+		return `${maximized.language.toLowerCase()}-${(maximized.script ?? "").toLowerCase()}`;
+	} catch {
+		return `${locale.split("-")[0]?.toLowerCase() ?? locale.toLowerCase()}-`;
+	}
+}
+
 function readStoredPackId(): string | null {
 	try {
 		return localStorage.getItem(LANGUAGE_PACK_STORAGE_KEY);
@@ -707,6 +716,30 @@ export class I18nRuntime {
 		}
 	}
 
+	private findPackForLocale(locale: string): LanguagePack | null {
+		const canonical = canonicalLocale(locale, DEFAULT_LOCALE);
+		const languageAndScript = localeLanguageAndScript(canonical);
+		// English is the source catalog. Never auto-select a community voice when
+		// a browser or device reports `en`/`en-*`; users can still choose a voice
+		// explicitly from the picker.
+		if (languageAndScript === localeLanguageAndScript(DEFAULT_LOCALE)) {
+			return null;
+		}
+		const exact = this.packs.find(
+			(pack) => pack.enabled !== false && pack.locale === canonical
+		);
+		if (exact) {
+			return exact;
+		}
+		return (
+			this.packs.find(
+				(pack) =>
+					pack.enabled !== false &&
+					localeLanguageAndScript(pack.locale) === languageAndScript
+			) ?? null
+		);
+	}
+
 	setPacks(packs: readonly LanguagePack[], notify = true): void {
 		const next = new Map<string, LanguagePack>();
 		for (const pack of BUILT_IN_LANGUAGE_PACKS) {
@@ -741,6 +774,13 @@ export class I18nRuntime {
 		this.packs = [...next.values()];
 		if (this.packId === null && this.restoreStoredPackId) {
 			this.packId = readStoredPackId();
+		}
+		if (this.packId === null && this.localeOverride) {
+			const localePack = this.findPackForLocale(this.localeOverride);
+			if (localePack) {
+				this.packId = localePack.id;
+				this.localeOverride = null;
+			}
 		}
 		if (notify) {
 			this.emit();
@@ -795,10 +835,7 @@ export class I18nRuntime {
 
 	setLocale(locale: string): void {
 		const canonical = canonicalLocale(locale, DEFAULT_LOCALE);
-		const pack = this.packs.find(
-			(candidate) =>
-				candidate.locale === canonical && candidate.enabled !== false
-		);
+		const pack = this.findPackForLocale(canonical);
 		if (pack) {
 			this.selectPack(pack.id);
 			return;

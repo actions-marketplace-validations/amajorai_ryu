@@ -90,9 +90,9 @@ function FileSummaryRow({
 					: "M";
 	const kindClass =
 		file.kind === "added"
-			? "text-success dark:text-success"
+			? "text-status-success"
 			: file.kind === "deleted"
-				? "text-destructive dark:text-destructive"
+				? "text-status-destructive"
 				: "text-muted-foreground";
 
 	const row = (
@@ -125,7 +125,7 @@ function FileSummaryRow({
 			{(file.additions > 0 || file.deletions > 0) && (
 				<span className="ml-auto flex shrink-0 items-center gap-1.5 font-mono text-muted-foreground tabular-nums">
 					{file.additions > 0 && (
-						<span className="flex items-center gap-0.5 text-success dark:text-success">
+						<span className="flex items-center gap-0.5 text-status-success">
 							<HugeiconsIcon
 								aria-hidden
 								className="size-2.5"
@@ -135,7 +135,7 @@ function FileSummaryRow({
 						</span>
 					)}
 					{file.deletions > 0 && (
-						<span className="flex items-center gap-0.5 text-destructive dark:text-destructive">
+						<span className="flex items-center gap-0.5 text-status-destructive">
 							<HugeiconsIcon
 								aria-hidden
 								className="size-2.5"
@@ -341,12 +341,12 @@ export function DiffReviewPane({ target, runId }: DiffReviewPaneProps) {
 					</span>
 					<span className="ml-auto flex items-center gap-2 font-mono text-muted-foreground text-xs tabular-nums">
 						{totalAdditions > 0 && (
-							<span className="text-success dark:text-success">
+							<span className="text-status-success">
 								+{formatCount(totalAdditions)}
 							</span>
 						)}
 						{totalDeletions > 0 && (
-							<span className="text-destructive dark:text-destructive">
+							<span className="text-status-destructive">
 								-{formatCount(totalDeletions)}
 							</span>
 						)}
@@ -369,10 +369,10 @@ export function DiffReviewPane({ target, runId }: DiffReviewPaneProps) {
 
 			{expanded && (
 				<div className="border-border border-t">
-					<div className="m-3 flex items-center gap-2 rounded-xl border border-blue-500/20 bg-blue-500/8 px-3 py-2.5 text-foreground/80 text-xs">
+					<div className="m-3 flex items-center gap-2 rounded-xl border border-info/20 bg-info/8 px-3 py-2.5 text-foreground/80 text-xs">
 						<HugeiconsIcon
 							aria-hidden
-							className="size-4 shrink-0 text-blue-500"
+							className="size-4 shrink-0 text-status-info"
 							icon={InformationCircleIcon}
 						/>
 						<span className="min-w-0 flex-1">
@@ -392,10 +392,10 @@ export function DiffReviewPane({ target, runId }: DiffReviewPaneProps) {
 								</span>
 								{selectedFile && (
 									<span className="flex shrink-0 gap-1.5 font-mono tabular-nums">
-										<span className="text-success">
+										<span className="text-status-success">
 											+{formatCount(selectedFile.additions)}
 										</span>
-										<span className="text-destructive">
+										<span className="text-status-destructive">
 											-{formatCount(selectedFile.deletions)}
 										</span>
 									</span>
@@ -499,7 +499,7 @@ export function DiffReviewPane({ target, runId }: DiffReviewPaneProps) {
 				)}
 
 				{applyState.status === "merged" && (
-					<div className="flex items-center gap-1.5 text-success text-xs dark:text-success">
+					<div className="flex items-center gap-1.5 text-status-success text-xs">
 						<HugeiconsIcon
 							aria-hidden
 							className="size-3"
@@ -518,11 +518,11 @@ export function DiffReviewPane({ target, runId }: DiffReviewPaneProps) {
 					<div className="flex items-center gap-1.5 text-xs">
 						<HugeiconsIcon
 							aria-hidden
-							className="size-3 text-success dark:text-success"
+							className="size-3 text-status-success"
 							icon={CheckmarkCircle02Icon}
 						/>
 						<a
-							className="truncate text-info underline underline-offset-2 dark:text-info"
+							className="truncate text-status-info underline underline-offset-2"
 							href={applyState.prUrl}
 							rel="noopener noreferrer"
 							target="_blank"
@@ -534,7 +534,7 @@ export function DiffReviewPane({ target, runId }: DiffReviewPaneProps) {
 
 				{applyState.status === "conflict" && (
 					<div className="flex flex-col gap-1 text-xs">
-						<div className="flex items-center gap-1.5 text-warning dark:text-warning">
+						<div className="flex items-center gap-1.5 text-status-warning">
 							<HugeiconsIcon
 								aria-hidden
 								className="size-3"
@@ -553,7 +553,7 @@ export function DiffReviewPane({ target, runId }: DiffReviewPaneProps) {
 				)}
 
 				{applyState.status === "error" && (
-					<div className="flex items-center gap-1.5 text-destructive text-xs dark:text-destructive">
+					<div className="flex items-center gap-1.5 text-status-destructive text-xs">
 						<HugeiconsIcon
 							aria-hidden
 							className="size-3"

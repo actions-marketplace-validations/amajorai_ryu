@@ -66,12 +66,12 @@ export function ActivationOfferStep({
 							"Create the first task only after subscription confirmation",
 						].map((item) => (
 							<div className="flex items-start gap-2 text-sm" key={item}>
-								<Check className="mt-0.5 size-4 shrink-0 text-success" />
+								<Check className="mt-0.5 size-4 shrink-0 text-status-success" />
 								<span>{item}</span>
 							</div>
 						))}
 						{error ? (
-							<p className="text-destructive text-sm" role="alert">
+							<p className="text-sm text-status-destructive" role="alert">
 								{error}
 							</p>
 						) : null}

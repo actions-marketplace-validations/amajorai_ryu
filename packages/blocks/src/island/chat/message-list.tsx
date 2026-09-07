@@ -46,17 +46,17 @@ export function MessageList({
 				<p
 					className={
 						message.role === "user"
-							? "whitespace-pre-wrap text-neutral-400"
-							: "whitespace-pre-wrap text-neutral-100"
+							? "whitespace-pre-wrap text-muted-foreground"
+							: "whitespace-pre-wrap text-foreground"
 					}
 					key={message.id}
 				>
 					{message.content}
 					{message.streaming && message.content.length === 0 ? (
-						<span className="text-neutral-500">…</span>
+						<span className="text-muted-foreground">…</span>
 					) : null}
 					{message.streaming && message.content.length > 0 ? (
-						<span className="ml-0.5 inline-block h-3.5 w-1.5 animate-pulse bg-neutral-400 align-middle" />
+						<span className="ml-0.5 inline-block h-3.5 w-1.5 animate-pulse bg-muted-foreground align-middle" />
 					) : null}
 				</p>
 			))}

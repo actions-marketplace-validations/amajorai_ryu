@@ -19,7 +19,7 @@ export default function ProductLandingCtas({
 				size="default"
 			/>
 			<a
-				className={cn(buttonVariants({ variant: "outline" }), "rounded-full")}
+				className={cn(buttonVariants({ variant: "ghost" }), "rounded-full")}
 				href={DEMO_HREF}
 				rel="noopener noreferrer"
 				target="_blank"

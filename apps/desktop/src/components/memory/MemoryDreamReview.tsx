@@ -61,15 +61,15 @@ function ProposalDiff({ proposal }: { proposal: MemoryProposal }) {
 			{previous ? (
 				<div className="grid gap-2 md:grid-cols-2">
 					<div className="rounded-lg border border-destructive/20 bg-destructive/5 p-3">
-						<div className="mb-1 font-medium text-destructive text-xs">
+						<div className="mb-1 font-medium text-status-destructive text-xs">
 							Before
 						</div>
 						<p className="whitespace-pre-wrap text-sm leading-relaxed">
 							{previous}
 						</p>
 					</div>
-					<div className="rounded-lg border border-emerald-500/25 bg-emerald-500/5 p-3">
-						<div className="mb-1 font-medium text-emerald-700 text-xs dark:text-emerald-400">
+					<div className="rounded-lg border border-success/25 bg-success/5 p-3">
+						<div className="mb-1 font-medium text-status-success text-xs">
 							Proposed
 						</div>
 						<p className="whitespace-pre-wrap text-sm leading-relaxed">
@@ -78,7 +78,7 @@ function ProposalDiff({ proposal }: { proposal: MemoryProposal }) {
 					</div>
 				</div>
 			) : (
-				<div className="rounded-lg border border-emerald-500/25 bg-emerald-500/5 p-3">
+				<div className="rounded-lg border border-success/25 bg-success/5 p-3">
 					<p className="whitespace-pre-wrap text-sm leading-relaxed">{next}</p>
 				</div>
 			)}

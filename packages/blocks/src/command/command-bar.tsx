@@ -158,7 +158,7 @@ export function CommandBar({
 		<motion.div
 			animate={{ opacity: 1, scale: 1 }}
 			className={cn(
-				"flex w-full flex-col overflow-hidden rounded-[28px] border border-white/15 bg-popover/60 text-popover-foreground shadow-2xl shadow-black/30 ring-1 ring-white/5 ring-inset backdrop-blur-2xl",
+				"flex w-full flex-col overflow-hidden rounded-2xl border border-border bg-popover text-popover-foreground shadow-lg",
 				className
 			)}
 			initial={{ opacity: 0, scale: 0.985 }}

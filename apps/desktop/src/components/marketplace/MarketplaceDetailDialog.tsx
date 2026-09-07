@@ -257,7 +257,9 @@ function DetailBody({
 					<Spinner className="size-5" />
 				</div>
 			) : null}
-			{error ? <p className="text-destructive text-sm">{error}</p> : null}
+			{error ? (
+				<p className="text-sm text-status-destructive">{error}</p>
+			) : null}
 
 			{detail && detail.examplePrompts.length > 0 ? (
 				<MarketplacePromptBanner

@@ -394,7 +394,7 @@ function ToolkitResults({
 	}
 	if (error) {
 		return (
-			<p className="text-destructive text-sm">
+			<p className="text-sm text-status-destructive">
 				Couldn't load integrations: {error.message}
 			</p>
 		);
@@ -647,7 +647,7 @@ function ToolSectionBody({
 		return <Spinner className="size-4" />;
 	}
 	if (error) {
-		return <p className="text-destructive text-xs">{error.message}</p>;
+		return <p className="text-status-destructive text-xs">{error.message}</p>;
 	}
 	if (items.length === 0) {
 		return <p className="text-muted-foreground text-xs">{emptyLabel}</p>;

@@ -83,11 +83,12 @@ function PaginationPrevious({
 	return (
 		<PaginationLink
 			aria-label={localizedAriaLabel}
-			className={cn("pl-2!", className)}
+			className={cn("ps-2!", className)}
 			size="default"
 			{...props}
 		>
 			<HugeiconsIcon
+				className="rtl:rotate-180"
 				data-icon="inline-start"
 				icon={ArrowLeft01Icon}
 				strokeWidth={2}
@@ -107,12 +108,13 @@ function PaginationNext({
 	return (
 		<PaginationLink
 			aria-label={localizedAriaLabel}
-			className={cn("pr-2!", className)}
+			className={cn("pe-2!", className)}
 			size="default"
 			{...props}
 		>
 			<span className="hidden sm:block">{localizedText}</span>
 			<HugeiconsIcon
+				className="rtl:rotate-180"
 				data-icon="inline-end"
 				icon={ArrowRight01Icon}
 				strokeWidth={2}

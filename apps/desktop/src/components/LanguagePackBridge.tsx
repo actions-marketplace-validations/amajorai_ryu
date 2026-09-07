@@ -5,6 +5,7 @@ import {
 	validateLanguagePack,
 } from "@ryu/i18n";
 import { I18nProvider } from "@ryu/i18n/react";
+import { I18nDirectionProvider } from "@ryu/ui/components/direction.tsx";
 import { type ReactNode, useEffect, useMemo, useState } from "react";
 import {
 	LANGUAGE_MODE_CHANGED_EVENT,
@@ -82,10 +83,11 @@ export function LanguagePackBridge({ children }: { children: ReactNode }) {
 	return (
 		<I18nProvider
 			initialLocale={languageMode === "auto" ? navigator.language : null}
+			initialPackId={languageMode === "auto" ? null : undefined}
 			key={`desktop-i18n-${languageMode}`}
 			packs={packs}
 		>
-			{children}
+			<I18nDirectionProvider>{children}</I18nDirectionProvider>
 		</I18nProvider>
 	);
 }

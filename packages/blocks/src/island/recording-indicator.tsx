@@ -11,23 +11,23 @@ export function RecordingIndicator({
 }) {
 	if (recording) {
 		return (
-			<span className="flex items-center gap-1.5 text-[11px] text-red-300">
-				<span className="size-2 animate-pulse rounded-full bg-red-500" />
+			<span className="flex items-center gap-1.5 text-[11px] text-status-destructive">
+				<span className="size-2 animate-pulse rounded-full bg-destructive" />
 				Recording
 			</span>
 		);
 	}
 	if (paused) {
 		return (
-			<span className="flex items-center gap-1.5 text-[11px] text-amber-300">
-				<span className="size-2 rounded-full bg-amber-400" />
+			<span className="flex items-center gap-1.5 text-[11px] text-status-warning">
+				<span className="size-2 rounded-full bg-warning" />
 				Paused
 			</span>
 		);
 	}
 	return (
-		<span className="flex items-center gap-1.5 text-[11px] text-neutral-500">
-			<span className="size-2 rounded-full bg-neutral-600" />
+		<span className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
+			<span className="size-2 rounded-full bg-muted-foreground" />
 			Idle
 		</span>
 	);

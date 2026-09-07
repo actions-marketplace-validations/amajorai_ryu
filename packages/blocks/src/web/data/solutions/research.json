@@ -4,10 +4,10 @@
   "navLabel": "Research",
   "category": "Industries",
   "icon": "Microscope",
-  "tagline": "Review literature, extract data, and chain analysis with agents grounded in your own corpus.",
+  "tagline": "Find information in your source material, extract data, and prepare cited summaries for review.",
   "heroEyebrow": "Ryu for Research",
-  "heroTitle": "Move from question to finding without drowning in papers.",
-  "heroSubtitle": "Screen literature, extract structured data, and orchestrate multi-step analysis with agents that run on your machine and cite every source. Unpublished data stays on-device, and reproducible workflows let you rerun the same pipeline on demand.",
+  "heroTitle": "Ryu for research",
+  "heroSubtitle": "Find information in your source material, extract data, and prepare cited summaries for review.",
   "visualKey": "CoreVisual",
   "intro": "Research is bottlenecked by literature review, data extraction, and repetitive analysis, while unpublished results demand discretion. Ryu grounds agents in your own corpus so answers cite sources, runs locally so sensitive data stays on-device, and chains steps into reproducible Workflows you can rerun. It assists the researcher; you verify every claim.",
   "highlights": [

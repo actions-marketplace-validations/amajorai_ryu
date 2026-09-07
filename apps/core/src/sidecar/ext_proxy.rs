@@ -108,50 +108,6 @@ fn fire_lazy_activation(state: &ServerState, event: &'static str) {
     });
 }
 
-// ── Sidecar port resolution ───────────────────────────────────────────────────
-
-/// Resolve a manifest-declared sidecar's loopback port, profile-shifted EXACTLY the
-/// way [`ext_proxy`] forwards ([`crate::profile::port`]) — so a Core-side loopback
-/// driver hits the same shifted port the sidecar was told to bind under a dev/custom
-/// profile.
-///
-/// This is the single seam every Core-side reverse-coupling (`*_client.rs`) resolves
-/// its port through. It exists so no Core module re-declares an app's port: AGENTS.md
-/// forbids baking a `com.ryu.<app>` fallback port into Core, and each of those clients
-/// used to carry its own `*_FALLBACK_PORT` const that could silently drift from the
-/// fixture it claimed to mirror.
-///
-/// **This is a bind-time answer, not a dial-time one — and its callers still treat it as
-/// dial-time.** The ext-proxy, the capability broker and `document.parse` no longer
-/// resolve a port this way: they go through
-/// [`crate::sidecar::SidecarManager::forward_target`], which returns only a port the
-/// manager holds a live claim on, so a sidecar whose `claim_port` was refused is refused
-/// rather than handed Core-authenticated traffic and its minted `RYU_EXT_TOKEN` (see
-/// [`ForwardTarget`]). The legacy `*_client.rs` drivers listed above have NOT been moved
-/// onto that gate; each caches the manifest port at construction and dials it directly
-/// with the plugin's ext token, so each is still exposed to a port squatted before Core
-/// registered the sidecar. Moving them is a follow-on: the fix is to resolve
-/// `forward_target` per call instead of caching a port, not to add a check here (this
-/// function cannot see the manager). Do not add new callers.
-///
-/// `None` means the manifest does not declare that sidecar at all. For a **built-in**
-/// that is a build-time invariant, not a runtime condition — the fixture is
-/// `include_str!`d into `BUILTIN_MANIFESTS` and `load()` always parses it — so built-in
-/// callers `expect` rather than invent a port. (The runtime fail-open those clients
-/// document is a separate failure mode: an *unreachable* sidecar, still handled per
-/// call.)
-pub fn sidecar_port(
-    manifests: &[crate::plugin_manifest::PluginManifest],
-    plugin_id: &str,
-    sidecar_name: &str,
-) -> Option<u16> {
-    manifests
-        .iter()
-        .find(|m| m.id == plugin_id)
-        .and_then(|m| m.sidecars.iter().find(|s| s.name == sidecar_name))
-        .map(|s| crate::profile::port(s.port))
-}
-
 // ── Token derivation ──────────────────────────────────────────────────────────
 
 /// The node token (`RYU_TOKEN`), trimmed + non-empty, or `None` (loopback dev with
@@ -3344,35 +3300,39 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::NOT_IMPLEMENTED);
     }
 
-    /// Every Core-side loopback driver resolves its port from the built-in manifest
-    /// ALONE — no `*_FALLBACK_PORT` const survives in Core (AGENTS.md: never bake a
-    /// `com.ryu.<app>` port into Core outside the fixture).
-    ///
-    /// This locks the invariant those `expect`s rest on. Each `sidecar_port` panics
-    /// when its fixture stops declaring the sidecar, so without this test that
-    /// regression would first surface as a Core **boot panic** on a developer's
-    /// machine; here it is a red build. `load_builtins` (not `load`) so the assertion
-    /// does not depend on whatever the developer happens to have in `~/.ryu/plugins`.
+    /// Built-in sidecars need distinct nonzero bind ports. Dialing clients use
+    /// the manager registry, so a missing app is unavailable rather than a boot panic.
     #[test]
-    fn every_loopback_driver_resolves_its_port_from_the_builtin_manifest() {
+    fn builtin_app_sidecars_declare_distinct_bind_ports() {
         let manifests = crate::plugin_manifest::PluginManifestLoader::load_builtins();
         let resolved = [
-            (
-                "dashboards",
-                crate::dashboards_client::sidecar_port(&manifests),
-            ),
-            ("finetune", crate::finetune_client::sidecar_port(&manifests)),
-            ("healing", crate::healing_client::sidecar_port(&manifests)),
-            ("meetings", crate::meetings_client::sidecar_port(&manifests)),
-            ("monitors", crate::monitors_client::sidecar_port(&manifests)),
-            ("quests", crate::quests_client::sidecar_port(&manifests)),
-            ("teams", crate::teams_client::sidecar_port(&manifests)),
-        ];
+            "dashboards",
+            "finetune",
+            "healing",
+            "meetings",
+            "monitors",
+            "quests",
+            "teams",
+        ]
+        .map(|app| {
+            let plugin_id = format!("@ryu/{app}");
+            let sidecar_name = format!("ryu-{app}");
+            let manifest = manifests
+                .iter()
+                .find(|manifest| manifest.id == plugin_id)
+                .unwrap_or_else(|| panic!("missing built-in manifest {plugin_id}"));
+            let spec = manifest
+                .sidecars
+                .iter()
+                .find(|spec| spec.name == sidecar_name)
+                .unwrap_or_else(|| panic!("missing sidecar {sidecar_name} in {plugin_id}"));
+            (app, crate::profile::port(spec.port))
+        });
         for (app, port) in resolved {
             assert_ne!(port, 0, "{app}: manifest must declare a real sidecar port");
         }
         // Two sidecars sharing a port means whichever binds second dies and its
-        // driver silently talks to the wrong app — worth catching at fixture-edit
+        // driver becomes unavailable — worth catching at fixture-edit
         // time rather than at runtime.
         let mut ports: Vec<u16> = resolved.iter().map(|(_, p)| *p).collect();
         ports.sort_unstable();
@@ -3383,16 +3343,6 @@ mod tests {
             before,
             "two built-in sidecars declare the same port: {resolved:?}"
         );
-    }
-
-    /// An app whose manifest does not declare the named sidecar resolves to `None`
-    /// rather than to an invented port — the property that lets the built-in callers
-    /// treat absence as a build-time invariant instead of carrying a fallback.
-    #[test]
-    fn sidecar_port_is_none_for_an_undeclared_sidecar() {
-        let m = provider_manifest(9099, None);
-        assert!(sidecar_port(std::slice::from_ref(&m), &m.id, "no-such-sidecar").is_none());
-        assert!(sidecar_port(&[], "@ryu/teams", "ryu-teams").is_none());
     }
 
     // ── Kernel capabilities (the retired per-app /api/host/<app>/* rows) ─────────

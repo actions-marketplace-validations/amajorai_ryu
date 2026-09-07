@@ -365,11 +365,6 @@ export function buildMentionGroups(
 	);
 }
 
-/** Flatten grouped candidates into a single ordered list for keyboard nav. */
-export function flattenGroups(groups: MentionGroup[]): MentionItem[] {
-	return groups.flatMap((g) => g.items);
-}
-
 /**
  * Apply a chosen mention back into the composer value by replacing the trailing
  * "@fragment" with an "@Label " token.

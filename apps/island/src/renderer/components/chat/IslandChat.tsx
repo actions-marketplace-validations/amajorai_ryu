@@ -151,12 +151,12 @@ export function IslandChat() {
 		<div className="flex h-full w-full flex-col gap-2">
 			<header className="relative z-20 flex shrink-0 items-center justify-between px-1 pt-1">
 				<div className="flex min-w-0 items-center gap-2">
-					<span className="font-medium text-neutral-100 text-sm">
+					<span className="font-medium text-foreground text-sm">
 						{t("chat.new")}
 					</span>
 					<select
 						aria-label={t("language.current")}
-						className="max-w-32 truncate rounded-full border border-white/10 bg-white/5 px-1.5 py-0.5 text-[10px] text-neutral-300 outline-none"
+						className="max-w-32 truncate rounded-full border border-border bg-card px-1.5 py-0.5 text-[10px] text-muted-foreground outline-none"
 						onChange={(event) => selectPack(event.target.value || null)}
 						value={selectedPackId ?? ""}
 					>
@@ -173,7 +173,7 @@ export function IslandChat() {
 				<div className="flex items-center gap-0.5">
 					<button
 						aria-label={commandPaletteLabel}
-						className="flex size-7 items-center justify-center rounded-full text-neutral-400 transition-colors hover:bg-white/10 hover:text-neutral-100"
+						className="flex size-7 items-center justify-center rounded-full text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
 						onClick={openCommand}
 						title={commandPaletteLabel}
 						type="button"
@@ -182,7 +182,7 @@ export function IslandChat() {
 					</button>
 					<button
 						aria-label={t("island.minimize-ryu", undefined, "Minimize Ryu")}
-						className="flex size-7 items-center justify-center rounded-full text-neutral-400 transition-colors hover:bg-white/10 hover:text-neutral-100"
+						className="flex size-7 items-center justify-center rounded-full text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
 						onClick={toggleCollapse}
 						title={minimizeLabel}
 						type="button"
@@ -194,14 +194,14 @@ export function IslandChat() {
 				</div>
 			</header>
 			{notes.length > 0 ? (
-				<div className="relative z-20 shrink-0 rounded-lg border border-amber-400/30 bg-amber-500/10 px-2.5 py-1.5">
+				<div className="relative z-20 shrink-0 rounded-lg border border-warning/30 bg-warning/10 px-2.5 py-1.5">
 					<div className="flex items-start justify-between gap-2">
-						<span className="font-medium text-[10px] text-amber-300/90 uppercase tracking-wide">
+						<span className="font-medium text-[10px] text-status-warning/90 uppercase tracking-wide">
 							{t("island.note", undefined, "Note")}
 						</span>
 						<button
 							aria-label={t("island.dismiss-notes", undefined, "Dismiss notes")}
-							className="shrink-0 text-amber-200/70 hover:text-amber-100"
+							className="shrink-0 text-status-warning/70 hover:text-status-warning"
 							onClick={clearNotes}
 							type="button"
 						>
@@ -221,7 +221,7 @@ export function IslandChat() {
 					</div>
 					{notes.map((note, index) => (
 						<p
-							className="mt-0.5 text-amber-100/90 text-xs leading-snug"
+							className="mt-0.5 text-status-warning/90 text-xs leading-snug"
 							// biome-ignore lint/suspicious/noArrayIndexKey: notes are append-only, ephemeral, and never reordered
 							key={index}
 						>
@@ -232,10 +232,10 @@ export function IslandChat() {
 			) : null}
 			<div className="flex min-h-0 flex-1 flex-col">
 				{offline ? (
-					<p className="relative z-10 shrink-0 text-neutral-400 text-xs">
+					<p className="relative z-10 shrink-0 text-muted-foreground text-xs">
 						{t("island.core-unreachable", undefined, "Can't reach Ryu Core.")}{" "}
 						<button
-							className="text-neutral-200 underline underline-offset-2 hover:text-neutral-100"
+							className="text-foreground underline underline-offset-2 hover:text-foreground"
 							onClick={probe}
 							type="button"
 						>

@@ -1,3 +1,5 @@
+@import "./status-colors.css";
+@import "./overlays.css";
 /*
  * Build-time theme substrate for sandboxed Companion apps.
  *
@@ -40,8 +42,6 @@
 	--ring: oklch(0.708 0 0);
 	--radius: 0.625rem;
 	--spacing: 0.25rem;
-	--ryu-dialog-overlay-background: rgb(0 0 0 / 30%);
-	--ryu-dialog-overlay-blur: 8px;
 	font-synthesis: none;
 	color-scheme: light dark;
 }

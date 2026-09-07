@@ -53,7 +53,7 @@ export function SidebarTodoProgress({
 					data-testid="sidebar-todo-complete"
 				>
 					<HugeiconsIcon
-						className="absolute top-1/2 right-0 size-9 -translate-y-1/2 text-success/15"
+						className="absolute top-1/2 right-0 size-9 -translate-y-1/2 text-status-success/15"
 						icon={Tick02Icon}
 						strokeWidth={3}
 					/>

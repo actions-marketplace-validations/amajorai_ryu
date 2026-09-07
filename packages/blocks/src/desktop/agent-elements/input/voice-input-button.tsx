@@ -38,7 +38,7 @@ export function VoiceInputButton({
 			<Button
 				aria-label="Stop recording"
 				className={cn(
-					"size-7 text-destructive hover:text-destructive",
+					"size-7 text-status-destructive hover:text-status-destructive",
 					className
 				)}
 				onClick={onStop}

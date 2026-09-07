@@ -180,7 +180,7 @@ export function SessionsPopover({
 						<Spinner />
 					</div>
 				) : error ? (
-					<p className="px-3 py-4 text-destructive text-xs">{error}</p>
+					<p className="px-3 py-4 text-status-destructive text-xs">{error}</p>
 				) : sessions.length === 0 ? (
 					<p className="px-3 py-4 text-muted-foreground text-xs">
 						No sessions yet.

@@ -413,7 +413,7 @@ export function ModelLaunchConfigSection({
 										<span className="text-muted-foreground text-xs">Saved</span>
 									) : null}
 									{saveMutation.isError ? (
-										<span className="text-destructive text-xs">
+										<span className="text-status-destructive text-xs">
 											Could not save (the backend may not support this yet)
 										</span>
 									) : null}

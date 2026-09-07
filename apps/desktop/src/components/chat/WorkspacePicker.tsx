@@ -43,6 +43,7 @@ import {
 import {
 	DropdownMenu,
 	DropdownMenuContent,
+	DropdownMenuGroup,
 	DropdownMenuItem,
 	DropdownMenuLabel,
 	DropdownMenuSeparator,
@@ -137,12 +138,12 @@ export function DiffStat({ stat }: { stat: LineStat }) {
 	return (
 		<span className="flex shrink-0 items-center gap-1 font-medium font-mono text-[11px] tabular-nums">
 			{stat.insertions > 0 && (
-				<span className="text-emerald-600 dark:text-emerald-400/90">
+				<span className="text-status-success dark:text-status-success/90">
 					+{formatCount(stat.insertions)}
 				</span>
 			)}
 			{stat.deletions > 0 && (
-				<span className="text-red-600/90 dark:text-red-400/90">
+				<span className="text-status-destructive/90 dark:text-status-destructive/90">
 					−{formatCount(stat.deletions)}
 				</span>
 			)}
@@ -712,7 +713,7 @@ function EnvironmentList({
 	onSelect: (environmentId: string) => void;
 }) {
 	return (
-		<>
+		<DropdownMenuGroup>
 			<DropdownMenuLabel className="px-2 pt-1 pb-1 text-sm">
 				Local environment
 			</DropdownMenuLabel>
@@ -739,7 +740,7 @@ function EnvironmentList({
 					worktree is created.
 				</p>
 			) : null}
-		</>
+		</DropdownMenuGroup>
 	);
 }
 
@@ -875,7 +876,7 @@ function BranchList({
 	);
 
 	return (
-		<>
+		<DropdownMenuGroup>
 			{branches.length > 1 && (
 				<div className="sticky top-0 z-10 mb-1">
 					<div className="relative">
@@ -956,7 +957,9 @@ function BranchList({
 				</DropdownMenuItem>
 			)}
 			{error && (
-				<p className="mt-1 px-2 py-1.5 text-[12px] text-destructive">{error}</p>
+				<p className="mt-1 px-2 py-1.5 text-[12px] text-status-destructive">
+					{error}
+				</p>
 			)}
 			<DropdownMenuSeparator />
 
@@ -970,7 +973,7 @@ function BranchList({
 			) : (
 				createRow
 			)}
-		</>
+		</DropdownMenuGroup>
 	);
 }
 
@@ -1034,7 +1037,9 @@ function CreateBranchDialog({
 					spellCheck={false}
 					value={name}
 				/>
-				{error && <p className="text-[12px] text-destructive">{error}</p>}
+				{error && (
+					<p className="text-[12px] text-status-destructive">{error}</p>
+				)}
 				<DialogFooter>
 					<DialogClose render={<Button variant="ghost" />}>Cancel</DialogClose>
 					<Button
@@ -1085,7 +1090,7 @@ function RunModeContent({
 		);
 	}
 	return (
-		<>
+		<DropdownMenuGroup>
 			<DropdownMenuLabel className="px-2 pt-1 pb-1 text-sm">
 				Work in
 			</DropdownMenuLabel>
@@ -1127,7 +1132,7 @@ function RunModeContent({
 					</div>
 				</div>
 			)}
-		</>
+		</DropdownMenuGroup>
 	);
 }
 

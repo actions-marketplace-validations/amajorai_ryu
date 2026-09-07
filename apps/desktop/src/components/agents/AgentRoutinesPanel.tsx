@@ -68,7 +68,7 @@ const STATUS_META: Record<
 	{ className: string; dotClassName: string; label: string }
 > = {
 	failed: {
-		className: "text-destructive",
+		className: "text-status-destructive",
 		dotClassName: "bg-destructive",
 		label: "Failed",
 	},
@@ -78,7 +78,7 @@ const STATUS_META: Record<
 		label: "No runs",
 	},
 	operational: {
-		className: "text-success",
+		className: "text-status-success",
 		dotClassName: "bg-success",
 		label: "Operational",
 	},
@@ -88,7 +88,7 @@ const STATUS_META: Record<
 		label: "Paused",
 	},
 	scheduled: {
-		className: "text-warning",
+		className: "text-status-warning",
 		dotClassName: "bg-warning",
 		label: "Scheduled",
 	},
@@ -416,7 +416,9 @@ function RoutineEditor({
 						</label>
 					</div>
 
-					{error ? <p className="text-destructive text-sm">{error}</p> : null}
+					{error ? (
+						<p className="text-sm text-status-destructive">{error}</p>
+					) : null}
 				</div>
 
 				<DialogFooter>
@@ -631,7 +633,7 @@ export function AgentRoutinesPanel({
 									<div className="flex items-center gap-2">
 										{overallStatus === "operational" ? (
 											<HugeiconsIcon
-												className="size-4 text-success"
+												className="size-4 text-status-success"
 												icon={CheckmarkCircle02Icon}
 											/>
 										) : null}
@@ -663,10 +665,10 @@ export function AgentRoutinesPanel({
 								);
 							})()}
 							<div className="flex flex-wrap gap-x-4 gap-y-1 border-t pt-3 text-xs">
-								<span className="text-success">
+								<span className="text-status-success">
 									{overview.operational} operational
 								</span>
-								<span className="text-destructive">
+								<span className="text-status-destructive">
 									{overview.failed} failed
 								</span>
 								<span className="text-muted-foreground">
@@ -677,7 +679,7 @@ export function AgentRoutinesPanel({
 					</div>
 
 					{error ? (
-						<p className="px-3 text-destructive text-sm">{error}</p>
+						<p className="px-3 text-sm text-status-destructive">{error}</p>
 					) : null}
 					{routines.length === 0 ? (
 						<SettingsCard className="flex flex-col items-center gap-2 py-8 text-center">
@@ -753,7 +755,7 @@ export function AgentRoutinesPanel({
 														variant="ghost"
 													>
 														<HugeiconsIcon
-															className="size-4 text-destructive"
+															className="size-4 text-status-destructive"
 															icon={Delete02Icon}
 														/>
 													</Button>

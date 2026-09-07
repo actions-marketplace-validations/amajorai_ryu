@@ -68,13 +68,13 @@ const CHECK_LABELS: Record<CheckKind, string> = {
 
 function statusColor(status?: CheckStatus | null): string {
 	if (status === "ok") {
-		return "bg-emerald-500";
+		return "bg-success";
 	}
 	if (status === "triggered") {
-		return "bg-amber-500";
+		return "bg-warning";
 	}
 	if (status === "error") {
-		return "bg-red-500";
+		return "bg-destructive";
 	}
 	return "bg-muted-foreground/40";
 }
@@ -580,7 +580,7 @@ function MonitorDetail({
 					</Button>
 					<Button onClick={onDelete} size="sm" variant="ghost">
 						<HugeiconsIcon
-							className="size-4 text-destructive"
+							className="size-4 text-status-destructive"
 							icon={Delete02Icon}
 						/>
 					</Button>
@@ -751,7 +751,7 @@ export function MonitorsView({
 
 			<div className="scroll-fade flex-1 overflow-y-auto p-6">
 				{error ? (
-					<p className="mb-3 text-destructive text-sm">{error}</p>
+					<p className="mb-3 text-sm text-status-destructive">{error}</p>
 				) : null}
 				{editing ? (
 					<MonitorForm

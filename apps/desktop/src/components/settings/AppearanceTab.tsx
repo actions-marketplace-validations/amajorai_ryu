@@ -2257,7 +2257,7 @@ export function AppearanceTab() {
 					onOpenChange={setToolDetailAdvancedOpen}
 					open={toolDetailAdvancedOpen}
 				>
-					<CollapsibleTrigger className="flex w-full items-center justify-between gap-3 rounded-[10px] px-3.5 py-2 text-left text-muted-foreground text-xs hover:bg-muted/40">
+					<CollapsibleTrigger className="flex w-full items-center justify-between gap-3 rounded-lg px-3.5 py-2 text-left text-muted-foreground text-xs hover:bg-muted/40">
 						<span>Advanced detail</span>
 						<HugeiconsIcon
 							className={cn(

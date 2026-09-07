@@ -167,7 +167,7 @@ function CommandItem({
 		>
 			{children}
 			<HugeiconsIcon
-				className="ml-auto opacity-0 group-has-data-[slot=command-shortcut]/command-item:hidden group-data-[checked=true]/command-item:opacity-100"
+				className="ms-auto opacity-0 group-has-data-[slot=command-shortcut]/command-item:hidden group-data-[checked=true]/command-item:opacity-100"
 				icon={Tick02Icon}
 				strokeWidth={2}
 			/>
@@ -182,7 +182,7 @@ function CommandShortcut({
 	return (
 		<span
 			className={cn(
-				"ml-auto text-muted-foreground text-xs tracking-widest group-data-selected/command-item:text-foreground",
+				"ms-auto text-muted-foreground text-xs tracking-widest group-data-selected/command-item:text-foreground",
 				className
 			)}
 			data-slot="command-shortcut"

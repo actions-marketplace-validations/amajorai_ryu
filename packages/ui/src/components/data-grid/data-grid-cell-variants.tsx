@@ -725,7 +725,7 @@ export function UrlCell<TData>({
 					data-slot="grid-cell-content"
 				>
 					<a
-						className="truncate text-primary underline decoration-primary/30 underline-offset-2 hover:decoration-primary/60 data-invalid:cursor-not-allowed data-focused:text-foreground data-invalid:text-destructive data-focused:decoration-foreground/50 data-invalid:decoration-destructive/50 data-focused:hover:decoration-foreground/70 data-invalid:hover:decoration-destructive/70"
+						className="truncate text-primary underline decoration-primary/30 underline-offset-2 hover:decoration-primary/60 data-invalid:cursor-not-allowed data-focused:text-foreground data-invalid:text-status-destructive data-focused:decoration-foreground/50 data-invalid:decoration-destructive/50 data-focused:hover:decoration-foreground/70 data-invalid:hover:decoration-destructive/70"
 						data-focused={isFocused && !isDangerousUrl ? "" : undefined}
 						data-invalid={isDangerousUrl ? "" : undefined}
 						href={urlHref}

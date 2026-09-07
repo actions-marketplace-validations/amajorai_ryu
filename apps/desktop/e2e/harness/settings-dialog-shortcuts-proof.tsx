@@ -42,6 +42,9 @@ window.fetch = async (input, init) => {
 		});
 	}
 	if (pathname === "/api/gateway/status") {
+		document.body.dataset.gatewayRequests = String(
+			Number(document.body.dataset.gatewayRequests ?? "0") + 1
+		);
 		return new Response(JSON.stringify({ reachable: false, url: null }), {
 			headers,
 			status: 200,

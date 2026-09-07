@@ -114,7 +114,7 @@ const dropdownArrowVariants = cva(
 				default:
 					"bg-transparent hover:bg-muted hover:text-muted-foreground aria-pressed:bg-accent aria-pressed:text-accent-foreground",
 				outline:
-					"border border-input border-l-0 bg-transparent hover:bg-accent hover:text-accent-foreground",
+					"border border-input border-s-0 bg-transparent hover:bg-accent hover:text-accent-foreground",
 			},
 		},
 	}
@@ -154,7 +154,7 @@ export const ToolbarButton = withTooltip(function ToolbarButton({
 					size,
 					variant,
 				}),
-				isDropdown && "justify-between gap-1 pr-1",
+				isDropdown && "justify-between gap-1 pe-1",
 				className
 			)}
 			{...props}
@@ -179,7 +179,7 @@ export const ToolbarButton = withTooltip(function ToolbarButton({
 					size,
 					variant,
 				}),
-				isDropdown && "pr-1",
+				isDropdown && "pe-1",
 				className
 			)}
 			{...props}
@@ -226,7 +226,7 @@ export function ToolbarSplitButtonPrimary({
 					size,
 					variant,
 				}),
-				"rounded-r-none",
+				"rounded-e-none",
 				"group-data-[pressed=true]:bg-accent group-data-[pressed=true]:text-accent-foreground",
 				className
 			)}

@@ -257,7 +257,7 @@ function DraftCard({
 				</Button>
 			</div>
 			{draft.error && (
-				<p className="mt-2 text-destructive text-xs">{draft.error}</p>
+				<p className="mt-2 text-status-destructive text-xs">{draft.error}</p>
 			)}
 		</div>
 	);

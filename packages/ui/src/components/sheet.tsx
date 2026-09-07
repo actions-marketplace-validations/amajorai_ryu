@@ -4,6 +4,7 @@ import { Dialog as SheetPrimitive } from "@base-ui/react/dialog";
 import { Cancel01Icon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { Button } from "@ryu/ui/components/button.tsx";
+import { useDirection } from "@ryu/ui/components/direction.tsx";
 import { cn } from "@ryu/ui/lib/utils.ts";
 import type * as React from "react";
 
@@ -46,6 +47,7 @@ function SheetContent({
 	side?: "top" | "right" | "bottom" | "left";
 	showCloseButton?: boolean;
 }) {
+	const direction = useDirection();
 	return (
 		<SheetPortal>
 			<SheetOverlay />
@@ -57,6 +59,7 @@ function SheetContent({
 				data-side={side}
 				data-slot="sheet-content"
 				{...props}
+				dir={direction}
 			>
 				{children}
 				{showCloseButton && (
@@ -64,7 +67,7 @@ function SheetContent({
 						data-slot="sheet-close"
 						render={
 							<Button
-								className="absolute top-4 right-4 bg-secondary"
+								className="absolute end-4 top-4 bg-secondary"
 								size="icon-sm"
 								variant="ghost"
 							/>

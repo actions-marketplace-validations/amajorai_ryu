@@ -67,7 +67,7 @@ export type StatusKind = "active" | "builtin" | "default" | "unavailable";
  * Glyph choices are constrained by what is already spoken for in this repo, and
  * an "obvious" pick is wrong in three of the four cases:
  *   • `CheckmarkCircle02Icon` is ALREADY the repo's green check (the Add button's
- *     "Added" state paints it `text-success`), so Active inherits a mark the user
+ *     "Added" state paints it `text-status-success`), so Active inherits a mark the user
  *     has already learned.
  *   • `ChipIcon` — not `CpuIcon`, which is the Engines section's own glyph in 35
  *     places, and not `LockedIcon`, which the agent editor already uses for a
@@ -84,7 +84,7 @@ const STATUS_META: Record<
 	active: {
 		icon: CheckmarkCircle02Icon,
 		label: "Active",
-		tone: "bg-success/12 text-success",
+		tone: "bg-success/12 text-status-success",
 	},
 	builtin: {
 		icon: ChipIcon,
@@ -99,7 +99,7 @@ const STATUS_META: Record<
 	unavailable: {
 		icon: UnavailableIcon,
 		label: "Unavailable",
-		tone: "bg-destructive/12 text-destructive",
+		tone: "bg-destructive/12 text-status-destructive",
 	},
 };
 

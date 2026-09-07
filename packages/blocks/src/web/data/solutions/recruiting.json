@@ -4,10 +4,10 @@
   "navLabel": "Recruiting",
   "category": "People & Operations",
   "icon": "UserPlus",
-  "tagline": "Screen resumes, schedule interviews, and keep candidates moving with agents wired into your ATS.",
+  "tagline": "Organize applications, draft candidate communications, and coordinate interviews. Your team makes hiring decisions.",
   "heroEyebrow": "Ryu for Recruiting",
-  "heroTitle": "Move every candidate forward, faster.",
-  "heroSubtitle": "Agents read the requisition, screen the inbound, draft the outreach, and book the interviews, all connected to your ATS and calendar. Candidate data is redacted on egress and every screening decision is logged, so your pipeline runs fast and stays defensible.",
+  "heroTitle": "Ryu for recruiting",
+  "heroSubtitle": "Organize applications, draft candidate communications, and coordinate interviews. Your team makes hiring decisions.",
   "visualKey": "ConnectionsVisual",
   "intro": "Recruiting is a logistics problem wrapped in judgment calls: screening volume, chasing candidates, and coordinating calendars eats the hours you'd rather spend on the people. Ryu connects agents to your ATS and calendar to handle the logistics, grounds screening on your real rubric, and keeps candidate data governed throughout.",
   "highlights": [

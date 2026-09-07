@@ -404,7 +404,9 @@ export function NodeFolderBrowser({
 						</div>
 					)}
 					{!loading && error && (
-						<p className="px-3 py-2 text-[12px] text-destructive">{error}</p>
+						<p className="px-3 py-2 text-[12px] text-status-destructive">
+							{error}
+						</p>
 					)}
 					{!(loading || error) && roots.length === 0 && (
 						<CommandEmpty>No folders found.</CommandEmpty>

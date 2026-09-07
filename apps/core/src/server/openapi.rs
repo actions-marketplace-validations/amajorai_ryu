@@ -430,11 +430,11 @@ use utoipa::OpenApi;
         // Dashboards runs out-of-process (`ryu-dashboards` sidecar); its
         // `/api/dashboards/*` spec is owned by the sidecar, not merged here.
         // Data
-        super::export_data_path,
-        super::get_data_path,
-        super::reset_data_path,
-        super::switch_data_path,
-        super::validate_data_path,
+        super::data_path_api::export_data_path,
+        super::data_path_api::get_data_path,
+        super::data_path_api::reset_data_path,
+        super::data_path_api::switch_data_path,
+        super::data_path_api::validate_data_path,
         // Downloads
         super::downloads_history,
         super::downloads_history_clear,

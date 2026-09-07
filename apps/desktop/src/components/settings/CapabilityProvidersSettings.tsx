@@ -27,7 +27,6 @@ import { toTarget } from "@/src/lib/api/client.ts";
 import {
 	fetchGatewayConfig,
 	type GatewayConfig,
-	MODALITIES,
 	type Modality,
 	routingViewIncludesModalityMap,
 } from "@/src/lib/api/gateway.ts";
@@ -71,11 +70,6 @@ const ROUTED_CAPABILITIES: {
 			"Serves POST /v1/videos/generations. Job-based: the client polls for the result.",
 	},
 ];
-
-/** Everything in {@link ROUTED_CAPABILITIES} is a real gateway modality. */
-const ROUTED_MODALITIES = new Set<string>(
-	ROUTED_CAPABILITIES.map((c) => c.modality)
-);
 
 export function CapabilityProvidersSettings() {
 	const node = useActiveNode();
@@ -167,7 +161,7 @@ export function CapabilityProvidersSettings() {
 				) : null}
 
 				{!(loading || error) && served === false ? (
-					<p className="text-sm text-warning">
+					<p className="text-sm text-status-warning">
 						This gateway is too old to report its modality map, so what serves
 						each capability cannot be shown — or edited from the app without
 						dropping a hand-written{" "}
@@ -294,14 +288,5 @@ export function CapabilityProvidersSettings() {
 				</p>
 			</SettingsSection>
 		</>
-	);
-}
-
-/** Exported for the unit test: every routed capability is a real modality, and
- * chat is not among them. */
-export function routedCapabilitiesAreModalities(): boolean {
-	return (
-		ROUTED_CAPABILITIES.every((c) => MODALITIES.includes(c.modality)) &&
-		!ROUTED_MODALITIES.has("chat")
 	);
 }

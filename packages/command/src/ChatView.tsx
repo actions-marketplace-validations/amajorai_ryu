@@ -198,7 +198,7 @@ export function ChatView({
 					</div>
 				))}
 				{error ? (
-					<div className="rounded-2xl bg-destructive/10 px-4 py-2 text-destructive text-sm">
+					<div className="rounded-2xl bg-destructive/10 px-4 py-2 text-sm text-status-destructive">
 						{error}
 					</div>
 				) : null}

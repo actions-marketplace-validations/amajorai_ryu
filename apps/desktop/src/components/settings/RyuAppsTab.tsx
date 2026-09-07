@@ -38,7 +38,7 @@ export function RyuAppsTab() {
 				</SettingsCard>
 			) : error ? (
 				<SettingsCard>
-					<p className="text-destructive text-sm">{error}</p>
+					<p className="text-sm text-status-destructive">{error}</p>
 				</SettingsCard>
 			) : installedApps.length === 0 ? (
 				<SettingsCard>
@@ -111,7 +111,9 @@ export function RyuAppsTab() {
 				</div>
 			) : null}
 			{toggleError ? (
-				<p className="mt-1.5 px-3.5 text-destructive text-xs">{toggleError}</p>
+				<p className="mt-1.5 px-3.5 text-status-destructive text-xs">
+					{toggleError}
+				</p>
 			) : null}
 		</SettingsSection>
 	);

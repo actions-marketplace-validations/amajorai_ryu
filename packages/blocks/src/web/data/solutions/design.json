@@ -4,10 +4,10 @@
   "navLabel": "Design",
   "category": "Engineering & Product",
   "icon": "Palette",
-  "tagline": "Generate visuals, audit accessibility, and turn ideas into UI from one desktop app.",
+  "tagline": "Create draft visuals and front-end code using your design system as context.",
   "heroEyebrow": "Ryu for Design",
-  "heroTitle": "A creative partner that lives on your desktop.",
-  "heroSubtitle": "Generate imagery locally, write the copy, audit a screen for accessibility, and translate a mockup into front-end code, all from one private desktop app. Swap between models per task, keep work on your machine, and ground agents in your design system.",
+  "heroTitle": "Ryu for design",
+  "heroSubtitle": "Create draft visuals and front-end code using your design system as context.",
   "visualKey": "DesktopVisual",
   "intro": "Design work spans many modes: ideation, visual generation, writing, and the handoff to code. Ryu brings them into one local-first desktop app, with image generation and chat that run on your machine, agents grounded in your design system, and the freedom to pick the best model for each task instead of being locked to one tool.",
   "highlights": [

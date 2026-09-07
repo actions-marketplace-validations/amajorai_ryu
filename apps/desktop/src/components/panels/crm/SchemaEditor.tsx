@@ -156,7 +156,7 @@ export function SchemaEditor({
 			</header>
 
 			{error && (
-				<div className="flex items-start gap-2 border-b bg-destructive/10 px-4 py-2 text-destructive text-xs">
+				<div className="flex items-start gap-2 border-b bg-destructive/10 px-4 py-2 text-status-destructive text-xs">
 					<HugeiconsIcon icon={Alert01Icon} size={14} />
 					<span>{error}</span>
 				</div>
@@ -680,7 +680,7 @@ function FieldForm({
 						</p>
 					)}
 					{removedOptions.length > 0 && (
-						<p className="mt-1 text-destructive text-xs">
+						<p className="mt-1 text-status-destructive text-xs">
 							Removing {removedOptions.map((o) => o.label).join(", ")} affects
 							records that still hold{" "}
 							{removedOptions.length === 1 ? "it" : "them"}.

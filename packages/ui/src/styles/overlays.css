@@ -1,0 +1,59 @@
+/* Shared overlay treatment for host surfaces and bundled Companions. */
+:root {
+	--ryu-popup-overlay-background: rgb(0 0 0 / 18%);
+	--ryu-popup-overlay-blur: 8px;
+	--ryu-dialog-overlay-background: rgb(0 0 0 / 30%);
+	--ryu-dialog-overlay-blur: 8px;
+}
+
+/* Popup backdrops are opt-in on desktop. The Base UI backdrop parts stay in the
+   DOM while a popup is open so outside-click and keyboard dismissal keep their
+   normal behavior; this class only supplies the visual treatment. */
+.ryu-popup-overlay {
+	position: fixed;
+	inset: 0;
+	z-index: 40;
+	background-color: var(--ryu-popup-overlay-background);
+	border-radius: var(--ryu-window-radius, 0px);
+	-webkit-backdrop-filter: blur(var(--ryu-popup-overlay-blur));
+	backdrop-filter: blur(var(--ryu-popup-overlay-blur));
+}
+
+html:not([data-popup-overlay-blur="on"]) .ryu-popup-overlay {
+	display: none;
+}
+
+.ryu-dialog-overlay {
+	background-color: var(--ryu-dialog-overlay-background);
+	-webkit-backdrop-filter: blur(var(--ryu-dialog-overlay-blur));
+	backdrop-filter: blur(var(--ryu-dialog-overlay-blur));
+}
+
+/* Dialog transparent mode is OPT-OUT — the dimmed, blurred backdrop above is the
+   CSS base state, so it is what a surface paints on the very first frame with no
+   JS involved. `apps/web` has no toggle and never bootstraps the store, so the
+   base state is exactly what it ships.
+
+   The DESKTOP default is the opposite: "Blur dialog backgrounds" is OFF, and the
+   desktop reaches that by stamping data-dialog-overlay-blur="off" on <html> from
+   `apps/desktop/src/main.tsx` module scope, before the first render
+   (hooks/use-dialog-overlay-blur.ts). The off branch drops the backdrop and the
+   panel shadow for a flat transparent look.
+
+   Do NOT invert this to an "on"-gated rule to match the desktop default: that
+   would unblur every apps/web dialog, since nothing there stamps an attribute. */
+html[data-dialog-overlay-blur="off"] .ryu-dialog-overlay {
+	display: none;
+}
+
+html[data-dialog-overlay-blur="off"] [data-slot="dialog-content"],
+html[data-dialog-overlay-blur="off"] [data-slot="alert-dialog-content"],
+html[data-dialog-overlay-blur="off"] [data-slot="sheet-content"],
+html[data-dialog-overlay-blur="off"] [data-slot="drawer-content"] {
+	border: 1px solid color-mix(in oklch, var(--border) 50%, transparent) !important;
+	box-shadow: none !important;
+}
+
+html[data-dialog-overlay-blur="off"] [data-slot="drawer-content"]::before {
+	box-shadow: none !important;
+}

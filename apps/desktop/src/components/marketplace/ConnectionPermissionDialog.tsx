@@ -92,9 +92,9 @@ export function ConnectionPermissionDialog({
 					</DialogDescription>
 				</DialogHeader>
 
-				<div className="flex items-start gap-3 rounded-xl border border-amber-500/35 bg-amber-500/10 px-3 py-3 text-sm">
+				<div className="flex items-start gap-3 rounded-xl border border-warning/35 bg-warning/10 px-3 py-3 text-sm">
 					<HugeiconsIcon
-						className="mt-0.5 size-4 shrink-0 text-amber-600 dark:text-amber-300"
+						className="mt-0.5 size-4 shrink-0 text-status-warning"
 						icon={InformationCircleIcon}
 					/>
 					<div className="space-y-1">
@@ -173,7 +173,7 @@ export function ConnectionPermissionDialog({
 				</div>
 
 				{error ? (
-					<p className="text-destructive text-xs" role="alert">
+					<p className="text-status-destructive text-xs" role="alert">
 						{error}
 					</p>
 				) : null}

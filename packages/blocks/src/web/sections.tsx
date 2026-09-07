@@ -11,7 +11,6 @@ import { landingSubheadlineClass } from "./landing-typography.ts";
 import {
 	ProductBentoFrame,
 	ProductHeroFrame,
-	type ProductLandingStyle,
 } from "./product-landing-layouts.tsx";
 import { Reveal } from "./reveal.tsx";
 import { SectionTitle } from "./section-title.tsx";
@@ -60,7 +59,6 @@ function Cta({
 /* ------------------------------------------------------------------ */
 
 export function ProductHero({
-	landingStyle,
 	title,
 	subtitle,
 	primaryCta,
@@ -68,48 +66,24 @@ export function ProductHero({
 	visual,
 }: {
 	eyebrow: string;
-	landingStyle?: ProductLandingStyle;
 	title: string;
 	subtitle: string;
 	primaryCta: CtaLink;
 	secondaryCta?: CtaLink;
 	visual: ReactNode;
 }) {
-	if (landingStyle) {
-		return (
-			<ProductHeroFrame
-				actions={
-					<>
-						<Cta cta={primaryCta} />
-						{secondaryCta ? <Cta cta={secondaryCta} variant="ghost" /> : null}
-					</>
-				}
-				landingStyle={landingStyle}
-				subtitle={subtitle}
-				title={title}
-				visual={visual}
-			/>
-		);
-	}
-
 	return (
-		<section className="container mx-auto px-4 pt-16 pb-12 md:pt-24">
-			<div className="mx-auto grid max-w-6xl items-center gap-10 lg:grid-cols-2">
-				<div className="space-y-6">
-					<h1 className="text-balance font-medium text-4xl text-foreground leading-[1.1] tracking-tight md:text-5xl">
-						{title}
-					</h1>
-					<p className="max-w-md text-balance text-muted-foreground md:text-lg">
-						{subtitle}
-					</p>
-					<div className="flex flex-col gap-3 sm:flex-row">
-						<Cta cta={primaryCta} />
-						{secondaryCta ? <Cta cta={secondaryCta} variant="ghost" /> : null}
-					</div>
-				</div>
-				<Reveal className="lg:pl-4">{visual}</Reveal>
-			</div>
-		</section>
+		<ProductHeroFrame
+			actions={
+				<>
+					<Cta cta={primaryCta} />
+					{secondaryCta ? <Cta cta={secondaryCta} variant="ghost" /> : null}
+				</>
+			}
+			subtitle={subtitle}
+			title={title}
+			visual={visual}
+		/>
 	);
 }
 
@@ -122,7 +96,6 @@ export const sectionSubtitleClass = landingSubheadlineClass;
 export function SectionHeading({
 	title,
 	subtitle,
-	align = "left",
 	className,
 }: {
 	eyebrow?: string;
@@ -132,13 +105,7 @@ export function SectionHeading({
 	className?: string;
 }) {
 	return (
-		<StaggerLines
-			className={cn(
-				"mb-10 max-w-2xl",
-				align === "center" && "mx-auto text-center",
-				className
-			)}
-		>
+		<StaggerLines className={cn("mb-10 max-w-2xl", className)}>
 			<SectionTitle title={title} />
 			{subtitle ? <p className={sectionSubtitleClass}>{subtitle}</p> : null}
 		</StaggerLines>
@@ -196,30 +163,8 @@ export interface BentoItem {
 	visual?: ReactNode;
 }
 
-export function BentoGrid({
-	items,
-	landingStyle,
-}: {
-	items: BentoItem[];
-	landingStyle?: ProductLandingStyle;
-}) {
-	if (landingStyle) {
-		return <ProductBentoFrame items={items} landingStyle={landingStyle} />;
-	}
-
-	return (
-		<div className="grid auto-rows-[minmax(0,1fr)] grid-cols-1 gap-3 md:grid-cols-2 lg:grid-cols-3">
-			{items.map((item, i) => (
-				<Reveal
-					className={cn("min-h-52", item.span)}
-					delay={(i % 3) * 0.08}
-					key={item.title}
-				>
-					<BentoCard item={item} />
-				</Reveal>
-			))}
-		</div>
-	);
+export function BentoGrid({ items }: { items: BentoItem[] }) {
+	return <ProductBentoFrame items={items} />;
 }
 
 export function BentoCard({ item }: { item: BentoItem }) {
@@ -317,21 +262,23 @@ export function ProductCta({
 }) {
 	return (
 		<section className="container mx-auto px-4 py-24">
-			<div className="mx-auto max-w-2xl text-center">
+			<div className="mx-auto max-w-6xl">
 				{/* Only the title and its supporting line stagger — the button row below
 				    is a flex layout and `.t-stagger-line` would force it to block. */}
 				<StaggerLines>
-					<SectionTitle className="mx-auto" title={title} />
-					<p className={cn(landingSubheadlineClass, "mx-auto mt-4 max-w-md")}>
-						{subtitle}
-					</p>
+					<SectionTitle title={title} />
+					{subtitle ? (
+						<p className={cn(landingSubheadlineClass, "mt-4 max-w-xl")}>
+							{subtitle}
+						</p>
+					) : null}
 				</StaggerLines>
-				<div className="mt-8 flex flex-col items-center gap-3 sm:flex-row sm:justify-center">
+				<div className="mt-8 flex flex-wrap items-center gap-3">
 					<Cta cta={primaryCta} />
 					{secondaryCta ? <Cta cta={secondaryCta} variant="ghost" /> : null}
 				</div>
 				{note ? (
-					<p className="mt-4 text-muted-foreground/60 text-xs">{note}</p>
+					<p className="mt-4 text-muted-foreground text-sm">{note}</p>
 				) : null}
 			</div>
 		</section>

@@ -1,4 +1,5 @@
 import { I18nProvider } from "@ryu/i18n/react";
+import { I18nDirectionProvider } from "@ryu/ui/components/direction.tsx";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { ThemeProvider } from "next-themes";
 import { useEffect, useMemo } from "react";
@@ -83,30 +84,33 @@ function ProofSurface() {
 		<QueryClientProvider client={queryClient}>
 			<AppSurfaceProvider surface="desktop">
 				<I18nProvider>
-					<ThemeProvider attribute="class" defaultTheme="dark" enableSystem>
-						<main
-							className="min-h-dvh bg-background p-8 text-foreground"
-							data-testid="desktop-general-settings-proof"
-						>
-							<div className="mx-auto flex max-w-5xl flex-col gap-6">
-								<header className="rounded-2xl border bg-card p-6 shadow-sm">
-									<p className="font-medium text-muted-foreground text-xs uppercase tracking-wide">
-										Desktop settings verification
-									</p>
-									<h1 className="mt-2 font-semibold text-2xl">
-										General preferences
-									</h1>
-									<p className="mt-2 max-w-2xl text-muted-foreground text-sm">
-										The live Desktop settings surface, including persisted
-										workspace defaults and the active node's keep-awake policy.
-									</p>
-								</header>
-								<section className="rounded-2xl border bg-card p-6 shadow-sm">
-									<GeneralTab />
-								</section>
-							</div>
-						</main>
-					</ThemeProvider>
+					<I18nDirectionProvider>
+						<ThemeProvider attribute="class" defaultTheme="dark" enableSystem>
+							<main
+								className="min-h-dvh bg-background p-8 text-foreground"
+								data-testid="desktop-general-settings-proof"
+							>
+								<div className="mx-auto flex max-w-5xl flex-col gap-6">
+									<header className="rounded-2xl border bg-card p-6 shadow-sm">
+										<p className="font-medium text-muted-foreground text-xs uppercase tracking-wide">
+											Desktop settings verification
+										</p>
+										<h1 className="mt-2 font-semibold text-2xl">
+											General preferences
+										</h1>
+										<p className="mt-2 max-w-2xl text-muted-foreground text-sm">
+											The live Desktop settings surface, including persisted
+											workspace defaults and the active node's keep-awake
+											policy.
+										</p>
+									</header>
+									<section className="rounded-2xl border bg-card p-6 shadow-sm">
+										<GeneralTab />
+									</section>
+								</div>
+							</main>
+						</ThemeProvider>
+					</I18nDirectionProvider>
 				</I18nProvider>
 			</AppSurfaceProvider>
 		</QueryClientProvider>

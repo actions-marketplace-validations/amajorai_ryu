@@ -144,12 +144,12 @@ function pct(value: number): string {
 
 function scoreTone(score: number): string {
 	if (score >= 0.75) {
-		return "text-success dark:text-success";
+		return "text-status-success dark:text-status-success";
 	}
 	if (score >= 0.5) {
-		return "text-warning dark:text-warning";
+		return "text-status-warning dark:text-status-warning";
 	}
-	return "text-destructive";
+	return "text-status-destructive";
 }
 
 function parseThreshold(value: string): number | undefined {
@@ -1383,7 +1383,7 @@ function PromptTestCases({
 			</div>
 
 			{suiteError ? (
-				<p className="text-destructive text-xs">{suiteError}</p>
+				<p className="text-status-destructive text-xs">{suiteError}</p>
 			) : null}
 
 			<PromptVariantsEditor
@@ -1461,7 +1461,9 @@ function PromptTestCases({
 				/>
 			</div>
 
-			{error ? <p className="text-destructive text-xs">{error}</p> : null}
+			{error ? (
+				<p className="text-status-destructive text-xs">{error}</p>
+			) : null}
 
 			<PromptRunHistory
 				onSelect={async (runId) => {
@@ -2217,7 +2219,7 @@ function RunHint({
 	}
 	if (largeMatrix) {
 		return (
-			<span className="text-warning text-xs dark:text-warning">
+			<span className="text-status-warning text-xs dark:text-status-warning">
 				Large matrix — this may be slow and could hit a 120s timeout.
 			</span>
 		);
@@ -2507,7 +2509,7 @@ function MatrixCell({
 		<div className="flex flex-col gap-1.5">
 			<div className="flex flex-wrap items-center gap-1">
 				<Badge
-					className={`text-[10px] ${score.assertions_pass ? "" : "border-destructive text-destructive"}`}
+					className={`text-[10px] ${score.assertions_pass ? "" : "border-destructive text-status-destructive"}`}
 					variant={score.assertions_pass ? "secondary" : "outline"}
 				>
 					{score.assertions_pass ? "pass" : "fail"}
@@ -2521,7 +2523,7 @@ function MatrixCell({
 				<div className="flex flex-wrap gap-1">
 					{score.evaluators.map((evaluator) => (
 						<span
-							className={`rounded px-1 py-0.5 text-[10px] ${evaluator.pass ? "bg-success/15 text-success dark:text-success" : "bg-warning/15 text-warning dark:text-warning"}`}
+							className={`rounded px-1 py-0.5 text-[10px] ${evaluator.pass ? "bg-success/15 text-status-success dark:text-status-success" : "bg-warning/15 text-status-warning dark:text-status-warning"}`}
 							key={evaluator.id}
 						>
 							{evaluator.id}:{" "}
@@ -2601,7 +2603,7 @@ function AssertionChips({ assertions }: { assertions: AssertionResult[] }) {
 	return (
 		<div className="flex flex-wrap gap-1">
 			{assertions.map((a, i) => {
-				const className = `rounded px-1 py-0.5 text-[10px] ${a.pass ? "bg-success/15 text-success dark:text-success" : "bg-destructive/15 text-destructive"}`;
+				const className = `rounded px-1 py-0.5 text-[10px] ${a.pass ? "bg-success/15 text-status-success dark:text-status-success" : "bg-destructive/15 text-status-destructive"}`;
 				return a.detail ? (
 					<Tooltip
 						// biome-ignore lint/suspicious/noArrayIndexKey: assertion results are positional and have no stable id
@@ -2697,7 +2699,7 @@ function PreviewPanel({ prompt, agentId, target, convId }: PreviewPanelProps) {
 			</div>
 
 			{error ? (
-				<p className="text-destructive text-xs">{error.message}</p>
+				<p className="text-status-destructive text-xs">{error.message}</p>
 			) : null}
 
 			{responseText ? (

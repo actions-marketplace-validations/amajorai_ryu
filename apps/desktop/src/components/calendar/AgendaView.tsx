@@ -34,7 +34,7 @@ const JOB_STATUS_META: Record<
 		label: "Disabled",
 	},
 	failure: {
-		className: "text-destructive",
+		className: "text-status-destructive",
 		dotClassName: "bg-destructive",
 		label: "Failed",
 	},
@@ -44,12 +44,12 @@ const JOB_STATUS_META: Record<
 		label: "No runs",
 	},
 	scheduled: {
-		className: "text-warning",
+		className: "text-status-warning",
 		dotClassName: "bg-warning",
 		label: "Scheduled",
 	},
 	success: {
-		className: "text-success",
+		className: "text-status-success",
 		dotClassName: "bg-success",
 		label: "Operational",
 	},

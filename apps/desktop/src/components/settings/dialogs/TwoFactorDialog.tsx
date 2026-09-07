@@ -507,7 +507,7 @@ export function TwoFactorDialog({
 												value={confirmCode}
 											/>
 											{confirmStatus === "error" && (
-												<p className="text-destructive text-sm">
+												<p className="text-sm text-status-destructive">
 													That code doesn&apos;t match. Save the codes above —
 													without them you can be locked out of your account.
 												</p>

@@ -125,9 +125,9 @@ export function SupportAccessTab() {
 			<Separator />
 
 			{isActive && grant ? (
-				<div className="space-y-3 rounded-lg border border-amber-500/40 bg-amber-500/5 p-4">
+				<div className="space-y-3 rounded-lg border border-warning/40 bg-warning/5 p-4">
 					<div className="flex items-center gap-2">
-						<ShieldCheck className="size-4 text-amber-600" />
+						<ShieldCheck className="size-4 text-status-warning" />
 						<p className="font-medium text-sm">Support access is active</p>
 						{grant.activeSession && (
 							<Badge className="text-xs" variant="secondary">

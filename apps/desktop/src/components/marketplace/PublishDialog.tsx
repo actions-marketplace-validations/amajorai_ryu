@@ -289,7 +289,7 @@ export function PublishDialog({
 				) : (
 					<div className="flex flex-col gap-4 py-1">
 						{signedIn ? null : (
-							<p className="rounded-xl bg-destructive/10 p-3 text-destructive text-sm">
+							<p className="rounded-xl bg-destructive/10 p-3 text-sm text-status-destructive">
 								Sign in to your Ryu account to publish to the marketplace.
 							</p>
 						)}
@@ -473,7 +473,9 @@ export function PublishDialog({
 							</div>
 						) : null}
 
-						{error ? <p className="text-destructive text-sm">{error}</p> : null}
+						{error ? (
+							<p className="text-sm text-status-destructive">{error}</p>
+						) : null}
 
 						<DialogFooter>
 							<Button onClick={() => handleOpenChange(false)} variant="ghost">

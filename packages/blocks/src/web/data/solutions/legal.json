@@ -4,10 +4,10 @@
   "navLabel": "Legal",
   "category": "Legal & Compliance",
   "icon": "Scale",
-  "tagline": "Draft, review, and research with agents that keep privileged data on your machine.",
+  "tagline": "Compare contract clauses and prepare draft summaries for legal review.",
   "heroEyebrow": "Ryu for Legal",
-  "heroTitle": "An AI legal team that never leaks.",
-  "heroSubtitle": "Review contracts, surface risky clauses, and draft first passes with agents that run on your own machine. Privileged matter never leaves your device unless you say so, and every model call is governed, logged, and auditable.",
+  "heroTitle": "Ryu for legal",
+  "heroSubtitle": "Compare contract clauses and prepare draft summaries for legal review.",
   "visualKey": "GatewayVisual",
   "intro": "Legal work is high-stakes and confidential: a contract review, a discovery summary, or a memo can't be pasted into a public chatbot that trains on your data. Ryu runs the same caliber of agent locally, with the Gateway redacting sensitive data on egress and recording every call, so you get speed without surrendering privilege.",
   "highlights": [

@@ -216,14 +216,14 @@ export function Comment(props: {
 				</h4>
 
 				<div className="text-muted-foreground/80 text-xs leading-none">
-					<span className="mr-1">
+					<span className="me-1">
 						{formatCommentDate(new Date(comment.createdAt))}
 					</span>
 					{comment.isEdited && <span>(edited)</span>}
 				</div>
 
 				{isMyComment && (hovering || dropdownOpen) && (
-					<div className="absolute top-0 right-0 flex space-x-1">
+					<div className="absolute end-0 top-0 flex space-x-1 rtl:space-x-reverse">
 						{index === 0 && (
 							<Button
 								className="h-6 p-1 text-muted-foreground"
@@ -257,18 +257,18 @@ export function Comment(props: {
 			</div>
 
 			{isFirst && showDocumentContent && (
-				<div className="relative mt-1 flex pl-[32px] text-sm text-subtle-foreground">
+				<div className="relative mt-1 flex ps-[32px] text-sm text-subtle-foreground">
 					{discussionLength > 1 && (
-						<div className="absolute top-[5px] left-3 h-full w-0.5 shrink-0 bg-muted" />
+						<div className="absolute start-3 top-[5px] h-full w-0.5 shrink-0 bg-muted" />
 					)}
 					<div className="my-px w-0.5 shrink-0 bg-highlight" />
-					{documentContent && <div className="ml-2">{documentContent}</div>}
+					{documentContent && <div className="ms-2">{documentContent}</div>}
 				</div>
 			)}
 
-			<div className="relative my-1 pl-[26px]">
+			<div className="relative my-1 ps-[26px]">
 				{!isLast && (
-					<div className="absolute top-0 left-3 h-full w-0.5 shrink-0 bg-muted" />
+					<div className="absolute start-3 top-0 h-full w-0.5 shrink-0 bg-muted" />
 				)}
 				<Plate editor={commentEditor} readOnly={!isEditing}>
 					<EditorContainer variant="comment">
@@ -279,7 +279,7 @@ export function Comment(props: {
 						/>
 
 						{isEditing && (
-							<div className="ml-auto flex shrink-0 gap-1">
+							<div className="ms-auto flex shrink-0 gap-1">
 								<Button
 									className="size-[28px]"
 									onClick={(e: MouseEvent<HTMLButtonElement>) => {
@@ -582,7 +582,7 @@ export function CommentCreateForm({
 
 	return (
 		<div className={cn("flex w-full", className)}>
-			<div className="mt-2 mr-1 shrink-0">
+			<div className="me-1 mt-2 shrink-0">
 				{/* Replace to your own backend or refer to potion */}
 				<Avatar className="size-5">
 					<AvatarImage alt={userInfo?.name} src={userInfo?.avatarUrl} />
@@ -601,7 +601,7 @@ export function CommentCreateForm({
 						<Editor
 							autoComplete="off"
 							autoFocus={autoFocus}
-							className="min-h-[25px] grow pt-0.5 pr-8"
+							className="min-h-[25px] grow pe-8 pt-0.5"
 							onKeyDown={(e) => {
 								if (e.key === "Enter" && !e.shiftKey) {
 									e.preventDefault();
@@ -613,7 +613,7 @@ export function CommentCreateForm({
 						/>
 
 						<Button
-							className="absolute right-0.5 bottom-0.5 ml-auto size-6 shrink-0"
+							className="absolute end-0.5 bottom-0.5 ms-auto size-6 shrink-0"
 							disabled={commentContent.trim().length === 0}
 							onClick={(e) => {
 								e.stopPropagation();

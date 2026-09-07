@@ -33,36 +33,56 @@ export function chatMessageText(message: ChatSearchableMessage): string {
 	return typeof message.content === "string" ? message.content : "";
 }
 
-/**
- * Find literal, case-insensitive matches in the messages currently loaded into
- * the active chat. The preceding user message is the scroll anchor for an
- * assistant match because the transcript groups both sides into one turn.
- */
-export function searchChatMessages(
-	messages: readonly ChatSearchableMessage[],
+/** A snapshot of visible text; rebuild when the loaded messages change. */
+export interface ChatSearchIndexEntry extends ChatSearchMatch {
+	normalizedContent: string;
+}
+
+export function buildChatSearchIndex(
+	messages: readonly ChatSearchableMessage[]
+): ChatSearchIndexEntry[] {
+	let currentAnchorMessageId: string | null = null;
+	return messages.map((message) => {
+		if (message.role === "user") {
+			currentAnchorMessageId = message.id;
+		}
+		const content = chatMessageText(message);
+		return {
+			anchorMessageId: currentAnchorMessageId ?? message.id,
+			content,
+			messageId: message.id,
+			role: message.role?.trim() || "message",
+			normalizedContent: content.toLocaleLowerCase(),
+		};
+	});
+}
+
+/** Find literal, case-insensitive matches without normalizing history per keypress. */
+export function searchChatIndex(
+	index: readonly ChatSearchIndexEntry[],
 	query: string
 ): ChatSearchMatch[] {
 	const normalizedQuery = query.trim().toLocaleLowerCase();
 	if (!normalizedQuery) {
 		return [];
 	}
-
 	const matches: ChatSearchMatch[] = [];
-	let currentAnchorMessageId: string | null = null;
-	for (const message of messages) {
-		if (message.role === "user") {
-			currentAnchorMessageId = message.id;
+	for (const entry of index) {
+		if (entry.normalizedContent.includes(normalizedQuery)) {
+			const { normalizedContent: _, ...match } = entry;
+			matches.push(match);
 		}
-		const content = chatMessageText(message);
-		if (!content.toLocaleLowerCase().includes(normalizedQuery)) {
-			continue;
-		}
-		matches.push({
-			anchorMessageId: currentAnchorMessageId ?? message.id,
-			content,
-			messageId: message.id,
-			role: message.role?.trim() || "message",
-		});
 	}
 	return matches;
+}
+
+/** One-shot search for callers that do not retain an index. */
+export function searchChatMessages(
+	messages: readonly ChatSearchableMessage[],
+	query: string
+): ChatSearchMatch[] {
+	if (!query.trim()) {
+		return [];
+	}
+	return searchChatIndex(buildChatSearchIndex(messages), query);
 }

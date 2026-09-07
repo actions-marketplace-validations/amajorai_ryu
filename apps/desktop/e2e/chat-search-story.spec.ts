@@ -7,6 +7,8 @@ const STORY_URL = "/chat-search-story.html";
 test("Ctrl+F opens chat search, cycles to files, and preserves the query", async ({
 	page,
 }, testInfo) => {
+	const errors: string[] = [];
+	page.on("pageerror", (error) => errors.push(error.message));
 	await page.goto(STORY_URL);
 	await expect(page.getByTestId("search-state")).toContainText("Press Ctrl+F");
 
@@ -52,4 +54,11 @@ test("Ctrl+F opens chat search, cycles to files, and preserves the query", async
 		"Search chat messages"
 	);
 	await expect(page.getByTestId("chat-search-status")).toHaveText("1 of 2");
+	expect(errors).toEqual([]);
+	await page.screenshot({
+		fullPage: true,
+		path: testInfo.outputPath("chat-search-product.png"),
+	});
+	await searchInput.press("Escape");
+	await expect(searchInput).not.toBeVisible();
 });

@@ -333,7 +333,7 @@ export default function StoreCatalogCard({
 						membershipIncluded={membershipIncluded}
 					/>
 					{stabilityLabel(stability) ? (
-						<span className="shrink-0 rounded-sm border border-amber-500/40 px-1 py-px text-[10px] text-amber-600 leading-tight">
+						<span className="shrink-0 rounded-sm border border-warning/40 px-1 py-px text-[10px] text-status-warning leading-tight">
 							{stabilityLabel(stability)}
 						</span>
 					) : null}

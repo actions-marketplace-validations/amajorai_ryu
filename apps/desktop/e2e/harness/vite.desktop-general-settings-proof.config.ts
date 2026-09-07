@@ -19,7 +19,12 @@ export default defineConfig({
 	publicDir: path.resolve(desktopRoot, "public"),
 	clearScreen: false,
 	resolve: {
-		alias: { "@": desktopRoot },
+		dedupe: ["react", "react-dom"],
+		alias: {
+			"@": desktopRoot,
+			react: path.resolve(desktopRoot, "node_modules/react"),
+			"react-dom": path.resolve(desktopRoot, "node_modules/react-dom"),
+		},
 	},
 	server: {
 		host: "127.0.0.1",

@@ -132,7 +132,7 @@ export function VerificationPopover({
 				className={cn(
 					"pointer-events-auto relative z-10 inline-flex size-5 shrink-0 items-center justify-center rounded-sm outline-none transition-colors focus-visible:ring-2 focus-visible:ring-ring/60",
 					variant === "shield"
-						? "text-success hover:text-success/80"
+						? "text-status-success hover:text-status-success/80"
 						: "hover:text-foreground",
 					className
 				)}
@@ -152,7 +152,9 @@ export function VerificationPopover({
 				<PopoverHeader>
 					<PopoverTitle className="flex items-center gap-2">
 						<VerificationMark
-							className={variant === "shield" ? "text-success" : className}
+							className={
+								variant === "shield" ? "text-status-success" : className
+							}
 							variant={variant}
 						/>
 						{title}
@@ -187,7 +189,7 @@ export function VerificationPopover({
 									>
 										<MethodIcon
 											aria-hidden="true"
-											className="size-3.5 text-success"
+											className="size-3.5 text-status-success"
 										/>
 										<span>{method.label}</span>
 									</li>

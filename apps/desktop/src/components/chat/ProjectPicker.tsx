@@ -484,7 +484,9 @@ export function CreateFolderDialog({
 					spellCheck={false}
 					value={name}
 				/>
-				{error && <p className="text-[12px] text-destructive">{error}</p>}
+				{error && (
+					<p className="text-[12px] text-status-destructive">{error}</p>
+				)}
 				<DialogFooter>
 					<DialogClose render={<Button variant="ghost" />}>Cancel</DialogClose>
 					<Button
@@ -641,7 +643,7 @@ export function CloneFolderDialog({
 						/>
 					</div>
 					{error && (
-						<p className="text-destructive text-xs" role="alert">
+						<p className="text-status-destructive text-xs" role="alert">
 							{error}
 						</p>
 					)}

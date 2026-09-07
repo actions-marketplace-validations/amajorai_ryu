@@ -88,7 +88,7 @@ function KeySection({ custody }: { custody: KeyCustody }) {
 				title="Encryption key"
 			>
 				<SettingsCard className="flex flex-col gap-2">
-					<div className="font-medium text-destructive text-sm">
+					<div className="font-medium text-sm text-status-destructive">
 						This node cannot load its encryption key
 					</div>
 					<div className="text-muted-foreground text-xs">

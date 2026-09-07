@@ -137,9 +137,7 @@ export function CodeBlock({
 				<span
 					className={cn(
 						"ml-auto inline-flex shrink-0 items-center gap-1 font-medium text-[10px]",
-						streaming
-							? "text-blue-600 dark:text-blue-400"
-							: "text-emerald-600 dark:text-emerald-400"
+						streaming ? "text-status-info" : "text-status-success"
 					)}
 				>
 					{streaming ? (
@@ -186,7 +184,7 @@ export function CodeBlock({
 										showLineNumbers
 											? "grid-cols-[2.75rem_minmax(0,1fr)]"
 											: "grid-cols-1",
-										highlighted.has(lineNumber) && "bg-blue-500/[0.07]"
+										highlighted.has(lineNumber) && "bg-info/[0.07]"
 									)}
 									key={line.offset}
 								>

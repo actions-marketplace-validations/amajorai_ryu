@@ -873,13 +873,13 @@ function ModelList({
 											{m.installed && (
 												<HugeiconsIcon
 													aria-label="Added"
-													className="size-3.5 shrink-0 text-success"
+													className="size-3.5 shrink-0 text-status-success"
 													icon={CheckmarkCircle02Icon}
 												/>
 											)}
 											{m.gated && (
 												<HugeiconsIcon
-													className="size-3.5 shrink-0 text-warning"
+													className="size-3.5 shrink-0 text-status-warning"
 													icon={SquareLock01Icon}
 												/>
 											)}
@@ -915,7 +915,7 @@ function ModelList({
 								/>
 								{!m.compatible && (
 									<Badge
-										className="border-warning/30 bg-warning/5 text-warning dark:text-warning"
+										className="border-warning/30 bg-warning/5 text-status-warning"
 										variant="outline"
 									>
 										{m.format === "mlx"
@@ -1047,7 +1047,7 @@ function ModelDetailHeader({
 					{card.gated && (
 						<Badge className="gap-1" variant="secondary">
 							<HugeiconsIcon
-								className="size-3.5 text-warning"
+								className="size-3.5 text-status-warning"
 								icon={SquareLock01Icon}
 							/>
 							Gated
@@ -1056,7 +1056,7 @@ function ModelDetailHeader({
 					{card.installed && (
 						<Badge className="gap-1" variant="secondary">
 							<HugeiconsIcon
-								className="size-3.5 text-success"
+								className="size-3.5 text-status-success"
 								icon={CheckmarkCircle02Icon}
 							/>
 							Added
@@ -1369,7 +1369,7 @@ function LlmfitEstimateBlock({
 		<section className="flex flex-col gap-2">
 			<h3 className="font-medium text-sm">Speed estimate</h3>
 			{body}
-			{error && <p className="text-destructive text-xs">{error}</p>}
+			{error && <p className="text-status-destructive text-xs">{error}</p>}
 		</section>
 	);
 }
@@ -1477,7 +1477,7 @@ function ModelDetailPanel({
 	}
 	if (error) {
 		return (
-			<div className="p-4 text-destructive text-sm">
+			<div className="p-4 text-sm text-status-destructive">
 				Couldn't load this model: {error}
 			</div>
 		);
@@ -1543,7 +1543,7 @@ function ModelDetailPanel({
 			{card.gated && (
 				<section className="flex gap-2 rounded-lg border border-warning/30 bg-warning/5 px-4 py-3 text-muted-foreground text-xs">
 					<HugeiconsIcon
-						className="mt-0.5 size-4 shrink-0 text-warning"
+						className="mt-0.5 size-4 shrink-0 text-status-warning"
 						icon={SquareLock01Icon}
 					/>
 					<p>
@@ -1785,7 +1785,7 @@ function InstalledButton({
 		>
 			{!busy && (
 				<HugeiconsIcon
-					className={armed ? "size-3.5" : "size-3.5 text-success"}
+					className={armed ? "size-3.5" : "size-3.5 text-status-success"}
 					icon={armed ? Delete01Icon : CheckmarkCircle02Icon}
 				/>
 			)}
@@ -2172,7 +2172,7 @@ function FileSections({
 				<section className="flex flex-col gap-2">
 					<h3 className="flex items-center gap-1.5 font-medium text-sm">
 						<HugeiconsIcon
-							className="size-4 text-success"
+							className="size-4 text-status-success"
 							icon={CheckmarkCircle02Icon}
 						/>
 						Added

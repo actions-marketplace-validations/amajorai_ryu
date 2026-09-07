@@ -1612,6 +1612,65 @@ mod tests {
     use crate::sidecar::BoxFuture;
     use std::sync::atomic::{AtomicBool, Ordering};
 
+    #[tokio::test]
+    async fn typed_team_client_never_dials_a_refused_or_stopped_sidecar() {
+        let manager = SidecarManager::new_noop();
+        let name = "@ryu/teams/ryu-teams";
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let client = crate::teams_client::TeamsClient::new(Arc::clone(&manager));
+        assert!(manager
+            .register_and_start(FakeSidecar::with_port(name, port))
+            .await
+            .is_err());
+        assert!(client
+            .get("test-team")
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("not registered"));
+        assert_eq!(
+            listener.accept().unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+
+        drop(listener);
+        let sidecar = FakeSidecar::with_port(name, port);
+        manager.register_and_start(sidecar.clone()).await.unwrap();
+        // The same client now resolves the live registration instead of retaining
+        // its initial unavailable state or a manifest port.
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", port))
+            .await
+            .unwrap();
+        let server = tokio::spawn(async move {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = [0u8; 4096];
+            let read = stream.read(&mut request).await.unwrap();
+            assert!(
+                String::from_utf8_lossy(&request[..read]).starts_with("GET /api/teams/test-team ")
+            );
+            let body = r#"{"team":{"id":"test-team","name":"Test","members":[],"coordination":"broadcast"}}"#;
+            stream.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
+            listener
+        });
+        let team = tokio::time::timeout(Duration::from_secs(5), client.get("test-team"))
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(team.id, "test-team");
+        let listener = server.await.unwrap();
+        sidecar.running.store(false, Ordering::SeqCst);
+        assert!(client.get("test-team").await.is_err());
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), listener.accept())
+                .await
+                .is_err()
+        );
+    }
+
     /// A minimal in-memory [`Sidecar`] for exercising the runtime-registration
     /// (dynamic) path without a real process, download, or network.
     struct FakeSidecar {

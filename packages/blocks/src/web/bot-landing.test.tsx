@@ -8,7 +8,7 @@ test("Bot landing includes the managed product story", () => {
 	expect(html).toContain('data-testid="product-page-bot"');
 	expect(html).toContain("data-product-hero-layout=");
 	expect(html).toContain("data-product-bento-layout=");
-	expect(html).toContain("Give AI a job, not a setup");
+	expect(html).toContain("Ask Ryu Bot to handle a task");
 	expect(html).toContain("Ryu Bot");
 	expect(html).toContain("Weekly report");
 	expect(html).not.toContain("Ryu Bot is here");

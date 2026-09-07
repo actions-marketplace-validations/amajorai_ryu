@@ -512,11 +512,11 @@ describe("the spawn-time premise the timing caveat rests on", () => {
 				"\"CODEX_HOME='{}' npx -y @zed-industries/codex-acp\""
 			)
 		).toBe(PRESENT);
-		// The flagship's own injection, inline in `ryu_agent_route`.
+		// The flagship injects the Gateway into the structured spawn environment.
 		expect(
 			anchor(
 				"apps/core/src/sidecar/adapters/mod.rs",
-				'"OPENAI_BASE_URL={gateway_v1} OPENAI_API_KEY={token} "'
+				'env.push(("OPENAI_BASE_URL".to_owned(), gateway_v1));'
 			)
 		).toBe(PRESENT);
 	});

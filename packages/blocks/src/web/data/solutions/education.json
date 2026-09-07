@@ -4,10 +4,10 @@
   "navLabel": "Education",
   "category": "Industries",
   "icon": "GraduationCap",
-  "tagline": "Plan lessons, build materials, and give feedback with agents that keep student data private.",
+  "tagline": "Prepare lesson plans, practice materials, and draft feedback using your curriculum.",
   "heroEyebrow": "Ryu for Education",
-  "heroTitle": "More teaching, less prep, with student data kept on-device.",
-  "heroSubtitle": "Plan lessons, generate practice sets, and draft feedback with agents that run on your machine and ground answers in your own curriculum. Student information stays on-device by default, and every model call is governed and logged.",
+  "heroTitle": "Ryu for education",
+  "heroSubtitle": "Prepare lesson plans, practice materials, and draft feedback using your curriculum.",
   "visualKey": "SkillsVisual",
   "intro": "Educators spend evenings on prep, grading drafts, and paperwork while student records demand strict privacy. Ryu runs capable agents locally so student data stays on-device, grounds answers in your own curriculum, and drafts materials and feedback you review. It supports the teacher, it never grades or decides on its own.",
   "highlights": [

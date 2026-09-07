@@ -731,7 +731,7 @@ function SkillSourcePicker({
 								/>
 							</div>
 							{addError && (
-								<p className="text-destructive text-xs">{addError}</p>
+								<p className="text-status-destructive text-xs">{addError}</p>
 							)}
 							<Button
 								disabled={sourceActionId !== null}
@@ -1061,7 +1061,7 @@ function SkillDetailPanel({
 	}
 	if (error) {
 		return (
-			<div className="p-4 text-destructive text-sm">
+			<div className="p-4 text-sm text-status-destructive">
 				Couldn't load this skill: {error}
 			</div>
 		);
@@ -1395,7 +1395,7 @@ function SkillDetailAction({
 			) : null}
 			<Badge className="gap-1" variant="secondary">
 				<HugeiconsIcon
-					className="size-3.5 text-success"
+					className="size-3.5 text-status-success"
 					icon={CheckmarkCircle02Icon}
 				/>
 				Added
@@ -1452,8 +1452,8 @@ function SkillAuditList({
 							<span
 								className={
 									audit.status.toLowerCase() === "pass"
-										? "font-mono text-success uppercase"
-										: "font-mono text-warning uppercase"
+										? "font-mono text-status-success uppercase"
+										: "font-mono text-status-warning uppercase"
 								}
 							>
 								{audit.status}

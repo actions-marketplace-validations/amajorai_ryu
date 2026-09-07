@@ -201,7 +201,11 @@ export function AgentUI({
 				</AgentUiSubmissionStateProvider>
 			</RenderErrorBoundary>
 			{submitError ? (
-				<p aria-live="polite" className="text-destructive text-xs" role="alert">
+				<p
+					aria-live="polite"
+					className="text-status-destructive text-xs"
+					role="alert"
+				>
 					{submitError}
 				</p>
 			) : pending ? (

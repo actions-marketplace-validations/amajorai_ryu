@@ -57,7 +57,7 @@ export function WidgetCard({
 							variant: "ghost",
 							size: "icon",
 							className:
-								"size-6 text-muted-foreground opacity-0 transition-opacity focus-visible:opacity-100 group-hover:opacity-100 data-[state=open]:opacity-100",
+								"size-6 text-muted-foreground opacity-0 transition-opacity focus-visible:opacity-100 group-hover:opacity-100 aria-expanded:opacity-100",
 						})}
 						onPointerDown={(e) => e.stopPropagation()}
 					>
@@ -75,7 +75,7 @@ export function WidgetCard({
 			</div>
 			<CardContent className="min-h-0 flex-1 overflow-hidden p-3">
 				{error ? (
-					<div className="flex h-full items-center justify-center text-center text-destructive text-xs">
+					<div className="flex h-full items-center justify-center text-center text-status-destructive text-xs">
 						{error}
 					</div>
 				) : (

@@ -1,3 +1,11 @@
+import type { RouteClaim } from "./rpc-routes.ts";
+
+export {
+	isShellSafeRoute,
+	SHELL_SAFE_ROUTE_PREFIXES,
+	validatePluginRoute,
+} from "./rpc-routes.ts";
+
 // The capability-gated RPC dispatch for the desktop extension host (#446).
 //
 // This is the PURE half of the host message router: given an RPC method, its
@@ -40,21 +48,26 @@ import type {
 	RyuNodeShareOrigin,
 } from "./app-bridge.ts";
 
+import {
+	CapabilityError,
+	CodedRpcError,
+	type RpcErrorPayload,
+} from "./rpc-errors.ts";
+
+export {
+	CapabilityError,
+	CodedRpcError,
+	type RpcErrorPayload,
+	toRpcError,
+	type WidgetRpcErrorCode,
+} from "./rpc-errors.ts";
+
 /** A request envelope a plugin sends over the bridge. `id` correlates the reply. */
 export interface RpcRequest {
 	args: unknown[];
 	id: number;
 	kind: "ryu-plugin-rpc";
 	method: string;
-}
-
-/** A structured error the host relays to a widget (decisions doc D6). `code` is a
- *  closed enum so the widget can branch without string matching; `message` is a
- *  human-readable detail. The legacy plugin path still uses a plain string error,
- *  so {@link RpcResponse.error} is a union and every reader must accept both. */
-export interface RpcErrorPayload {
-	code: WidgetRpcErrorCode;
-	message: string;
 }
 
 /** The reply envelope the host sends back. Exactly one of `result`/`error`.
@@ -75,26 +88,6 @@ export interface RpcChunk {
 	delta: string;
 	id: number;
 	kind: "ryu-plugin-rpc-chunk";
-}
-
-/** The closed set of widget RPC error codes (decisions doc D6). */
-export type WidgetRpcErrorCode =
-	| "denied"
-	| "not_found"
-	| "over_budget"
-	| "server_error"
-	| "invalid_args";
-
-const WIDGET_RPC_ERROR_CODES = new Set<string>([
-	"denied",
-	"not_found",
-	"over_budget",
-	"server_error",
-	"invalid_args",
-] satisfies WidgetRpcErrorCode[]);
-
-function isWidgetRpcErrorCode(value: unknown): value is WidgetRpcErrorCode {
-	return typeof value === "string" && WIDGET_RPC_ERROR_CODES.has(value);
 }
 
 /** Host → widget push envelope (spec §1.2 `HostPush`). Merges the present keys of
@@ -400,11 +393,7 @@ export type Capability =
  *  `ui.registerRoute`; the host validates it with {@link validatePluginRoute}
  *  before accepting. Kept minimal (path + title) — the anti-phishing enforcement
  *  point (#6). */
-export interface RouteClaim {
-	path: string;
-	title: string;
-}
-
+export type { RouteClaim } from "./rpc-routes.ts";
 // --- Monitor payload shapes (grant `monitors:crud`). These aliases point at the
 // canonical Core Client wire model so the RPC boundary, Desktop, and Companion all
 // carry the same required fields and notification variants. ---
@@ -2292,118 +2281,6 @@ export function capabilitiesFromGrants(
 		}
 	}
 	return caps;
-}
-
-/**
- * The anti-phishing gate (invariant #6). A plugin may claim ONLY its own,
- * namespaced surface: the exact path `/plugin/<pluginId>`. Every other path —
- * a system route (`/agents`, `/settings`), another plugin's route
- * (`/plugin/other`), or a nested/relative variant — is rejected. The `title` may
- * not impersonate system chrome (contain "ryu" or "system"), so a plugin cannot
- * pose as first-party UI in the tab label.
- *
- * Pure so the `system_route_impersonation_rejected` adversarial test can assert
- * it directly, and so the host `registerRoute` service is a one-line call.
- */
-export function validatePluginRoute(
-	pluginId: string,
-	claim: RouteClaim
-): boolean {
-	if (typeof claim.path !== "string" || typeof claim.title !== "string") {
-		return false;
-	}
-	// The one legal surface: this plugin's own exact route. `encodeURIComponent`
-	// mirrors `pluginCompanionPath` so a claim matches the route the shell mints.
-	const ownPath = `/plugin/${encodeURIComponent(pluginId)}`;
-	if (claim.path !== ownPath) {
-		return false;
-	}
-	const lowerTitle = claim.title.toLowerCase();
-	if (lowerTitle.includes("ryu") || lowerTitle.includes("system")) {
-		return false;
-	}
-	return true;
-}
-
-/** The safe first-party route PREFIXES a `shell.openTab` call (grant
- *  `shell:integrate`) may target. Even a GRANTED companion can only open a known
- *  shell destination — the anti-phishing gate layered ON TOP of the grant, the
- *  sibling of {@link validatePluginRoute} (a raw `openTab(anyPath)` would break the
- *  `/plugin/<id>`-only frame containment). See `docs/renderer-host-slice-1.md`. */
-export const SHELL_SAFE_ROUTE_PREFIXES = [
-	"/chat",
-	"/library",
-	"/review",
-	"/settings",
-	"/meetings",
-	"/spaces",
-] as const;
-
-/**
- * Whether `path` is a shell destination a granted companion may open via
- * `shell.openTab`: an exact or CHILD match of an allowlisted prefix
- * ({@link SHELL_SAFE_ROUTE_PREFIXES}), or the companion's own `/plugin/<id>` surface
- * (`ownPluginPath`, which the host service supplies from `companion.pluginId`).
- *
- * Pure — extracted here (the `validatePluginRoute` precedent) so the anti-phishing
- * allowlist is unit-testable DOM-free. The `${prefix}/` child guard rejects a
- * prefix-collision like `/chatfoo`; another plugin's `/plugin/<other>` is rejected
- * because only THIS plugin's `ownPluginPath` is passed.
- */
-export function isShellSafeRoute(path: string, ownPluginPath: string): boolean {
-	if (typeof path !== "string" || !path.startsWith("/")) {
-		return false;
-	}
-	if (path === ownPluginPath || path.startsWith(`${ownPluginPath}/`)) {
-		return true;
-	}
-	return SHELL_SAFE_ROUTE_PREFIXES.some(
-		(prefix) => path === prefix || path.startsWith(`${prefix}/`)
-	);
-}
-
-/** Thrown (and caught into an RpcResponse.error) when a call is not permitted.
- *  Serialized to a plain STRING error (the legacy plugin path shape). */
-export class CapabilityError extends Error {}
-
-/** A widget round-trip failure carrying a closed {@link WidgetRpcErrorCode}
- *  (decisions doc D6). Serialized by the host into a structured
- *  `{ code, message }` error, distinct from {@link CapabilityError}'s string. */
-export class CodedRpcError extends Error {
-	code: WidgetRpcErrorCode;
-	constructor(code: WidgetRpcErrorCode, message: string) {
-		super(message);
-		this.code = code;
-		this.name = "CodedRpcError";
-	}
-}
-
-/**
- * Serialize a thrown error into the `error` field of an {@link RpcResponse}. A
- * {@link CodedRpcError} (or anything carrying a PUBLIC widget `code`) becomes the
- * structured `{ code, message }` a widget expects (D6). An unknown string code is
- * normalized to `server_error` instead of escaping the closed wire vocabulary.
- * Everything else — notably the legacy {@link CapabilityError} — stays a plain
- * string so the existing plugin bridge (which checks `typeof error === "string"`)
- * is unaffected.
- */
-export function toRpcError(err: unknown): string | RpcErrorPayload {
-	if (
-		err &&
-		typeof err === "object" &&
-		"code" in err &&
-		typeof err.code === "string"
-	) {
-		const message =
-			"message" in err && typeof err.message === "string"
-				? err.message
-				: String(err);
-		return {
-			code: isWidgetRpcErrorCode(err.code) ? err.code : "server_error",
-			message,
-		};
-	}
-	return err instanceof Error ? err.message : String(err);
 }
 
 /**

@@ -4,10 +4,10 @@
   "navLabel": "Accounting",
   "category": "Finance & Risk",
   "icon": "Calculator",
-  "tagline": "Close the books, reconcile accounts, and prep statements with agents that keep client financials on your machine.",
+  "tagline": "Reconcile accounts and prepare draft financial statements for review.",
   "heroEyebrow": "Ryu for Accounting",
-  "heroTitle": "An AI accountant that respects the numbers.",
-  "heroSubtitle": "Reconcile ledgers, chase variances, and draft financial statements with agents that run on your own machine. Client books never leave your device unless you say so, and every model call is governed, logged, and auditable.",
+  "heroTitle": "Ryu for accounting",
+  "heroSubtitle": "Reconcile accounts and prepare draft financial statements for review.",
   "visualKey": "GatewayVisual",
   "intro": "Accounting runs on sensitive financial data that can't be pasted into a public chatbot that trains on what it sees. Ryu runs capable agents locally, connects into your accounting tools to pull real transactions, and writes down every step it takes, so you can speed up the close without exposing a single client ledger.",
   "highlights": [

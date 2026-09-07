@@ -132,7 +132,9 @@ export function GuidedSetup({
 				<div className="flex flex-col gap-6">{step.content}</div>
 			</div>
 
-			{error ? <p className="text-destructive text-sm">{error}</p> : null}
+			{error ? (
+				<p className="text-sm text-status-destructive">{error}</p>
+			) : null}
 
 			<div className="flex flex-wrap items-center gap-2 border-t pt-5">
 				{index > 0 ? (

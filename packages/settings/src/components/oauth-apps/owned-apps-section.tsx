@@ -90,7 +90,7 @@ export function OwnedAppsSection() {
 					<Spinner className="size-5" />
 				</div>
 			) : ownedQuery.isError ? (
-				<p className="text-destructive text-sm">
+				<p className="text-sm text-status-destructive">
 					{errorMessage(ownedQuery.error, "Failed to load your OAuth apps")}
 				</p>
 			) : ownedApps.length === 0 ? (

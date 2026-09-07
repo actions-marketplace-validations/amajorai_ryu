@@ -1,7 +1,7 @@
 {
   "name": "desktop",
   "private": true,
-  "version": "0.2.8",
+  "version": "0.3.0",
   "type": "module",
   "scripts": {
     "dev": "node scripts/dev.mjs",
@@ -17,6 +17,7 @@
     "check-types": "tsc --noEmit",
     "test": "bun run scripts/test-isolated.ts",
     "test:e2e": "playwright test",
+    "test:performance:gateway": "bun test src/hooks/useGatewayStatus.test.tsx && playwright test --config playwright.gateway-polling-proof.config.ts",
     "test:e2e:graphrag-live": "playwright test --config e2e/graphrag-spaces-live.playwright.config.ts",
     "test:e2e:list": "playwright test --list",
     "test:e2e:live": "RYU_E2E_LIVE=1 playwright test available-updates-story.live",

@@ -717,6 +717,74 @@ async fn require_agent_permission(
     }
 }
 
+/// Apply the canonical per-agent ACL to an HTTP caller while preserving the
+/// existing internal sync-worker context. The worker deliberately passes
+/// `None` because it is a node-owned operation rather than a user request; the
+/// route-level coarse permission check has already rejected that context on a
+/// managed or org-bound HTTP request.
+async fn agent_resource_is_visible(
+    state: &ServerState,
+    caller: &Option<crate::identity_verify::VerifiedCaller>,
+    permission: &'static str,
+    agent_id: &str,
+) -> bool {
+    caller.is_none()
+        || crate::server::enforce_permission_on(
+            state,
+            caller,
+            permission,
+            crate::acl::KIND_AGENT,
+            agent_id,
+        )
+        .await
+        .is_ok()
+}
+
+fn filter_status_bindings(
+    bindings: Vec<AcpBinding>,
+    allowed_agent_ids: &HashSet<String>,
+    readable_conversation_ids: &HashSet<String>,
+) -> Vec<AcpBinding> {
+    bindings
+        .into_iter()
+        .filter(|binding| {
+            allowed_agent_ids.contains(&binding.agent_id)
+                && readable_conversation_ids.contains(&binding.conversation_id)
+        })
+        .collect()
+}
+
+fn filter_status_items(
+    items: Vec<SyncItemStatus>,
+    profile_agent_ids: &HashMap<String, String>,
+    allowed_agent_ids: &HashSet<String>,
+) -> Vec<SyncItemStatus> {
+    // A profile's provider is the only durable link from setup-ledger rows to
+    // a Ryu agent. Keep rows for providers with no canonical agent (currently
+    // `other`) under the existing coarse sync permission rather than inventing
+    // a second resource identity for them.
+    items
+        .into_iter()
+        .filter(|item| {
+            profile_agent_ids
+                .get(&item.profile_id)
+                .is_none_or(|agent_id| allowed_agent_ids.contains(agent_id))
+        })
+        .collect()
+}
+
+fn filter_export_templates(
+    templates: Vec<(String, crate::agents::AgentTemplate)>,
+    allowed_agent_ids: &HashSet<String>,
+) -> Vec<crate::agents::AgentTemplate> {
+    templates
+        .into_iter()
+        .filter_map(|(agent_id, template)| {
+            allowed_agent_ids.contains(&agent_id).then_some(template)
+        })
+        .collect()
+}
+
 async fn list_profiles(
     State(state): State<ServerState>,
     axum::Extension(caller): axum::Extension<Option<crate::identity_verify::VerifiedCaller>>,
@@ -946,6 +1014,18 @@ async fn resume_acp(
         })
         .into_response();
     };
+    if crate::server::enforce_permission_on(
+        &state,
+        &caller,
+        crate::identity_verify::permissions::AGENT_RUN,
+        crate::acl::KIND_AGENT,
+        &binding.agent_id,
+    )
+    .await
+    .is_err()
+    {
+        return error_response_with(StatusCode::FORBIDDEN, "insufficient permissions: agent.run");
+    }
     let Some(spawn_cmd) = crate::sidecar::adapters::resolve_acp_spawn_cmd(
         &binding.agent_id,
         &state.agents,
@@ -1344,14 +1424,76 @@ async fn status(
         store.bindings().await,
         store.items().await,
     ) {
-        (Ok(profiles), Ok(bindings), Ok(items)) => Json(SyncStatus {
-            profiles,
-            bindings,
-            items,
-            active_operations: store.active_count().await,
-            node_id: store.node_id().to_owned(),
-        })
-        .into_response(),
+        (Ok(profiles), Ok(bindings), Ok(items)) => {
+            if caller.is_none() {
+                return Json(SyncStatus {
+                    profiles,
+                    bindings,
+                    items,
+                    active_operations: store.active_count().await,
+                    node_id: store.node_id().to_owned(),
+                })
+                .into_response();
+            }
+
+            let agent_infos = state.agents.list_infos();
+            let profile_agent_ids: HashMap<String, String> = profiles
+                .iter()
+                .filter_map(|profile| {
+                    agent_infos
+                        .iter()
+                        .find(|info| {
+                            info.engine.as_deref().is_some_and(|engine| {
+                                engine.eq_ignore_ascii_case(&profile.provider)
+                            })
+                        })
+                        .map(|info| (profile.id.clone(), info.id.clone()))
+                })
+                .collect();
+            let mut candidate_agent_ids: HashSet<String> = bindings
+                .iter()
+                .map(|binding| binding.agent_id.clone())
+                .collect();
+            candidate_agent_ids.extend(profile_agent_ids.values().cloned());
+            let mut allowed_agent_ids = HashSet::new();
+            for agent_id in candidate_agent_ids {
+                if agent_resource_is_visible(
+                    &state,
+                    &caller,
+                    crate::identity_verify::permissions::AGENT_VIEW,
+                    &agent_id,
+                )
+                .await
+                {
+                    allowed_agent_ids.insert(agent_id);
+                }
+            }
+            let mut readable_conversation_ids = HashSet::new();
+            for binding in &bindings {
+                if allowed_agent_ids.contains(&binding.agent_id)
+                    && crate::server::require_conversation_read_by_id(
+                        &state,
+                        &caller,
+                        &binding.conversation_id,
+                    )
+                    .await
+                    .is_ok()
+                {
+                    readable_conversation_ids.insert(binding.conversation_id.clone());
+                }
+            }
+            let bindings =
+                filter_status_bindings(bindings, &allowed_agent_ids, &readable_conversation_ids);
+            let items = filter_status_items(items, &profile_agent_ids, &allowed_agent_ids);
+            Json(SyncStatus {
+                profiles,
+                bindings,
+                items,
+                active_operations: store.active_count().await,
+                node_id: store.node_id().to_owned(),
+            })
+            .into_response()
+        }
         (Err(error), _, _) | (_, Err(error), _) | (_, _, Err(error)) => {
             error_response(&error.to_string())
         }
@@ -1522,14 +1664,27 @@ async fn build_export(
 ) -> Result<SyncExportResult> {
     let mut warnings = Vec::new();
     let agents = if include_agents {
-        state
+        let records = state
             .agent_store
             .list()
             .await
-            .context("listing agents for export")?
-            .into_iter()
-            .map(|record| record.to_template())
-            .collect()
+            .context("listing agents for export")?;
+        let mut allowed_agent_ids = HashSet::new();
+        let mut templates = Vec::with_capacity(records.len());
+        for record in records {
+            if agent_resource_is_visible(
+                state,
+                caller,
+                crate::identity_verify::permissions::AGENT_VIEW,
+                &record.id,
+            )
+            .await
+            {
+                allowed_agent_ids.insert(record.id.clone());
+                templates.push((record.id.clone(), record.to_template()));
+            }
+        }
+        filter_export_templates(templates, &allowed_agent_ids)
     } else {
         Vec::new()
     };
@@ -1729,7 +1884,25 @@ async fn build_export(
                 .await?;
         }
     }
-    let bindings = store.bindings().await?;
+    let readable_conversation_ids: HashSet<String> = visible_conversations
+        .iter()
+        .map(|conversation| conversation.id.clone())
+        .collect();
+    let mut bindings = Vec::new();
+    for binding in store.bindings().await? {
+        if !readable_conversation_ids.contains(&binding.conversation_id)
+            || !agent_resource_is_visible(
+                state,
+                caller,
+                crate::identity_verify::permissions::AGENT_VIEW,
+                &binding.agent_id,
+            )
+            .await
+        {
+            continue;
+        }
+        bindings.push(binding);
+    }
     let acp_resume = visible_conversations
         .into_iter()
         .map(|conversation| {
@@ -2486,6 +2659,185 @@ async fn reconcile_native_threads(
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    const DENIED_AGENT_ID: &str = "agent-sync-denied-agent";
+    const VISIBLE_AGENT_ID: &str = "agent-sync-visible-agent";
+    static ACL_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    struct RestoredAgentAcl {
+        key: crate::acl::store::ResourceKey,
+        previous: Vec<crate::acl::store::StoredOverwrite>,
+    }
+
+    impl Drop for RestoredAgentAcl {
+        fn drop(&mut self) {
+            let _ = crate::acl::store::set_overwrites(&self.key, self.previous.clone());
+        }
+    }
+
+    fn install_denied_agent_acl() -> RestoredAgentAcl {
+        let key = crate::acl::store::ResourceKey::new(crate::acl::KIND_AGENT, DENIED_AGENT_ID);
+        let previous = crate::acl::store::stored_for(&key);
+        crate::acl::store::set_overwrites(
+            &key,
+            vec![crate::acl::store::StoredOverwrite {
+                target_type: "member".to_owned(),
+                target_id: "sync-bob".to_owned(),
+                allow: Vec::new(),
+                deny: vec![
+                    crate::identity_verify::permissions::AGENT_RUN.to_owned(),
+                    crate::identity_verify::permissions::AGENT_VIEW.to_owned(),
+                ],
+            }],
+        )
+        .expect("persist the agent sync ACL fixture");
+        let restored = RestoredAgentAcl { key, previous };
+        assert_eq!(crate::acl::store::stored_for(&restored.key).len(), 1);
+        restored
+    }
+
+    fn sync_member(user_id: &str) -> crate::identity_verify::VerifiedCaller {
+        crate::identity_verify::VerifiedCaller {
+            user_id: user_id.to_owned(),
+            email: None,
+            org_id: Some("sync-org".to_owned()),
+            role: crate::identity_verify::OrgRole::Member,
+            teams: Vec::new(),
+        }
+    }
+
+    fn persisted_allowed_agent_ids(
+        caller: &crate::identity_verify::VerifiedCaller,
+    ) -> HashSet<String> {
+        [DENIED_AGENT_ID, VISIBLE_AGENT_ID]
+            .into_iter()
+            .filter(|agent_id| {
+                crate::acl::decide_with_context(
+                    caller,
+                    crate::acl::KIND_AGENT,
+                    agent_id,
+                    crate::identity_verify::permissions::AGENT_VIEW,
+                    &HashSet::new(),
+                    &HashSet::new(),
+                ) == crate::acl::Decision::Allowed
+            })
+            .map(str::to_owned)
+            .collect()
+    }
+
+    fn binding(conversation_id: &str, agent_id: &str) -> AcpBinding {
+        AcpBinding {
+            node_id: "sync-node".to_owned(),
+            conversation_id: conversation_id.to_owned(),
+            agent_id: agent_id.to_owned(),
+            engine: "claude".to_owned(),
+            native_session_id: format!("session-{conversation_id}"),
+            working_directory: None,
+            capabilities: serde_json::json!({}),
+            updated_at: 1,
+        }
+    }
+
+    fn item(profile_id: &str, source_id: &str) -> SyncItemStatus {
+        SyncItemStatus {
+            profile_id: profile_id.to_owned(),
+            kind: "instructions".to_owned(),
+            source_id: source_id.to_owned(),
+            source_hash: None,
+            generated_hash: None,
+            revision: 1,
+            operation_id: None,
+            state: "imported".to_owned(),
+            conflict: None,
+            updated_at: 1,
+        }
+    }
+
+    fn template(name: &str) -> crate::agents::AgentTemplate {
+        serde_json::from_value(serde_json::json!({
+            "kind": "agent",
+            "name": name,
+            "version": "1.0.0",
+            "agent_config": {}
+        }))
+        .expect("valid agent template")
+    }
+
+    #[test]
+    fn persisted_agent_acl_filters_status_and_export_rows() {
+        let _lock = ACL_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let _restore = install_denied_agent_acl();
+        let caller = sync_member("sync-bob");
+        let allowed_agent_ids = persisted_allowed_agent_ids(&caller);
+        assert_eq!(
+            allowed_agent_ids,
+            [VISIBLE_AGENT_ID.to_owned()].into_iter().collect()
+        );
+        assert_eq!(
+            crate::acl::decide_with_context(
+                &caller,
+                crate::acl::KIND_AGENT,
+                DENIED_AGENT_ID,
+                crate::identity_verify::permissions::AGENT_RUN,
+                &HashSet::new(),
+                &HashSet::new(),
+            ),
+            crate::acl::Decision::Denied
+        );
+
+        let readable_conversations = ["conversation-visible".to_owned()]
+            .into_iter()
+            .collect::<HashSet<_>>();
+        let bindings = filter_status_bindings(
+            vec![
+                binding("conversation-denied-agent", DENIED_AGENT_ID),
+                binding("conversation-visible", VISIBLE_AGENT_ID),
+                binding("conversation-unreadable", VISIBLE_AGENT_ID),
+            ],
+            &allowed_agent_ids,
+            &readable_conversations,
+        );
+        assert_eq!(
+            bindings
+                .iter()
+                .map(|binding| binding.conversation_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["conversation-visible"]
+        );
+
+        let profile_agent_ids = HashMap::from([
+            ("profile-denied".to_owned(), DENIED_AGENT_ID.to_owned()),
+            ("profile-visible".to_owned(), VISIBLE_AGENT_ID.to_owned()),
+        ]);
+        let items = filter_status_items(
+            vec![
+                item("profile-denied", "private.md"),
+                item("profile-visible", "shared.md"),
+                item("profile-unmapped", "setup.md"),
+            ],
+            &profile_agent_ids,
+            &allowed_agent_ids,
+        );
+        assert_eq!(
+            items
+                .iter()
+                .map(|item| item.source_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["shared.md", "setup.md"]
+        );
+
+        let templates = filter_export_templates(
+            vec![
+                (DENIED_AGENT_ID.to_owned(), template("private agent")),
+                (VISIBLE_AGENT_ID.to_owned(), template("visible agent")),
+            ],
+            &allowed_agent_ids,
+        );
+        assert_eq!(templates.len(), 1);
+        assert_eq!(templates[0].name, "visible agent");
+    }
 
     #[tokio::test]
     async fn duplicate_roots_are_idempotent_without_duplicate_profiles() {

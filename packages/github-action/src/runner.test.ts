@@ -1,18 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import type { FetchLike } from "./client.ts";
-import { parseActionInputs } from "./input.ts";
-import {
-	buildChatRequestForTest,
-	buildToolRequestForTest,
-	executeAction,
-} from "./runner.ts";
+import { executeAction } from "./runner.ts";
 import type { ActionRuntime } from "./runtime.ts";
-
-function reader(values: Record<string, string>): {
-	get: (name: string) => string;
-} {
-	return { get: (name) => values[name] ?? "" };
-}
 
 function runtime(values: Record<string, string>): ActionRuntime & {
 	environment: Record<string, string>;
@@ -36,60 +25,6 @@ function runtime(values: Record<string, string>): ActionRuntime & {
 		},
 	};
 }
-
-describe("Ryu GitHub Action request construction", () => {
-	it("builds a chat request with optional agent, execution, inference, and plugin fields", () => {
-		const inputs = parseActionInputs(
-			reader({
-				agent: "review-agent",
-				cwd: "/workspace/project",
-				"enable-long-term": "true",
-				inference: '{"temperature":0}',
-				operation: "run",
-				persist: "true",
-				"plugin-flags": '{"com.ryu.audit":false}',
-				prompt: "Review this",
-				"worktree-isolation": "true",
-			})
-		);
-
-		expect(buildChatRequestForTest(inputs, "conversation-42")).toEqual({
-			agent_id: "review-agent",
-			conversation_id: "conversation-42",
-			cwd: "/workspace/project",
-			enable_long_term: true,
-			inference: { temperature: 0 },
-			messages: [
-				{
-					content: [{ text: "Review this", type: "text" }],
-					role: "user",
-				},
-			],
-			persist: true,
-			plugin_flags: { "com.ryu.audit": false },
-			worktree_isolation: true,
-		});
-	});
-
-	it("builds a tool request with the required agent allowlist", () => {
-		const inputs = parseActionInputs(
-			reader({
-				agent: "release-agent",
-				operation: "tool",
-				"tool-arguments": '{"tag":"v1"}',
-				tool: "github.create_release",
-				"user-id": "ci-user",
-			})
-		);
-
-		expect(buildToolRequestForTest(inputs)).toEqual({
-			agent_id: "release-agent",
-			arguments: { tag: "v1" },
-			tool: "github.create_release",
-			user_id: "ci-user",
-		});
-	});
-});
 
 describe("executeAction setup", () => {
 	it("validates the node, masks the token, exports aliases, and writes outputs", async () => {

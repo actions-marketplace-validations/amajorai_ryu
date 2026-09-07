@@ -33,9 +33,9 @@ const QUICK_LINKS = [
 ] as const;
 
 const STATUS_META: Record<PopupCoreStatus, { color: string; label: string }> = {
-	running: { color: "bg-emerald-500", label: "Running" },
-	starting: { color: "bg-amber-500", label: "Starting" },
-	stopped: { color: "bg-red-500", label: "Stopped" },
+	running: { color: "bg-success", label: "Running" },
+	starting: { color: "bg-warning", label: "Starting" },
+	stopped: { color: "bg-destructive", label: "Stopped" },
 };
 
 function initialsFor(user: PopupUser): string {

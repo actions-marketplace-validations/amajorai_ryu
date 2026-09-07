@@ -66,7 +66,6 @@ import {
 	FRONTEND_URL,
 	getActiveUserId,
 	listAccounts,
-	type StoredAccount,
 	signOutAccount,
 	switchAccount,
 	useSession,
@@ -250,6 +249,8 @@ function formatDate(value: string | null | undefined): string {
 // name/email, a check on the active one), switches on click, adds another
 // account via the existing device-auth flow, and signs an account out. Tokens
 // stay local (the vault in auth-client); this only ever renders the safe fields.
+type AccountView = ReturnType<typeof listAccounts>[number];
+
 export function AccountList({
 	activeUser,
 	onSignOutAll,
@@ -262,14 +263,12 @@ export function AccountList({
 	} | null;
 	onSignOutAll: () => void;
 }) {
-	const [accounts, setAccounts] = useState<StoredAccount[]>(() =>
-		listAccounts()
-	);
+	const [accounts, setAccounts] = useState<AccountView[]>(() => listAccounts());
 	const [activeId, setActiveId] = useState<string | null>(() =>
 		getActiveUserId()
 	);
 	const [adding, setAdding] = useState(false);
-	const [pendingSignOut, setPendingSignOut] = useState<StoredAccount | null>(
+	const [pendingSignOut, setPendingSignOut] = useState<AccountView | null>(
 		null
 	);
 	const [signingOut, setSigningOut] = useState(false);
@@ -297,7 +296,7 @@ export function AccountList({
 
 	const handleSignOutAccount = (
 		event: React.MouseEvent,
-		account: StoredAccount
+		account: AccountView
 	) => {
 		event.preventDefault();
 		event.stopPropagation();
@@ -429,7 +428,7 @@ export function AccountList({
 										) : null}
 										<button
 											aria-label={`Sign out ${label}`}
-											className="absolute flex size-5 items-center justify-center rounded-md text-muted-foreground opacity-0 transition-all duration-150 hover:bg-accent hover:text-destructive group-hover/item:scale-100 group-hover/item:opacity-100"
+											className="absolute flex size-5 items-center justify-center rounded-md text-muted-foreground opacity-0 transition-all duration-150 hover:bg-accent hover:text-status-destructive group-hover/item:scale-100 group-hover/item:opacity-100"
 											onClick={(event) => handleSignOutAccount(event, account)}
 											type="button"
 										>

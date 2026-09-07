@@ -35,7 +35,7 @@ export function GoalCompletionFooter({
 			<span className="inline-flex min-w-0 items-center gap-1.5">
 				<HugeiconsIcon
 					aria-hidden="true"
-					className="size-4 shrink-0 text-emerald-500"
+					className="size-4 shrink-0 text-status-success"
 					icon={CheckmarkCircle02Icon}
 				/>
 				<span className="truncate">

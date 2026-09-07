@@ -36,8 +36,8 @@ export function StatBody({
 				<span
 					className={
 						delta >= 0
-							? "inline-flex w-fit items-center gap-1 rounded-full bg-success/10 px-2 py-0.5 font-medium text-success text-xs dark:text-success"
-							: "inline-flex w-fit items-center gap-1 rounded-full bg-destructive/10 px-2 py-0.5 font-medium text-destructive text-xs"
+							? "inline-flex w-fit items-center gap-1 rounded-full bg-success/10 px-2 py-0.5 font-medium text-status-success text-xs dark:text-status-success"
+							: "inline-flex w-fit items-center gap-1 rounded-full bg-destructive/10 px-2 py-0.5 font-medium text-status-destructive text-xs"
 					}
 				>
 					{delta >= 0 ? "▲" : "▼"} {formatNumber(Math.abs(delta))}

@@ -220,7 +220,9 @@ export function RulesAgentEditPanel({
 			title={title}
 		>
 			<SettingsCard className="flex flex-col gap-4">
-				{error ? <p className="text-destructive text-xs">{error}</p> : null}
+				{error ? (
+					<p className="text-status-destructive text-xs">{error}</p>
+				) : null}
 				<div className="grid gap-3 sm:grid-cols-2">
 					<div className="flex items-center justify-between gap-3 rounded-md border px-3 py-2">
 						<div>

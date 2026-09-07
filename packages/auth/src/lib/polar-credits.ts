@@ -4,6 +4,17 @@ import {
 	type CreditPoolId,
 } from "./credit-pools.ts";
 
+export const POLAR_ORGANIZATION_EXTERNAL_ID_PREFIX = "ryu:organization:";
+
+/** Stable organization identity shared by billing, membership, and meters. */
+export function polarOrganizationExternalId(organizationId: string): string {
+	const normalized = organizationId.trim();
+	if (!normalized) {
+		throw new Error("organization id is required for Polar billing");
+	}
+	return `${POLAR_ORGANIZATION_EXTERNAL_ID_PREFIX}${normalized}`;
+}
+
 /** The aggregate Polar meter used for plan, top-up, and unrestricted usage. */
 export const POLAR_MANAGED_CREDIT_EVENT = "ryu_managed_credit_v1";
 

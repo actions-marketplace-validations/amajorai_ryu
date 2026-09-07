@@ -309,7 +309,7 @@ export function RecordDetail({
 			</header>
 
 			{error && (
-				<div className="border-b bg-destructive/10 px-4 py-2 text-destructive text-xs">
+				<div className="border-b bg-destructive/10 px-4 py-2 text-status-destructive text-xs">
 					{error}
 				</div>
 			)}

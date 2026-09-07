@@ -139,13 +139,15 @@ impl Cache {
     }
 
     fn evict_oldest(&self, n: usize) {
-        // Collect keys with their ages, sort by oldest first, remove the first n
+        // Partition out the oldest n entries without sorting the entire cache.
         let mut pairs: Vec<(String, Instant)> = self
             .entries
             .iter()
             .map(|e| (e.key().clone(), e.value().inserted_at))
             .collect();
-        pairs.sort_by_key(|(_, t)| *t);
+        if n < pairs.len() {
+            pairs.select_nth_unstable_by_key(n, |(_, t)| *t);
+        }
         for (key, _) in pairs.into_iter().take(n) {
             self.entries.remove(&key);
         }
@@ -493,6 +495,47 @@ mod cache_tests {
         cache.insert("k10".into(), json!(10));
         assert_eq!(cache.get("k0"), None, "oldest key should be evicted first");
         assert_eq!(cache.get("k10"), Some(json!(10)), "newest key present");
+    }
+
+    #[test]
+    fn performance_eviction_selects_the_same_oldest_entries() {
+        let cache = Cache::new(cfg(true, 3600, 20_000));
+        let now = Instant::now();
+        for i in 0..20_000 {
+            cache.entries.insert(
+                format!("k{i}"),
+                CachedEntry {
+                    response: json!(i),
+                    inserted_at: now - Duration::from_micros(i),
+                },
+            );
+        }
+        let mut before: Vec<_> = cache
+            .entries
+            .iter()
+            .map(|e| (e.key().clone(), e.inserted_at))
+            .collect();
+        let mut after = before.clone();
+        let start = Instant::now();
+        before.sort_by_key(|(_, t)| *t);
+        let baseline = start.elapsed();
+        let start = Instant::now();
+        after.select_nth_unstable_by_key(2000, |(_, t)| *t);
+        let optimized = start.elapsed();
+        let expected: std::collections::HashSet<_> =
+            before.into_iter().take(2000).map(|(key, _)| key).collect();
+        let selected: std::collections::HashSet<_> =
+            after.into_iter().take(2000).map(|(key, _)| key).collect();
+        assert_eq!(expected, selected);
+        cache.evict_oldest(2000);
+        assert_eq!(cache.entries.len(), 18_000);
+        assert!(expected.iter().all(|key| cache.get(key).is_none()));
+        cache.evict_oldest(0);
+        assert_eq!(cache.entries.len(), 18_000);
+        cache.evict_oldest(30_000);
+        assert!(cache.entries.is_empty());
+        cache.evict_oldest(1);
+        eprintln!("Eviction selection 20,000 entries: before={baseline:?}, after={optimized:?}");
     }
 
     // ─── concurrency ─────────────────────────────────────────────────────────

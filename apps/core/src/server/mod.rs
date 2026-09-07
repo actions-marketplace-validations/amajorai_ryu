@@ -26,6 +26,7 @@ pub mod chat_suggestions;
 pub mod continuity;
 pub mod conversations;
 pub mod data_admin;
+mod data_path_api;
 pub mod encryption;
 pub mod gifs;
 pub mod git;
@@ -906,6 +907,60 @@ mod managed_user_authorization_tests {
         assert!(
             managed_user_jwt_resolution_for(other, &personal_node(), Some("ryu"), 10).is_none()
         );
+    }
+
+    #[test]
+    fn agent_surface_admission_keeps_read_and_edit_capabilities_distinct() {
+        let viewer = managed_user_jwt_resolution_for(
+            caller(OrgRole::Viewer, "org_1"),
+            &node(),
+            Some("agent-a"),
+            10,
+        )
+        .expect("same-org viewer should reach the resource ACL");
+        assert!(viewer
+            .context
+            .authorize(
+                &RoutePolicy::requires([Capability::AgentsRead]),
+                &viewer.bindings,
+                10,
+            )
+            .is_allowed());
+        assert!(!viewer
+            .context
+            .authorize(
+                &RoutePolicy::requires([Capability::AgentsManage]),
+                &viewer.bindings,
+                10,
+            )
+            .is_allowed());
+
+        // A personal-node owner with an administrator role remains admitted to
+        // both sides of the surface; the resource gate then applies the exact
+        // agent ACL without changing the node-scope contract.
+        let owner = managed_user_jwt_resolution_for(
+            caller(OrgRole::Owner, "org_1"),
+            &personal_node(),
+            Some("agent-a"),
+            10,
+        )
+        .expect("personal-node owner should reach agent management");
+        assert!(owner
+            .context
+            .authorize(
+                &RoutePolicy::requires([Capability::AgentsRead]),
+                &owner.bindings,
+                10,
+            )
+            .is_allowed());
+        assert!(owner
+            .context
+            .authorize(
+                &RoutePolicy::requires([Capability::AgentsManage]),
+                &owner.bindings,
+                10,
+            )
+            .is_allowed());
     }
 
     #[test]
@@ -3647,167 +3702,6 @@ async fn destroy_sandbox(Path(run_id): Path<String>) -> impl IntoResponse {
 
 // ── Data folder ("Storage" setting) ──────────────────────────────────────────────
 
-#[derive(serde::Deserialize)]
-struct DataPathTarget {
-    path: String,
-}
-
-#[derive(serde::Deserialize)]
-struct DataPathExportReq {
-    out: String,
-}
-
-/// `GET /api/data-path` — current data-folder location, default, size, free space.
-/// All path logic lives in Core (`crate::data_path`); the desktop only renders it.
-#[utoipa::path(
-    get,
-    path = "/api/data-path",
-    tag = "Data",
-    summary = "The active data folder and its disk info",
-    responses((status = 200, description = "OK", body = serde_json::Value))
-)]
-async fn get_data_path() -> impl IntoResponse {
-    match tokio::task::spawn_blocking(crate::data_path::info).await {
-        Ok(info) => Json(info).into_response(),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({ "error": e.to_string() })),
-        )
-            .into_response(),
-    }
-}
-
-/// `POST /api/data-path/validate` — check a candidate target folder (writable,
-/// empty, not nested in the current folder, enough free space for a copy).
-#[utoipa::path(
-    post,
-    path = "/api/data-path/validate",
-    tag = "Data",
-    summary = "Validate a candidate data folder",
-    request_body = serde_json::Value,
-    responses((status = 200, description = "OK", body = serde_json::Value))
-)]
-async fn validate_data_path(Json(req): Json<DataPathTarget>) -> impl IntoResponse {
-    let target = std::path::PathBuf::from(&req.path);
-    let res = tokio::task::spawn_blocking(move || {
-        crate::data_path::validate_target(&crate::paths::ryu_dir(), &target, true)
-    })
-    .await;
-    match res {
-        Ok(v) => Json(v).into_response(),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({ "ok": false, "error": e.to_string() })),
-        )
-            .into_response(),
-    }
-}
-
-/// `POST /api/data-path/switch` — point-only relocation (NO copy). Writes the
-/// pointer; takes effect on the next Core restart. The old data stays intact, so
-/// this is the "start fresh in a new folder" path. (Copy-and-migrate runs as the
-/// offline `data-path migrate` subcommand the desktop invokes while Core is down.)
-#[utoipa::path(
-    post,
-    path = "/api/data-path/switch",
-    tag = "Data",
-    summary = "Relocate the data folder (restart required)",
-    request_body = serde_json::Value,
-    responses((status = 200, description = "OK", body = serde_json::Value))
-)]
-async fn switch_data_path(Json(req): Json<DataPathTarget>) -> impl IntoResponse {
-    let target = std::path::PathBuf::from(&req.path);
-    let v = crate::data_path::validate_target(&crate::paths::ryu_dir(), &target, false);
-    if !v.ok {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(json!({ "ok": false, "error": v.error })),
-        )
-            .into_response();
-    }
-    match crate::paths::set_data_dir(Some(&target)) {
-        Ok(()) => Json(json!({ "ok": true, "restart_required": true })).into_response(),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({ "ok": false, "error": e.to_string() })),
-        )
-            .into_response(),
-    }
-}
-
-/// `POST /api/data-path/reset` — revert to the default `~/.ryu` (point-only).
-#[utoipa::path(
-    post,
-    path = "/api/data-path/reset",
-    tag = "Data",
-    summary = "Reset the data folder to the default location",
-    responses((status = 200, description = "OK", body = serde_json::Value))
-)]
-async fn reset_data_path() -> impl IntoResponse {
-    match crate::paths::set_data_dir(None) {
-        Ok(()) => Json(json!({ "ok": true, "restart_required": true })).into_response(),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({ "ok": false, "error": e.to_string() })),
-        )
-            .into_response(),
-    }
-}
-
-/// `POST /api/data-path/export` — zip the current data folder to `out`. Read-only
-/// on the data folder, so it runs online (no restart). Import/restore is offline
-/// (the `data-path import` subcommand) because it overwrites the live DB files.
-#[utoipa::path(
-    post,
-    path = "/api/data-path/export",
-    tag = "Data",
-    summary = "Export the data folder to a zip backup",
-    request_body = serde_json::Value,
-    responses((status = 200, description = "OK", body = serde_json::Value))
-)]
-async fn export_data_path(
-    axum::Extension(caller): axum::Extension<Option<crate::identity_verify::VerifiedCaller>>,
-    Json(req): Json<DataPathExportReq>,
-) -> impl IntoResponse {
-    // ── ACL ──────────────────────────────────────────────────────────────────
-    // This zips the ENTIRE data folder — every user's conversations, documents and
-    // memory DBs — so on an org-bound node it is inherently cross-tenant and there is
-    // no scoped variant. Mirror `data_clear`'s danger-zone posture:
-    //   - Node UNBOUND (personal): one principal, `RYU_TOKEN` is the boundary — the
-    //     user backing up their own machine. Behaves exactly as before.
-    //   - Node ORG-BOUND: a whole-folder export dumps other users' data. Even a
-    //     signed-in member must not exfiltrate the shared node, so REFUSE outright.
-    if node_org_id().is_some() {
-        let _ = &caller;
-        return (
-            StatusCode::FORBIDDEN,
-            Json(json!({
-                "ok": false,
-                "error": "forbidden: the data-folder export dumps every user's data and is disabled on a shared (org-bound) node"
-            })),
-        )
-            .into_response();
-    }
-    let out = std::path::PathBuf::from(&req.out);
-    let res = tokio::task::spawn_blocking(move || {
-        crate::data_path::export_zip(&crate::paths::ryu_dir(), &out)
-    })
-    .await;
-    match res {
-        Ok(Ok(bytes)) => Json(json!({ "ok": true, "bytes": bytes })).into_response(),
-        Ok(Err(e)) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({ "ok": false, "error": e.to_string() })),
-        )
-            .into_response(),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({ "ok": false, "error": e.to_string() })),
-        )
-            .into_response(),
-    }
-}
-
 pub fn create_router(
     state: ServerState,
     auth_token: Option<String>,
@@ -5124,13 +5018,13 @@ pub fn create_router(
         // Data folder ("Storage" setting): read location, validate/switch (point-only),
         // reset to default, export a backup zip. Copy-migrate + import run offline as
         // the `ryu-core data-path` subcommand.
-        .route("/api/data-path", get(get_data_path))
-        .route("/api/data-path/validate", post(validate_data_path))
-        .route("/api/data-path/switch", post(switch_data_path))
-        .route("/api/data-path/reset", post(reset_data_path))
+        .route("/api/data-path", get(data_path_api::get_data_path))
+        .route("/api/data-path/validate", post(data_path_api::validate_data_path))
+        .route("/api/data-path/switch", post(data_path_api::switch_data_path))
+        .route("/api/data-path/reset", post(data_path_api::reset_data_path))
         .route(
             "/api/data-path/export",
-            post(export_data_path).layer(DefaultBodyLimit::max(16 * 1024)),
+            post(data_path_api::export_data_path).layer(DefaultBodyLimit::max(16 * 1024)),
         )
         // ── Shadow proxy (`/api/shadow/*`) ──────────────────────────────────
         // The desktop webview's companion/review/search surfaces reach the
@@ -9788,6 +9682,52 @@ fn parse_acp_selections(raw: Option<&str>) -> crate::sidecar::adapters::acp::Ses
         .unwrap_or_default()
 }
 
+/// Require a caller's permission on the exact agent named by an agent-management
+/// route. The broad `AgentsRead`/`AgentsManage` route policy only admits the
+/// request to Core; this resource gate is the authority that applies the agent's
+/// ACL before Core resolves or spawns its ACP runtime.
+async fn enforce_agent_resource_permission(
+    state: &ServerState,
+    caller: &Option<crate::identity_verify::VerifiedCaller>,
+    permission: &'static str,
+    agent_id: &str,
+) -> Result<(), axum::response::Response> {
+    enforce_permission_on(state, caller, permission, crate::acl::KIND_AGENT, agent_id)
+        .await
+        .map_err(|status| json_error(status, format!("insufficient permissions: {permission}")))
+}
+
+/// Run an ACP operation only after its exact-agent ACL check succeeds.
+/// This narrow generic seam also lets tests prove a denied check skips an
+/// injected side effect without constructing the full Core server state.
+async fn run_after_agent_resource_permission<T>(
+    permission: impl std::future::Future<Output = Result<(), axum::response::Response>>,
+    operation: impl std::future::Future<Output = T>,
+) -> Result<T, axum::response::Response> {
+    permission.await?;
+    Ok(operation.await)
+}
+
+async fn resolve_acp_spawn_cmd_authorized(
+    state: &ServerState,
+    caller: &Option<crate::identity_verify::VerifiedCaller>,
+    permission: &'static str,
+    agent_id: &str,
+) -> Result<Option<String>, axum::response::Response> {
+    run_after_agent_resource_permission(
+        enforce_agent_resource_permission(state, caller, permission, agent_id),
+        async {
+            crate::sidecar::adapters::resolve_acp_spawn_cmd(
+                agent_id,
+                &state.agents,
+                &state.agent_store,
+            )
+            .await
+        },
+    )
+    .await
+}
+
 /// `GET /api/agents/:id/acp-config` — the agent's advertised ACP session config.
 ///
 /// Opens a throwaway ACP session (no prompt) and returns `{ modes, models,
@@ -9805,20 +9745,29 @@ fn parse_acp_selections(raw: Option<&str>) -> crate::sidecar::adapters::acp::Ses
     tag = "Agents",
     summary = "Get an agent's ACP configuration",
     params(("id" = String, Path), ("selections" = Option<String>, Query)),
-    responses((status = 200, description = "OK", body = serde_json::Value))
+    responses(
+        (status = 200, description = "OK", body = serde_json::Value),
+        (status = 403, description = "Agent view permission required", body = serde_json::Value)
+    )
 )]
 async fn acp_config(
     State(state): State<ServerState>,
+    axum::Extension(caller): axum::Extension<Option<crate::identity_verify::VerifiedCaller>>,
     Path(agent_id): Path<String>,
     axum::extract::Query(query): axum::extract::Query<AcpConfigQuery>,
 ) -> axum::response::Response {
-    let Some(spawn_cmd) = crate::sidecar::adapters::resolve_acp_spawn_cmd(
+    let spawn_cmd = match resolve_acp_spawn_cmd_authorized(
+        &state,
+        &caller,
+        crate::identity_verify::permissions::AGENT_VIEW,
         &agent_id,
-        &state.agents,
-        &state.agent_store,
     )
     .await
-    else {
+    {
+        Ok(spawn_cmd) => spawn_cmd,
+        Err(response) => return response,
+    };
+    let Some(spawn_cmd) = spawn_cmd else {
         // Not an ACP agent → no session/new advertisement to read.
         return Json(serde_json::json!({
             "modes": null,
@@ -9877,20 +9826,29 @@ struct AcpAuthRequest {
     summary = "Authenticate to an ACP agent (login)",
     params(("id" = String, Path, description = "Agent id")),
     request_body = serde_json::Value,
-    responses((status = 200, description = "OK", body = serde_json::Value))
+    responses(
+        (status = 200, description = "OK", body = serde_json::Value),
+        (status = 403, description = "Agent edit permission required", body = serde_json::Value)
+    )
 )]
 async fn acp_authenticate(
     State(state): State<ServerState>,
+    axum::Extension(caller): axum::Extension<Option<crate::identity_verify::VerifiedCaller>>,
     Path(agent_id): Path<String>,
     Json(body): Json<AcpAuthRequest>,
 ) -> axum::response::Response {
-    let Some(spawn_cmd) = crate::sidecar::adapters::resolve_acp_spawn_cmd(
+    let spawn_cmd = match resolve_acp_spawn_cmd_authorized(
+        &state,
+        &caller,
+        crate::identity_verify::permissions::AGENT_EDIT,
         &agent_id,
-        &state.agents,
-        &state.agent_store,
     )
     .await
-    else {
+    {
+        Ok(spawn_cmd) => spawn_cmd,
+        Err(response) => return response,
+    };
+    let Some(spawn_cmd) = spawn_cmd else {
         return (
             StatusCode::BAD_REQUEST,
             Json(serde_json::json!({ "error": "not an ACP agent" })),
@@ -9968,19 +9926,28 @@ async fn acp_authenticate(
     tag = "Agents",
     summary = "Log out of an ACP agent",
     params(("id" = String, Path, description = "Agent id")),
-    responses((status = 200, description = "OK", body = serde_json::Value))
+    responses(
+        (status = 200, description = "OK", body = serde_json::Value),
+        (status = 403, description = "Agent edit permission required", body = serde_json::Value)
+    )
 )]
 async fn acp_logout(
     State(state): State<ServerState>,
+    axum::Extension(caller): axum::Extension<Option<crate::identity_verify::VerifiedCaller>>,
     Path(agent_id): Path<String>,
 ) -> axum::response::Response {
-    let Some(spawn_cmd) = crate::sidecar::adapters::resolve_acp_spawn_cmd(
+    let spawn_cmd = match resolve_acp_spawn_cmd_authorized(
+        &state,
+        &caller,
+        crate::identity_verify::permissions::AGENT_EDIT,
         &agent_id,
-        &state.agents,
-        &state.agent_store,
     )
     .await
-    else {
+    {
+        Ok(spawn_cmd) => spawn_cmd,
+        Err(response) => return response,
+    };
+    let Some(spawn_cmd) = spawn_cmd else {
         return (
             StatusCode::BAD_REQUEST,
             Json(serde_json::json!({ "error": "not an ACP agent" })),
@@ -10199,23 +10166,32 @@ async fn pi_provider_account_remove(
     tag = "Agents",
     summary = "List an ACP agent's accounts",
     params(("id" = String, Path, description = "Agent id")),
-    responses((status = 200, description = "OK", body = serde_json::Value))
+    responses(
+        (status = 200, description = "OK", body = serde_json::Value),
+        (status = 403, description = "Agent view permission required", body = serde_json::Value)
+    )
 )]
 async fn acp_accounts(
     State(state): State<ServerState>,
+    axum::Extension(caller): axum::Extension<Option<crate::identity_verify::VerifiedCaller>>,
     Path(agent_id): Path<String>,
-) -> Json<serde_json::Value> {
-    let accounts = match crate::sidecar::adapters::resolve_acp_spawn_cmd(
+) -> axum::response::Response {
+    let spawn_cmd = match resolve_acp_spawn_cmd_authorized(
+        &state,
+        &caller,
+        crate::identity_verify::permissions::AGENT_VIEW,
         &agent_id,
-        &state.agents,
-        &state.agent_store,
     )
     .await
     {
+        Ok(spawn_cmd) => spawn_cmd,
+        Err(response) => return response,
+    };
+    let accounts = match spawn_cmd {
         Some(spawn_cmd) => crate::pi_config::list_acp_accounts(&spawn_cmd),
         None => Vec::new(),
     };
-    Json(serde_json::json!({ "accounts": accounts }))
+    Json(serde_json::json!({ "accounts": accounts })).into_response()
 }
 
 /// `POST /api/agents/:id/accounts/switch` — switch an ACP agent's active
@@ -10229,20 +10205,29 @@ async fn acp_accounts(
     summary = "Switch an ACP agent's active account",
     params(("id" = String, Path, description = "Agent id")),
     request_body = serde_json::Value,
-    responses((status = 200, description = "OK", body = serde_json::Value))
+    responses(
+        (status = 200, description = "OK", body = serde_json::Value),
+        (status = 403, description = "Agent edit permission required", body = serde_json::Value)
+    )
 )]
 async fn acp_account_switch(
     State(state): State<ServerState>,
+    axum::Extension(caller): axum::Extension<Option<crate::identity_verify::VerifiedCaller>>,
     Path(agent_id): Path<String>,
     Json(body): Json<AccountAction>,
 ) -> axum::response::Response {
-    let Some(spawn_cmd) = crate::sidecar::adapters::resolve_acp_spawn_cmd(
+    let spawn_cmd = match resolve_acp_spawn_cmd_authorized(
+        &state,
+        &caller,
+        crate::identity_verify::permissions::AGENT_EDIT,
         &agent_id,
-        &state.agents,
-        &state.agent_store,
     )
     .await
-    else {
+    {
+        Ok(spawn_cmd) => spawn_cmd,
+        Err(response) => return response,
+    };
+    let Some(spawn_cmd) = spawn_cmd else {
         return (
             StatusCode::BAD_REQUEST,
             Json(serde_json::json!({ "switched": false, "error": "not an ACP agent" })),
@@ -10285,20 +10270,29 @@ async fn acp_account_switch(
     summary = "Remove an ACP agent account",
     params(("id" = String, Path, description = "Agent id")),
     request_body = serde_json::Value,
-    responses((status = 200, description = "OK", body = serde_json::Value))
+    responses(
+        (status = 200, description = "OK", body = serde_json::Value),
+        (status = 403, description = "Agent edit permission required", body = serde_json::Value)
+    )
 )]
 async fn acp_account_remove(
     State(state): State<ServerState>,
+    axum::Extension(caller): axum::Extension<Option<crate::identity_verify::VerifiedCaller>>,
     Path(agent_id): Path<String>,
     Json(body): Json<AccountAction>,
 ) -> axum::response::Response {
-    let Some(spawn_cmd) = crate::sidecar::adapters::resolve_acp_spawn_cmd(
+    let spawn_cmd = match resolve_acp_spawn_cmd_authorized(
+        &state,
+        &caller,
+        crate::identity_verify::permissions::AGENT_EDIT,
         &agent_id,
-        &state.agents,
-        &state.agent_store,
     )
     .await
-    else {
+    {
+        Ok(spawn_cmd) => spawn_cmd,
+        Err(response) => return response,
+    };
+    let Some(spawn_cmd) = spawn_cmd else {
         return (
             StatusCode::BAD_REQUEST,
             Json(serde_json::json!({ "removed": false, "error": "not an ACP agent" })),
@@ -10329,19 +10323,28 @@ async fn acp_account_remove(
     tag = "Agents",
     summary = "List an ACP agent's sessions",
     params(("id" = String, Path, description = "Agent id")),
-    responses((status = 200, description = "OK", body = serde_json::Value))
+    responses(
+        (status = 200, description = "OK", body = serde_json::Value),
+        (status = 403, description = "Agent view permission required", body = serde_json::Value)
+    )
 )]
 async fn list_acp_sessions_handler(
     State(state): State<ServerState>,
+    axum::Extension(caller): axum::Extension<Option<crate::identity_verify::VerifiedCaller>>,
     Path(agent_id): Path<String>,
 ) -> axum::response::Response {
-    let Some(spawn_cmd) = crate::sidecar::adapters::resolve_acp_spawn_cmd(
+    let spawn_cmd = match resolve_acp_spawn_cmd_authorized(
+        &state,
+        &caller,
+        crate::identity_verify::permissions::AGENT_VIEW,
         &agent_id,
-        &state.agents,
-        &state.agent_store,
     )
     .await
-    else {
+    {
+        Ok(spawn_cmd) => spawn_cmd,
+        Err(response) => return response,
+    };
+    let Some(spawn_cmd) = spawn_cmd else {
         return Json(serde_json::json!({ "sessions": [] })).into_response();
     };
     match crate::sidecar::adapters::acp::list_acp_sessions(spawn_cmd).await {
@@ -10365,19 +10368,28 @@ async fn list_acp_sessions_handler(
         ("id" = String, Path, description = "Agent id"),
         ("sid" = String, Path, description = "Session id")
     ),
-    responses((status = 200, description = "OK", body = serde_json::Value))
+    responses(
+        (status = 200, description = "OK", body = serde_json::Value),
+        (status = 403, description = "Agent edit permission required", body = serde_json::Value)
+    )
 )]
 async fn delete_acp_session_handler(
     State(state): State<ServerState>,
+    axum::Extension(caller): axum::Extension<Option<crate::identity_verify::VerifiedCaller>>,
     Path((agent_id, sid)): Path<(String, String)>,
 ) -> axum::response::Response {
-    let Some(spawn_cmd) = crate::sidecar::adapters::resolve_acp_spawn_cmd(
+    let spawn_cmd = match resolve_acp_spawn_cmd_authorized(
+        &state,
+        &caller,
+        crate::identity_verify::permissions::AGENT_EDIT,
         &agent_id,
-        &state.agents,
-        &state.agent_store,
     )
     .await
-    else {
+    {
+        Ok(spawn_cmd) => spawn_cmd,
+        Err(response) => return response,
+    };
+    let Some(spawn_cmd) = spawn_cmd else {
         return (
             StatusCode::BAD_REQUEST,
             Json(serde_json::json!({ "error": "not an ACP agent" })),
@@ -10426,20 +10438,29 @@ struct LoadSessionBody {
         ("sid" = String, Path, description = "Session id")
     ),
     request_body = serde_json::Value,
-    responses((status = 200, description = "OK", body = serde_json::Value))
+    responses(
+        (status = 200, description = "OK", body = serde_json::Value),
+        (status = 403, description = "Agent edit permission required", body = serde_json::Value)
+    )
 )]
 async fn load_acp_session_handler(
     State(state): State<ServerState>,
+    axum::Extension(caller): axum::Extension<Option<crate::identity_verify::VerifiedCaller>>,
     Path((agent_id, sid)): Path<(String, String)>,
     body: Option<Json<LoadSessionBody>>,
 ) -> axum::response::Response {
-    let Some(spawn_cmd) = crate::sidecar::adapters::resolve_acp_spawn_cmd(
+    let spawn_cmd = match resolve_acp_spawn_cmd_authorized(
+        &state,
+        &caller,
+        crate::identity_verify::permissions::AGENT_EDIT,
         &agent_id,
-        &state.agents,
-        &state.agent_store,
     )
     .await
-    else {
+    {
+        Ok(spawn_cmd) => spawn_cmd,
+        Err(response) => return response,
+    };
+    let Some(spawn_cmd) = spawn_cmd else {
         return (
             StatusCode::BAD_REQUEST,
             Json(serde_json::json!({ "error": "not an ACP agent" })),
@@ -10487,13 +10508,30 @@ async fn agent_npm_package(state: &ServerState, agent_id: &str) -> Option<String
     tag = "Agents",
     summary = "Check an agent runtime for updates",
     params(("id" = String, Path, description = "Agent id")),
-    responses((status = 200, description = "OK", body = serde_json::Value))
+    responses(
+        (status = 200, description = "OK", body = serde_json::Value),
+        (status = 403, description = "Agent view permission required", body = serde_json::Value)
+    )
 )]
 async fn agent_update_check(
     State(state): State<ServerState>,
+    axum::Extension(caller): axum::Extension<Option<crate::identity_verify::VerifiedCaller>>,
     Path(agent_id): Path<String>,
-) -> Json<serde_json::Value> {
-    let entry = state.agents.find_by_prefix(&agent_id).cloned();
+) -> axum::response::Response {
+    let entry = match run_after_agent_resource_permission(
+        enforce_agent_resource_permission(
+            &state,
+            &caller,
+            crate::identity_verify::permissions::AGENT_VIEW,
+            &agent_id,
+        ),
+        async { state.agents.find_by_prefix(&agent_id).cloned() },
+    )
+    .await
+    {
+        Ok(entry) => entry,
+        Err(response) => return response,
+    };
     let probe = entry.as_ref().and_then(|e| e.version_probe.clone());
     let bridge_npm_package = probe.as_ref().and_then(|p| p.bridge_npm_package.clone());
     // `agent_npm_package` parses the SPAWN command, so for an ACP agent it yields
@@ -10549,6 +10587,7 @@ async fn agent_update_check(
         "latestBridgeVersion": latest_bridge,
         "updateAvailable": update_available,
     }))
+    .into_response()
 }
 
 /// How an on-PATH agent CLI was installed, which is what decides whether Ryu can
@@ -10874,16 +10913,33 @@ async fn resolve_capability_model_ref(
     tag = "Agents",
     summary = "Resolve an agent's capabilities (tools / reasoning / vision)",
     params(("id" = String, Path), ("model" = Option<String>, Query, description = "Override the model ref to probe")),
-    responses((status = 200, description = "OK", body = serde_json::Value))
+    responses(
+        (status = 200, description = "OK", body = serde_json::Value),
+        (status = 403, description = "Agent view permission required", body = serde_json::Value)
+    )
 )]
 async fn agent_capabilities(
     State(state): State<ServerState>,
+    axum::Extension(caller): axum::Extension<Option<crate::identity_verify::VerifiedCaller>>,
     Path(agent_id): Path<String>,
     axum::extract::Query(query): axum::extract::Query<AgentCapabilitiesQuery>,
 ) -> axum::response::Response {
     use crate::model_catalog::capabilities::{self as caps, CapabilityReport, DetectedCaps};
 
-    let overrides = caps::load_override(&agent_id);
+    let overrides = match run_after_agent_resource_permission(
+        enforce_agent_resource_permission(
+            &state,
+            &caller,
+            crate::identity_verify::permissions::AGENT_VIEW,
+            &agent_id,
+        ),
+        async { caps::load_override(&agent_id) },
+    )
+    .await
+    {
+        Ok(overrides) => overrides,
+        Err(response) => return response,
+    };
     let acp_selections = parse_acp_selections(query.selections.as_deref());
     let model_ref = resolve_capability_model_ref(&state, &agent_id, query.model).await;
     let local_detected = model_ref.as_deref().and_then(caps::detect_local);
@@ -10985,10 +11041,14 @@ struct CapabilityOverridePatch {
     summary = "Persist an agent's capability overrides",
     params(("id" = String, Path)),
     request_body = serde_json::Value,
-    responses((status = 200, description = "OK", body = serde_json::Value))
+    responses(
+        (status = 200, description = "OK", body = serde_json::Value),
+        (status = 403, description = "Agent edit permission required", body = serde_json::Value)
+    )
 )]
 async fn set_agent_capabilities(
     State(state): State<ServerState>,
+    axum::Extension(caller): axum::Extension<Option<crate::identity_verify::VerifiedCaller>>,
     Path(agent_id): Path<String>,
     Json(patch): Json<CapabilityOverridePatch>,
 ) -> axum::response::Response {
@@ -10999,7 +11059,21 @@ async fn set_agent_capabilities(
         reasoning: patch.reasoning,
         vision: patch.vision,
     };
-    if let Err(e) = crate::model_catalog::capabilities::save_override(&agent_id, &overrides) {
+    let save_result = match run_after_agent_resource_permission(
+        enforce_agent_resource_permission(
+            &state,
+            &caller,
+            crate::identity_verify::permissions::AGENT_EDIT,
+            &agent_id,
+        ),
+        async { crate::model_catalog::capabilities::save_override(&agent_id, &overrides) },
+    )
+    .await
+    {
+        Ok(save_result) => save_result,
+        Err(response) => return response,
+    };
+    if let Err(e) = save_result {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({ "error": e.to_string() })),
@@ -11010,6 +11084,7 @@ async fn set_agent_capabilities(
     // model override here: report the agent's own effective capabilities.
     agent_capabilities(
         State(state),
+        axum::Extension(caller),
         Path(agent_id),
         axum::extract::Query(AgentCapabilitiesQuery {
             model: None,
@@ -27996,7 +28071,10 @@ fn native_history_access_denied(
         ("id" = String, Path),
         ("cwd" = Option<String>, Query, description = "Filter to threads from this working directory")
     ),
-    responses((status = 200, description = "OK", body = serde_json::Value))
+    responses(
+        (status = 200, description = "OK", body = serde_json::Value),
+        (status = 403, description = "Agent view permission required", body = serde_json::Value)
+    )
 )]
 async fn list_agent_threads_handler(
     State(state): State<ServerState>,
@@ -28004,6 +28082,16 @@ async fn list_agent_threads_handler(
     axum::extract::Path(agent_id): axum::extract::Path<String>,
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> axum::response::Response {
+    if let Err(response) = enforce_agent_resource_permission(
+        &state,
+        &caller,
+        crate::identity_verify::permissions::AGENT_VIEW,
+        &agent_id,
+    )
+    .await
+    {
+        return response;
+    }
     if let Some(response) = native_history_access_denied(caller.as_ref()) {
         return response;
     }
@@ -28073,11 +28161,29 @@ fn missing_imported_message_tail<'a>(
     &imported[imported_index..]
 }
 
+fn import_reuse_permission(
+    result: Result<(), axum::response::Response>,
+) -> Result<bool, axum::response::Response> {
+    match result {
+        Ok(()) => Ok(true),
+        Err(response)
+            if matches!(
+                response.status(),
+                StatusCode::FORBIDDEN | StatusCode::NOT_FOUND
+            ) =>
+        {
+            Ok(false)
+        }
+        Err(response) => Err(response),
+    }
+}
+
 #[cfg(test)]
 mod imported_thread_merge_tests {
-    use super::missing_imported_message_tail;
+    use super::{import_reuse_permission, json_error, missing_imported_message_tail};
     use crate::native_history::ImportedMessage;
     use crate::server::conversations::StoredMessage;
+    use axum::http::StatusCode;
 
     fn stored(role: &str, content: &str, created_at: i64) -> StoredMessage {
         StoredMessage {
@@ -28106,6 +28212,27 @@ mod imported_thread_merge_tests {
             content: content.to_string(),
             created_at: Some(created_at),
         }
+    }
+
+    #[test]
+    fn import_reuse_only_falls_through_for_denial_or_missing_rows() {
+        assert!(
+            import_reuse_permission(Ok(())).expect("authorized reuse decision"),
+            "an authorized existing conversation may be updated"
+        );
+        for status in [StatusCode::FORBIDDEN, StatusCode::NOT_FOUND] {
+            assert!(
+                !import_reuse_permission(Err(json_error(status, "not reusable".to_owned())))
+                    .expect("denied reuse decision"),
+                "{status} should create a separate caller-owned import"
+            );
+        }
+        let failure = import_reuse_permission(Err(json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "resource metadata unavailable".to_owned(),
+        )))
+        .expect_err("a metadata failure must not become a successful fresh import");
+        assert_eq!(failure.status(), StatusCode::INTERNAL_SERVER_ERROR);
     }
 
     #[test]
@@ -28190,7 +28317,10 @@ mod imported_thread_merge_tests {
     summary = "Import a native thread into a Ryu conversation",
     params(("id" = String, Path)),
     request_body = serde_json::Value,
-    responses((status = 200, description = "OK", body = serde_json::Value))
+    responses(
+        (status = 200, description = "OK", body = serde_json::Value),
+        (status = 403, description = "Agent view or edit permission required", body = serde_json::Value)
+    )
 )]
 async fn import_agent_thread_handler(
     State(state): State<ServerState>,
@@ -28198,6 +28328,26 @@ async fn import_agent_thread_handler(
     axum::extract::Path(agent_id): axum::extract::Path<String>,
     Json(body): Json<ImportThreadBody>,
 ) -> axum::response::Response {
+    if let Err(response) = enforce_agent_resource_permission(
+        &state,
+        &caller,
+        crate::identity_verify::permissions::AGENT_VIEW,
+        &agent_id,
+    )
+    .await
+    {
+        return response;
+    }
+    if let Err(response) = enforce_agent_resource_permission(
+        &state,
+        &caller,
+        crate::identity_verify::permissions::AGENT_EDIT,
+        &agent_id,
+    )
+    .await
+    {
+        return response;
+    }
     if let Some(response) = native_history_access_denied(caller.as_ref()) {
         return response;
     }
@@ -28254,76 +28404,102 @@ async fn import_agent_thread_inner(
         );
     }
 
+    let tenancy = tenancy_override
+        .clone()
+        .unwrap_or_else(|| caller_tenancy(caller));
     // Dedup + sync: a repeat import of the same agent-native thread updates the
     // existing Ryu conversation with the source transcript's new tail.
     let origin = format!("import:{engine}");
     if let Some(native_id) = imported.thread.native_session_id.as_deref() {
         match state
             .conversations
-            .find_imported_conversation(&origin, native_id)
+            .find_imported_conversation(&origin, native_id, &tenancy)
             .await
         {
             Ok(Some(existing)) => {
-                let existing_messages = match state.conversations.get_messages(&existing).await {
-                    Ok(messages) => messages,
-                    Err(e) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
-                };
-                let missing_messages =
-                    missing_imported_message_tail(&existing_messages, &imported.messages);
-                let messages_added = missing_messages.len();
-                let tenancy = tenancy_override
-                    .clone()
-                    .unwrap_or_else(|| caller_tenancy(caller));
-                for msg in missing_messages {
-                    if let Err(e) = state
-                        .conversations
-                        .append_message_at(
-                            &existing,
-                            &msg.role,
-                            &msg.content,
-                            Some(&agent_id),
-                            None,
-                            None,
-                            tenancy.clone(),
-                            msg.created_at,
-                        )
-                        .await
-                    {
-                        return json_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string());
+                // The tenancy key prevents cross-owner matches. Keep the
+                // canonical conversation write check as defense in depth for
+                // resource ACL denies and stale rows. The sync service is an
+                // explicit SharedOrg writer; its scoped query cannot match a
+                // private human import.
+                let service_reuse = matches!(
+                    tenancy_override.as_ref(),
+                    Some(conversations::Tenancy::SharedOrg { .. })
+                );
+                let caller_can_update = if service_reuse {
+                    true
+                } else {
+                    match import_reuse_permission(require_resource_write(
+                        state.conversations.get_access_meta(&existing).await,
+                        caller.as_ref(),
+                        "conversation not found",
+                    )) {
+                        Ok(can_update) => can_update,
+                        Err(response) => return response,
                     }
+                };
+                if caller_can_update {
+                    let existing_messages = match state.conversations.get_messages(&existing).await
+                    {
+                        Ok(messages) => messages,
+                        Err(e) => {
+                            return json_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string());
+                        }
+                    };
+                    let missing_messages =
+                        missing_imported_message_tail(&existing_messages, &imported.messages);
+                    let messages_added = missing_messages.len();
+                    for msg in missing_messages {
+                        if let Err(e) = state
+                            .conversations
+                            .append_message_at(
+                                &existing,
+                                &msg.role,
+                                &msg.content,
+                                Some(&agent_id),
+                                None,
+                                None,
+                                tenancy.clone(),
+                                msg.created_at,
+                            )
+                            .await
+                        {
+                            return json_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string());
+                        }
+                    }
+                    if messages_added > 0 {
+                        crate::events::publish_system_notification_for_user(
+                            "Thread import updated",
+                            format!(
+                                "{} synced {messages_added} new messages from {engine}.",
+                                imported.thread.title
+                            ),
+                            "success",
+                            caller.as_ref().map(|verified| verified.user_id.clone()),
+                        );
+                    }
+                    if let Some(native_id) = imported.thread.native_session_id.as_deref() {
+                        crate::server::agent_sync::remember_native_session(
+                            &existing,
+                            &agent_id,
+                            &engine,
+                            native_id,
+                            imported.thread.cwd.as_deref(),
+                        );
+                    }
+                    return Json(json!({
+                        "conversation_id": existing,
+                        "agent_id": agent_id,
+                        "engine": engine,
+                        "message_count": imported.messages.len(),
+                        "messages_added": messages_added,
+                        "truncated": imported.truncated,
+                        "title": imported.thread.title,
+                        "cwd": imported.thread.cwd,
+                        "already_imported": true,
+                    }))
+                    .into_response();
                 }
-                if messages_added > 0 {
-                    crate::events::publish_system_notification_for_user(
-                        "Thread import updated",
-                        format!(
-                            "{} synced {messages_added} new messages from {engine}.",
-                            imported.thread.title
-                        ),
-                        "success",
-                        caller.as_ref().map(|verified| verified.user_id.clone()),
-                    );
-                }
-                if let Some(native_id) = imported.thread.native_session_id.as_deref() {
-                    crate::server::agent_sync::remember_native_session(
-                        &existing,
-                        &agent_id,
-                        &engine,
-                        native_id,
-                        imported.thread.cwd.as_deref(),
-                    );
-                }
-                return Json(json!({
-                    "conversation_id": existing,
-                    "agent_id": agent_id,
-                    "engine": engine,
-                    "message_count": imported.messages.len(),
-                    "messages_added": messages_added,
-                    "truncated": imported.truncated,
-                    "title": imported.thread.title,
-                    "cwd": imported.thread.cwd,
-                    "already_imported": true,
-                }))
-                .into_response();
             }
             Ok(None) => {}
             Err(e) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
@@ -28336,9 +28512,6 @@ async fn import_agent_thread_inner(
     // untenanted, which `resource_access` denies to EVERYONE on an org-bound node —
     // the importer would 403 out of the thread they just imported. No-op on a
     // personal node (see `caller_tenancy`).
-    let tenancy = tenancy_override
-        .clone()
-        .unwrap_or_else(|| caller_tenancy(caller));
     if let Err(e) = state
         .conversations
         .ensure_conversation(
@@ -29178,20 +29351,37 @@ async fn resolved_agent_tool_allowlist(state: &ServerState, agent_id: &str) -> O
     tag = "Agents",
     summary = "List an agent's tools + MCP tools",
     params(("id" = String, Path)),
-    responses((status = 200, description = "OK", body = serde_json::Value))
+    responses(
+        (status = 200, description = "OK", body = serde_json::Value),
+        (status = 403, description = "Agent view permission required", body = serde_json::Value)
+    )
 )]
 async fn list_tools(
     State(state): State<ServerState>,
+    axum::Extension(caller): axum::Extension<Option<crate::identity_verify::VerifiedCaller>>,
     axum::extract::Path(agent_id): axum::extract::Path<String>,
-) -> Json<serde_json::Value> {
+) -> axum::response::Response {
     // Tools the ACP agent has actually invoked this run...
-    let observed = state.agents.tools_for(&agent_id);
+    let observed = match run_after_agent_resource_permission(
+        enforce_agent_resource_permission(
+            &state,
+            &caller,
+            crate::identity_verify::permissions::AGENT_VIEW,
+            &agent_id,
+        ),
+        async { state.agents.tools_for(&agent_id) },
+    )
+    .await
+    {
+        Ok(observed) => observed,
+        Err(response) => return response,
+    };
     // ...plus the registered MCP tools this agent is allowed to use. The
     // persisted agent card supplies the default scope and the registry config
     // can provide an operator override.
     let allowlist = resolved_agent_tool_allowlist(&state, &agent_id).await;
     let mcp = state.mcp.tools_for_agent(allowlist.as_deref()).await;
-    Json(json!({ "tools": observed, "mcpTools": mcp }))
+    Json(json!({ "tools": observed, "mcpTools": mcp })).into_response()
 }
 
 /// `GET /api/mcp/servers` — list the MCP servers registered in Core config.
@@ -38366,22 +38556,6 @@ fn host_is_allowlisted_in(host: &str, port: u16, list: Option<&str>) -> bool {
 /// Runtime wrapper: read [`ENV_AGENT_EGRESS_SSRF_GUARD`] and classify.
 fn agent_egress_guard_enabled() -> bool {
     agent_egress_guard_enabled_from(std::env::var(ENV_AGENT_EGRESS_SSRF_GUARD).ok().as_deref())
-}
-
-/// Runtime wrapper: is `host:port` exempted by [`ENV_AGENT_EGRESS_ALLOW_HOSTS`]?
-///
-/// Retained (and `allow`ed) as the named runtime counterpart to
-/// [`host_is_allowlisted_in`]: [`screen_egress_url_with`] now takes the allowlist
-/// as a parameter so it is testable without touching process env, so this has no
-/// in-crate caller. Kept rather than deleted because it is the one place the
-/// env-var → decision binding is spelled out for a future caller to reuse.
-#[allow(dead_code)]
-fn host_is_allowlisted(host: &str, port: u16) -> bool {
-    host_is_allowlisted_in(
-        host,
-        port,
-        std::env::var(ENV_AGENT_EGRESS_ALLOW_HOSTS).ok().as_deref(),
-    )
 }
 
 /// SSRF egress screen for agent browsing tools that fetch arbitrary URLs.
@@ -50492,6 +50666,24 @@ async fn acl_vocabulary() -> Json<serde_json::Value> {
 
 // ── Per-resource permission enforcement ──────────────────────────────────────
 
+fn resource_permission_admission(
+    managed_node: bool,
+    node_org: Option<&str>,
+    caller: Option<&crate::identity_verify::VerifiedCaller>,
+) -> Result<(), StatusCode> {
+    if caller.is_none() {
+        return if node_org.is_some() || managed_node {
+            Err(StatusCode::FORBIDDEN)
+        } else {
+            Ok(())
+        };
+    }
+    if managed_node && node_org.is_none() {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    Ok(())
+}
+
 /// Require that the caller holds `permission` on ONE SPECIFIC resource.
 ///
 /// The per-resource sibling of [`enforce_permission`]. That one answers "may this
@@ -50505,6 +50697,7 @@ async fn acl_vocabulary() -> Json<serde_json::Value> {
 /// deliberately, so the two gates cannot disagree about who is even a candidate:
 ///   - anonymous + node UNBOUND -> allowed (a personal node's boundary is its
 ///     node token; denying would lock the single local user out of their own data);
+///   - managed but unregistered -> denied until the node binding resolves;
 ///   - anonymous + node ORG-BOUND -> denied;
 ///   - a caller from a different org than the node's -> denied.
 ///
@@ -50520,14 +50713,12 @@ pub(crate) async fn enforce_permission_on(
     kind: &str,
     resource_id: &str,
 ) -> Result<(), StatusCode> {
+    let managed_node = crate::sidecar::control_plane::is_managed_node();
     let node_org = crate::sidecar::control_plane::registered_org().map(|o| o.id);
 
+    resource_permission_admission(managed_node, node_org.as_deref(), caller.as_ref())?;
     let Some(caller) = caller else {
-        return if node_org.is_some() {
-            Err(StatusCode::FORBIDDEN)
-        } else {
-            Ok(())
-        };
+        return Ok(());
     };
 
     // UNBOUND node: there is no org to scope roles against, so `to_caller_for_org`
@@ -50536,6 +50727,8 @@ pub(crate) async fn enforce_permission_on(
     // lock the single local user out of their own spaces — the exact trap
     // `resource_access` documents. `enforce_permission` returns Ok here for the
     // same reason; the two gates must not disagree about who is a candidate.
+    // A node flagged managed but not yet registered is not an unbound personal
+    // node; fail closed until its control-plane binding is available.
     let Some(node_org) = node_org.as_deref() else {
         return Ok(());
     };
@@ -50939,7 +51132,38 @@ async fn acl_principals(
 
 #[cfg(test)]
 mod per_resource_gate_tests {
-    use super::acl_principals_payload;
+    use super::{acl_principals_payload, resource_permission_admission};
+    use crate::identity_verify::{OrgRole, VerifiedCaller};
+    use axum::http::StatusCode;
+
+    #[test]
+    fn managed_unregistered_resource_permissions_fail_closed() {
+        let caller = VerifiedCaller {
+            user_id: "alice".to_owned(),
+            email: None,
+            org_id: Some("org1".to_owned()),
+            role: OrgRole::Member,
+            teams: Vec::new(),
+        };
+
+        assert_eq!(
+            resource_permission_admission(true, None, None),
+            Err(StatusCode::FORBIDDEN)
+        );
+        assert_eq!(
+            resource_permission_admission(true, None, Some(&caller)),
+            Err(StatusCode::FORBIDDEN)
+        );
+        assert_eq!(resource_permission_admission(false, None, None), Ok(()));
+        assert_eq!(
+            resource_permission_admission(false, None, Some(&caller)),
+            Ok(())
+        );
+        assert_eq!(
+            resource_permission_admission(true, Some("org1"), Some(&caller)),
+            Ok(())
+        );
+    }
 
     /// EVERY `/api/acl/*` read handler must check a permission.
     ///
@@ -51299,6 +51523,157 @@ mod acp_selections_query_tests {
             parse_acp_selections(Some(r#"{"model":{"nested":true}}"#)).is_empty(),
             "values must be plain strings (ACP value ids)"
         );
+    }
+}
+
+#[cfg(test)]
+mod agent_resource_permission_runner_tests {
+    use super::{json_error, run_after_agent_resource_permission};
+    use crate::identity_verify::{OrgRole, VerifiedCaller};
+    use axum::http::StatusCode;
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
+
+    fn member(user_id: &str) -> VerifiedCaller {
+        VerifiedCaller {
+            user_id: user_id.to_owned(),
+            email: None,
+            org_id: Some("org1".to_owned()),
+            role: OrgRole::Member,
+            teams: Vec::new(),
+        }
+    }
+
+    const PERSISTED_AGENT_ID: &str = "security-acp-persisted-agent";
+    static ACL_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    struct RestoredAgentAcl {
+        key: crate::acl::store::ResourceKey,
+        previous: Vec<crate::acl::store::StoredOverwrite>,
+    }
+
+    impl Drop for RestoredAgentAcl {
+        fn drop(&mut self) {
+            let _ = crate::acl::store::set_overwrites(&self.key, self.previous.clone());
+        }
+    }
+
+    fn install_agent_acl() -> RestoredAgentAcl {
+        let key = crate::acl::store::ResourceKey::new(crate::acl::KIND_AGENT, PERSISTED_AGENT_ID);
+        let previous = crate::acl::store::stored_for(&key);
+        crate::acl::store::set_overwrites(
+            &key,
+            vec![crate::acl::store::StoredOverwrite {
+                target_type: "member".to_owned(),
+                target_id: "bob".to_owned(),
+                allow: Vec::new(),
+                deny: vec![
+                    crate::identity_verify::permissions::AGENT_VIEW.to_owned(),
+                    crate::identity_verify::permissions::AGENT_EDIT.to_owned(),
+                ],
+            }],
+        )
+        .expect("persist the agent ACL fixture");
+        assert_eq!(
+            crate::acl::store::stored_for(&key).len(),
+            1,
+            "the guard test must read the ACL from the persisted store"
+        );
+        RestoredAgentAcl { key, previous }
+    }
+
+    #[tokio::test]
+    async fn persisted_denied_agent_acl_skips_acp_and_vault_operations() {
+        let _lock = ACL_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let _restore = install_agent_acl();
+        let bob = member("bob");
+        for permission in [
+            crate::identity_verify::permissions::AGENT_VIEW,
+            crate::identity_verify::permissions::AGENT_EDIT,
+        ] {
+            let decision = crate::acl::decide_with_context(
+                &bob,
+                crate::acl::KIND_AGENT,
+                PERSISTED_AGENT_ID,
+                permission,
+                &std::collections::HashSet::new(),
+                &std::collections::HashSet::new(),
+            );
+            assert_eq!(decision, crate::acl::Decision::Denied);
+
+            let operation_calls = Arc::new(AtomicUsize::new(0));
+            let calls = Arc::clone(&operation_calls);
+            let result = run_after_agent_resource_permission(
+                async move {
+                    match decision {
+                        crate::acl::Decision::Allowed => Ok(()),
+                        crate::acl::Decision::Denied => Err(json_error(
+                            StatusCode::FORBIDDEN,
+                            format!("insufficient permissions: {permission}"),
+                        )),
+                    }
+                },
+                async move {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    "side effect"
+                },
+            )
+            .await;
+
+            let response = result.expect_err("a denied resource ACL must stop the operation");
+            assert_eq!(response.status(), StatusCode::FORBIDDEN);
+            assert_eq!(
+                operation_calls.load(Ordering::SeqCst),
+                0,
+                "ACP spawn or vault access must not run after an ACL denial"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn persisted_allowed_agent_acl_runs_the_operation_once() {
+        let _lock = ACL_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let _restore = install_agent_acl();
+        let carol = member("carol");
+        let permission = crate::identity_verify::permissions::AGENT_VIEW;
+        let decision = crate::acl::decide_with_context(
+            &carol,
+            crate::acl::KIND_AGENT,
+            PERSISTED_AGENT_ID,
+            permission,
+            &std::collections::HashSet::new(),
+            &std::collections::HashSet::new(),
+        );
+        assert_eq!(decision, crate::acl::Decision::Allowed);
+
+        let operation_calls = Arc::new(AtomicUsize::new(0));
+        let calls = Arc::clone(&operation_calls);
+        let result = run_after_agent_resource_permission(
+            async move {
+                match decision {
+                    crate::acl::Decision::Allowed => Ok(()),
+                    crate::acl::Decision::Denied => Err(json_error(
+                        StatusCode::FORBIDDEN,
+                        format!("insufficient permissions: {permission}"),
+                    )),
+                }
+            },
+            async move {
+                calls.fetch_add(1, Ordering::SeqCst);
+                "completed"
+            },
+        )
+        .await
+        .expect("an allowed resource ACL should run the operation");
+
+        assert_eq!(result, "completed");
+        assert_eq!(operation_calls.load(Ordering::SeqCst), 1);
     }
 }
 

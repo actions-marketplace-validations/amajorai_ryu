@@ -83,7 +83,7 @@ export default function ImportToolsAction({
 				{state === "busy" ? "Adding…" : label}
 			</Button>
 			{state === "error" && message ? (
-				<p className="text-destructive text-xs">{message}</p>
+				<p className="text-status-destructive text-xs">{message}</p>
 			) : null}
 		</div>
 	);

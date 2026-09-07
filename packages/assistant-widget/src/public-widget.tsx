@@ -940,8 +940,8 @@ export function RyuAssistantWidget({
 
 	return (
 		<RyuAssistantMorph
-			bgClassName="bg-gradient-to-b from-neutral-950/95 via-neutral-950/90 to-neutral-900/85 text-neutral-100"
-			chromeClassName="ring-1 ring-white/10 shadow-2xl"
+			bgClassName="bg-popover text-popover-foreground"
+			chromeClassName="ring-1 ring-border shadow-lg"
 			className="fixed z-[1000000001] h-10 w-10"
 			contentHeight={MORPH_CONTENT_HEIGHT}
 			contentMaxHeight="calc(100svh - 2rem)"
@@ -950,8 +950,8 @@ export function RyuAssistantWidget({
 			isOpen={open}
 			onOpenChange={setOpen}
 			style={{ bottom: "1.5rem", right: "1.5rem", zIndex: 1_000_000_001 }}
-			trigger={<Logo className="text-neutral-100" size="34px" variant="eyes" />}
-			triggerClassName="text-neutral-100 transition-transform duration-200 hover:scale-[1.04] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background"
+			trigger={<Logo className="text-foreground" size="34px" variant="eyes" />}
+			triggerClassName="text-foreground transition-transform duration-200 hover:scale-[1.04] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background"
 			triggerLabel="Open Ask Ryu"
 		>
 			{panel}

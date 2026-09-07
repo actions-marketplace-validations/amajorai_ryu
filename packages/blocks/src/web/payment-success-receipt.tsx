@@ -352,14 +352,14 @@ export function PaymentSuccessReceipt({
 						<PrintLine delay={0.12}>
 							<div className="flex items-center justify-between gap-4 font-mono text-[0.65rem] text-muted-foreground uppercase tracking-[0.18em]">
 								<span>{copy.eyebrow}</span>
-								<span className="text-success">● paid</span>
+								<span className="text-status-success">● paid</span>
 							</div>
 						</PrintLine>
 					</div>
 
 					<div className="px-6 pt-8 pb-7 text-center sm:px-9 sm:pt-10">
 						<PrintLine delay={0.2}>
-							<div className="mx-auto flex size-16 items-center justify-center rounded-full bg-success/12 text-success ring-8 ring-success/5 sm:size-20">
+							<div className="mx-auto flex size-16 items-center justify-center rounded-full bg-success/12 text-status-success ring-8 ring-success/5 sm:size-20">
 								{icon ?? <SuccessCheck className="size-9 sm:size-10" />}
 							</div>
 						</PrintLine>
@@ -392,7 +392,9 @@ export function PaymentSuccessReceipt({
 									<p className="text-[0.65rem] text-muted-foreground uppercase tracking-[0.16em]">
 										Status
 									</p>
-									<p className="mt-1 font-medium text-sm text-success">Paid</p>
+									<p className="mt-1 font-medium text-sm text-status-success">
+										Paid
+									</p>
 								</div>
 							</div>
 						</PrintLine>

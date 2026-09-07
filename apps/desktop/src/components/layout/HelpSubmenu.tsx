@@ -138,50 +138,52 @@ export function HelpSubmenu() {
 					</span>
 				</DropdownMenuItem>
 				<DropdownMenuSeparator />
-				<DropdownMenuLabel className="flex items-center gap-1.5">
-					<Sparkles className="size-3.5" />
-					What&rsquo;s new?
-				</DropdownMenuLabel>
-				{loading ? (
-					<div className="flex items-center justify-center px-3 py-6">
-						<Spinner className="size-4" />
-					</div>
-				) : whatsNew.length === 0 ? (
-					<div className="px-3 py-4 text-muted-foreground text-sm">
-						No recent updates
-					</div>
-				) : (
-					<DropdownMenuGroup className="relative">
-						{/* The timeline rail. Runs behind the dots and stops a beat
+				<DropdownMenuGroup>
+					<DropdownMenuLabel className="flex items-center gap-1.5">
+						<Sparkles className="size-3.5" />
+						What&rsquo;s new?
+					</DropdownMenuLabel>
+					{loading ? (
+						<div className="flex items-center justify-center px-3 py-6">
+							<Spinner className="size-4" />
+						</div>
+					) : whatsNew.length === 0 ? (
+						<div className="px-3 py-4 text-muted-foreground text-sm">
+							No recent updates
+						</div>
+					) : (
+						<DropdownMenuGroup className="relative">
+							{/* The timeline rail. Runs behind the dots and stops a beat
 						    above/below the first and last so the endpoints read as
 						    start/stop rather than a clipped line. */}
-						<span
-							aria-hidden
-							className="absolute top-4 bottom-4 left-[11px] w-px bg-border/70"
-						/>
-						{whatsNew.map((item) => (
-							<DropdownMenuItem
-								key={`${item.kind}-${item.id}`}
-								onClick={() => openUpdate(item, frontendBase)}
-							>
-								<span className="mr-3 size-1.5 shrink-0 rounded-full bg-foreground/70" />
-								<span className="flex min-w-0 flex-1 flex-col gap-0.5">
-									<OverflowTooltip
-										className="min-w-0 flex-1 overflow-hidden whitespace-nowrap font-medium text-sm"
-										fade
-										text={item.title}
-									/>
-									<OverflowTooltip
-										className="min-w-0 flex-1 overflow-hidden whitespace-nowrap text-[11px] text-muted-foreground"
-										fade
-										text={itemMeta(item)}
-									/>
-								</span>
-								<ArrowUpRight className="ml-2 size-3.5 shrink-0 text-muted-foreground" />
-							</DropdownMenuItem>
-						))}
-					</DropdownMenuGroup>
-				)}
+							<span
+								aria-hidden
+								className="absolute top-4 bottom-4 left-[11px] w-px bg-border/70"
+							/>
+							{whatsNew.map((item) => (
+								<DropdownMenuItem
+									key={`${item.kind}-${item.id}`}
+									onClick={() => openUpdate(item, frontendBase)}
+								>
+									<span className="mr-3 size-1.5 shrink-0 rounded-full bg-foreground/70" />
+									<span className="flex min-w-0 flex-1 flex-col gap-0.5">
+										<OverflowTooltip
+											className="min-w-0 flex-1 overflow-hidden whitespace-nowrap font-medium text-sm"
+											fade
+											text={item.title}
+										/>
+										<OverflowTooltip
+											className="min-w-0 flex-1 overflow-hidden whitespace-nowrap text-[11px] text-muted-foreground"
+											fade
+											text={itemMeta(item)}
+										/>
+									</span>
+									<ArrowUpRight className="ml-2 size-3.5 shrink-0 text-muted-foreground" />
+								</DropdownMenuItem>
+							))}
+						</DropdownMenuGroup>
+					)}
+				</DropdownMenuGroup>
 				<DropdownMenuItem onClick={openAllReleases}>
 					<ArrowUpRight className="mr-2 size-4" />
 					View all releases

@@ -88,7 +88,7 @@ export function ModeToolbarButton(props: ComponentProps<typeof DropdownMenu>) {
 					value={value}
 				>
 					<DropdownMenuRadioItem
-						className="pl-2 *:[svg]:text-muted-foreground"
+						className="ps-2 *:[svg]:text-muted-foreground"
 						value="editing"
 					>
 						{item.editing!.icon}
@@ -96,7 +96,7 @@ export function ModeToolbarButton(props: ComponentProps<typeof DropdownMenu>) {
 					</DropdownMenuRadioItem>
 
 					<DropdownMenuRadioItem
-						className="pl-2 *:[svg]:text-muted-foreground"
+						className="ps-2 *:[svg]:text-muted-foreground"
 						value="viewing"
 					>
 						{item.viewing!.icon}
@@ -104,7 +104,7 @@ export function ModeToolbarButton(props: ComponentProps<typeof DropdownMenu>) {
 					</DropdownMenuRadioItem>
 
 					<DropdownMenuRadioItem
-						className="pl-2 *:[svg]:text-muted-foreground"
+						className="ps-2 *:[svg]:text-muted-foreground"
 						value="suggestion"
 					>
 						{item.suggestion!.icon}

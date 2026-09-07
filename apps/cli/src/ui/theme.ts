@@ -16,9 +16,9 @@ type ThemeBorder = Theme["border"];
 // theme-definition boundary, so components and preference resolution never
 // need to know which color represents a surface, status, or focus state.
 const RYU_DARK_COLORS = {
-	primary: "#A78BFA",
+	primary: "#0099FF",
 	primaryForeground: "#0B0B12",
-	accent: "#8B5CF6",
+	accent: "#0099FF",
 	accentForeground: "#FFFFFF",
 	secondary: "#7C7F93",
 	secondaryForeground: "#FFFFFF",
@@ -35,15 +35,15 @@ const RYU_DARK_COLORS = {
 	muted: "#1F2230",
 	mutedForeground: "#9CA3AF",
 	border: "#3A3D4D",
-	focusRing: "#A78BFA",
-	selection: "#7C3AED",
+	focusRing: "#0099FF",
+	selection: "#006EB8",
 	selectionForeground: "#FFFFFF",
 } satisfies ThemeColors;
 
 const RYU_LIGHT_COLORS = {
-	primary: "#6D28D9",
+	primary: "#006EB8",
 	primaryForeground: "#FFFFFF",
-	accent: "#7C3AED",
+	accent: "#006EB8",
 	accentForeground: "#FFFFFF",
 	secondary: "#6B7280",
 	secondaryForeground: "#FFFFFF",
@@ -60,9 +60,9 @@ const RYU_LIGHT_COLORS = {
 	muted: "#EEF0F6",
 	mutedForeground: "#5F6472",
 	border: "#D6D9E5",
-	focusRing: "#6D28D9",
-	selection: "#DDD6FE",
-	selectionForeground: "#312E81",
+	focusRing: "#006EB8",
+	selection: "#D9F0FF",
+	selectionForeground: "#003C66",
 } satisfies ThemeColors;
 
 const RYU_MONO_DARK_COLORS = {

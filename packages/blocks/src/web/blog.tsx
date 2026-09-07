@@ -7,7 +7,6 @@ import type { Route } from "next";
 import Image from "next/image";
 import Link, { useLinkStatus } from "next/link";
 import { useEffect, useMemo, useState } from "react";
-import { SeededGrainientBanner } from "./seeded-grainient-banner.tsx";
 
 /**
  * Block-local author shape. The live app's Notion `Author` type is a structural
@@ -137,10 +136,10 @@ export function BlogTags({
 				return (
 					<Link
 						className={cn(
-							"relative rounded-full border px-4 py-2 font-medium text-sm transition-colors",
+							"relative rounded-full px-4 py-2 font-medium text-sm outline-offset-4 transition-colors focus-visible:outline-2 focus-visible:outline-ring",
 							isActive
-								? "border-transparent bg-black text-white hover:bg-black/80 dark:bg-white dark:text-black dark:hover:bg-white/80"
-								: "text-foreground/60 hover:bg-black/5 hover:text-foreground dark:hover:bg-white/10"
+								? "bg-muted text-foreground"
+								: "text-muted-foreground hover:bg-muted/60 hover:text-foreground"
 						)}
 						href={url as Route}
 						key={tag.label}
@@ -201,8 +200,8 @@ export function BlogPostCard({ post }: { post: BlogPostData }) {
 			<div className="flex flex-col gap-1 pb-3">
 				<Link className="relative block" href={`/blog/${post.slug}`}>
 					<LinkPendingIndicator className="top-3 right-3" />
-					<div className="mb-4 aspect-video w-full overflow-hidden rounded-md">
-						{post.banner ? (
+					{post.banner ? (
+						<div className="mb-4 aspect-video w-full overflow-hidden rounded-md">
 							<Image
 								alt={post.title}
 								className="h-full w-full object-cover transition-transform duration-200 group-hover:scale-105"
@@ -211,12 +210,13 @@ export function BlogPostCard({ post }: { post: BlogPostData }) {
 								unoptimized
 								width={600}
 							/>
-						) : (
-							<SeededGrainientBanner className="h-full w-full" seed={post.id} />
-						)}
-					</div>
+						</div>
+					) : null}
 					<div className="flex flex-col gap-2">
-						<h2 className="font-medium text-xl transition-colors hover:text-primary">
+						<h2
+							className="font-heading font-medium text-xl transition-colors hover:underline hover:underline-offset-4"
+							data-slot="article-title"
+						>
 							{post.title}
 						</h2>
 					</div>
@@ -297,34 +297,11 @@ export function BlogPostsSearch({
 						</div>
 					)}
 					{unpinnedPosts.length > 0 && (
-						<>
-							{unpinnedPosts.length >= 3 ? (
-								<div className="grid grid-cols-1 gap-6 md:grid-cols-4 lg:grid-cols-6">
-									<div className="md:col-span-2 md:row-span-2 lg:col-span-3">
-										<BlogPostCard post={unpinnedPosts[0]} />
-									</div>
-									<div className="md:col-span-2 lg:col-span-3 lg:col-start-4 lg:row-start-1">
-										<BlogPostCard post={unpinnedPosts[1]} />
-									</div>
-									<div className="md:col-span-2 lg:col-span-3 lg:col-start-4 lg:row-start-2">
-										<BlogPostCard post={unpinnedPosts[2]} />
-									</div>
-								</div>
-							) : (
-								<div className="grid grid-cols-1 gap-6 md:grid-cols-2">
-									{unpinnedPosts.map((post) => (
-										<BlogPostCard key={post.id} post={post} />
-									))}
-								</div>
-							)}
-							{unpinnedPosts.length > 3 && (
-								<div className="grid grid-cols-1 gap-6 md:grid-cols-2 lg:grid-cols-3">
-									{unpinnedPosts.slice(3).map((post) => (
-										<BlogPostCard key={post.id} post={post} />
-									))}
-								</div>
-							)}
-						</>
+						<div className="grid grid-cols-1 gap-x-10 gap-y-10 md:grid-cols-2 lg:grid-cols-3">
+							{unpinnedPosts.map((post) => (
+								<BlogPostCard key={post.id} post={post} />
+							))}
+						</div>
 					)}
 				</div>
 			)}

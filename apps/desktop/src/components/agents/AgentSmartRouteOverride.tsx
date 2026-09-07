@@ -491,7 +491,7 @@ export function AgentSmartRouteOverride({ agentId }: { agentId: string }) {
 								</p>
 							) : null}
 							{classifierUnserved ? (
-								<p className="text-destructive text-xs">
+								<p className="text-status-destructive text-xs">
 									{classifierUnservedCopy}
 								</p>
 							) : null}
@@ -745,7 +745,7 @@ export function AgentSmartRouteOverride({ agentId }: { agentId: string }) {
 													variant="ghost"
 												>
 													<HugeiconsIcon
-														className="size-3.5 text-destructive"
+														className="size-3.5 text-status-destructive"
 														icon={Delete01Icon}
 													/>
 													<span className="sr-only">Remove rule {idx + 1}</span>

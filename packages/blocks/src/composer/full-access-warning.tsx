@@ -204,7 +204,7 @@ export function FullAccessWarningDialog({
 				<AlertDialogHeader className="gap-3">
 					<AlertDialogTitle className="flex items-center gap-2 text-lg">
 						<HugeiconsIcon
-							className="size-4 text-warning"
+							className="size-4 text-status-warning"
 							icon={Alert02Icon}
 							strokeWidth={2}
 						/>

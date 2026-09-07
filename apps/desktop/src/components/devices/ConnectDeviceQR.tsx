@@ -77,7 +77,7 @@ function ConnectDeviceQR() {
 				/>
 			</div>
 			{isLoopback && (
-				<p className="text-[11px] text-warning">
+				<p className="text-[11px] text-status-warning">
 					This address only works on this device. Enter the address other
 					devices on the same Wi-Fi use to reach it, for example
 					http://192.168.1.50:7980.

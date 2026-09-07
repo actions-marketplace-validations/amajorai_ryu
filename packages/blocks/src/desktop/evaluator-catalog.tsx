@@ -155,7 +155,7 @@ function EvaluatorRow({
 						<span
 							className={cn(
 								"text-[10px]",
-								item.enforced ? "text-success" : "text-muted-foreground"
+								item.enforced ? "text-status-success" : "text-muted-foreground"
 							)}
 						>
 							{item.enforced ? "● Enforced" : "○ Not yet enforced"}
@@ -254,7 +254,9 @@ export function EvaluatorCatalog({
 				/>
 			</div>
 
-			{error ? <p className="text-destructive text-xs">{error}</p> : null}
+			{error ? (
+				<p className="text-status-destructive text-xs">{error}</p>
+			) : null}
 
 			{canCreate ? (
 				<div className="flex flex-col gap-2 rounded-lg border border-dashed bg-muted/20 p-3">

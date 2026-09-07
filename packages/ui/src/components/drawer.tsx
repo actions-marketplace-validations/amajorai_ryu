@@ -1,5 +1,6 @@
 "use client";
 
+import { useDirection } from "@ryu/ui/components/direction.tsx";
 import { cn } from "@ryu/ui/lib/utils.ts";
 import type * as React from "react";
 import { Drawer as DrawerPrimitive } from "vaul";
@@ -49,6 +50,7 @@ function DrawerContent({
 	children,
 	...props
 }: React.ComponentProps<typeof DrawerPrimitive.Content>) {
+	const direction = useDirection();
 	return (
 		<DrawerPortal data-slot="drawer-portal">
 			<DrawerOverlay />
@@ -59,6 +61,7 @@ function DrawerContent({
 				)}
 				data-slot="drawer-content"
 				{...props}
+				dir={direction}
 			>
 				<div className="mx-auto mt-4 hidden h-1.5 w-[100px] shrink-0 rounded-full bg-muted group-data-[vaul-drawer-direction=bottom]/drawer-content:block" />
 				{children}

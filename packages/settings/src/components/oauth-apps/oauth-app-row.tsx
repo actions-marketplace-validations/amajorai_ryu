@@ -67,7 +67,7 @@ export function OAuthAppRow({
 						size="icon"
 						variant="ghost"
 					>
-						<Trash2 className="size-4 text-destructive" />
+						<Trash2 className="size-4 text-status-destructive" />
 					</Button>
 				</div>
 			</div>

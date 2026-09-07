@@ -14,6 +14,14 @@ describe("layoutForceGraph", () => {
 
 		expect([...first.keys()]).toEqual(["a", "b", "c"]);
 		expect(first).toEqual(second);
+		for (const point of first.values()) {
+			expect(Number.isFinite(point.x)).toBe(true);
+			expect(Number.isFinite(point.y)).toBe(true);
+		}
+		expect(
+			new Set([...first.values()].map(({ x, y }) => `${x},${y}`)).size
+		).toBe(nodes.length);
+		expect(first).not.toEqual(layoutForceGraph(nodes, []));
 	});
 
 	test("ignores edges that point to nodes outside the graph", () => {
@@ -22,7 +30,6 @@ describe("layoutForceGraph", () => {
 			[{ source: "a", target: "missing" }]
 		);
 
-		expect(points.size).toBe(1);
-		expect(points.get("a")).toBeDefined();
+		expect(points).toEqual(layoutForceGraph([{ id: "a" }], []));
 	});
 });

@@ -101,7 +101,7 @@ export function ActivationRecommendationsStep({
 											{recommendation.appName}
 										</p>
 										{recommendation.active ? (
-											<span className="inline-flex items-center gap-1 text-success text-xs">
+											<span className="inline-flex items-center gap-1 text-status-success text-xs">
 												<Check className="size-3" /> Connected
 											</span>
 										) : null}
@@ -128,7 +128,7 @@ export function ActivationRecommendationsStep({
 						))
 					)}
 					{error ? (
-						<p className="text-destructive text-sm" role="alert">
+						<p className="text-sm text-status-destructive" role="alert">
 							{error}
 						</p>
 					) : null}

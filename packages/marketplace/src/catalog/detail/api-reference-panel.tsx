@@ -115,7 +115,7 @@ function ContributionList({ items }: { items: CatalogContribution[] }) {
 						</p>
 					) : null}
 					{item.name ? null : (
-						<p className="mt-0.5 text-amber-600 text-xs dark:text-amber-500">
+						<p className="mt-0.5 text-status-warning text-xs">
 							Declared but not shipped by this plugin.
 						</p>
 					)}
@@ -196,7 +196,7 @@ function SidecarList({ sidecars }: { sidecars: CatalogSidecar[] }) {
 										<span
 											className={
 												route.auth === "none" || route.auth === "public"
-													? "shrink-0 text-amber-600 dark:text-amber-500"
+													? "shrink-0 text-status-warning"
 													: "shrink-0 text-muted-foreground"
 											}
 										>

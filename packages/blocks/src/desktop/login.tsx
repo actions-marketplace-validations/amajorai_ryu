@@ -91,7 +91,7 @@ function SetupStatus({
 		>
 			{complete ? (
 				<HugeiconsIcon
-					className="size-4 shrink-0 text-emerald-500"
+					className="size-4 shrink-0 text-status-success"
 					icon={CheckmarkCircle02Icon}
 				/>
 			) : (
@@ -213,7 +213,7 @@ function DeviceCode({ userCode }: { userCode: string }) {
 				/>
 				<HugeiconsIcon
 					className={cn(
-						"absolute text-green-500 transition-[transform,opacity] duration-200",
+						"absolute text-status-success transition-[transform,opacity] duration-200",
 						copied ? "scale-100 opacity-100" : "scale-50 opacity-0"
 					)}
 					icon={CheckmarkCircle02Icon}

@@ -133,7 +133,7 @@ export function UpdateStepView({
 							className={cn(
 								"flex size-16 items-center justify-center rounded-2xl bg-muted/60 text-muted-foreground",
 								isAvailable && "bg-primary/10 text-primary",
-								isError && "bg-destructive/10 text-destructive"
+								isError && "bg-destructive/10 text-status-destructive"
 							)}
 						>
 							<HugeiconsIcon

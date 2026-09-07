@@ -509,8 +509,8 @@ export function TrayRowIcon({
 		<span
 			className={cn(
 				"mt-px flex size-7 shrink-0 items-center justify-center rounded-[10px] bg-muted text-muted-foreground",
-				tone === "danger" && "text-destructive",
-				tone === "success" && "text-success",
+				tone === "danger" && "text-status-destructive",
+				tone === "success" && "text-status-success",
 				tone === "primary" && "text-primary",
 				className
 			)}
@@ -575,7 +575,7 @@ export function TrayIconAction({
 						className={cn(
 							"flex size-6 shrink-0 items-center justify-center rounded-lg text-muted-foreground transition-colors hover:bg-muted hover:text-foreground",
 							tone === "danger" &&
-								"hover:bg-destructive/10 hover:text-destructive"
+								"hover:bg-destructive/10 hover:text-status-destructive"
 						)}
 						onClick={onClick}
 						type="button"
@@ -676,7 +676,7 @@ export function TrayRow({
 						className={cn(
 							"mt-0.5 truncate text-[11px] tabular-nums leading-4",
 							metaTone === "danger"
-								? "text-destructive/90"
+								? "text-status-destructive/90"
 								: "text-muted-foreground"
 						)}
 					>

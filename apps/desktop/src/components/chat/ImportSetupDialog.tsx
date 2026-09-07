@@ -270,7 +270,7 @@ export function ImportSetupDialog({
 				)}
 
 				{error && (
-					<p className="rounded-md bg-destructive/10 px-3 py-2 text-destructive text-sm">
+					<p className="rounded-md bg-destructive/10 px-3 py-2 text-sm text-status-destructive">
 						{error}
 					</p>
 				)}
@@ -403,7 +403,7 @@ export function ImportSetupDialog({
 									.filter((o) => o.status === "failed" && o.detail)
 									.map((o) => (
 										<p
-											className="text-destructive text-xs"
+											className="text-status-destructive text-xs"
 											key={`${o.kind}:${o.id}`}
 										>
 											{o.title}: {o.detail}

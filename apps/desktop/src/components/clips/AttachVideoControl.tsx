@@ -221,7 +221,7 @@ export function AttachVideoControl({
 				</div>
 
 				{error ? (
-					<p className="flex items-start gap-1.5 text-destructive text-xs">
+					<p className="flex items-start gap-1.5 text-status-destructive text-xs">
 						<IconAlertTriangle className="mt-0.5 size-3.5 shrink-0" />
 						<span>{error}</span>
 					</p>

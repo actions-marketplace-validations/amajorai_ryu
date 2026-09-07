@@ -128,6 +128,68 @@ pub struct SyncClient {
     http: Client,
 }
 
+const MAX_SYNC_PAGES: usize = 10_000;
+
+#[derive(Debug, Deserialize)]
+struct DocumentPullPage {
+    documents: Vec<DocumentSyncPayload>,
+    #[serde(rename = "nextCursor", alias = "next_cursor", default)]
+    next_cursor: Option<String>,
+    #[serde(rename = "snapshotAt", alias = "snapshot_at", default)]
+    snapshot_at: Option<i64>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ConversationPullPage {
+    conversations: Vec<SyncPayload>,
+    #[serde(rename = "nextCursor", alias = "next_cursor", default)]
+    next_cursor: Option<String>,
+    #[serde(rename = "snapshotAt", alias = "snapshot_at", default)]
+    snapshot_at: Option<i64>,
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+struct SyncPullOutcome {
+    applied: usize,
+    snapshot_at: Option<i64>,
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+struct SyncStreamOutcome {
+    snapshot_at: Option<i64>,
+}
+
+fn record_pull_snapshot(
+    outcome: &mut SyncPullOutcome,
+    snapshot_at: Option<i64>,
+    requires_snapshot: bool,
+) -> Result<(), SyncError> {
+    match snapshot_at {
+        Some(snapshot_at) if snapshot_at >= 0 => {
+            if let Some(previous) = outcome.snapshot_at {
+                if previous != snapshot_at {
+                    return Err(SyncError::ServerError(
+                        502,
+                        "sync server changed snapshot while paging".to_owned(),
+                    ));
+                }
+            } else {
+                outcome.snapshot_at = Some(snapshot_at);
+            }
+            Ok(())
+        }
+        Some(_) => Err(SyncError::ServerError(
+            502,
+            "sync server returned an invalid snapshotAt".to_owned(),
+        )),
+        None if requires_snapshot => Err(SyncError::ServerError(
+            502,
+            "sync server omitted snapshotAt for paginated response".to_owned(),
+        )),
+        None => Ok(()),
+    }
+}
+
 impl SyncClient {
     /// Build a sync client from the environment.
     ///
@@ -154,6 +216,15 @@ impl SyncClient {
             token: token.into(),
             http,
         }
+    }
+
+    fn pull_url(&self, path: &str, since_ms: i64, cursor: Option<&str>) -> String {
+        let mut url = format!("{}/api/{path}?since={since_ms}", self.server_url);
+        if let Some(cursor) = cursor {
+            url.push_str("&cursor=");
+            url.push_str(&urlencoding::encode(cursor));
+        }
+        url
     }
 
     /// Push one conversation (all messages) to the server store.
@@ -210,33 +281,68 @@ impl SyncClient {
         since_ms: i64,
         tenancy: Tenancy,
     ) -> Result<usize, SyncError> {
-        let url = format!(
-            "{}/api/documents-sync/pull?since={}",
-            self.server_url, since_ms
-        );
-        let resp = self.http.get(&url).bearer_auth(&self.token).send().await?;
-        if !resp.status().is_success() {
-            let status = resp.status().as_u16();
-            let body = resp.text().await.unwrap_or_default();
-            return Err(SyncError::ServerError(status, body));
-        }
-        #[derive(Deserialize)]
-        struct PullResponse {
-            documents: Vec<DocumentSyncPayload>,
-        }
-        let data: PullResponse = resp.json().await?;
-        let mut applied = 0;
-        for payload in data.documents {
-            match apply_document_sync_payload(store, &payload, tenancy.clone()).await {
-                Ok(true) => applied += 1,
-                Ok(false) => {}
-                Err(error) => tracing::warn!(
-                    "cloud sync: applying pulled document {} failed: {error:#}",
-                    payload.document_id
-                ),
+        Ok(self
+            .pull_documents_since_with_snapshot(store, since_ms, tenancy)
+            .await?
+            .applied)
+    }
+
+    async fn pull_documents_since_with_snapshot(
+        &self,
+        store: &super::spaces::SpaceStore,
+        since_ms: i64,
+        tenancy: Tenancy,
+    ) -> Result<SyncPullOutcome, SyncError> {
+        let mut cursor: Option<String> = None;
+        let mut outcome = SyncPullOutcome::default();
+        for _page in 0..MAX_SYNC_PAGES {
+            let url = self.pull_url("documents-sync/pull", since_ms, cursor.as_deref());
+            let resp = self.http.get(&url).bearer_auth(&self.token).send().await?;
+            if !resp.status().is_success() {
+                let status = resp.status().as_u16();
+                let body = resp.text().await.unwrap_or_default();
+                return Err(SyncError::ServerError(status, body));
             }
+            let data: DocumentPullPage = resp.json().await?;
+            record_pull_snapshot(
+                &mut outcome,
+                data.snapshot_at,
+                cursor.is_some() || data.next_cursor.is_some(),
+            )?;
+            let mut apply_error = None;
+            for payload in data.documents {
+                match apply_document_sync_payload(store, &payload, tenancy.clone()).await {
+                    Ok(true) => outcome.applied += 1,
+                    Ok(false) => {}
+                    Err(error) => {
+                        tracing::warn!(
+                            "cloud sync: applying pulled document {} failed: {error:#}",
+                            payload.document_id
+                        );
+                        if apply_error.is_none() {
+                            apply_error = Some(error);
+                        }
+                    }
+                }
+            }
+            if let Some(error) = apply_error {
+                return Err(SyncError::Store(error));
+            }
+            let Some(next_cursor) = data.next_cursor else {
+                return Ok(outcome);
+            };
+            if next_cursor.is_empty() || cursor.as_deref() == Some(next_cursor.as_str()) {
+                return Err(SyncError::ServerError(
+                    502,
+                    "sync server returned a non-advancing cursor".to_owned(),
+                ));
+            }
+            cursor = Some(next_cursor);
         }
-        Ok(applied)
+        Err(SyncError::ServerError(
+            502,
+            "sync server returned too many pages".to_owned(),
+        ))
     }
 
     /// Pull all conversations updated at or after `since_ms` and apply them
@@ -255,38 +361,69 @@ impl SyncClient {
         since_ms: i64,
         tenancy: Tenancy,
     ) -> Result<usize, SyncError> {
-        let url = format!(
-            "{}/api/conversations-sync/pull?since={}",
-            self.server_url, since_ms
-        );
-        let resp = self.http.get(&url).bearer_auth(&self.token).send().await?;
+        Ok(self
+            .pull_since_with_snapshot(store, since_ms, tenancy)
+            .await?
+            .applied)
+    }
 
-        if !resp.status().is_success() {
-            let status = resp.status().as_u16();
-            let body = resp.text().await.unwrap_or_default();
-            return Err(SyncError::ServerError(status, body));
-        }
-
-        #[derive(Deserialize)]
-        struct PullResponse {
-            conversations: Vec<SyncPayload>,
-        }
-        let data: PullResponse = resp.json().await?;
-        let mut applied = 0usize;
-        for payload in data.conversations {
-            // Per-row best-effort: a single fail-closed refusal (e.g. an author-less
-            // row on a bound node) must not abort the batch and drop the good rows
-            // after it. Mirror `stream_changes`, which already tolerates per-delta
-            // failures.
-            match apply_sync_payload(store, &payload, tenancy.clone()).await {
-                Ok(()) => applied += 1,
-                Err(e) => tracing::warn!(
-                    "cloud sync: applying pulled conversation {} failed: {e}",
-                    payload.conversation_id
-                ),
+    async fn pull_since_with_snapshot(
+        &self,
+        store: &ConversationStore,
+        since_ms: i64,
+        tenancy: Tenancy,
+    ) -> Result<SyncPullOutcome, SyncError> {
+        let mut cursor: Option<String> = None;
+        let mut outcome = SyncPullOutcome::default();
+        for _page in 0..MAX_SYNC_PAGES {
+            let url = self.pull_url("conversations-sync/pull", since_ms, cursor.as_deref());
+            let resp = self.http.get(&url).bearer_auth(&self.token).send().await?;
+            if !resp.status().is_success() {
+                let status = resp.status().as_u16();
+                let body = resp.text().await.unwrap_or_default();
+                return Err(SyncError::ServerError(status, body));
             }
+            let data: ConversationPullPage = resp.json().await?;
+            record_pull_snapshot(
+                &mut outcome,
+                data.snapshot_at,
+                cursor.is_some() || data.next_cursor.is_some(),
+            )?;
+            let mut apply_error = None;
+            for payload in data.conversations {
+                // Per-row best-effort: a single fail-closed refusal (e.g. an
+                // author-less row on a bound node) must not abort the batch.
+                match apply_sync_payload(store, &payload, tenancy.clone()).await {
+                    Ok(()) => outcome.applied += 1,
+                    Err(error) => {
+                        tracing::warn!(
+                            "cloud sync: applying pulled conversation {} failed: {error}",
+                            payload.conversation_id
+                        );
+                        if apply_error.is_none() {
+                            apply_error = Some(error);
+                        }
+                    }
+                }
+            }
+            if let Some(error) = apply_error {
+                return Err(SyncError::Store(error));
+            }
+            let Some(next_cursor) = data.next_cursor else {
+                return Ok(outcome);
+            };
+            if next_cursor.is_empty() || cursor.as_deref() == Some(next_cursor.as_str()) {
+                return Err(SyncError::ServerError(
+                    502,
+                    "sync server returned a non-advancing cursor".to_owned(),
+                ));
+            }
+            cursor = Some(next_cursor);
         }
-        Ok(applied)
+        Err(SyncError::ServerError(
+            502,
+            "sync server returned too many pages".to_owned(),
+        ))
     }
 
     /// Consume the SSE change feed, applying each delta to the local store as it
@@ -308,6 +445,17 @@ impl SyncClient {
         since_ms: i64,
         tenancy: Tenancy,
     ) -> Result<(), SyncError> {
+        self.stream_changes_with_snapshot(store, since_ms, tenancy)
+            .await
+            .map(|_| ())
+    }
+
+    async fn stream_changes_with_snapshot(
+        &self,
+        store: &ConversationStore,
+        since_ms: i64,
+        tenancy: Tenancy,
+    ) -> Result<SyncStreamOutcome, SyncError> {
         use futures_util::StreamExt;
 
         let url = format!(
@@ -328,23 +476,81 @@ impl SyncClient {
             return Err(SyncError::ServerError(status, body));
         }
 
-        let mut buf = String::new();
+        let snapshot_at = resp
+            .headers()
+            .get("x-ryu-sync-snapshot-at")
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.parse::<i64>().ok())
+            .filter(|value| *value >= 0);
+        let mut buf = Vec::new();
         let mut stream = resp.bytes_stream();
+        let mut apply_error = None;
+        let mut frame_error = false;
         while let Some(chunk) = stream.next().await {
             let chunk = chunk?;
-            buf.push_str(&String::from_utf8_lossy(&chunk));
+            buf.extend_from_slice(&chunk);
             // SSE events are separated by a blank line — drain complete frames.
-            while let Some(idx) = buf.find("\n\n") {
-                let frame: String = buf.drain(..idx + 2).collect();
-                if let Some(payload) = parse_change_frame(&frame) {
-                    if let Err(e) = apply_sync_payload(store, &payload, tenancy.clone()).await {
-                        tracing::warn!("cloud sync: applying streamed delta failed: {e}");
+            while let Some(frame) = take_sse_frame(&mut buf) {
+                if frame_has_data(&frame) {
+                    let Some(payload) = parse_change_frame_bytes(&frame) else {
+                        frame_error = true;
+                        continue;
+                    };
+                    if let Err(error) = apply_sync_payload(store, &payload, tenancy.clone()).await {
+                        tracing::warn!("cloud sync: applying streamed delta failed: {error}");
+                        if apply_error.is_none() {
+                            apply_error = Some(error);
+                        }
                     }
                 }
             }
         }
-        Ok(())
+        if !buf.is_empty() {
+            frame_error = true;
+        }
+        if let Some(error) = apply_error {
+            return Err(SyncError::Store(error));
+        }
+        if frame_error {
+            return Err(SyncError::ServerError(
+                502,
+                "sync server returned an incomplete or invalid SSE frame".to_owned(),
+            ));
+        }
+        Ok(SyncStreamOutcome { snapshot_at })
     }
+}
+
+/// Drain one complete SSE frame without decoding incomplete UTF-8 bytes.
+/// Supports the LF framing emitted by Ryu and CRLF framing from a proxy.
+fn take_sse_frame(buffer: &mut Vec<u8>) -> Option<Vec<u8>> {
+    let mut end = None;
+    for index in 0..buffer.len().saturating_sub(1) {
+        if buffer[index..].starts_with(b"\n\n") {
+            end = Some(index + 2);
+            break;
+        }
+        if buffer[index..].starts_with(b"\r\n\r\n") {
+            end = Some(index + 4);
+            break;
+        }
+    }
+    end.map(|end| buffer.drain(..end).collect())
+}
+
+fn parse_change_frame_bytes(raw: &[u8]) -> Option<SyncPayload> {
+    std::str::from_utf8(raw).ok().and_then(parse_change_frame)
+}
+
+fn frame_has_data(raw: &[u8]) -> bool {
+    std::str::from_utf8(raw)
+        .ok()
+        .map(|frame| {
+            frame
+                .lines()
+                .any(|line| line.trim_end_matches('\r').starts_with("data:"))
+        })
+        .unwrap_or(true)
 }
 
 /// Parse one SSE frame from the change feed into a [`SyncPayload`].
@@ -504,12 +710,11 @@ pub fn spawn_sync_loop(
                 }
             }
 
-            // Receive remote changes since the last watermark. Prefer the live
-            // SSE change feed; hold it open for at most one interval so local
-            // pushes still recur, then reconnect on the next tick with an
-            // advanced cursor. The watermark is captured BEFORE streaming, so a
-            // delta that lands mid-session (updated_at ≥ now_ms) is re-delivered
-            // by the next snapshot — apply is idempotent, so nothing is lost.
+            // Receive remote changes since the last server-owned watermark.
+            // Prefer the live SSE change feed; hold it open for at most one
+            // interval so local pushes still recur, then reconnect on the next
+            // tick. Every pull drains its bounded cursor pages before this
+            // watermark advances, so a large backlog cannot be skipped.
             match build_document_sync_payloads(&spaces).await {
                 Ok(payloads) => {
                     for payload in payloads {
@@ -535,52 +740,64 @@ pub fn spawn_sync_loop(
                 }
             }
 
+            // The captured wall time is only a compatibility fallback for an
+            // older server that does not return the server-owned watermark.
             let document_now_ms = chrono::Utc::now().timestamp_millis();
             match client
-                .pull_documents_since(&spaces, document_pull_since_ms, replay_ctx.clone())
+                .pull_documents_since_with_snapshot(
+                    &spaces,
+                    document_pull_since_ms,
+                    replay_ctx.clone(),
+                )
                 .await
             {
-                Ok(count) => {
-                    if count > 0 {
-                        tracing::info!("cloud sync: pulled {count} document(s)");
+                Ok(outcome) => {
+                    if outcome.applied > 0 {
+                        tracing::info!("cloud sync: pulled {} document(s)", outcome.applied);
                     }
-                    document_pull_since_ms = document_now_ms;
+                    document_pull_since_ms = outcome.snapshot_at.unwrap_or(document_now_ms);
                 }
                 Err(error) => tracing::warn!("cloud sync: document pull failed: {error}"),
             }
-            let now_ms = chrono::Utc::now().timestamp_millis();
+            let stream_fallback_now_ms = chrono::Utc::now().timestamp_millis();
             match tokio::time::timeout(
                 SYNC_INTERVAL,
-                client.stream_changes(&conversations, pull_since_ms, replay_ctx.clone()),
+                client.stream_changes_with_snapshot(
+                    &conversations,
+                    pull_since_ms,
+                    replay_ctx.clone(),
+                ),
             )
             .await
             {
-                // Session window elapsed while the stream was healthy, or the
-                // server closed it cleanly — advance the cursor and reconnect.
-                Err(_) | Ok(Ok(())) => {
-                    pull_since_ms = now_ms;
+                // A stream header or clean EOF only describes the server's
+                // intended boundary. It does not prove that the entire bounded
+                // snapshot was received, that the final frame was complete, or
+                // that every delta was applied. Always drain the paginated pull
+                // from the old watermark before advancing it; apply failures
+                // keep the watermark unchanged so the next tick retries them.
+                Ok(Ok(_)) => {
+                    tracing::debug!("cloud sync: sse window ended; reconciling with paginated pull")
                 }
-                // SSE could not be used (old server, a proxy stripping
-                // streaming, transient error) — fall back to the /pull long-poll
-                // for this tick, keeping sync working end-to-end.
-                Ok(Err(stream_err)) => {
-                    tracing::debug!(
-                        "cloud sync: sse change feed unavailable, falling back to /pull: {stream_err}"
-                    );
-                    match client
-                        .pull_since(&conversations, pull_since_ms, replay_ctx.clone())
-                        .await
-                    {
-                        Ok(count) => {
-                            if count > 0 {
-                                tracing::info!("cloud sync: pulled {count} conversation(s)");
-                            }
-                            pull_since_ms = now_ms;
-                        }
-                        Err(e) => {
-                            tracing::warn!("cloud sync: pull failed: {e}");
-                        }
+                Err(_) => tracing::debug!(
+                    "cloud sync: sse window elapsed; reconciling with paginated pull"
+                ),
+                Ok(Err(stream_err)) => tracing::debug!(
+                    "cloud sync: sse unavailable; falling back to paginated pull: {stream_err}"
+                ),
+            }
+            match client
+                .pull_since_with_snapshot(&conversations, pull_since_ms, replay_ctx.clone())
+                .await
+            {
+                Ok(outcome) => {
+                    if outcome.applied > 0 {
+                        tracing::info!("cloud sync: pulled {} conversation(s)", outcome.applied);
                     }
+                    pull_since_ms = outcome.snapshot_at.unwrap_or(stream_fallback_now_ms);
+                }
+                Err(error) => {
+                    tracing::warn!("cloud sync: paginated pull failed: {error}");
                 }
             }
         }
@@ -895,6 +1112,69 @@ pub async fn apply_sync_payload_at(
 mod tests {
     use super::*;
     use crate::server::conversations::ConversationStore;
+    use axum::body::Body;
+    use axum::extract::Query;
+    use axum::http::StatusCode;
+    use axum::response::Response;
+    use axum::routing::get;
+    use axum::Router;
+    use serde::Deserialize;
+    use std::sync::Arc;
+    use tokio::net::TcpListener;
+
+    #[derive(Debug, Deserialize)]
+    struct PullQuery {
+        cursor: Option<String>,
+    }
+
+    #[derive(Clone, Copy)]
+    enum SnapshotFault {
+        Missing,
+        Changed,
+    }
+
+    async fn start_snapshot_fault_server(
+        path: &'static str,
+        resource: &'static str,
+        fault: SnapshotFault,
+    ) -> (String, tokio::task::JoinHandle<()>) {
+        let app = Router::new().route(
+            path,
+            get(move |Query(query): Query<PullQuery>| async move {
+                let continuation = query.cursor.is_some();
+                let next_cursor = (!continuation).then_some("page-2");
+                let snapshot_at = if !continuation {
+                    Some(1000)
+                } else {
+                    match fault {
+                        SnapshotFault::Missing => None,
+                        SnapshotFault::Changed => Some(1001),
+                    }
+                };
+                let mut value = if resource == "documents" {
+                    serde_json::json!({
+                        "documents": [],
+                        "nextCursor": next_cursor,
+                    })
+                } else {
+                    serde_json::json!({
+                        "conversations": [],
+                        "nextCursor": next_cursor,
+                    })
+                };
+                if let Some(snapshot_at) = snapshot_at {
+                    value["snapshotAt"] = serde_json::json!(snapshot_at);
+                }
+                axum::Json(value)
+            }),
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        (format!("http://{address}"), server)
+    }
 
     #[tokio::test]
     async fn document_round_trip_preserves_stable_ids_and_rejects_stale_replay() {
@@ -1410,6 +1690,287 @@ mod tests {
         // A `data:` line that is not a valid payload decodes to None, never panics.
         assert!(parse_change_frame("data: {\"not\":\"a payload\"}\n").is_none());
         assert!(parse_change_frame("data: not json at all\n").is_none());
+    }
+
+    #[test]
+    fn sse_frame_buffer_preserves_unicode_split_across_chunks() {
+        let mut payload = sample_payload("conv-unicode");
+        payload.messages[0].content = "hello 🌍".to_owned();
+        let frame = format!(
+            "event: conversation\ndata: {}\n\n",
+            serde_json::to_string(&payload).unwrap()
+        );
+        let bytes = frame.as_bytes();
+
+        // Exercise every possible two-chunk boundary, including boundaries in
+        // the middle of the UTF-8 encoding for the globe emoji.
+        for split in 0..=bytes.len() {
+            let mut buffer = Vec::new();
+            buffer.extend_from_slice(&bytes[..split]);
+            if split < bytes.len() {
+                assert!(
+                    take_sse_frame(&mut buffer).is_none(),
+                    "a partial frame must remain buffered at split {split}"
+                );
+            }
+            buffer.extend_from_slice(&bytes[split..]);
+            let complete = take_sse_frame(&mut buffer).expect("complete frame");
+            let parsed = parse_change_frame_bytes(&complete).expect("valid payload");
+            assert_eq!(parsed.messages[0].content, "hello 🌍");
+            assert!(buffer.is_empty());
+        }
+
+        let mut crlf = b"event: conversation\r\ndata: ".to_vec();
+        crlf.extend_from_slice(serde_json::to_string(&payload).unwrap().as_bytes());
+        crlf.extend_from_slice(b"\r\n\r\n");
+        let complete = take_sse_frame(&mut crlf).expect("CRLF frame");
+        assert_eq!(
+            parse_change_frame_bytes(&complete).unwrap().conversation_id,
+            "conv-unicode"
+        );
+    }
+
+    #[tokio::test]
+    async fn pull_drains_all_bounded_pages_with_equal_server_timestamps() {
+        let payloads: Arc<Vec<SyncPayload>> = Arc::new(
+            (0..=1000)
+                .map(|index| SyncPayload {
+                    conversation_id: format!("paged-{index:04}"),
+                    title: Some(format!("row-{index}")),
+                    agent_id: None,
+                    folder_path: None,
+                    branch: None,
+                    worktree_path: None,
+                    run_status: None,
+                    owner_user_id: None,
+                    created_at: 1,
+                    updated_at: 1,
+                    messages: Vec::new(),
+                })
+                .collect(),
+        );
+        let app = Router::new().route(
+            "/api/conversations-sync/pull",
+            get({
+                let payloads = Arc::clone(&payloads);
+                move |Query(query): Query<PullQuery>| {
+                    let payloads = Arc::clone(&payloads);
+                    async move {
+                        let (conversations, next_cursor) =
+                            if query.cursor.as_deref() == Some("page-2") {
+                                (payloads[1000..].to_vec(), None)
+                            } else {
+                                (payloads[..1000].to_vec(), Some("page-2"))
+                            };
+                        axum::Json(serde_json::json!({
+                            "conversations": conversations,
+                            "nextCursor": next_cursor,
+                            "snapshotAt": 1000,
+                        }))
+                    }
+                }
+            }),
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let store = ConversationStore::open_in_memory().unwrap();
+        let client = SyncClient::new(format!("http://{address}"), "test-token");
+        let applied = client
+            .pull_since(&store, 0, Tenancy::Unattributed)
+            .await
+            .unwrap();
+
+        server.abort();
+        let _ = server.await;
+        assert_eq!(applied, 1001);
+        assert_eq!(store.list_conversations().await.unwrap().len(), 1001);
+    }
+
+    #[tokio::test]
+    async fn pull_rejects_a_non_advancing_server_cursor() {
+        let app = Router::new().route(
+            "/api/conversations-sync/pull",
+            get(|| async {
+                axum::Json(serde_json::json!({
+                    "conversations": [],
+                    "nextCursor": "same-page",
+                    "snapshotAt": 1000,
+                }))
+            }),
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let store = ConversationStore::open_in_memory().unwrap();
+        let client = SyncClient::new(format!("http://{address}"), "test-token");
+        let result = client.pull_since(&store, 0, Tenancy::Unattributed).await;
+
+        server.abort();
+        let _ = server.await;
+        assert!(matches!(
+            result,
+            Err(SyncError::ServerError(502, ref message))
+                if message.contains("non-advancing cursor")
+        ));
+    }
+
+    #[tokio::test]
+    async fn pull_reports_storage_apply_failures_instead_of_advancing() {
+        let payload = DocumentSyncPayload {
+            document_id: "bad-file".to_owned(),
+            title: "Bad file".to_owned(),
+            source: "bytes".to_owned(),
+            kind: "file".to_owned(),
+            parent_id: None,
+            icon: None,
+            created_at: 1,
+            updated_at: 1,
+            revision: 0,
+            owner_user_id: None,
+            space: ryu_spaces::SpaceSyncRecord {
+                id: "space".to_owned(),
+                name: "Space".to_owned(),
+                description: None,
+                created_at: 1,
+                updated_at: 1,
+                retrieval_mode: "hybrid".to_owned(),
+                visibility: "private".to_owned(),
+                team_id: None,
+            },
+        };
+        let app = Router::new().route(
+            "/api/documents-sync/pull",
+            get(move || {
+                let payload = payload.clone();
+                async move {
+                    axum::Json(serde_json::json!({
+                        "documents": [payload],
+                        "nextCursor": null,
+                        "snapshotAt": 1000,
+                    }))
+                }
+            }),
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let store = super::super::spaces::SpaceStore::open_in_memory().unwrap();
+        let client = SyncClient::new(format!("http://{address}"), "test-token");
+        let result = client
+            .pull_documents_since(&store, 0, Tenancy::Unattributed)
+            .await;
+
+        server.abort();
+        let _ = server.await;
+        assert!(matches!(result, Err(SyncError::Store(_))));
+    }
+
+    #[tokio::test]
+    async fn conversation_pull_rejects_missing_or_changed_continuation_snapshot() {
+        for fault in [SnapshotFault::Missing, SnapshotFault::Changed] {
+            let (url, server) =
+                start_snapshot_fault_server("/api/conversations-sync/pull", "conversations", fault)
+                    .await;
+            let store = ConversationStore::open_in_memory().unwrap();
+            let result = SyncClient::new(url, "test-token")
+                .pull_since(&store, 0, Tenancy::Unattributed)
+                .await;
+            server.abort();
+            let _ = server.await;
+            let expected = match fault {
+                SnapshotFault::Missing => "omitted snapshotAt",
+                SnapshotFault::Changed => "changed snapshot",
+            };
+            assert!(matches!(
+                result,
+                Err(SyncError::ServerError(502, ref message))
+                    if message.contains(expected)
+            ));
+        }
+    }
+
+    #[tokio::test]
+    async fn document_pull_rejects_missing_or_changed_continuation_snapshot() {
+        for fault in [SnapshotFault::Missing, SnapshotFault::Changed] {
+            let (url, server) =
+                start_snapshot_fault_server("/api/documents-sync/pull", "documents", fault).await;
+            let store = super::super::spaces::SpaceStore::open_in_memory().unwrap();
+            let result = SyncClient::new(url, "test-token")
+                .pull_documents_since(&store, 0, Tenancy::Unattributed)
+                .await;
+            server.abort();
+            let _ = server.await;
+            let expected = match fault {
+                SnapshotFault::Missing => "omitted snapshotAt",
+                SnapshotFault::Changed => "changed snapshot",
+            };
+            assert!(matches!(
+                result,
+                Err(SyncError::ServerError(502, ref message))
+                    if message.contains(expected)
+            ));
+        }
+    }
+
+    #[tokio::test]
+    async fn stream_rejects_an_incomplete_final_frame_for_pull_reconciliation() {
+        let payload = sample_payload("stream-partial");
+        let complete = format!(
+            "event: conversation\ndata: {}\n\n",
+            serde_json::to_string(&payload).unwrap()
+        );
+        let body = format!("{complete}data: {{\"conversation_id\":\"partial");
+        let app = Router::new().route(
+            "/api/conversations-sync/stream",
+            get(move || {
+                let body = body.clone();
+                async move {
+                    Response::builder()
+                        .status(StatusCode::OK)
+                        .header("content-type", "text/event-stream")
+                        .header("x-ryu-sync-snapshot-at", "1000")
+                        .body(Body::from(body))
+                        .unwrap()
+                }
+            }),
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let store = ConversationStore::open_in_memory().unwrap();
+        let client = SyncClient::new(format!("http://{address}"), "test-token");
+        let result = client
+            .stream_changes(&store, 0, Tenancy::Unattributed)
+            .await;
+
+        server.abort();
+        let _ = server.await;
+        assert!(matches!(
+            result,
+            Err(SyncError::ServerError(502, ref message))
+                if message.contains("incomplete or invalid SSE frame")
+        ));
+        assert_eq!(
+            store
+                .get_conversation_detail("stream-partial")
+                .await
+                .unwrap()
+                .map(|detail| detail.id),
+            Some("stream-partial".to_owned())
+        );
     }
 
     /// `env_sync_enabled` is truthy only for the documented tokens; anything else

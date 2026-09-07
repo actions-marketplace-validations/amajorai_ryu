@@ -115,8 +115,8 @@ export function ConnectionStatusToast({
 					aria-hidden="true"
 					className={
 						isWarning
-							? "flex size-7 shrink-0 items-center justify-center rounded-full bg-warning/15 text-warning"
-							: "flex size-7 shrink-0 items-center justify-center rounded-full bg-success/15 text-success"
+							? "flex size-7 shrink-0 items-center justify-center rounded-full bg-warning/15 text-status-warning"
+							: "flex size-7 shrink-0 items-center justify-center rounded-full bg-success/15 text-status-success"
 					}
 				>
 					{phaseIcon(phase, restored)}

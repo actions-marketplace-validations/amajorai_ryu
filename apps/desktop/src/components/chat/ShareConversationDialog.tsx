@@ -572,7 +572,7 @@ export function ShareConversationDialog({
 							{error ? (
 								<p
 									aria-live="polite"
-									className="text-destructive text-sm"
+									className="text-sm text-status-destructive"
 									role="alert"
 								>
 									{error}

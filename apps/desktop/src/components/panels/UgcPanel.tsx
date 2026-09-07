@@ -620,7 +620,7 @@ function PanelNotice({
 		<p
 			className={cn(
 				"px-3 py-2 text-xs",
-				tone === "error" ? "text-destructive" : "text-muted-foreground"
+				tone === "error" ? "text-status-destructive" : "text-muted-foreground"
 			)}
 		>
 			{children}
@@ -639,7 +639,7 @@ function LoadingRow({ text = "Loading…" }: { text?: string }) {
 
 function ErrorBanner({ message }: { message: string }) {
 	return (
-		<div className="flex items-start gap-2 rounded-xl border border-destructive/30 bg-destructive/10 px-3 py-2 text-destructive text-xs">
+		<div className="flex items-start gap-2 rounded-xl border border-destructive/30 bg-destructive/10 px-3 py-2 text-status-destructive text-xs">
 			<HugeiconsIcon className="mt-px size-3.5 shrink-0" icon={Alert01Icon} />
 			<span className="min-w-0 break-words">{message}</span>
 		</div>

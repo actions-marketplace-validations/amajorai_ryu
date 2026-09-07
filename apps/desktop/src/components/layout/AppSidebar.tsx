@@ -240,7 +240,7 @@ import {
 	conversationGroupKey,
 	conversationParticipantIds,
 	conversationsForOtherChats,
-	directAgentThreads,
+	groupDirectAgentThreads,
 	isForkedConversation,
 	isGroupConversation,
 } from "@/src/lib/agent-conversation-groups.ts";
@@ -2555,14 +2555,8 @@ function AgentsSection({
 		[messaging, conversations]
 	);
 	const directThreadsByAgent = useMemo(
-		() =>
-			new Map(
-				agents.map((agent) => [
-					agent.id,
-					directAgentThreads(agent.id, conversations),
-				])
-			),
-		[agents, conversations]
+		() => groupDirectAgentThreads(conversations),
+		[conversations]
 	);
 	const [expandedAgentIds, setExpandedAgentIds] = useState<Set<string>>(
 		new Set()
@@ -4010,7 +4004,7 @@ function ChannelsSection({
 							!agents.some((agent) => agent.id === channel.agentId) ? (
 								<span
 									aria-label="This channel was reverted to the default agent"
-									className="font-medium text-amber-600 text-xs dark:text-amber-400"
+									className="font-medium text-status-warning text-xs"
 									title="This channel was reverted to the default agent because its original agent was deleted"
 								>
 									!

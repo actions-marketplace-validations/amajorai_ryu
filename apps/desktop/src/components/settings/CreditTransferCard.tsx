@@ -359,7 +359,7 @@ export function CreditTransferCard() {
 						value={topupDollars}
 					/>
 					{overdrawn ? (
-						<p className="text-destructive text-xs">
+						<p className="text-status-destructive text-xs">
 							That is more than this workspace holds.
 						</p>
 					) : null}

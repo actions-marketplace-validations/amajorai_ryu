@@ -245,7 +245,9 @@ function RoleFormDialog({
 							))}
 						</div>
 					</div>
-					{err ? <p className="text-destructive text-sm">{err}</p> : null}
+					{err ? (
+						<p className="text-sm text-status-destructive">{err}</p>
+					) : null}
 				</div>
 				<DialogFooter>
 					<Button
@@ -400,7 +402,7 @@ function RolesMatrix({
 													variant="ghost"
 												>
 													<HugeiconsIcon
-														className="size-3.5 text-destructive"
+														className="size-3.5 text-status-destructive"
 														icon={Delete01Icon}
 													/>
 												</Button>

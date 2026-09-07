@@ -73,7 +73,7 @@ function ScoreBar({
 				{icon ? (
 					<HugeiconsIcon
 						aria-hidden="true"
-						className="size-3 shrink-0 text-warning"
+						className="size-3 shrink-0 text-status-warning"
 						icon={icon}
 					/>
 				) : null}
@@ -184,7 +184,7 @@ export function ModelHoverPreview({ insight }: { insight: ModelInsight }) {
 			<div className="flex flex-col gap-0.5">
 				<div className="flex items-start gap-2">
 					<HugeiconsIcon
-						className="mt-0.5 size-3.5 shrink-0 text-warning"
+						className="mt-0.5 size-3.5 shrink-0 text-status-warning"
 						icon={SparklesIcon}
 					/>
 					<div className="min-w-0 flex-1">

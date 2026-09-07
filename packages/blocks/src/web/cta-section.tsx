@@ -17,9 +17,9 @@ import { StaggerLines } from "./stagger-lines.tsx";
  */
 export default function CtaSection({
 	primaryHref = DEMO_HREF,
-	primaryLabel = "Book a free consultation",
-	title = "Put the work your team hates on autopilot.",
-	subtitle = "Every action logged, every cost capped. Bring the tools you already pay for, or start with one we set up for you.",
+	primaryLabel = "Talk to the team",
+	title = "Try Ryu with your team",
+	subtitle = "Tell us what you want to automate. We can help you choose a setup and connect your tools.",
 }: {
 	primaryHref?: string;
 	primaryLabel?: string;
@@ -28,7 +28,7 @@ export default function CtaSection({
 } = {}) {
 	return (
 		<section className="container mx-auto px-4 py-24">
-			<div className="mx-auto max-w-2xl text-center">
+			<div className="max-w-2xl">
 				{/* Wraps only the title and its supporting line: the button row below is
 				    a flex layout and `.t-stagger-line` would force it to block. */}
 				<StaggerLines>
@@ -37,7 +37,7 @@ export default function CtaSection({
 						{subtitle}
 					</p>
 				</StaggerLines>
-				<div className="mt-8 flex flex-col items-center justify-center gap-3 sm:flex-row">
+				<div className="mt-8 flex flex-wrap items-center gap-3">
 					<a
 						className={cn(buttonVariants({ variant: "default" }))}
 						href={primaryHref}

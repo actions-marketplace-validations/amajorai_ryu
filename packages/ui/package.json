@@ -93,6 +93,7 @@
     "./components/toggle-group": "./src/components/toggle-group.tsx",
     "./components/tooltip": "./src/components/tooltip.tsx",
     "./components/wave": "./src/components/wave.tsx",
+    "./status-colors.css": "./src/styles/status-colors.css",
     "./companion-theme.css": "./src/styles/companion-theme.css",
     "./app-ui.css": "./src/styles/app-ui.css",
     "./hooks/use-hover-capable": "./src/hooks/use-hover-capable.ts",

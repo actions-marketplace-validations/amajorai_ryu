@@ -163,7 +163,7 @@ function MemoryRow({
 					</Button>
 					<Button
 						aria-label="Delete memory"
-						className="text-destructive hover:text-destructive"
+						className="text-status-destructive hover:text-status-destructive"
 						onClick={() => onDelete(memory)}
 						size="icon"
 						variant="ghost"

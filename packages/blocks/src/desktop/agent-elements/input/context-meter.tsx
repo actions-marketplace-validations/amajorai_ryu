@@ -120,8 +120,8 @@ export function ContextMeter({
 					onOpen
 						? "cursor-pointer hover:bg-accent hover:text-foreground"
 						: "cursor-default",
-					near && "text-warning",
-					over && "text-destructive",
+					near && "text-status-warning",
+					over && "text-status-destructive",
 					className
 				)}
 				closeDelay={80}

@@ -198,7 +198,7 @@ export function LanguageSettings({
 				</SettingsGroup>
 			</SettingsSection>
 			{importError ? (
-				<p className="px-3.5 text-destructive text-xs">{importError}</p>
+				<p className="px-3.5 text-status-destructive text-xs">{importError}</p>
 			) : null}
 
 			<SettingsSection title={t("language.available_packs")}>

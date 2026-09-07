@@ -183,7 +183,7 @@ export function VoiceModeCallScreen({
 
 					{voice.error && (
 						<p
-							className="mt-2 text-center text-destructive text-sm"
+							className="mt-2 text-center text-sm text-status-destructive"
 							role="alert"
 						>
 							{voice.error}
@@ -297,7 +297,7 @@ export function VoiceModeCallScreen({
 							"flex min-w-24 items-center justify-center gap-2 rounded-full px-4 font-medium text-sm transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
 							hasComposer ? "py-2" : "py-2.5",
 							voice.muted
-								? "bg-destructive/15 text-destructive hover:bg-destructive/20"
+								? "bg-destructive/15 text-status-destructive hover:bg-destructive/20"
 								: "bg-muted text-foreground hover:bg-muted/70"
 						)}
 						onClick={voice.toggleMute}

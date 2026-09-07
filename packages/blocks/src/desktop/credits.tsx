@@ -166,7 +166,7 @@ function LedgerAmount({
 	return (
 		<span
 			className={`font-heading font-medium text-sm tabular-nums ${
-				row.isCredit ? "text-green-600 dark:text-green-400" : "text-foreground"
+				row.isCredit ? "text-status-success" : "text-foreground"
 			}`}
 		>
 			{row.isCredit ? "+" : "−"}
@@ -300,9 +300,9 @@ export function CreditsView({
 			</div>
 
 			{walletEmpty ? (
-				<div className="mb-6 flex items-start gap-3 rounded-lg border border-amber-500/40 bg-amber-500/5 p-4">
+				<div className="mb-6 flex items-start gap-3 rounded-lg border border-warning/40 bg-warning/5 p-4">
 					<HugeiconsIcon
-						className="mt-0.5 size-5 shrink-0 text-amber-500"
+						className="mt-0.5 size-5 shrink-0 text-status-warning"
 						icon={Alert02Icon}
 					/>
 					<div className="min-w-0 flex-1">
@@ -331,7 +331,7 @@ export function CreditsView({
 					Credit balances
 				</h2>
 				{!(loading || wallet) && errorMessage ? (
-					<p className="mb-3 text-destructive text-xs">
+					<p className="mb-3 text-status-destructive text-xs">
 						Could not load your balance: {errorMessage}
 					</p>
 				) : null}

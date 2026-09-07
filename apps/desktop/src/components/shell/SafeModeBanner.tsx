@@ -95,7 +95,7 @@ export function SafeModeBanner() {
 	return (
 		<div className="pointer-events-auto fixed top-12 right-4 z-50 flex items-center gap-3 rounded-xl border border-warning/40 bg-warning/15 px-3 py-2 shadow-lg backdrop-blur-xl">
 			<HugeiconsIcon
-				className="size-4 shrink-0 text-warning dark:text-warning"
+				className="size-4 shrink-0 text-status-warning dark:text-status-warning"
 				icon={Alert01Icon}
 			/>
 			<div className="flex flex-col leading-tight">

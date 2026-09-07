@@ -129,7 +129,7 @@ export function AgentsGrid({
 
 				{state === "error" ? (
 					<div className="flex h-full flex-col items-center justify-center gap-3 text-center">
-						<span className="flex size-12 items-center justify-center rounded-2xl bg-destructive/10 text-2xl text-destructive">
+						<span className="flex size-12 items-center justify-center rounded-2xl bg-destructive/10 text-2xl text-status-destructive">
 							!
 						</span>
 						<div className="space-y-1">

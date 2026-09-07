@@ -128,7 +128,7 @@ export function AgentExecutionPolicyPanel({
 					</p>
 				) : null}
 				{postureError ? (
-					<p className="text-destructive text-xs">{postureError}</p>
+					<p className="text-status-destructive text-xs">{postureError}</p>
 				) : null}
 			</SettingsCard>
 		</SettingsSection>

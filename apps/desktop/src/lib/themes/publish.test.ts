@@ -21,9 +21,7 @@ const MINE: ThemeVariant = {
 
 describe("themeToPluginManifest", () => {
 	test("carries the theme as the manifest's only contribution", () => {
-		const m = themeToPluginManifest(MINE) as {
-			contributes: { themes: ThemeVariant[] };
-		};
+		const m = themeToPluginManifest(MINE);
 		expect(m.contributes.themes).toHaveLength(1);
 		const [theme] = m.contributes.themes;
 		expect(theme.label).toBe("My Cool Theme");
@@ -36,10 +34,7 @@ describe("themeToPluginManifest", () => {
 		// The local id embeds the millisecond it was saved. Publishing that would give
 		// every re-export a different id — the same theme would install twice and a
 		// user's selection would not survive an update.
-		const m = themeToPluginManifest(MINE, { scope: "@acme" }) as {
-			id: string;
-			contributes: { themes: Array<{ id: string }> };
-		};
+		const m = themeToPluginManifest(MINE, { scope: "@acme" });
 		expect(m.id).toBe("@acme/my-cool-theme-theme");
 		expect(m.contributes.themes[0].id).toBe(
 			"@acme/my-cool-theme-theme:my-cool-theme"
@@ -47,17 +42,21 @@ describe("themeToPluginManifest", () => {
 		expect(m.contributes.themes[0].id).not.toContain("1730000000000");
 	});
 
-	test("is stable across exports of the same theme", () => {
-		expect(themeManifestJson(MINE)).toBe(themeManifestJson(MINE));
+	test("re-exporting a locally re-saved theme preserves the published manifest", () => {
+		const savedAgain = {
+			...MINE,
+			id: "custom-dark-my cool theme-1800000000000",
+		};
+		expect(themeManifestJson(savedAgain)).toBe(themeManifestJson(MINE));
 	});
 
 	test("declares no runnables — a theme ships no code, so it needs no grants", () => {
-		const m = themeToPluginManifest(MINE) as { runnables: unknown[] };
+		const m = themeToPluginManifest(MINE);
 		expect(m.runnables).toEqual([]);
 	});
 
 	test("lands on the Themes shelf so it is browsable as one", () => {
-		const m = themeToPluginManifest(MINE) as { category: string };
+		const m = themeToPluginManifest(MINE);
 		expect(m.category).toBe("Themes");
 	});
 
@@ -65,7 +64,7 @@ describe("themeToPluginManifest", () => {
 		const m = themeToPluginManifest(
 			{ ...MINE, label: "  Ünïcode & Spaces!!  " },
 			{ scope: "@acme" }
-		) as { id: string };
+		);
 		expect(m.id).toBe("@acme/unicode-spaces-theme");
 	});
 
@@ -75,20 +74,21 @@ describe("themeToPluginManifest", () => {
 		const m = themeToPluginManifest(
 			{ ...MINE, label: "Café Noir" },
 			{ scope: "@acme" }
-		) as { id: string };
+		);
 		expect(m.id).toBe("@acme/cafe-noir-theme");
 	});
 
 	test("a label with no usable characters still yields a valid id", () => {
-		const m = themeToPluginManifest({ ...MINE, label: "!!!" }) as {
-			id: string;
-		};
+		const m = themeToPluginManifest({ ...MINE, label: "!!!" });
 		expect(m.id).toBe("@you/theme-theme");
 	});
 
 	test("emits parseable JSON ending in a newline", () => {
 		const text = themeManifestJson(MINE);
 		expect(text.endsWith("\n")).toBe(true);
-		expect(() => JSON.parse(text)).not.toThrow();
+		expect(JSON.parse(text)).toEqual(themeToPluginManifest(MINE));
+		expect(JSON.parse(themeManifestJson(MINE, { scope: "@acme" }))).toEqual(
+			themeToPluginManifest(MINE, { scope: "@acme" })
+		);
 	});
 });

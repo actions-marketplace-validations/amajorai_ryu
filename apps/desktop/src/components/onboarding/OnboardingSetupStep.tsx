@@ -467,7 +467,7 @@ function ProviderSetup({
 								</p>
 							</div>
 							{configured ? (
-								<span className="text-success text-xs">Ready</span>
+								<span className="text-status-success text-xs">Ready</span>
 							) : null}
 						</div>
 						{configured ? null : (

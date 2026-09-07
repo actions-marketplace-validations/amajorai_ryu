@@ -4,10 +4,10 @@
   "navLabel": "Product Management",
   "category": "Engineering & Product",
   "icon": "Boxes",
-  "tagline": "Draft specs, triage feedback, and run the busywork with agents wired to your tools.",
+  "tagline": "Group feedback, draft specifications, and prepare updates using your project tools.",
   "heroEyebrow": "Ryu for Product Management",
-  "heroTitle": "Spend the week on the product, not the admin.",
-  "heroSubtitle": "Turn scattered feedback into themes, write the spec, and keep the backlog moving with agents connected to Linear, Jira, Slack, and your docs. Chain steps into workflows that run on a schedule, and bring in a panel of agents when a decision is hard.",
+  "heroTitle": "Ryu for product management",
+  "heroSubtitle": "Group feedback, draft specifications, and prepare updates using your project tools.",
   "visualKey": "WorkflowsVisual",
   "intro": "Product management is glued together by writing and coordination: specs, summaries, ticket grooming, and chasing context across tools. Ryu connects agents to the systems where that work lives, drafts the documents from real inputs, and lets you script the repetitive parts into workflows so you get the week back.",
   "highlights": [

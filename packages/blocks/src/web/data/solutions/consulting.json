@@ -4,10 +4,10 @@
   "navLabel": "Consulting",
   "category": "Industries",
   "icon": "Briefcase",
-  "tagline": "Research, model, and produce client deliverables with agents that keep each engagement walled off.",
+  "tagline": "Research client questions and prepare reports using the documents for each engagement.",
   "heroEyebrow": "Ryu for Consulting",
-  "heroTitle": "Bill for insight, not for slide cleanup.",
-  "heroSubtitle": "Build research, draft decks, and structure analysis with agents that run on your machine and stay grounded in each client's documents. Engagement data stays controlled, and you can spin up a tailored agent per project.",
+  "heroTitle": "Ryu for consulting",
+  "heroSubtitle": "Research client questions and prepare reports using the documents for each engagement.",
   "visualKey": "AgentsVisual",
   "intro": "Consultants live in research, synthesis, and deliverables under tight deadlines, with client confidentiality non-negotiable. Ryu lets you stand up a dedicated agent per engagement, grounded in that client's data and walled off from the rest, running locally so nothing leaks. It accelerates the analyst work; the partner owns the judgment.",
   "highlights": [

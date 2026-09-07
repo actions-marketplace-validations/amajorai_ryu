@@ -1,13 +1,13 @@
 import { HotkeysProvider, useHotkey } from "@ryu/hotkeys/react";
 import type { UIMessage } from "ai";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import { AgentChat } from "../../components/agent-elements/agent-chat.tsx";
 import { ChatDisplayPrefs } from "../../src/components/chat/ChatDisplayPrefsProvider.tsx";
 import {
 	ChatSearchBar,
 	type ChatSearchMode,
 } from "../../src/components/chat/ChatSearchBar.tsx";
-import { searchChatMessages } from "../../src/lib/chat-search.ts";
+import { useChatSearch } from "../../src/hooks/useChatSearch.ts";
 import { DESKTOP_HOTKEYS } from "../../src/lib/hotkeys/actions.ts";
 import "../../src/index.css";
 
@@ -41,10 +41,7 @@ function SearchStory() {
 	const [open, setOpen] = useState(false);
 	const [query, setQuery] = useState("");
 	const [activeMatchIndex, setActiveMatchIndex] = useState(0);
-	const matches = useMemo(
-		() => (mode === "chat" ? searchChatMessages(MESSAGES, query) : []),
-		[mode, query]
-	);
+	const matches = useChatSearch(MESSAGES, query, open && mode === "chat");
 	const activeMatch = matches[activeMatchIndex] ?? null;
 
 	const toggleSearch = () => {

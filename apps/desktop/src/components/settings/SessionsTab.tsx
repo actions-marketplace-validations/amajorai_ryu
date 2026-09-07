@@ -123,7 +123,7 @@ export function SessionsTab() {
 										!isCurrent && (
 											<Button
 												aria-label="Revoke session"
-												className="size-8 shrink-0 text-muted-foreground hover:text-destructive"
+												className="size-8 shrink-0 text-muted-foreground hover:text-status-destructive"
 												disabled={revokeMutation.isPending}
 												onClick={() => revokeMutation.mutate(session.id)}
 												size="icon"

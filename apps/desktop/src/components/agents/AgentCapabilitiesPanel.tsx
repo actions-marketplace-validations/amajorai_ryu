@@ -186,7 +186,7 @@ export function AgentCapabilitiesPanel({
 					</SettingsGroup>
 
 					{capabilities.tools ? null : (
-						<p className="text-warning text-xs dark:text-warning">
+						<p className="text-status-warning text-xs dark:text-status-warning">
 							Tools are off for this agent's model — the tool allowlist below
 							has no effect until you turn Tools on.
 						</p>

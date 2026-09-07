@@ -42,12 +42,12 @@ const STATUS_STYLE: Record<
 	{ className: string; icon: IconSvgElement; label: string }
 > = {
 	fail: {
-		className: "text-destructive",
+		className: "text-status-destructive",
 		icon: Alert01Icon,
 		label: "Failed",
 	},
 	pass: {
-		className: "text-emerald-600 dark:text-emerald-500",
+		className: "text-status-success",
 		icon: CheckmarkCircle02Icon,
 		label: "Passed",
 	},
@@ -57,7 +57,7 @@ const STATUS_STYLE: Record<
 		label: "Not checkable",
 	},
 	warn: {
-		className: "text-amber-600 dark:text-amber-500",
+		className: "text-status-warning",
 		icon: CircleIcon,
 		label: "Worth knowing",
 	},
@@ -65,11 +65,11 @@ const STATUS_STYLE: Record<
 
 /** Grade → badge treatment. A/B read as fine, C/D as caution, F as a stop sign. */
 const GRADE_STYLE: Record<ScorecardGrade, string> = {
-	A: "border-emerald-500/40 text-emerald-600 dark:text-emerald-500",
-	B: "border-emerald-500/40 text-emerald-600 dark:text-emerald-500",
-	C: "border-amber-500/40 text-amber-600 dark:text-amber-500",
-	D: "border-amber-500/40 text-amber-600 dark:text-amber-500",
-	F: "border-destructive/40 text-destructive",
+	A: "border-success/40 text-status-success",
+	B: "border-success/40 text-status-success",
+	C: "border-warning/40 text-status-warning",
+	D: "border-warning/40 text-status-warning",
+	F: "border-destructive/40 text-status-destructive",
 };
 
 /**
@@ -246,7 +246,7 @@ export function ScorecardPanel({
 
 			{scanError ? (
 				<section
-					className="rounded-lg border border-destructive/30 bg-destructive/5 p-4 text-destructive text-sm"
+					className="rounded-lg border border-destructive/30 bg-destructive/5 p-4 text-sm text-status-destructive"
 					data-testid="catalog-scan-error"
 				>
 					Agent scan failed: {scanError}

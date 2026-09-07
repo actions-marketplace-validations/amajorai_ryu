@@ -423,3 +423,6 @@ export const authClient = createAuthClient({
 });
 
 export const { useSession, signIn, signOut, signUp } = authClient;
+
+/** Network clients read the bearer from the owning vault, not UI account data. */
+export { getTokenSync as getActiveToken };

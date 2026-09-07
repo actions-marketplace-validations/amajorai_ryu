@@ -5,6 +5,7 @@ import {
 	conversationParticipantIds,
 	conversationsForOtherChats,
 	directAgentThreads,
+	groupDirectAgentThreads,
 	isForkedConversation,
 	isGroupConversation,
 } from "./agent-conversation-groups.ts";
@@ -94,4 +95,25 @@ describe("agent conversation grouping", () => {
 		);
 		expect(other.map(({ id }) => id)).toEqual(["group", "unknown"]);
 	});
+});
+
+test("batch grouping preserves direct-thread ordering, ties, and exclusions", () => {
+	const rows = Array.from({ length: 300 }, (_, i) =>
+		conversation(`c${i}`, {
+			agentId: i % 7 ? `a${i % 13}` : undefined,
+			participants:
+				i % 11 === 0 ? ["a1", "a2"] : i % 5 === 0 ? [`a${i % 13}`] : [],
+			archived: i % 9 === 0,
+			updatedAt: i % 17,
+			lastMessageAt: i % 3 ? i % 19 : undefined,
+		})
+	);
+	const original = [...rows];
+	const grouped = groupDirectAgentThreads(rows);
+	for (let i = 0; i < 14; i++) {
+		expect(grouped.get(`a${i}`) ?? []).toEqual(
+			directAgentThreads(`a${i}`, rows)
+		);
+	}
+	expect(rows).toEqual(original);
 });

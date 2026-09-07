@@ -2833,7 +2833,7 @@ export const MessageList = memo(function MessageList({
 														// from something the agent wrote, came along when you copied the
 														// reply, and had to be pattern-matched back out on resume.
 														<Marker
-															className="pt-0.5 text-destructive"
+															className="pt-0.5 text-status-destructive"
 															variant="separator"
 														>
 															<MarkerIcon>

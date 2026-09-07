@@ -4,10 +4,10 @@
   "navLabel": "Insurance",
   "category": "Finance & Risk",
   "icon": "Umbrella",
-  "tagline": "Triage claims, review policies, and assess risk with agents that keep policyholder data on your machine.",
+  "tagline": "Summarize claim documents and compare them with policy terms for an authorized reviewer.",
   "heroEyebrow": "Ryu for Insurance",
-  "heroTitle": "An AI adjuster that keeps PII protected.",
-  "heroSubtitle": "Summarize claims, check coverage, and draft decisions with agents that run on your own machine. Policyholder data never leaves your device unless you say so, and every model call is governed, logged, and auditable.",
+  "heroTitle": "Ryu for insurance",
+  "heroSubtitle": "Summarize claim documents and compare them with policy terms for an authorized reviewer.",
   "visualKey": "GatewayVisual",
   "intro": "Insurance work runs on personal and medical data that regulators expect you to protect, so it can't be pasted into a public chatbot that trains on it. Ryu runs capable agents locally, redacts sensitive fields on egress when you route to the cloud, and logs every call, so claims and underwriting move faster without putting policyholder data at risk.",
   "highlights": [

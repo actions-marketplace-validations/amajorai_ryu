@@ -107,7 +107,7 @@ function Stat({
 			<div
 				className={cn(
 					"font-medium text-xl tabular-nums",
-					tone === "danger" && value > 0 && "text-destructive"
+					tone === "danger" && value > 0 && "text-status-destructive"
 				)}
 			>
 				{formatCount(value)}
@@ -255,7 +255,7 @@ function SessionRow({
 				<HugeiconsIcon
 					className={cn(
 						"mt-0.5 size-4 shrink-0",
-						failed ? "text-destructive" : "text-emerald-500"
+						failed ? "text-status-destructive" : "text-status-success"
 					)}
 					icon={failed ? Alert02Icon : CheckmarkCircle02Icon}
 				/>
@@ -521,13 +521,13 @@ export default function MissionControlPage() {
 					</div>
 				)}
 				{overview.isError && (
-					<p className="rounded-lg border border-destructive/40 p-3 text-destructive text-xs">
+					<p className="rounded-lg border border-destructive/40 p-3 text-status-destructive text-xs">
 						Mission Control's sidecar did not answer. Check the app is enabled
 						in the Store.
 					</p>
 				)}
 				{summarize.isError && (
-					<p className="rounded-lg border border-destructive/40 p-3 text-destructive text-xs">
+					<p className="rounded-lg border border-destructive/40 p-3 text-status-destructive text-xs">
 						That summary needs a model this node can reach — the dashboard's own
 						numbers are unaffected.
 					</p>

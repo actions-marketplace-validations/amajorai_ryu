@@ -74,7 +74,7 @@ export function ActivationValueStep({
 							<p className="text-muted-foreground text-sm">{offer.cadence}</p>
 							<div className="my-4 h-px bg-border/70" />
 							<div className="flex items-center gap-2 font-medium text-sm">
-								<Check className="size-4 text-success" />
+								<Check className="size-4 text-status-success" />
 								{offer.recurring}
 							</div>
 						</div>

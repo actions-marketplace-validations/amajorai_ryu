@@ -152,13 +152,13 @@ export function ViewBar({
 									}
 								/>
 								<DropdownMenuContent align="start" className="w-52">
-									<DropdownMenuLabel>Layout</DropdownMenuLabel>
 									<DropdownMenuRadioGroup
 										onValueChange={(value) =>
 											onUpdateView(view.id, { kind: value as DbViewKind })
 										}
 										value={view.kind}
 									>
+										<DropdownMenuLabel>Layout</DropdownMenuLabel>
 										{VIEW_KINDS.map((option) => (
 											<DropdownMenuRadioItem
 												key={option.kind}

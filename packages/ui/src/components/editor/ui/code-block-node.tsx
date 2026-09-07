@@ -150,12 +150,12 @@ export function CodeBlockElement({
 			{...props}
 		>
 			<div className="relative rounded-md bg-muted/50">
-				<pre className="overflow-x-auto p-8 pr-4 font-mono text-sm leading-[normal] [tab-size:2] print:break-inside-avoid">
+				<pre className="overflow-x-auto p-8 pe-4 font-mono text-sm leading-[normal] [tab-size:2] print:break-inside-avoid">
 					<code>{props.children}</code>
 				</pre>
 
 				<div
-					className="absolute top-1 right-1 z-10 flex select-none gap-0.5"
+					className="absolute end-1 top-1 z-10 flex select-none gap-0.5"
 					contentEditable={false}
 				>
 					{isLangSupported(element.lang) && (

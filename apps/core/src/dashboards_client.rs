@@ -24,7 +24,8 @@
 //! Security mirrors the ext-proxy hop exactly: the loopback client presents the
 //! per-plugin minted bearer ([`crate::sidecar::ext_proxy::ext_token`]), the same
 //! value the sidecar was spawned with — a hand-rolled local request without it is
-//! rejected fail-closed. Nothing hardcoded (the port resolves from the manifest).
+//! rejected fail-closed. Nothing hardcoded (the target resolves from the manager's
+//! live registration).
 
 use std::time::Duration;
 
@@ -61,35 +62,25 @@ pub fn global_client() -> Option<&'static DashboardsClient> {
     GLOBAL_CLIENT.get()
 }
 
-/// Resolve the `ryu-dashboards` sidecar's loopback port from the loaded manifests,
-/// profile-shifted the same way the ext-proxy forwards ([`crate::profile::port`]). The
-/// port comes from the manifest and ONLY the manifest — see
-/// [`crate::sidecar::ext_proxy::sidecar_port`] for why a built-in absence is a
-/// build-time invariant rather than a runtime fallback.
-pub fn sidecar_port(manifests: &[crate::plugin_manifest::PluginManifest]) -> u16 {
-    crate::sidecar::ext_proxy::sidecar_port(manifests, DASHBOARDS_PLUGIN_ID, DASHBOARDS_SIDECAR)
-        .expect(
-            "built-in dashboards.manifest.json must declare the ryu-dashboards sidecar (see \
-             plugin_manifest::BUILTIN_MANIFESTS)",
-        )
-}
-
 /// Typed loopback client for the `ryu-dashboards` sidecar. Cheap to clone (holds
-/// only the resolved port); the bearer is minted per call so it always tracks the
+/// only the manager); the bearer is minted per call so it always tracks the
 /// current node token.
 #[derive(Clone)]
 pub struct DashboardsClient {
-    port: u16,
+    manager: std::sync::Arc<crate::sidecar::SidecarManager>,
 }
 
 impl DashboardsClient {
-    /// Build a client bound to the sidecar's resolved loopback port.
-    pub fn new(port: u16) -> Self {
-        Self { port }
+    /// Build a client that resolves the manager's live target before each request.
+    pub fn new(manager: std::sync::Arc<crate::sidecar::SidecarManager>) -> Self {
+        Self { manager }
     }
 
-    fn base_url(&self) -> String {
-        format!("http://127.0.0.1:{}/api/dashboards", self.port)
+    fn base_url(&self) -> std::result::Result<String, String> {
+        self.manager
+            .sidecar_base_url(DASHBOARDS_PLUGIN_ID, DASHBOARDS_SIDECAR)
+            .map(|url| format!("{url}/api/dashboards"))
+            .map_err(|denied| denied.reason())
     }
 
     /// The per-plugin minted bearer the sidecar was spawned with.
@@ -103,7 +94,10 @@ impl DashboardsClient {
     /// 404 (unknown dashboard), matching the old builder `get_dashboard` contract.
     pub async fn get_dashboard(&self, id: &str) -> Result<Option<Value>> {
         let resp = reqwest::Client::new()
-            .get(format!("{}/{id}", self.base_url()))
+            .get(format!(
+                "{}/{id}",
+                self.base_url().map_err(anyhow::Error::msg)?
+            ))
             .bearer_auth(self.bearer())
             .send()
             .await
@@ -120,7 +114,7 @@ impl DashboardsClient {
     /// Create a dashboard, returning its new id.
     pub async fn create_dashboard(&self, name: &str) -> Result<String> {
         let resp = reqwest::Client::new()
-            .post(self.base_url())
+            .post(self.base_url().map_err(anyhow::Error::msg)?)
             .bearer_auth(self.bearer())
             .json(&json!({ "name": name }))
             .send()
@@ -139,7 +133,10 @@ impl DashboardsClient {
     /// Rename a dashboard.
     pub async fn rename_dashboard(&self, id: &str, name: &str) -> Result<()> {
         let resp = reqwest::Client::new()
-            .put(format!("{}/{id}", self.base_url()))
+            .put(format!(
+                "{}/{id}",
+                self.base_url().map_err(anyhow::Error::msg)?
+            ))
             .bearer_auth(self.bearer())
             .json(&json!({ "name": name }))
             .send()
@@ -163,7 +160,10 @@ impl DashboardsClient {
         widget: &Value,
     ) -> Result<std::result::Result<(), String>> {
         let resp = reqwest::Client::new()
-            .post(format!("{}/{dashboard_id}/widgets", self.base_url()))
+            .post(format!(
+                "{}/{dashboard_id}/widgets",
+                self.base_url().map_err(anyhow::Error::msg)?
+            ))
             .bearer_auth(self.bearer())
             .json(widget)
             .send()
@@ -186,7 +186,7 @@ impl DashboardsClient {
         let resp = reqwest::Client::new()
             .delete(format!(
                 "{}/{dashboard_id}/widgets/{widget_id}",
-                self.base_url()
+                self.base_url().map_err(anyhow::Error::msg)?
             ))
             .bearer_auth(self.bearer())
             .send()
@@ -199,7 +199,10 @@ impl DashboardsClient {
     /// return its id — the builder's device-target path.
     pub async fn ensure_device_dashboard(&self, device_id: &str) -> Result<String> {
         let resp = reqwest::Client::new()
-            .post(format!("{}/device/ensure", self.base_url()))
+            .post(format!(
+                "{}/device/ensure",
+                self.base_url().map_err(anyhow::Error::msg)?
+            ))
             .bearer_auth(self.bearer())
             .json(&json!({ "device_id": device_id }))
             .send()
@@ -252,7 +255,7 @@ impl DashboardFeed for DashboardsClient {
         prefs: &Value,
     ) -> std::result::Result<DeviceManifest, String> {
         let resp = reqwest::Client::new()
-            .post(format!("{}/device/manifest", self.base_url()))
+            .post(format!("{}/device/manifest", self.base_url()?))
             .bearer_auth(self.bearer())
             .json(&json!({
                 "device_id": device_id,
@@ -283,7 +286,7 @@ impl DashboardFeed for DashboardsClient {
         known_rev: Option<&str>,
     ) -> std::result::Result<Option<RenderedImage>, String> {
         let resp = reqwest::Client::new()
-            .post(format!("{}/device/image", self.base_url()))
+            .post(format!("{}/device/image", self.base_url()?))
             .bearer_auth(self.bearer())
             .json(&json!({
                 "device_id": device_id,
@@ -331,7 +334,7 @@ impl DashboardFeed for DashboardsClient {
         prefs: &Value,
     ) -> std::result::Result<Value, String> {
         let resp = reqwest::Client::new()
-            .post(format!("{}/device/config", self.base_url()))
+            .post(format!("{}/device/config", self.base_url()?))
             .bearer_auth(self.bearer())
             .json(&json!({
                 "device_id": device_id,
@@ -356,7 +359,7 @@ impl DashboardFeed for DashboardsClient {
         widgets: Option<Value>,
     ) -> std::result::Result<SetDeviceResult, String> {
         let resp = reqwest::Client::new()
-            .put(format!("{}/device/config", self.base_url()))
+            .put(format!("{}/device/config", self.base_url()?))
             .bearer_auth(self.bearer())
             .json(&json!({
                 "device_id": device_id,
@@ -378,8 +381,11 @@ impl DashboardFeed for DashboardsClient {
     }
 
     async fn delete_device(&self, device_id: &str) {
+        let Ok(base_url) = self.base_url() else {
+            return;
+        };
         let _ = reqwest::Client::new()
-            .delete(format!("{}/device/{device_id}", self.base_url()))
+            .delete(format!("{base_url}/device/{device_id}"))
             .bearer_auth(self.bearer())
             .send()
             .await;
@@ -387,7 +393,7 @@ impl DashboardFeed for DashboardsClient {
 
     async fn list_bindings(&self) -> std::result::Result<Vec<DeviceBinding>, String> {
         let resp = reqwest::Client::new()
-            .get(format!("{}/device-bindings", self.base_url()))
+            .get(format!("{}/device-bindings", self.base_url()?))
             .bearer_auth(self.bearer())
             .send()
             .await
@@ -436,7 +442,7 @@ impl DashboardsClient {
     /// reconnects) or the receiver drops.
     async fn stream_changes(&self, tx: &tokio::sync::mpsc::Sender<String>) -> Result<(), String> {
         let resp = reqwest::Client::new()
-            .get(format!("{}/events?internal=1", self.base_url()))
+            .get(format!("{}/events?internal=1", self.base_url()?))
             .bearer_auth(self.bearer())
             .send()
             .await

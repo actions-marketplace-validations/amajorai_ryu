@@ -132,7 +132,7 @@ function ActivityRow({ row }: { row: PassportActivityRow }) {
 			data-testid="agent-passport-event"
 		>
 			<div
-				className={`mt-0.5 flex size-8 shrink-0 items-center justify-center rounded-full ${success ? "bg-success/10 text-success" : "bg-destructive/10 text-destructive"}`}
+				className={`mt-0.5 flex size-8 shrink-0 items-center justify-center rounded-full ${success ? "bg-success/10 text-status-success" : "bg-destructive/10 text-status-destructive"}`}
 			>
 				<HugeiconsIcon
 					className="size-4"

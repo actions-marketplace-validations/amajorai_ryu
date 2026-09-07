@@ -1034,7 +1034,7 @@ export default function ProfileSettings({
 
 								<Item>
 									<ItemContent>
-										<ItemTitle className="text-destructive">
+										<ItemTitle className="text-status-destructive">
 											Delete Account
 										</ItemTitle>
 										<ItemDescription>

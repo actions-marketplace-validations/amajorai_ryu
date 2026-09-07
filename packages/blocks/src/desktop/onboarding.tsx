@@ -824,7 +824,7 @@ function ConnectStep({
 				</div>
 
 				{remoteError ? (
-					<p className="text-destructive text-sm">{remoteError}</p>
+					<p className="text-sm text-status-destructive">{remoteError}</p>
 				) : null}
 
 				<div className="mt-1 flex items-center justify-end gap-2">

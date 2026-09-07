@@ -165,8 +165,8 @@ function versionLabel(version: string): string {
 
 const ACTION_TONE: Record<NonNullable<LayerAction["tone"]>, string> = {
 	default: "text-foreground",
-	warning: "text-warning dark:text-warning",
-	destructive: "text-destructive",
+	warning: "text-status-warning dark:text-status-warning",
+	destructive: "text-status-destructive",
 };
 
 /** Shared "start" / "stop" actions, so every toggleable layer words it the same. */
@@ -274,7 +274,7 @@ function OptionRow({
 			{option.uninstall && !option.disabled && (
 				<button
 					aria-label={`Uninstall ${option.label}`}
-					className="shrink-0 rounded-md p-0.5 text-muted-foreground/50 hover:bg-destructive/10 hover:text-destructive disabled:opacity-50"
+					className="shrink-0 rounded-md p-0.5 text-muted-foreground/50 hover:bg-destructive/10 hover:text-status-destructive disabled:opacity-50"
 					disabled={pending !== null}
 					onClick={(e) => {
 						// Uninstall is a row-local action: never let it bubble into the

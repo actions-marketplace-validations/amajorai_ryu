@@ -131,12 +131,12 @@ function usedPercent(window: UsageWindow): number {
 
 function windowTone(used: number): string {
 	if (used >= 90) {
-		return "bg-red-500";
+		return "bg-destructive";
 	}
 	if (used >= 70) {
-		return "bg-amber-500";
+		return "bg-warning";
 	}
-	return "bg-emerald-500";
+	return "bg-success";
 }
 
 function WindowRow({ window }: { window: UsageWindow }) {

@@ -220,7 +220,7 @@ function MeetingRow({
 				/>
 				<span className="min-w-0 flex-1 truncate">{name}</span>
 				{recording ? (
-					<span className="size-2 shrink-0 animate-pulse rounded-full bg-red-500" />
+					<span className="size-2 shrink-0 animate-pulse rounded-full bg-destructive" />
 				) : null}
 			</SidebarMenuButton>
 		</SidebarMenuItem>
@@ -388,7 +388,7 @@ function BotModeSidebarContent() {
 function NodeSelectorPill() {
 	return (
 		<span className="flex items-center gap-1.5 rounded-md border border-border bg-card px-2 py-0.5 text-xs">
-			<span className="size-1.5 shrink-0 rounded-full bg-emerald-500" />
+			<span className="size-1.5 shrink-0 rounded-full bg-success" />
 			<span className="text-foreground">Local</span>
 			<HugeiconsIcon
 				className="size-3 text-muted-foreground"

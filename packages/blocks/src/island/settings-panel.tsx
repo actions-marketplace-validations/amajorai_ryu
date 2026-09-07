@@ -17,7 +17,7 @@ import { Switch } from "@ryu/ui/components/switch";
 
 // A compact island text/number field built on the shared Input.
 const FIELD_CLASS =
-	"h-7 rounded-lg bg-black/30 px-2 py-1 text-neutral-100 text-xs md:text-xs";
+	"h-7 rounded-lg bg-input/50 px-2 py-1 text-foreground text-xs md:text-xs";
 
 export type IslandConsentCapability = "chat" | "contextRead" | "proactive";
 
@@ -45,7 +45,7 @@ function ConsentToggle({
 	const id = `island-consent-${capability}`;
 	return (
 		<label
-			className="flex items-center justify-between gap-3 text-neutral-200 text-xs"
+			className="flex items-center justify-between gap-3 text-foreground text-xs"
 			htmlFor={id}
 		>
 			<span>{TOGGLE_COPY[capability]}</span>
@@ -107,7 +107,7 @@ const noop = (): void => {
 export function SettingsPanelView({
 	consent = DEFAULT_CONSENT,
 	settings = DEFAULT_SETTINGS,
-	version = "0.4.2",
+	version = "Unavailable",
 	autoUpdate = true,
 	updateReady = null,
 	onSetConsent = noop,
@@ -122,8 +122,8 @@ export function SettingsPanelView({
 }: SettingsPanelViewProps) {
 	return (
 		<div className="flex flex-col gap-4">
-			<section className="flex flex-col gap-2 rounded-2xl bg-white/5 p-3">
-				<h3 className="font-medium text-neutral-100 text-xs">Permissions</h3>
+			<section className="flex flex-col gap-2 rounded-2xl bg-card p-3">
+				<h3 className="font-medium text-foreground text-xs">Permissions</h3>
 				{CAPABILITIES.map((capability) => (
 					<ConsentToggle
 						capability={capability}
@@ -134,10 +134,10 @@ export function SettingsPanelView({
 				))}
 			</section>
 
-			<section className="flex flex-col gap-2 rounded-2xl bg-white/5 p-3">
-				<h3 className="font-medium text-neutral-100 text-xs">Connections</h3>
+			<section className="flex flex-col gap-2 rounded-2xl bg-card p-3">
+				<h3 className="font-medium text-foreground text-xs">Connections</h3>
 				<label
-					className="flex flex-col gap-1 text-[11px] text-neutral-400"
+					className="flex flex-col gap-1 text-[11px] text-muted-foreground"
 					htmlFor="island-core-url"
 				>
 					Core URL
@@ -150,18 +150,18 @@ export function SettingsPanelView({
 						type="text"
 					/>
 				</label>
-				<div className="flex flex-col gap-1 text-[11px] text-neutral-400">
+				<div className="flex flex-col gap-1 text-[11px] text-muted-foreground">
 					<span>Shadow URL</span>
-					<span className={`${FIELD_CLASS} text-neutral-500`}>
+					<span className={`${FIELD_CLASS} text-muted-foreground`}>
 						{settings.shadowUrl}
 					</span>
-					<span className="text-[10px] text-neutral-600">
+					<span className="text-[10px] text-muted-foreground">
 						Local only — Shadow captures this device and can't be repointed at
 						another node.
 					</span>
 				</div>
 				<label
-					className="flex flex-col gap-1 text-[11px] text-neutral-400"
+					className="flex flex-col gap-1 text-[11px] text-muted-foreground"
 					htmlFor="island-core-token"
 				>
 					Core token (optional)
@@ -177,12 +177,12 @@ export function SettingsPanelView({
 				</label>
 			</section>
 
-			<section className="flex flex-col gap-2 rounded-2xl bg-white/5 p-3">
-				<h3 className="font-medium text-neutral-100 text-xs">
+			<section className="flex flex-col gap-2 rounded-2xl bg-card p-3">
+				<h3 className="font-medium text-foreground text-xs">
 					Suggestion engine
 				</h3>
 				<label
-					className="flex items-center justify-between gap-2 text-[11px] text-neutral-400"
+					className="flex items-center justify-between gap-2 text-[11px] text-muted-foreground"
 					htmlFor="island-poll"
 				>
 					Poll interval (s)
@@ -197,7 +197,7 @@ export function SettingsPanelView({
 					/>
 				</label>
 				<label
-					className="flex items-center justify-between gap-2 text-[11px] text-neutral-400"
+					className="flex items-center justify-between gap-2 text-[11px] text-muted-foreground"
 					htmlFor="island-cooldown"
 				>
 					Cooldown (s)
@@ -213,11 +213,13 @@ export function SettingsPanelView({
 				</label>
 			</section>
 
-			<section className="flex flex-col gap-2 rounded-2xl bg-white/5 p-3">
-				<h3 className="font-medium text-neutral-100 text-xs">Updates</h3>
-				<p className="text-[11px] text-neutral-400">Version {version ?? "…"}</p>
+			<section className="flex flex-col gap-2 rounded-2xl bg-card p-3">
+				<h3 className="font-medium text-foreground text-xs">Updates</h3>
+				<p className="text-[11px] text-muted-foreground">
+					Version {version ?? "…"}
+				</p>
 				<label
-					className="flex items-center justify-between gap-3 text-neutral-200 text-xs"
+					className="flex items-center justify-between gap-3 text-foreground text-xs"
 					htmlFor="island-auto-update"
 				>
 					<span>Automatic updates</span>

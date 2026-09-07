@@ -300,9 +300,7 @@ function UsageRowItem({ row }: { row: UsageRow }) {
 				    reads correctly in greyscale or to a colour-blind reader. */}
 				<span
 					className={`font-medium text-sm tabular-nums ${
-						row.isCredit
-							? "text-green-600 dark:text-green-400"
-							: "text-foreground"
+						row.isCredit ? "text-status-success" : "text-foreground"
 					}`}
 				>
 					{row.isCredit ? "+" : "−"}
@@ -359,7 +357,7 @@ export function UsageView({
 			</div>
 
 			{errorMessage ? (
-				<div className="flex items-center gap-2 rounded-lg border border-destructive/40 bg-destructive/5 p-3 text-destructive text-sm">
+				<div className="flex items-center gap-2 rounded-lg border border-destructive/40 bg-destructive/5 p-3 text-sm text-status-destructive">
 					<HugeiconsIcon icon={Alert02Icon} size={16} />
 					{errorMessage}
 				</div>

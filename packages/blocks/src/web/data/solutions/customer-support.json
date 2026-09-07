@@ -4,10 +4,10 @@
   "navLabel": "Customer Support",
   "category": "Sales & Marketing",
   "icon": "Headphones",
-  "tagline": "Draft accurate replies, triage tickets, and pull answers from your own docs without exposing customer data.",
+  "tagline": "Find answers in your help center and draft ticket replies for your team to approve.",
   "heroEyebrow": "Ryu for Customer Support",
-  "heroTitle": "Faster replies, grounded in your real answers.",
-  "heroSubtitle": "Agents read a ticket, find the right answer in your help center and past resolutions, and draft a reply your team approves. They connect to your help desk to tag, route, and update, and the Gateway redacts customer PII before anything leaves your machine.",
+  "heroTitle": "Ryu for customer support",
+  "heroSubtitle": "Find answers in your help center and draft ticket replies for your team to approve.",
   "visualKey": "ConnectionsVisual",
   "intro": "Support is a volume game where accuracy and trust both matter. A generic chatbot invents answers and leaks customer data; your team needs replies grounded in your real knowledge base and a clear record of what was sent. Ryu grounds agents on your docs, connects them to your help desk, and keeps PII redacted on every model call.",
   "highlights": [

@@ -61,12 +61,12 @@ function SpanRow({ span }: { span: RunSpan }) {
 			<div className="flex items-center gap-2">
 				{isModelCall ? (
 					<HugeiconsIcon
-						className="h-3 w-3 shrink-0 text-info"
+						className="h-3 w-3 shrink-0 text-status-info"
 						icon={ZapIcon}
 					/>
 				) : (
 					<HugeiconsIcon
-						className="h-3 w-3 shrink-0 text-warning"
+						className="h-3 w-3 shrink-0 text-status-warning"
 						icon={ComputerTerminal01Icon}
 					/>
 				)}
@@ -81,7 +81,9 @@ function SpanRow({ span }: { span: RunSpan }) {
 				</p>
 			)}
 			{hasError && (
-				<p className="mt-0.5 text-[10px] text-destructive">{span.error}</p>
+				<p className="mt-0.5 text-[10px] text-status-destructive">
+					{span.error}
+				</p>
 			)}
 		</div>
 	);
@@ -153,7 +155,9 @@ export function RunTracePanel({ runId, target }: RunTracePanelProps) {
 
 			{expanded && (
 				<div className="border-t px-3 py-2">
-					{error && <p className="text-[11px] text-destructive">{error}</p>}
+					{error && (
+						<p className="text-[11px] text-status-destructive">{error}</p>
+					)}
 					{!error && spans.length === 0 && !loading && (
 						<p className="text-[11px] text-muted-foreground">
 							No spans recorded for this run.

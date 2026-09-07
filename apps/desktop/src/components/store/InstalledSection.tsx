@@ -260,7 +260,7 @@ function LifecycleAccessCard({
 				<Badge variant="outline">Server-authoritative</Badge>
 			</div>
 			{error ? (
-				<p className="mt-3 text-destructive text-xs">
+				<p className="mt-3 text-status-destructive text-xs">
 					Lifecycle access is unavailable; the server will still enforce every
 					action.
 				</p>
@@ -276,7 +276,7 @@ function LifecycleAccessCard({
 								<p
 									className={
 										allowed
-											? "text-emerald-600 text-xs"
+											? "text-status-success text-xs"
 											: "text-muted-foreground text-xs"
 									}
 								>
@@ -659,7 +659,7 @@ export default function InstalledSection() {
 						loading={lifecycleCapabilities.isLoading}
 					/>
 					{toggleError ? (
-						<div className="flex items-start justify-between gap-2 rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-destructive text-sm">
+						<div className="flex items-start justify-between gap-2 rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-status-destructive">
 							<span>{toggleError}</span>
 							<button
 								className="shrink-0 font-medium underline-offset-2 hover:underline"
@@ -1070,7 +1070,7 @@ function InstalledDoctorCard({
 							))}
 						</ul>
 					) : (
-						<p className="text-emerald-600 dark:text-emerald-400">
+						<p className="text-status-success">
 							Healthy — no runtime findings.
 						</p>
 					)}
@@ -1124,7 +1124,7 @@ function InstalledAppDetail({
 					)}
 					{isInstalled && !app.mandatory ? (
 						<Button
-							className="text-destructive hover:text-destructive"
+							className="text-status-destructive hover:text-status-destructive"
 							disabled={busy}
 							onClick={() => setConfirmUninstall(true)}
 							size="sm"
@@ -1226,7 +1226,7 @@ function InstalledAppDetail({
 			}
 			notice={
 				toggleError ? (
-					<div className="flex items-start justify-between gap-2 rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-destructive text-sm">
+					<div className="flex items-start justify-between gap-2 rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-status-destructive">
 						<span>{toggleError}</span>
 						<button
 							className="shrink-0 font-medium underline-offset-2 hover:underline"
@@ -1419,7 +1419,7 @@ function BuiltInAppDetail({
 						</Button>
 					) : null}
 					{actionError ? (
-						<span className="ml-auto text-destructive text-sm">
+						<span className="ml-auto text-sm text-status-destructive">
 							{actionError}
 						</span>
 					) : null}

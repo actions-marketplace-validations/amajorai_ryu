@@ -557,7 +557,7 @@ export function StoreCardRating({
 		<span className="inline-flex items-center gap-1 text-muted-foreground text-xs">
 			<HugeiconsIcon
 				aria-hidden="true"
-				className="size-3.5 text-amber-400"
+				className="size-3.5 text-status-warning"
 				icon={StarIcon}
 			/>
 			<span className="font-medium text-foreground tabular-nums">

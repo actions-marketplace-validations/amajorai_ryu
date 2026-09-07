@@ -863,9 +863,9 @@ async fn main() {
     }
     // Persisted agent teams (collections of agents + a coordination strategy) now
     // live OUT-OF-PROCESS in the `ryu-teams` sidecar (single owner of `teams.db`).
-    // Core reaches them over loopback via `TeamsClient`, constructed below once the
-    // manifests are loaded (so the sidecar port resolves from the manifest, not a
-    // hardcoded constant).
+    // Core reaches them over loopback via `TeamsClient`. The client is constructed
+    // before app-sidecar reconciliation and resolves a manager-owned target per call;
+    // no manifest port becomes a dial target here.
     let conversations = match server::conversations::ConversationStore::open_default() {
         Ok(store) => store,
         Err(e) => boot_fail!("failed to open conversation store: {e:#}"),
@@ -1304,10 +1304,8 @@ async fn main() {
         loaded.compatible = runtime;
         loaded
     };
-    // Loopback clients need their manifest-declared ports before the default
-    // marketplace packages are materialized below. Keep this bootstrap snapshot
-    // separate from the runtime set: absent packages must not be activated merely
-    // to make startup port resolution work.
+    // Keep bootstrap packages separate from the runtime set until the default
+    // marketplace packages are materialized below.
     let bootstrap_manifests = crate::plugin_manifest::PluginManifestLoader::load_bootstrap();
     if !loaded_manifests.incompatible.is_empty() {
         tracing::info!(
@@ -1318,56 +1316,41 @@ async fn main() {
     let incompatible_manifests = Arc::new(tokio::sync::RwLock::new(loaded_manifests.incompatible));
     let app_manifests = Arc::new(tokio::sync::RwLock::new(loaded_manifests.compatible));
     // Loopback client for the out-of-process `ryu-teams` sidecar (single owner of
-    // `teams.db`). Port resolved from the just-loaded manifests, profile-shifted.
-    let teams = crate::teams_client::TeamsClient::new(crate::teams_client::sidecar_port(
-        &bootstrap_manifests,
-    ));
+    // `teams.db`). Targets resolve through the live sidecar manager per request.
+    let teams = crate::teams_client::TeamsClient::new(Arc::clone(&sidecars));
     // Loopback client for the out-of-process `ryu-finetune` sidecar (single owner of
-    // `finetune.db` + the Python `unsloth` worker). Port resolved from the just-loaded
-    // manifests, profile-shifted — same posture as `teams`.
-    let finetune = crate::finetune_client::FinetuneClient::new(
-        crate::finetune_client::sidecar_port(&bootstrap_manifests),
-    );
+    // `finetune.db` + the Python `unsloth` worker). Target resolves from the manager's
+    // live registration per request — same posture as `teams`.
+    let finetune = crate::finetune_client::FinetuneClient::new(Arc::clone(&sidecars));
     // Loopback client for the out-of-process `ryu-quests` sidecar (single owner of
-    // `quests.db` + the detection engine). Port resolved from the just-loaded
-    // manifests, profile-shifted — same posture as `finetune`/`teams`. Published as
-    // a process-global so the scheduler (`JobTarget::Quest`) can reach it without
+    // `quests.db` + the detection engine). Target resolves from the manager's live
+    // registration per request — same posture as `finetune`/`teams`. Published as a
+    // process-global so the scheduler (`JobTarget::Quest`) can reach it without
     // `ServerState`.
-    let quests = crate::quests_client::QuestsClient::new(crate::quests_client::sidecar_port(
-        &bootstrap_manifests,
-    ));
+    let quests = crate::quests_client::QuestsClient::new(Arc::clone(&sidecars));
     crate::quests_client::set_global_client(quests.clone());
     // Loopback client for the out-of-process `ryu-monitors` sidecar (single owner of
-    // `monitors.db` + the monitor engine). Port resolved from the just-loaded
-    // manifests, profile-shifted — same posture as `quests`. Published as a
-    // process-global so the scheduler (`JobTarget::Monitor`) can reach it without
-    // `ServerState`; the reconcile loop is spawned once `activity`/`ServerState` exist.
-    let monitors = crate::monitors_client::MonitorsClient::new(
-        crate::monitors_client::sidecar_port(&bootstrap_manifests),
-    );
+    // `monitors.db` + the monitor engine). Target resolves from the manager's live
+    // registration per request — same posture as `quests`. Published as a process-global
+    // so the scheduler (`JobTarget::Monitor`) can reach it without `ServerState`; the
+    // reconcile loop is spawned once `activity`/`ServerState` exist.
+    let monitors = crate::monitors_client::MonitorsClient::new(Arc::clone(&sidecars));
     crate::monitors_client::set_global_client(monitors.clone());
     // Loopback client for the out-of-process `ryu-dashboards` sidecar (single owner
-    // of `dashboards.db` + the refresh loop + the `/api/dashboards/*` surface). Port
-    // resolved from the just-loaded manifests, profile-shifted — same posture as
+    // of `dashboards.db` + the refresh loop + the `/api/dashboards/*` surface). Target
+    // resolves from the manager's live registration per request — same posture as
     // `monitors`. Published as a process-global so the state-free `dashboard_builder`
     // MCP runnable can reach it; also backs the kernel hardware device-dashboard
     // renderer + nudge loop through the `ryu_hardware::DashboardFeed` seam.
-    let dashboards = crate::dashboards_client::DashboardsClient::new(
-        crate::dashboards_client::sidecar_port(&bootstrap_manifests),
-    );
+    let dashboards = crate::dashboards_client::DashboardsClient::new(Arc::clone(&sidecars));
     crate::dashboards_client::set_global_client(dashboards.clone());
     // Loopback client for the out-of-process `ryu-meetings` sidecar (single owner of
-    // `meetings.db` + the engine/audio pipeline + the `/api/meetings/*` surface). Port
-    // resolved from the just-loaded manifests, profile-shifted — same posture as
+    // `meetings.db` + the engine/audio pipeline + the `/api/meetings/*` surface). Target
+    // resolves from the manager's live registration per request — same posture as
     // `dashboards`. Backs the kernel hardware ambient-audio path through the
     // `ryu_hardware::MeetingIngest` seam; the activity-feed fold is spawned once
     // `activity`/`ServerState` exist.
-    let meetings = crate::meetings_client::MeetingsClient::new(
-        crate::meetings_client::sidecar_port(&bootstrap_manifests),
-    );
-    // Resolve the `ryu-healing` sidecar port from the bootstrap snapshot; the
-    // healing client is built later, once `server_state` exists.
-    let healing_sidecar_port = crate::healing_client::sidecar_port(&bootstrap_manifests);
+    let meetings = crate::meetings_client::MeetingsClient::new(Arc::clone(&sidecars));
     let app_store = match crate::plugins::PluginStore::open() {
         Ok(store) => store,
         Err(e) => boot_fail!("failed to open app store: {e:#}"),
@@ -1958,7 +1941,7 @@ async fn main() {
     // `ServerState`) and spawn the run-status bus loop, which reads a failed run's
     // context from the kernel conversation store and posts it to the sidecar,
     // applying the returned verdict (Core owns the approvals write + the re-run).
-    let healing = crate::healing_client::HealingClient::new(healing_sidecar_port);
+    let healing = crate::healing_client::HealingClient::new(Arc::clone(&sidecars));
     crate::healing_client::set_global_client(healing.clone());
     crate::healing_client::spawn(healing, server_state.clone());
     server::agent_sync::spawn_worker(server_state.clone());

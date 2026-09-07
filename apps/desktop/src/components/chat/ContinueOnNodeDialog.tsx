@@ -340,7 +340,7 @@ export function ContinueOnNodeDialog({
 
 					{error ? (
 						<p
-							className="rounded-xl bg-destructive/10 px-3 py-2 text-destructive text-sm"
+							className="rounded-xl bg-destructive/10 px-3 py-2 text-sm text-status-destructive"
 							role="alert"
 						>
 							{error}

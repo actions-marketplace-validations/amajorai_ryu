@@ -42,10 +42,10 @@ export type IslandViewActionHandler = (
 
 const TONE_DOT: Record<ViewTone, string> = {
 	neutral: "bg-white/40",
-	success: "bg-emerald-400",
-	warning: "bg-amber-400",
-	danger: "bg-red-400",
-	info: "bg-sky-400",
+	success: "bg-success",
+	warning: "bg-warning",
+	danger: "bg-destructive",
+	info: "bg-info",
 };
 
 function ToneBadges({ badges }: { badges?: ViewBadge[] }) {
@@ -89,15 +89,15 @@ function ActionPanel({
 		return null;
 	}
 	return (
-		<div className="flex flex-wrap items-center gap-1.5 border-white/10 border-t px-2 pt-2">
+		<div className="flex flex-wrap items-center gap-1.5 border-border border-t px-2 pt-2">
 			{entries.map(({ action, ctx }) => (
 				<button
 					className={`rounded-md px-2 py-1 text-xs transition-colors ${
 						action.style === "primary"
-							? "bg-white/15 text-white hover:bg-white/25"
+							? "bg-secondary text-white hover:bg-white/25"
 							: action.style === "danger"
-								? "text-red-300 hover:bg-red-500/15"
-								: "text-white/70 hover:bg-white/10"
+								? "text-status-destructive hover:bg-destructive/15"
+								: "text-white/70 hover:bg-muted"
 					}`}
 					key={action.id}
 					onClick={() => onAction?.(action, ctx)}
@@ -139,7 +139,7 @@ function Row({
 		<button
 			aria-pressed={selected}
 			className={`flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left ${
-				selected ? "bg-white/10" : "hover:bg-white/5"
+				selected ? "bg-muted" : "hover:bg-card"
 			}`}
 			onClick={onSelect}
 			type="button"
@@ -284,7 +284,7 @@ function CompactField({
 			<button
 				aria-pressed={on}
 				className={`rounded-md px-2 py-0.5 text-xs ${
-					on ? "bg-white/15 text-white" : "text-white/50 hover:bg-white/10"
+					on ? "bg-secondary text-white" : "text-white/50 hover:bg-muted"
 				}`}
 				onClick={() => onChange(!on)}
 				type="button"
@@ -296,7 +296,7 @@ function CompactField({
 	if (field.type === "select") {
 		return (
 			<select
-				className="max-w-[10rem] rounded-md bg-white/10 px-1.5 py-0.5 text-white/80 text-xs outline-none"
+				className="max-w-[10rem] rounded-md bg-muted px-1.5 py-0.5 text-white/80 text-xs outline-none"
 				onChange={(e) => onChange(e.target.value)}
 				value={String(value ?? "")}
 			>
@@ -310,7 +310,7 @@ function CompactField({
 	}
 	return (
 		<input
-			className="max-w-[10rem] rounded-md bg-white/10 px-1.5 py-0.5 text-white/80 text-xs outline-none placeholder:text-white/30"
+			className="max-w-[10rem] rounded-md bg-muted px-1.5 py-0.5 text-white/80 text-xs outline-none placeholder:text-white/30"
 			onChange={(e) =>
 				onChange(
 					field.type === "number" && e.target.value !== ""
@@ -441,7 +441,7 @@ export function IslandDeclarativeView({
 							<span
 								className={`rounded-md px-2 py-0.5 text-xs ${
 									filter.value === opt.value
-										? "bg-white/15 text-white"
+										? "bg-secondary text-white"
 										: "text-white/50"
 								}`}
 								key={`${filter.id}-${opt.value}`}
@@ -473,7 +473,7 @@ export function IslandDeclarativeView({
 			return (
 				<div className="grid grid-cols-2 gap-1.5 p-2">
 					{spec.stats.map((stat) => (
-						<div className="rounded-lg bg-white/5 px-2 py-1.5" key={stat.id}>
+						<div className="rounded-lg bg-card px-2 py-1.5" key={stat.id}>
 							<div className="text-[10px] text-white/45">{stat.label}</div>
 							<div className="font-medium text-sm text-white/90">
 								{stat.value}

@@ -85,7 +85,7 @@ export function LoginApprovalPrompt({
 				</div>
 
 				{error ? (
-					<p className="text-destructive text-sm" role="alert">
+					<p className="text-sm text-status-destructive" role="alert">
 						{error}
 					</p>
 				) : null}
@@ -159,7 +159,7 @@ export function LoginApprovalWait({
 				</div>
 
 				{error ? (
-					<p className="text-destructive text-sm" role="alert">
+					<p className="text-sm text-status-destructive" role="alert">
 						{error}
 					</p>
 				) : null}

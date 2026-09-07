@@ -49,16 +49,32 @@ describe("agentUiCatalog", () => {
 
 	it("produces a non-empty system prompt naming every component", () => {
 		const prompt = agentUiCatalog.prompt();
-		expect(typeof prompt).toBe("string");
-		expect(prompt.length).toBeGreaterThan(0);
 		for (const name of EXPECTED_COMPONENTS) {
 			expect(prompt, `prompt mentions ${name}`).toContain(name);
 		}
 	});
 
-	it("emits a JSON schema for the spec", () => {
-		const schema = agentUiCatalog.jsonSchema();
-		expect(schema).toBeTruthy();
-		expect(typeof schema).toBe("object");
+	it("emits the root and element contract for generated specs", () => {
+		expect(agentUiCatalog.jsonSchema()).toMatchObject({
+			type: "object",
+			required: ["root", "elements"],
+			additionalProperties: false,
+			properties: {
+				root: { type: "string" },
+				elements: {
+					type: "object",
+					additionalProperties: {
+						type: "object",
+						required: ["type", "props", "children", "visible"],
+						additionalProperties: false,
+						properties: {
+							type: { enum: EXPECTED_COMPONENTS },
+							props: { type: "object" },
+							children: { type: "array", items: { type: "string" } },
+						},
+					},
+				},
+			},
+		});
 	});
 });

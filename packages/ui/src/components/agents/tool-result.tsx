@@ -87,13 +87,13 @@ function getSwapKey(value: ReactNode, fallback: string) {
 
 function getStatusClass(status: ToolResultStatus) {
 	if (status === "running") {
-		return "text-blue-600 dark:text-blue-400";
+		return "text-status-info";
 	}
 	if (status === "success") {
-		return "text-emerald-600 dark:text-emerald-400";
+		return "text-status-success";
 	}
 	if (status === "error") {
-		return "text-rose-600 dark:text-rose-400";
+		return "text-status-destructive";
 	}
 	return "text-muted-foreground";
 }

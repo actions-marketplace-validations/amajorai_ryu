@@ -8,6 +8,7 @@ import {
 	stepUpMethods,
 	stepUpMethodsForScope,
 	stepUpRequiresEnrolled2fa,
+	stepUpScopeForApiKeyConfig,
 	stepUpScopeForAuthPath,
 	stepUpWindowMs,
 } from "./step-up.ts";
@@ -107,5 +108,11 @@ describe("STEP_UP_AUTH_PATHS", () => {
 			"org.members"
 		);
 		expect(stepUpScopeForAuthPath("/customer/portal")).toBeNull();
+	});
+
+	it("resolves credential protection from Better Auth's stored config", () => {
+		expect(stepUpScopeForApiKeyConfig("organization")).toBe("org.credentials");
+		expect(stepUpScopeForApiKeyConfig("default")).toBeNull();
+		expect(stepUpScopeForApiKeyConfig(undefined)).toBeNull();
 	});
 });

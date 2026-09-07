@@ -236,7 +236,7 @@ export function useIslandComposer(): IslandComposerState {
 
 	const leftActions = (
 		<ComposerSettingsMenu
-			className="text-neutral-200 hover:bg-white/10"
+			className="text-foreground hover:bg-muted"
 			compact
 			sections={sections}
 			side="top"

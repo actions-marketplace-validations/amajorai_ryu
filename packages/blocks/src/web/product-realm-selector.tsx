@@ -8,9 +8,10 @@ export function ProductRealmSelector() {
 	return (
 		<section aria-label="Ryu surfaces" data-testid="product-realm-selector">
 			<StaggerLines className="max-w-2xl">
-				<SectionTitle title="A simple toolkit that connects the tools they already use." />
+				<SectionTitle title="Choose how your team uses Ryu" />
 				<p className={sectionSubtitleClass}>
-					Use the same deployment through Apps, Bot, and Console.
+					Use apps for daily work, chat with an agent, or manage your
+					deployment.
 				</p>
 			</StaggerLines>
 			<ProductSurfaceCards className="mt-12" />

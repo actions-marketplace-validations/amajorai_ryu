@@ -827,7 +827,7 @@ function SpaceDetail(props: SpacesDetailProps) {
 							</Button>
 						</div>
 						{portableError ? (
-							<p className="text-destructive text-sm">{portableError}</p>
+							<p className="text-sm text-status-destructive">{portableError}</p>
 						) : null}
 						{portableNotice && !portableBusy ? (
 							<p className="text-muted-foreground text-xs">{portableNotice}</p>
@@ -895,7 +895,9 @@ function SpaceDetail(props: SpacesDetailProps) {
 							</div>
 						) : null}
 						{retrievalModeError ? (
-							<p className="text-destructive text-sm">{retrievalModeError}</p>
+							<p className="text-sm text-status-destructive">
+								{retrievalModeError}
+							</p>
 						) : null}
 						{retrievalModeNotice && !retrievalModeBusy ? (
 							<p className="text-muted-foreground text-xs">
@@ -939,7 +941,7 @@ function SpaceDetail(props: SpacesDetailProps) {
 							/>
 						</div>
 						{ingestError ? (
-							<p className="text-destructive text-sm">{ingestError}</p>
+							<p className="text-sm text-status-destructive">{ingestError}</p>
 						) : null}
 						<div>
 							<Button
@@ -977,7 +979,7 @@ function SpaceDetail(props: SpacesDetailProps) {
 					</div>
 				</div>
 				{documentsError ? (
-					<p className="text-destructive text-sm">{documentsError}</p>
+					<p className="text-sm text-status-destructive">{documentsError}</p>
 				) : null}
 				{documents.length === 0 ? (
 					<p className="text-muted-foreground text-sm">
@@ -1024,7 +1026,7 @@ function SpaceDetail(props: SpacesDetailProps) {
 					</Button>
 				</form>
 				{searchError ? (
-					<p className="text-destructive text-sm">{searchError}</p>
+					<p className="text-sm text-status-destructive">{searchError}</p>
 				) : null}
 				{searchResults !== null && searchResults !== undefined ? (
 					searchResults.length === 0 ? (

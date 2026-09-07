@@ -75,10 +75,10 @@ export function AccountTab() {
 				<div className="flex items-start justify-between gap-3 rounded-lg border border-warning bg-warning p-3 dark:border-warning dark:bg-warning/20">
 					<div className="flex items-center gap-2">
 						<HugeiconsIcon
-							className="size-4 shrink-0 text-warning dark:text-warning"
+							className="size-4 shrink-0 text-status-warning dark:text-status-warning"
 							icon={AlertCircleIcon}
 						/>
-						<p className="text-sm text-warning dark:text-warning">
+						<p className="text-sm text-status-warning dark:text-status-warning">
 							Please verify your email address to unlock all features.
 						</p>
 					</div>
@@ -104,14 +104,14 @@ export function AccountTab() {
 							<div className="w-full space-y-2 rounded-lg border border-warning bg-warning p-3 dark:border-warning dark:bg-warning/20">
 								<div className="flex items-center gap-2">
 									<HugeiconsIcon
-										className="size-4 shrink-0 text-warning dark:text-warning"
+										className="size-4 shrink-0 text-status-warning dark:text-status-warning"
 										icon={Clock01Icon}
 									/>
-									<p className="font-medium text-sm text-warning dark:text-warning">
+									<p className="font-medium text-sm text-status-warning dark:text-status-warning">
 										Email change pending
 									</p>
 								</div>
-								<p className="text-warning text-xs dark:text-warning">
+								<p className="text-status-warning text-xs dark:text-status-warning">
 									{emailChange.statusMessage ??
 										`Changing to ${emailChange.newEmail}`}
 								</p>
@@ -119,7 +119,7 @@ export function AccountTab() {
 									<span className="flex items-center gap-1">
 										{emailChange.oldEmailConfirmedAt ? (
 											<HugeiconsIcon
-												className="size-3 text-success"
+												className="size-3 text-status-success"
 												icon={CheckmarkCircle01Icon}
 											/>
 										) : (
@@ -133,7 +133,7 @@ export function AccountTab() {
 									<span className="flex items-center gap-1">
 										{emailChange.newEmailConfirmedAt ? (
 											<HugeiconsIcon
-												className="size-3 text-success"
+												className="size-3 text-status-success"
 												icon={CheckmarkCircle01Icon}
 											/>
 										) : (
@@ -189,7 +189,7 @@ export function AccountTab() {
 							<span className="flex items-center gap-2">
 								{twoFactorEnabled ? (
 									<HugeiconsIcon
-										className="size-4 shrink-0 text-success"
+										className="size-4 shrink-0 text-status-success"
 										icon={CheckmarkBadge04Icon}
 									/>
 								) : (

@@ -282,10 +282,10 @@ export function DelegationView({
 						{runError ? (
 							<Card className="border-destructive">
 								<CardHeader>
-									<CardTitle className="text-destructive">
+									<CardTitle className="text-status-destructive">
 										Delegation error
 									</CardTitle>
-									<CardDescription className="break-words text-destructive">
+									<CardDescription className="break-words text-status-destructive">
 										{runError}
 									</CardDescription>
 								</CardHeader>
@@ -371,7 +371,7 @@ export function DelegationView({
 												</Badge>
 											</div>
 											{result.error ? (
-												<p className="break-words text-destructive text-xs">
+												<p className="break-words text-status-destructive text-xs">
 													{result.error}
 												</p>
 											) : (

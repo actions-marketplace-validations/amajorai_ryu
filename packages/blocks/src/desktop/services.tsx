@@ -116,7 +116,7 @@ function StatusDot({
 	if (running) {
 		return (
 			<HugeiconsIcon
-				className="h-3 w-3 fill-green-500 text-green-500"
+				className="h-3 w-3 fill-success text-status-success"
 				icon={CircleIcon}
 			/>
 		);
@@ -176,7 +176,7 @@ export function SidecarRowView({
 						{entry.displayName}
 					</span>
 					{entry.deprecated ? (
-						<span className="flex items-center gap-1 font-medium text-amber-500 text-xs">
+						<span className="flex items-center gap-1 font-medium text-status-warning text-xs">
 							<HugeiconsIcon className="h-3 w-3" icon={Alert01Icon} />
 							Deprecated
 						</span>
@@ -194,7 +194,7 @@ export function SidecarRowView({
 					<span className="text-muted-foreground text-xs">Installing…</span>
 				) : isFailed ? (
 					<Button
-						className="h-7 px-2 text-amber-500 hover:text-amber-600"
+						className="h-7 px-2 text-status-warning hover:text-status-warning"
 						disabled={pending !== null}
 						onClick={() => onInstall?.(entry.name)}
 						size="sm"
@@ -211,7 +211,7 @@ export function SidecarRowView({
 						<>
 							{hasUpdate ? (
 								<Button
-									className="h-7 px-2 text-blue-500 hover:text-blue-600"
+									className="h-7 px-2 text-status-info hover:text-status-info"
 									disabled={pending !== null}
 									onClick={() => onInstall?.(entry.name)}
 									size="sm"
@@ -301,7 +301,7 @@ function GatewayRow({
 				{pending == null ? (
 					running ? (
 						<HugeiconsIcon
-							className="h-3 w-3 fill-green-500 text-green-500"
+							className="h-3 w-3 fill-success text-status-success"
 							icon={CircleIcon}
 						/>
 					) : (
@@ -397,7 +397,7 @@ function SandboxRow({
 					/>
 				) : enabled ? (
 					<HugeiconsIcon
-						className="h-3 w-3 fill-green-500 text-green-500"
+						className="h-3 w-3 fill-success text-status-success"
 						icon={CircleIcon}
 					/>
 				) : (
@@ -468,7 +468,7 @@ function DockerRow({ sandbox }: { sandbox: SandboxView | null | undefined }) {
 			<div className="flex w-4 flex-shrink-0 items-center justify-center">
 				{available ? (
 					<HugeiconsIcon
-						className="h-3 w-3 fill-green-500 text-green-500"
+						className="h-3 w-3 fill-success text-status-success"
 						icon={CircleIcon}
 					/>
 				) : (
@@ -612,12 +612,12 @@ export function ServicesView({
 								<div className="flex items-center gap-2 text-sm" key={dep.name}>
 									{dep.installed ? (
 										<HugeiconsIcon
-											className="h-3.5 w-3.5 text-green-500"
+											className="h-3.5 w-3.5 text-status-success"
 											icon={CheckmarkCircle01Icon}
 										/>
 									) : (
 										<HugeiconsIcon
-											className="h-3.5 w-3.5 text-destructive"
+											className="h-3.5 w-3.5 text-status-destructive"
 											icon={CancelCircleIcon}
 										/>
 									)}

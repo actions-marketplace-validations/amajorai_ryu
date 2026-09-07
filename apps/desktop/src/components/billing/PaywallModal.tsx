@@ -98,7 +98,7 @@ export function PaywallModal({
 				<DialogHeader>
 					<div className="flex items-center gap-2">
 						<HugeiconsIcon
-							className="text-warning"
+							className="text-status-warning"
 							icon={SparklesIcon}
 							strokeWidth={2}
 						/>
@@ -145,7 +145,7 @@ export function PaywallModal({
 					].map((feature) => (
 						<li className="flex items-center gap-2" key={feature}>
 							<HugeiconsIcon
-								className="text-success"
+								className="text-status-success"
 								icon={CheckmarkCircle02Icon}
 								strokeWidth={2}
 							/>

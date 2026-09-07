@@ -19,7 +19,6 @@ import {
 } from "@ryu/db/models/control-plane.model";
 import { OrganizationInvitationPolicy } from "@ryu/db/models/organization-invitation-policy.model";
 import { isOrganizationNotificationEnabled } from "@ryu/db/models/organization-notification.model";
-import { OrganizationSeatEntitlement } from "@ryu/db/models/organization-seat-entitlement.model";
 import { OrganizationSeatReservation } from "@ryu/db/models/organization-seat-reservation.model";
 import { isUserNotificationChannelEnabled } from "@ryu/db/models/user-notification.model";
 import {
@@ -125,6 +124,7 @@ import {
 	planByProductId,
 	resolveProductId,
 } from "./lib/plans.ts";
+import { resolveOrganizationPolarCustomerId } from "./lib/polar-customer-identity.ts";
 import { runRefereeGrantHook } from "./lib/referral-grant-hook.ts";
 import {
 	ACCOUNT_LINKING_SOCIAL_PROVIDER_IDS,
@@ -140,6 +140,7 @@ import {
 	isStaleAccountLogin,
 } from "./lib/stale-account.ts";
 import { stepUpGate } from "./lib/step-up-plugin.ts";
+import { supportAccessPlugin } from "./lib/support-access-plugin.ts";
 import {
 	ADMIN_ROLE,
 	APPROVED_ROLE,
@@ -189,36 +190,6 @@ const ORGANIZATION_PRODUCT_IDS = (): Set<string> =>
 	);
 
 /**
- * The same org billing identity used by the billing router. A reconciled
- * contract survives the original owner leaving; before reconciliation, use the
- * deterministic earliest-owner bootstrap identity.
- */
-async function organizationBillingEmail(
-	organizationId: string
-): Promise<string | null> {
-	const persisted = await OrganizationSeatEntitlement.findOne({
-		organizationId,
-		status: "active",
-	})
-		.select("billingEmail")
-		.lean<{ billingEmail?: string | null }>();
-	if (persisted?.billingEmail?.trim()) {
-		return persisted.billingEmail.trim().toLowerCase();
-	}
-	const owner = await Member.findOne({
-		organizationId,
-		role: /owner/i,
-	}).sort({ createdAt: 1 });
-	const member =
-		owner ?? (await Member.findOne({ organizationId }).sort({ createdAt: 1 }));
-	if (!member) {
-		return null;
-	}
-	const user = await User.findById(member.userId);
-	return user?.email ?? null;
-}
-
-/**
  * Resolve the live Teams seat quantity for an organization. A missing active
  * Teams subscription returns null (shared membership has no paid capacity);
  * a Polar failure is a hard error because allowing a paid-org membership
@@ -229,31 +200,7 @@ async function activeTeamsSeatCount(
 	organizationId: string
 ): Promise<number | null> {
 	try {
-		const persisted = await OrganizationSeatEntitlement.findOne({
-			organizationId,
-			status: "active",
-		})
-			.select("polarCustomerId")
-			.lean<{ polarCustomerId?: string | null }>();
-		let customerId = persisted?.polarCustomerId?.trim() || null;
-		if (!customerId) {
-			const email = await organizationBillingEmail(organizationId);
-			if (!email) {
-				return null;
-			}
-			const customers = await polarClient.customers.list({
-				email,
-				limit: 1,
-				organizationId: process.env.POLAR_ORGANIZATION_ID,
-			});
-			for await (const page of customers) {
-				const first = polarPageItems<{ id?: string | null }>(page)[0];
-				if (first?.id) {
-					customerId = first.id;
-					break;
-				}
-			}
-		}
+		const customerId = await resolveOrganizationPolarCustomerId(organizationId);
 		if (!customerId) {
 			return null;
 		}
@@ -3313,6 +3260,7 @@ export const auth = betterAuth({
 			},
 		}),
 		loginAssuranceCleanupPlugin(),
+		supportAccessPlugin(),
 		// LAST on purpose. Before-hooks run in `[config.hooks.before, ...plugins]`
 		// order, so this has to sit after `bearer` — which rewrites an
 		// `Authorization` header into the session cookie — or the gate resolves no

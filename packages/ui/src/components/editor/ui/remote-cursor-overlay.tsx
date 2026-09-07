@@ -93,7 +93,7 @@ function Caret({
 			style={{ ...caretPosition, background: data?.color }}
 		>
 			<div
-				className="absolute top-0 -translate-y-full whitespace-nowrap rounded rounded-bl-none px-1.5 py-0.5 text-white text-xs"
+				className="absolute top-0 -translate-y-full whitespace-nowrap rounded rounded-es-none px-1.5 py-0.5 text-white text-xs"
 				style={{ background: data?.color }}
 			>
 				{data?.name}

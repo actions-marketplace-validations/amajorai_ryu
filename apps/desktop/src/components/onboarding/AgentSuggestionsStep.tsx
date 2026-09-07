@@ -304,7 +304,7 @@ export function AgentSuggestionsStep({
 			</div>
 
 			{error ? (
-				<p className="text-destructive text-xs" role="alert">
+				<p className="text-status-destructive text-xs" role="alert">
 					{error}
 				</p>
 			) : null}

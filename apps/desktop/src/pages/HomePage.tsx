@@ -1023,7 +1023,7 @@ export default function HomePage() {
 	return (
 		<div className="flex h-full flex-col overflow-hidden">
 			{error && widgets.length > 0 && (
-				<div className="flex items-center gap-3 bg-destructive/10 px-4 py-2 text-destructive text-xs">
+				<div className="flex items-center gap-3 bg-destructive/10 px-4 py-2 text-status-destructive text-xs">
 					<span className="flex-1">{error}</span>
 					<Button
 						className="h-6 px-2 text-xs"

@@ -269,7 +269,7 @@ export function A2aSettingsView({
 	return (
 		<div className="space-y-4">
 			{firstError ? (
-				<div className="rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-destructive text-xs">
+				<div className="rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-status-destructive text-xs">
 					{errorMessage(firstError)}
 				</div>
 			) : null}
@@ -939,7 +939,7 @@ function AccessPanel({
 				</div>
 			</fieldset>
 			{issuedToken ? (
-				<div className="rounded-md border border-amber-500/30 bg-amber-500/5 p-3">
+				<div className="rounded-md border border-warning/30 bg-warning/5 p-3">
 					<p className="font-medium text-sm">Copy this token now</p>
 					<p className="mb-2 text-muted-foreground text-xs">
 						It cannot be retrieved after this panel is dismissed or another

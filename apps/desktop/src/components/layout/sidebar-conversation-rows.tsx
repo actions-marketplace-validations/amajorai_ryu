@@ -994,8 +994,8 @@ export function ChatRow({
 							<span
 								className={`shrink-0 text-[10px] tabular-nums ${
 									conv.runStatus === "failed"
-										? "text-destructive"
-										: "text-amber-600 dark:text-amber-400"
+										? "text-status-destructive"
+										: "text-status-warning"
 								}`}
 								title={runStatus.description}
 							>
@@ -1321,7 +1321,7 @@ export function ChatRow({
 								))}
 								<DropdownMenuSeparator />
 								<DropdownMenuItem
-									className="text-destructive"
+									className="text-status-destructive"
 									onClick={(e) => {
 										e.stopPropagation();
 										setConfirmDeleteOpen(true);
@@ -1515,7 +1515,7 @@ export function ChatRow({
 					))}
 					<ContextMenuSeparator />
 					<ContextMenuItem
-						className="text-destructive"
+						className="text-status-destructive"
 						onClick={() => setConfirmDeleteOpen(true)}
 					>
 						<HugeiconsIcon className="mr-2 size-4" icon={Delete01Icon} />

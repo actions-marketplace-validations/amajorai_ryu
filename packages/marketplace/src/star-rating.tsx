@@ -35,7 +35,7 @@ function DisplayStar({
 		return (
 			<span className={cn("relative inline-flex", className)}>
 				<Star className="size-full text-muted-foreground/40" />
-				<StarHalf className="absolute inset-0 size-full fill-warning text-warning" />
+				<StarHalf className="absolute inset-0 size-full fill-warning text-status-warning" />
 			</span>
 		);
 	}
@@ -44,7 +44,7 @@ function DisplayStar({
 			className={cn(
 				"size-full",
 				filled
-					? "fill-warning text-warning"
+					? "fill-warning text-status-warning"
 					: "fill-transparent text-muted-foreground/40",
 				className
 			)}
@@ -202,7 +202,7 @@ export function StarRatingInput({
 								className={cn(
 									"size-full",
 									filled
-										? "fill-warning text-warning"
+										? "fill-warning text-status-warning"
 										: "fill-transparent text-muted-foreground/40"
 								)}
 							/>

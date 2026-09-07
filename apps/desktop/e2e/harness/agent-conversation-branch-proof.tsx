@@ -10,6 +10,7 @@ import {
 	SidebarConversationList,
 } from "../../src/components/layout/AppSidebar.tsx";
 import { TabsContext } from "../../src/contexts/TabsContext.tsx";
+import { groupDirectAgentThreads } from "../../src/lib/agent-conversation-groups.ts";
 import type { AgentSummary } from "../../src/lib/api/agents.ts";
 import type { Conversation } from "../../src/types/chat.ts";
 import "../../src/index.css";
@@ -91,6 +92,16 @@ const GROUP_THREADS = [
 		updatedAt: NOW - 3 * HOUR,
 	}),
 ];
+
+const GROUPED_DIRECT_THREADS =
+	groupDirectAgentThreads([
+		...DIRECT_THREADS.toReversed(),
+		...GROUP_THREADS,
+		conversation("archived-builder", "Archived design", {
+			agentId: "builder",
+			archived: true,
+		}),
+	]).get("builder") ?? [];
 
 const CONTRIBUTIONS = {
 	context_menu_items: [],
@@ -196,12 +207,12 @@ function Story() {
 										<div className="rounded-md bg-background/30">
 											<MessagingAgentRowBody
 												agent={AGENTS[0]}
-												conversation={DIRECT_THREADS[0]}
+												conversation={GROUPED_DIRECT_THREADS[0]}
 												onEdit={() => undefined}
 												onToggleThreads={() =>
 													setThreadsExpanded((value) => !value)
 												}
-												threadCount={DIRECT_THREADS.length}
+												threadCount={GROUPED_DIRECT_THREADS.length}
 												threadsExpanded={threadsExpanded}
 												usageBarVisible={false}
 											/>
@@ -210,7 +221,7 @@ function Story() {
 											<AgentThreadList
 												onOpen={(id) => opened(`Opened ${id}`)}
 												pageSize={1}
-												threads={DIRECT_THREADS}
+												threads={GROUPED_DIRECT_THREADS}
 											/>
 										) : null}
 									</div>

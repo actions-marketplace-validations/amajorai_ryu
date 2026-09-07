@@ -17,7 +17,6 @@ function ProductCard({
 	product: Product;
 	featured?: boolean;
 }) {
-	const { Icon } = product;
 	return (
 		<Link
 			className={cn(
@@ -31,8 +30,10 @@ function ProductCard({
 				<div className="min-h-0 flex-1">{product.overviewVisual}</div>
 			) : null}
 			<div className="flex items-start justify-between gap-3">
-				<Icon className="size-5 text-foreground" strokeWidth={1.75} />
-				<ArrowUpRight className="size-4 text-muted-foreground/40 transition-colors group-hover:text-foreground" />
+				<ArrowUpRight
+					aria-hidden="true"
+					className="size-4 text-muted-foreground transition-colors group-hover:text-foreground"
+				/>
 			</div>
 			<div>
 				<h3 className="font-medium text-base text-foreground">
@@ -53,7 +54,7 @@ export function ProductsOverview({
 }) {
 	if (!showCategoryHeadings) {
 		return (
-			<div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
+			<div className="grid grid-cols-1 gap-x-12 gap-y-6 sm:grid-cols-2 lg:grid-cols-3">
 				{products.map((p, i) => (
 					<Reveal delay={(i % 3) * 0.06} key={p.slug}>
 						<ProductCard product={p} />
@@ -64,13 +65,13 @@ export function ProductsOverview({
 	}
 
 	return (
-		<div className="space-y-12">
+		<div className="space-y-16">
 			{productCategories.map((category) => (
 				<div key={category}>
-					<h3 className="mb-4 font-medium font-mono text-muted-foreground/70 text-xs uppercase tracking-widest">
+					<h2 className="mb-6 font-heading font-medium text-2xl tracking-tight">
 						{category}
-					</h3>
-					<div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
+					</h2>
+					<div className="grid grid-cols-1 gap-x-12 gap-y-6 sm:grid-cols-2 lg:grid-cols-3">
 						{productsByCategory(category).map((p, i) => (
 							<Reveal delay={(i % 3) * 0.06} key={p.slug}>
 								<ProductCard product={p} />

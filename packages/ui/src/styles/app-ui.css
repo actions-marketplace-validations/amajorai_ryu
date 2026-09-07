@@ -12,6 +12,11 @@
 
 @import "@ryu/ui/companion-theme.css";
 
+/* Tailwind does not discover workspace dependencies through node_modules.
+ * Bundle the canonical controls' utilities with every Companion, including
+ * portaled dialogs, instead of copying their classes into app-local markup. */
+@source "../components";
+
 :root {
 	--ryu-app-gutter: 1rem;
 	--ryu-app-toolbar-height: 3rem;

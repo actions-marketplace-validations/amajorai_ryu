@@ -249,7 +249,7 @@ export function EvaluatorEditorDialog({
 							<p className="text-muted-foreground text-xs">
 								id: <code>{id}</code>
 								{idCollision ? (
-									<span className="text-destructive">
+									<span className="text-status-destructive">
 										{" "}
 										— already exists, choose another name
 									</span>
@@ -312,7 +312,7 @@ export function EvaluatorEditorDialog({
 							value={threshold}
 						/>
 						{thresholdValid ? null : (
-							<p className="text-destructive text-xs">
+							<p className="text-status-destructive text-xs">
 								Enter a number between 0 and 1.
 							</p>
 						)}
@@ -401,7 +401,9 @@ export function EvaluatorEditorDialog({
 						</>
 					)}
 
-					{error ? <p className="text-destructive text-sm">{error}</p> : null}
+					{error ? (
+						<p className="text-sm text-status-destructive">{error}</p>
+					) : null}
 				</div>
 
 				<DialogFooter>

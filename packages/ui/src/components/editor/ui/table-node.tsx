@@ -716,7 +716,7 @@ export const TableElement = withHOC(
 				{...props}
 				className={cn(
 					"overflow-x-auto py-5",
-					hasControls && "-ml-2 *:data-[slot=block-selection]:left-2"
+					hasControls && "-ms-2 *:data-[slot=block-selection]:start-2"
 				)}
 				style={{ paddingLeft: marginLeft }}
 			>
@@ -727,18 +727,18 @@ export const TableElement = withHOC(
 						style={tableVariableStyle}
 					>
 						<div
-							className="pointer-events-none absolute inset-y-0 z-36 hidden w-[3px] -translate-x-[1.5px] bg-ring/70"
+							className="pointer-events-none absolute inset-y-0 z-36 hidden w-[3px] -translate-x-[1.5px] bg-ring/70 rtl:translate-x-[1.5px]"
 							contentEditable={false}
 							ref={dragIndicatorRef}
 						/>
 						<div
-							className="pointer-events-none absolute inset-y-0 z-35 hidden w-[3px] -translate-x-[1.5px] bg-ring/80"
+							className="pointer-events-none absolute inset-y-0 z-35 hidden w-[3px] -translate-x-[1.5px] bg-ring/80 rtl:translate-x-[1.5px]"
 							contentEditable={false}
 							ref={hoverIndicatorRef}
 						/>
 						<table
 							className={cn(
-								"mr-0 ml-px table h-px table-fixed border-collapse",
+								"ms-px me-0 table h-px table-fixed border-collapse",
 								"data-[table-selecting=true]:[&_*::selection]:!bg-transparent",
 								"data-[table-selecting=true]:[&_*::selection]:!text-inherit",
 								"data-[table-selecting=true]:[&_*::-moz-selection]:!bg-transparent",
@@ -1281,7 +1281,7 @@ function RowDragHandle({ dragRef }: { dragRef: Ref<any> }) {
 	return (
 		<Button
 			className={cn(
-				"absolute top-1/2 left-0 z-51 h-6 w-4 -translate-y-1/2 p-0 focus-visible:ring-0 focus-visible:ring-offset-0",
+				"absolute start-0 top-1/2 z-51 h-6 w-4 -translate-y-1/2 p-0 focus-visible:ring-0 focus-visible:ring-offset-0",
 				"cursor-grab active:cursor-grabbing",
 				"opacity-0 transition-opacity duration-100 group-hover/row:opacity-100 group-data-[table-resizing=true]/row:opacity-0"
 			)}
@@ -1306,7 +1306,7 @@ function RowDropLine() {
 	return (
 		<div
 			className={cn(
-				"reorder-drop-indicator absolute inset-x-0 left-2 z-50 h-0.5 bg-brand/50",
+				"reorder-drop-indicator absolute inset-x-0 start-2 z-50 h-0.5 bg-brand/50",
 				dropLine === "top" ? "-top-px" : "-bottom-px"
 			)}
 		/>
@@ -1351,14 +1351,14 @@ export function TableCellElement({
 			className={cn(
 				"relative h-full overflow-visible border-none bg-background p-0",
 				element.background ? "bg-(--cellBackground)" : "bg-background",
-				isHeader && "text-left *:m-0",
+				isHeader && "text-start *:m-0",
 				"before:size-full",
 				"data-[table-cell-selected=true]:before:z-10",
 				"data-[table-cell-selected=true]:before:bg-brand/5",
 				"before:absolute before:box-border before:select-none before:content-['']",
 				borders.bottom?.size && "before:border-b before:border-b-border",
-				borders.right?.size && "before:border-r before:border-r-border",
-				borders.left?.size && "before:border-l before:border-l-border",
+				borders.right?.size && "before:border-e before:border-e-border",
+				borders.left?.size && "before:border-s before:border-s-border",
 				borders.top?.size && "before:border-t before:border-t-border"
 			)}
 			style={
@@ -1422,7 +1422,7 @@ const TableCellResizeControls = memo(function TableCellResizeControls({
 			suppressContentEditableWarning={true}
 		>
 			<div
-				className="pointer-events-auto absolute -top-2 -right-1 z-40 h-[calc(100%_+_8px)] w-2 cursor-col-resize touch-none"
+				className="pointer-events-auto absolute -end-1 -top-2 z-40 h-[calc(100%_+_8px)] w-2 cursor-col-resize touch-none"
 				onPointerDown={(event) => {
 					startResize(event, {
 						colIndex,
@@ -1444,7 +1444,7 @@ const TableCellResizeControls = memo(function TableCellResizeControls({
 				}}
 			/>
 			<div
-				className="pointer-events-auto absolute -bottom-1 left-0 z-40 h-2 w-full cursor-row-resize touch-none"
+				className="pointer-events-auto absolute start-0 -bottom-1 z-40 h-2 w-full cursor-row-resize touch-none"
 				onPointerDown={(event) => {
 					startResize(event, {
 						colIndex,
@@ -1467,7 +1467,7 @@ const TableCellResizeControls = memo(function TableCellResizeControls({
 			/>
 			{isLeftHandle && (
 				<div
-					className="pointer-events-auto absolute top-0 -left-1 z-40 h-full w-2 cursor-col-resize touch-none"
+					className="pointer-events-auto absolute -start-1 top-0 z-40 h-full w-2 cursor-col-resize touch-none"
 					onPointerDown={(event) => {
 						startResize(event, {
 							colIndex,

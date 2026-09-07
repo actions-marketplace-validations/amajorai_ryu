@@ -1,4 +1,5 @@
 import type { LanguagePack } from "./core.ts";
+import { OFFICIAL_LANGUAGE_PACKS } from "./locales.ts";
 
 /**
  * The canonical source catalog. Keep message ids stable: language packs are
@@ -172,6 +173,7 @@ export const EN_MESSAGES = {
 	"nav.apps": "Apps",
 	"nav.agents": "Agents",
 	"nav.browser": "Browser",
+	"nav.challenges": "Challenges",
 	"nav.channels": "Channels",
 	"nav.chat": "Chat",
 	"nav.conversations": "Conversations",
@@ -359,12 +361,13 @@ export const EN_MESSAGES = {
 export type MessageId = keyof typeof EN_MESSAGES;
 
 /**
- * A deliberately small first-party example of a flavor pack. It changes copy,
- * not behavior, and demonstrates the same partial-overlay format community
- * authors use. More official locale packs can be shipped without changing the
- * runtime contract.
+ * First-party packs stay in the synchronous catalog so every surface can
+ * render offline and resolve auto-detect before a node or Marketplace request
+ * exists. The flavor pack below demonstrates the same partial-overlay format
+ * community authors use.
  */
 export const BUILT_IN_LANGUAGE_PACKS: readonly LanguagePack[] = [
+	...OFFICIAL_LANGUAGE_PACKS,
 	{
 		baseLocale: "en",
 		direction: "ltr",

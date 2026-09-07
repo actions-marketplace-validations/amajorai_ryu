@@ -2688,18 +2688,30 @@ mod tests {
     }
 
     #[test]
-    fn bootstrap_manifests_keep_loopback_clients_constructible_without_packages() {
+    fn bootstrap_manifests_declare_app_sidecar_bind_ports() {
         let manifests = PluginManifestLoader::load_bootstrap();
-        let resolved = [
-            crate::dashboards_client::sidecar_port(&manifests),
-            crate::finetune_client::sidecar_port(&manifests),
-            crate::healing_client::sidecar_port(&manifests),
-            crate::meetings_client::sidecar_port(&manifests),
-            crate::monitors_client::sidecar_port(&manifests),
-            crate::quests_client::sidecar_port(&manifests),
-            crate::teams_client::sidecar_port(&manifests),
-        ];
-        assert!(resolved.iter().all(|port| *port != 0));
+        for app in [
+            "dashboards",
+            "finetune",
+            "healing",
+            "meetings",
+            "monitors",
+            "quests",
+            "teams",
+        ] {
+            let plugin_id = format!("@ryu/{app}");
+            let sidecar_name = format!("ryu-{app}");
+            let manifest = manifests
+                .iter()
+                .find(|manifest| manifest.id == plugin_id)
+                .unwrap_or_else(|| panic!("missing bootstrap manifest {plugin_id}"));
+            let port = manifest
+                .sidecars
+                .iter()
+                .find(|spec| spec.name == sidecar_name)
+                .map(|spec| spec.port);
+            assert!(port.is_some_and(|port| port != 0), "{app} has no bind port");
+        }
     }
 
     #[test]

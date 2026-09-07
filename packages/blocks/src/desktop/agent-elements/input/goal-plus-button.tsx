@@ -181,7 +181,7 @@ export const GoalPlusButton = memo(function GoalPlusButton({
 	);
 	const verdictOk = doubleCheck?.result?.ok ?? false;
 	const VerdictIcon = verdictOk ? Tick02Icon : InformationCircleIcon;
-	const verdictTone = verdictOk ? "text-emerald-500" : "text-amber-500";
+	const verdictTone = verdictOk ? "text-status-success" : "text-status-warning";
 	const menuGroups: ComposerMenuGroup[] = [];
 	if (onAttach) {
 		menuGroups.push({
@@ -356,7 +356,7 @@ export const GoalPlusButton = memo(function GoalPlusButton({
 					aria-label="Remove goal"
 					className={cn(
 						"group relative flex size-7 shrink-0 items-center justify-center rounded-full",
-						"bg-primary/10 text-primary transition-colors hover:bg-destructive/15 hover:text-destructive"
+						"bg-primary/10 text-primary transition-colors hover:bg-destructive/15 hover:text-status-destructive"
 					)}
 					onClick={goal.onRemove}
 					title="Goal active — click to remove"

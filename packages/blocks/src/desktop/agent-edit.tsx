@@ -665,7 +665,7 @@ function CredentialHint({ meta }: { meta: PiProviderMeta }) {
 		return (
 			<span className="flex items-center gap-1 text-muted-foreground text-xs">
 				<HugeiconsIcon
-					className="size-3 text-emerald-500"
+					className="size-3 text-status-success"
 					icon={CheckmarkBadge04Icon}
 				/>
 				Credential configured
@@ -792,7 +792,7 @@ function PiModelPicker({
 			/>
 			<PopoverContent
 				align="start"
-				className="w-[min(300px,var(--radix-popover-content-available-width))] p-0"
+				className="w-[min(300px,var(--available-width))] p-0"
 			>
 				<div className="flex max-h-80 flex-col">
 					<div className="sticky top-0 z-10">
@@ -876,7 +876,7 @@ export function RyuPiConfigView({
 	}
 	if (error) {
 		return (
-			<div className="rounded-lg border border-destructive/40 bg-destructive/5 p-4 text-destructive text-sm">
+			<div className="rounded-lg border border-destructive/40 bg-destructive/5 p-4 text-sm text-status-destructive">
 				Failed to load Pi configuration: {error}
 			</div>
 		);
@@ -998,7 +998,7 @@ export function RyuPiConfigView({
 				) : null}
 
 				{saveError ? (
-					<p className="text-destructive text-xs">{saveError}</p>
+					<p className="text-status-destructive text-xs">{saveError}</p>
 				) : null}
 				<div className="flex items-center gap-3">
 					<Button
@@ -1010,7 +1010,7 @@ export function RyuPiConfigView({
 						Save Pi config
 					</Button>
 					{saved && !saving ? (
-						<span className="flex items-center gap-1 text-emerald-500 text-xs">
+						<span className="flex items-center gap-1 text-status-success text-xs">
 							<HugeiconsIcon className="size-3" icon={CheckmarkBadge04Icon} />
 							Saved
 						</span>
@@ -1072,7 +1072,7 @@ export function AgentByoaView({
 					</div>
 				) : null}
 				{!loading && error ? (
-					<p className="text-destructive text-xs">{error}</p>
+					<p className="text-status-destructive text-xs">{error}</p>
 				) : null}
 				{loading || error ? null : (
 					<div className="flex flex-col gap-3">
@@ -1093,7 +1093,7 @@ export function AgentByoaView({
 									>
 										{copied === "url" ? (
 											<HugeiconsIcon
-												className="size-3 text-green-600"
+												className="size-3 text-status-success"
 												icon={Tick01Icon}
 											/>
 										) : (
@@ -1119,7 +1119,7 @@ export function AgentByoaView({
 							<div className="flex flex-col gap-1.5">
 								<Label className="flex items-center gap-1 text-xs">
 									Gateway API key
-									<span className="rounded bg-amber-100 px-1 text-[10px] text-amber-700 dark:bg-amber-900/30 dark:text-amber-400">
+									<span className="rounded bg-warning/10 px-1 text-[10px] text-status-warning dark:bg-warning/30">
 										Copy now — not shown again
 									</span>
 								</Label>
@@ -1137,7 +1137,7 @@ export function AgentByoaView({
 									>
 										{copied === "key" ? (
 											<HugeiconsIcon
-												className="size-3 text-green-600"
+												className="size-3 text-status-success"
 												icon={Tick01Icon}
 											/>
 										) : (
@@ -1287,7 +1287,7 @@ export function AgentIntegrationsView({
 							{copied ? (
 								<HugeiconsIcon
 									aria-hidden="true"
-									className="size-3 text-green-600"
+									className="size-3 text-status-success"
 									icon={Tick01Icon}
 								/>
 							) : (
@@ -1538,7 +1538,7 @@ export function AgentEvalsView({
 					</div>
 
 					{runError ? (
-						<p className="text-destructive text-xs">{runError}</p>
+						<p className="text-status-destructive text-xs">{runError}</p>
 					) : null}
 
 					{catalog ? (
@@ -2705,7 +2705,9 @@ export function AgentSettingsForm(props: AgentSettingsFormProps) {
 									</p>
 								</div>
 								{triggerError ? (
-									<p className="text-destructive text-xs">{triggerError}</p>
+									<p className="text-status-destructive text-xs">
+										{triggerError}
+									</p>
 								) : null}
 								<Button
 									className="self-start"
@@ -3496,7 +3498,7 @@ export function AgentSettingsForm(props: AgentSettingsFormProps) {
 	const actions = (
 		<>
 			{formError ? (
-				<p className="text-destructive text-sm">{formError}</p>
+				<p className="text-sm text-status-destructive">{formError}</p>
 			) : null}
 
 			<div className="flex gap-2">
@@ -3778,7 +3780,7 @@ export function AgentPromptStudioView({
 			)}
 
 			{formError ? (
-				<p className="text-destructive text-sm">{formError}</p>
+				<p className="text-sm text-status-destructive">{formError}</p>
 			) : null}
 
 			<div className="flex gap-2">

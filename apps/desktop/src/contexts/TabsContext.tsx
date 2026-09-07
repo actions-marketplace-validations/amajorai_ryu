@@ -212,11 +212,6 @@ export function findSplit(
 	return splits.find((s) => s.id === splitId);
 }
 
-/** Members of a split, in strip (tab) order. */
-export function splitMembers(tabs: Tab[], splitId: string): Tab[] {
-	return tabs.filter((t) => t.splitId === splitId);
-}
-
 /** Members of a split in PANE order (the tree's depth-first leaf order) —
     the order the content area tiles them. */
 export function splitPaneTabs(tabs: Tab[], split: Split): Tab[] {

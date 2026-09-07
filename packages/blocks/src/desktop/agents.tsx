@@ -173,7 +173,7 @@ export function AgentsView({
 			</div>
 
 			{importError ? (
-				<div className="shrink-0 border-b bg-destructive/10 px-4 py-2 text-destructive text-sm">
+				<div className="shrink-0 border-b bg-destructive/10 px-4 py-2 text-sm text-status-destructive">
 					Import failed: {importError}
 				</div>
 			) : null}
@@ -278,7 +278,7 @@ export function AgentsView({
 										</DropdownMenuItem>
 										{agent.deletable ? (
 											<DropdownMenuItem
-												className="text-destructive"
+												className="text-status-destructive"
 												onClick={(e) => {
 													e.stopPropagation();
 													onDeleteAgent?.(agent.id);

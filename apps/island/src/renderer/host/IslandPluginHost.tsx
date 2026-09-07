@@ -224,7 +224,7 @@ export function IslandPluginHost({
 
 	if (bundle.status === "loading") {
 		return (
-			<div className="flex h-full items-center justify-center p-6 text-neutral-400 text-sm">
+			<div className="flex h-full items-center justify-center p-6 text-muted-foreground text-sm">
 				Loading app…
 			</div>
 		);
@@ -232,7 +232,7 @@ export function IslandPluginHost({
 
 	if (!srcdoc) {
 		return (
-			<div className="flex h-full items-center justify-center p-6 text-neutral-400 text-sm">
+			<div className="flex h-full items-center justify-center p-6 text-muted-foreground text-sm">
 				This app does not provide a runnable UI.
 			</div>
 		);
@@ -242,11 +242,11 @@ export function IslandPluginHost({
 		<div className="flex h-full flex-col overflow-hidden">
 			{/* Visible attribution: this is app content, namespaced, never system
 			    chrome. */}
-			<div className="flex items-center gap-2 border-white/10 border-b bg-white/5 px-3 py-2">
-				<span className="font-medium text-neutral-200 text-sm">
+			<div className="flex items-center gap-2 border-border border-b bg-card px-3 py-2">
+				<span className="font-medium text-foreground text-sm">
 					App · {companion.label || companion.name}
 				</span>
-				<span className="ml-auto text-neutral-500 text-xs">
+				<span className="ml-auto text-muted-foreground text-xs">
 					{connected ? "sandboxed · connected" : "sandboxed · starting…"}
 				</span>
 			</div>

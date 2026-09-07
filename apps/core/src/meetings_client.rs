@@ -64,34 +64,25 @@ const AMBIENT_APP: &str = "ryu-hardware";
 /// the old in-process `meetings_host`.
 const MEETINGS_SPACE_NAME: &str = "Meetings";
 
-/// Resolve the `ryu-meetings` sidecar's loopback port from the loaded manifests,
-/// profile-shifted the same way the ext-proxy forwards ([`crate::profile::port`]). The
-/// port comes from the manifest and ONLY the manifest — see
-/// [`crate::sidecar::ext_proxy::sidecar_port`] for why a built-in absence is a
-/// build-time invariant rather than a runtime fallback.
-pub fn sidecar_port(manifests: &[crate::plugin_manifest::PluginManifest]) -> u16 {
-    crate::sidecar::ext_proxy::sidecar_port(manifests, MEETINGS_PLUGIN_ID, MEETINGS_SIDECAR).expect(
-        "built-in meetings.manifest.json must declare the ryu-meetings sidecar (see \
-             plugin_manifest::BUILTIN_MANIFESTS)",
-    )
-}
-
 /// Typed loopback client for the `ryu-meetings` sidecar. Cheap to clone (holds only
-/// the resolved port); the bearer is minted per call so it always tracks the current
+/// the manager); the bearer is minted per call so it always tracks the current
 /// node token.
 #[derive(Clone)]
 pub struct MeetingsClient {
-    port: u16,
+    manager: std::sync::Arc<crate::sidecar::SidecarManager>,
 }
 
 impl MeetingsClient {
-    /// Build a client bound to the sidecar's resolved loopback port.
-    pub fn new(port: u16) -> Self {
-        Self { port }
+    /// Build a client that resolves the manager's live target before each request.
+    pub fn new(manager: std::sync::Arc<crate::sidecar::SidecarManager>) -> Self {
+        Self { manager }
     }
 
-    fn base_url(&self) -> String {
-        format!("http://127.0.0.1:{}/api/meetings", self.port)
+    fn base_url(&self) -> std::result::Result<String, String> {
+        self.manager
+            .sidecar_base_url(MEETINGS_PLUGIN_ID, MEETINGS_SIDECAR)
+            .map(|url| format!("{url}/api/meetings"))
+            .map_err(|denied| denied.reason())
     }
 
     /// The per-plugin minted bearer the sidecar was spawned with — the same value the
@@ -105,7 +96,7 @@ impl MeetingsClient {
     /// array. An unreachable sidecar or error body yields an empty list.
     pub async fn list(&self) -> Result<Vec<Value>, String> {
         let resp = reqwest::Client::new()
-            .get(self.base_url())
+            .get(self.base_url()?)
             .bearer_auth(self.bearer())
             .send()
             .await
@@ -122,7 +113,7 @@ impl MeetingsClient {
     /// removed.
     pub async fn delete(&self, meeting_id: &str) -> Result<bool, String> {
         let resp = reqwest::Client::new()
-            .delete(format!("{}/{meeting_id}", self.base_url()))
+            .delete(format!("{}/{meeting_id}", self.base_url()?))
             .bearer_auth(self.bearer())
             .send()
             .await
@@ -137,8 +128,11 @@ impl MeetingsClient {
 #[async_trait]
 impl MeetingIngest for MeetingsClient {
     async fn meeting_exists(&self, meeting_id: &str) -> bool {
+        let Ok(base_url) = self.base_url() else {
+            return false;
+        };
         let Ok(resp) = reqwest::Client::new()
-            .get(format!("{}/{meeting_id}", self.base_url()))
+            .get(format!("{}/{meeting_id}", base_url))
             .bearer_auth(self.bearer())
             .send()
             .await
@@ -150,7 +144,7 @@ impl MeetingIngest for MeetingsClient {
 
     async fn start_meeting(&self, title: String) -> Result<String, String> {
         let resp = reqwest::Client::new()
-            .post(self.base_url())
+            .post(self.base_url()?)
             .bearer_auth(self.bearer())
             .json(&json!({ "title": title, "app": AMBIENT_APP, "source": "auto" }))
             .send()
@@ -180,7 +174,7 @@ impl MeetingIngest for MeetingsClient {
         let part = reqwest::multipart::Part::bytes(wav).file_name(filename);
         let form = reqwest::multipart::Form::new().part("file", part);
         let resp = reqwest::Client::new()
-            .post(format!("{}/{meeting_id}/chunk", self.base_url()))
+            .post(format!("{}/{meeting_id}/chunk", self.base_url()?))
             .bearer_auth(self.bearer())
             .multipart(form)
             .send()
@@ -275,7 +269,7 @@ fn activity_from_meeting_json(event: &Value) -> Option<ActivityItem> {
 /// activity store until the stream closes or errors (then [`spawn`] reconnects).
 async fn stream_activity(client: &MeetingsClient, activity: &ActivityStore) -> Result<(), String> {
     let resp = reqwest::Client::new()
-        .get(format!("{}/stream", client.base_url()))
+        .get(format!("{}/stream", client.base_url()?))
         .bearer_auth(client.bearer())
         .send()
         .await

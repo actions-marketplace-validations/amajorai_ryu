@@ -260,7 +260,9 @@ export function FavoriteStar({
 			<HugeiconsIcon
 				className={cn(
 					"size-4",
-					favorited ? "fill-amber-400 text-amber-400" : "text-muted-foreground"
+					favorited
+						? "fill-warning text-status-warning"
+						: "text-muted-foreground"
 				)}
 				icon={StarIcon}
 			/>

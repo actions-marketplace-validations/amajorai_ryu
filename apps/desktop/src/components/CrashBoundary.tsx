@@ -473,7 +473,7 @@ export class CrashBoundary extends Component<
 	private renderShell(content: ReactNode): ReactNode {
 		return (
 			<div
-				className="/50 flex h-screen w-full items-center justify-center overflow-hidden rounded-[var(--ryu-window-radius-base,2rem)] bg-background backdrop-blur-xl"
+				className="flex h-screen w-full items-center justify-center overflow-hidden rounded-[var(--ryu-window-radius-base,2rem)] bg-background backdrop-blur-xl"
 				data-tauri-drag-region
 			>
 				{content}

@@ -91,7 +91,7 @@ export function PasswordStrengthMeter({
 								aria-hidden="true"
 								className={cn(
 									"size-3.5",
-									met ? "text-emerald-500" : "text-muted-foreground/60"
+									met ? "text-status-success" : "text-muted-foreground/60"
 								)}
 								icon={met ? CheckmarkCircle02Icon : Cancel01Icon}
 							/>

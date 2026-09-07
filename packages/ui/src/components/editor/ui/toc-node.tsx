@@ -7,7 +7,7 @@ import type { PlateElementProps } from "platejs/react";
 import { PlateElement } from "platejs/react";
 
 const headingItemVariants = cva(
-	"block h-auto w-full cursor-pointer truncate rounded-none px-0.5 py-1.5 text-left font-medium underline decoration-[0.5px] underline-offset-4",
+	"block h-auto w-full cursor-pointer truncate rounded-none px-0.5 py-1.5 text-start font-medium underline decoration-[0.5px] underline-offset-4",
 	{
 		variants: {
 			active: {
@@ -15,9 +15,9 @@ const headingItemVariants = cva(
 				true: "bg-accent text-foreground decoration-foreground",
 			},
 			depth: {
-				1: "pl-0.5",
-				2: "pl-[26px]",
-				3: "pl-[50px]",
+				1: "ps-0.5",
+				2: "ps-[26px]",
+				3: "ps-[50px]",
 			},
 		},
 	}

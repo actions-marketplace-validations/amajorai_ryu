@@ -43,15 +43,17 @@ export function IslandSuggestionChip({
 			aria-label="Proactive suggestion"
 			className="flex w-full items-start gap-2.5 px-1"
 		>
-			<span className="mt-1 size-2 shrink-0 rounded-full bg-amber-400" />
+			<span className="mt-1 size-2 shrink-0 rounded-full bg-warning" />
 			<div className="min-w-0 flex-1">
 				<p
-					className={`font-medium text-neutral-100 text-sm leading-tight ${lineClass}`}
+					className={`font-medium text-foreground text-sm leading-tight ${lineClass}`}
 				>
 					{suggestion.title}
 				</p>
 				{suggestion.body.trim().length > 0 ? (
-					<p className={`text-neutral-400 text-xs leading-tight ${lineClass}`}>
+					<p
+						className={`text-muted-foreground text-xs leading-tight ${lineClass}`}
+					>
 						{suggestion.body}
 					</p>
 				) : null}

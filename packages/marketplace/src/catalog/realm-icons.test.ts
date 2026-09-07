@@ -26,28 +26,20 @@ const REALMS: CatalogRealm[] = [
 ];
 
 describe("REALM_ICONS", () => {
-	test("every realm maps to a defined glyph", () => {
-		for (const realm of REALMS) {
-			expect(REALM_ICONS[realm]).toBeDefined();
-		}
-	});
-
-	test("the map has exactly the known realms, no extras", () => {
-		expect(Object.keys(REALM_ICONS).sort()).toEqual([...REALMS].sort());
-	});
-
 	test("glyphs are distinct across realms (no accidental reuse)", () => {
 		const glyphs = REALMS.map((r) => REALM_ICONS[r]);
 		expect(new Set(glyphs).size).toBe(REALMS.length);
 	});
 
 	test("matches the sidebar vocabulary for shared catalog realms", () => {
-		expect(REALM_ICONS.apps).toBe(Package01Icon);
-		expect(REALM_ICONS.plugins).toBe(PlugSocketIcon);
-		expect(REALM_ICONS.models).toBe(BrainIcon);
-		expect(REALM_ICONS.skills).toBe(PotionIcon);
-		expect(REALM_ICONS.mcp).toBe(ServerStack01Icon);
-		expect(REALM_ICONS.agents).toBe(Target01Icon);
-		expect(REALM_ICONS.workflows).toBe(WorkflowCircle06Icon);
+		expect(REALM_ICONS).toEqual({
+			apps: Package01Icon,
+			plugins: PlugSocketIcon,
+			models: BrainIcon,
+			skills: PotionIcon,
+			mcp: ServerStack01Icon,
+			agents: Target01Icon,
+			workflows: WorkflowCircle06Icon,
+		});
 	});
 });

@@ -27,8 +27,8 @@ export interface EnsurePolarCustomerInput {
 
 /**
  * Idempotently provisions a Polar customer for a user without ever failing the
- * caller. If a customer already exists for the email it is relinked to the
- * current user id; otherwise a new customer is created. Any Polar/API error is
+ * caller. An existing customer must already belong to the user; email alone
+ * cannot authorize linking a legacy or organization payer. Any Polar/API error is
  * logged and swallowed so billing problems never block sign-up.
  */
 export const ensurePolarCustomer = async ({
@@ -42,19 +42,13 @@ export const ensurePolarCustomer = async ({
 
 	try {
 		const { result } = await polarClient.customers.list({ email });
-		const existingCustomer = result.items[0];
-
-		if (existingCustomer) {
-			// Polar forbids changing an externalId once set, so only link when the
-			// existing customer has none yet. If it is already linked to another
-			// user id we leave it as-is rather than failing sign-up.
-			if (!existingCustomer.externalId) {
-				await polarClient.customers.update({
-					id: existingCustomer.id,
-					customerUpdate: { externalId: id },
-				});
-			}
-			return true;
+		if (result.items.length > 0) {
+			return result.items.some(
+				(customer) =>
+					customer.externalId === id &&
+					customer.metadata.scope !== "org" &&
+					typeof customer.metadata.orgId !== "string"
+			);
 		}
 
 		await polarClient.customers.create({

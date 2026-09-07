@@ -202,7 +202,7 @@ export function WorkflowsVisual() {
 			<div className="relative flex min-h-44 items-center">
 				<svg
 					aria-hidden="true"
-					className="pointer-events-none absolute inset-0 h-full w-full text-foreground"
+					className="pointer-events-none absolute inset-0 hidden h-full w-full text-foreground sm:block"
 					fill="none"
 				>
 					{[0, 1, 2, 3].map((i) => (
@@ -221,12 +221,11 @@ export function WorkflowsVisual() {
 						/>
 					))}
 				</svg>
-				<div className="flex w-full items-center justify-between gap-2">
-					{nodes.map((n, i) => (
+				<div className="grid w-full grid-cols-1 items-center gap-3 sm:grid-cols-5 sm:gap-2">
+					{nodes.map((n) => (
 						<div
-							className="shrink-0 animate-node-pulse rounded-md border border-border bg-muted/50 px-2 py-1.5 text-center text-[11px] text-foreground/80"
+							className="min-w-0 rounded-md bg-muted/50 px-2 py-1.5 text-center text-[11px] text-foreground"
 							key={n}
-							style={{ animationDelay: `${i * 0.5}s` }}
 						>
 							{n}
 						</div>

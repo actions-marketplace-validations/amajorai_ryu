@@ -58,13 +58,13 @@ const SHAPE_BASE =
 // transparent, with light text, over the in-island blur. (Translucent CSS blur
 // can't reach the desktop, so this is a tinted dark glass — see file header.)
 const TRANSLUCENT_SKIN =
-	"bg-gradient-to-b from-neutral-950/85 via-neutral-950/65 to-neutral-900/35 text-neutral-100 backdrop-blur-2xl";
+	"bg-gradient-to-b from-background/85 via-background/65 to-card/35 text-foreground backdrop-blur-2xl";
 // Acrylic = REAL desktop blur from the native OS material (Win11 acrylic / macOS
 // vibrancy). A *translucent* dark gradient tints that blur into the Siri look
 // without negating it — keep these alphas well under 1 so the frosted desktop
 // still reads through (a heavy/opaque fill would kill the material).
 const ACRYLIC_SKIN =
-	"bg-gradient-to-b from-black/55 via-black/40 to-black/20 text-neutral-100";
+	"bg-gradient-to-b from-black/55 via-black/40 to-black/20 text-foreground";
 
 /**
  * The visible footprint (bounding box) of the island group for a given state.
@@ -150,9 +150,8 @@ function detailContentClassFor(
 const ACTION_PILL_BASE =
 	"island-siri-border relative flex shrink-0 items-center justify-center overflow-hidden whitespace-nowrap rounded-full font-medium text-xs shadow-xl backdrop-blur-2xl";
 const ACTION_PILL_PRIMARY =
-	"bg-amber-400/25 text-amber-50 hover:bg-amber-400/40";
-const ACTION_PILL_DEFAULT =
-	"bg-neutral-900/70 text-neutral-200 hover:bg-neutral-800/85";
+	"bg-warning/25 text-status-warning hover:bg-warning/40";
+const ACTION_PILL_DEFAULT = "bg-card/70 text-foreground hover:bg-card/85";
 
 const COVER_HANDLE =
 	"absolute inset-0 z-10 cursor-grab bg-transparent active:cursor-grabbing";

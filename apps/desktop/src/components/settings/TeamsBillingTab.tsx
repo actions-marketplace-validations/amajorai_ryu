@@ -562,7 +562,7 @@ function TeamsBillingTabForOrg({
 						}}
 					/>
 					{reviewError ? (
-						<p className="text-destructive text-sm" role="alert">
+						<p className="text-sm text-status-destructive" role="alert">
 							{reviewError}
 						</p>
 					) : null}

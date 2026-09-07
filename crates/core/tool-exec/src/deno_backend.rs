@@ -22,16 +22,16 @@
 use serde_json::{json, Value};
 use std::process::Stdio;
 use std::sync::{Arc, Mutex, OnceLock};
-use std::time::Duration;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use std::time::{Duration, Instant};
 use tokio::process::{Child, ChildStdin, ChildStdout};
 
 use crate::win_process::NoWindow;
 
 use super::parked::ParkedStore;
 use super::{
-    Elicitation, ExecOutcome, InvokeOutcome, ResumeDecision, SandboxToolInvoker, ToolInvocation,
-    MAX_PARKED, MAX_PREVIEW_CHARS, PARKED_TTL,
+    kill_and_reap, write_line_until, BoundedFrameReader, Elicitation, ExecOutcome, InvokeOutcome,
+    ResumeDecision, SandboxToolInvoker, ToolInvocation, MAX_LOG_LINES, MAX_PARKED,
+    MAX_PREVIEW_CHARS, PARKED_TTL,
 };
 
 /// stdout line tags the bootstrap emits.
@@ -49,7 +49,7 @@ struct ParkedExec {
     script_path: std::path::PathBuf,
     child: Child,
     stdin: ChildStdin,
-    stdout: BufReader<ChildStdout>,
+    stdout: BoundedFrameReader<ChildStdout>,
     invoker: Arc<SandboxToolInvoker>,
     logs: Vec<String>,
     /// The agent that created this execution. `resume` must come from the same
@@ -225,7 +225,7 @@ impl DenoExecutor {
 
         // stdin is reply-only now (the program came from the file); keep it open.
         let stdin = child.stdin.take().expect("piped stdin");
-        let stdout = BufReader::new(child.stdout.take().expect("piped stdout"));
+        let stdout = BoundedFrameReader::new(child.stdout.take().expect("piped stdout"));
         let state = ParkedExec {
             script_path,
             child,
@@ -250,27 +250,31 @@ impl DenoExecutor {
 /// a Composio pause does not count against it (that wait is bounded separately
 /// by the parked-store TTL). Conflating the two would kill every real resume
 /// (a connect step routinely exceeds [`DEFAULT_DEADLINE_SECS`]).
-async fn pump(mut state: ParkedExec, active_deadline: Duration) -> ExecOutcome {
-    let deadline = std::time::Instant::now() + active_deadline;
+async fn pump(state: ParkedExec, active_deadline: Duration) -> ExecOutcome {
+    let deadline = Instant::now() + active_deadline;
+    pump_until(state, deadline).await
+}
+
+/// Pump using an already-created absolute deadline. Resume uses this form so
+/// the reply write and the resumed protocol share one active-compute budget.
+async fn pump_until(mut state: ParkedExec, deadline: Instant) -> ExecOutcome {
     loop {
-        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
-            let _ = state.child.kill().await;
+            kill_and_reap(&mut state.child, deadline).await;
             return ExecOutcome::error("execution exceeded the wall-clock deadline and was killed");
         }
 
-        let mut line = String::new();
-        let read = tokio::time::timeout(remaining, state.stdout.read_line(&mut line)).await;
-        match read {
+        let line = match tokio::time::timeout(remaining, state.stdout.read_frame()).await {
             Err(_) => {
-                let _ = state.child.kill().await;
+                kill_and_reap(&mut state.child, deadline).await;
                 return ExecOutcome::error(
                     "execution exceeded the wall-clock deadline and was killed",
                 );
             }
-            Ok(Ok(0)) => {
+            Ok(Ok(None)) => {
                 // EOF without a DONE marker — the program crashed or exited.
-                let _ = state.child.kill().await;
+                kill_and_reap(&mut state.child, deadline).await;
                 return completed_from_logs(
                     &mut state,
                     None,
@@ -278,13 +282,12 @@ async fn pump(mut state: ParkedExec, active_deadline: Duration) -> ExecOutcome {
                     Some("sandbox exited unexpectedly"),
                 );
             }
-            Ok(Ok(_)) => {}
+            Ok(Ok(Some(line))) => line,
             Ok(Err(e)) => {
-                let _ = state.child.kill().await;
+                kill_and_reap(&mut state.child, deadline).await;
                 return ExecOutcome::error(format!("error reading sandbox output: {e}"));
             }
-        }
-        let line = line.trim_end_matches(['\n', '\r']);
+        };
 
         if let Some(rest) = line.strip_prefix(TAG_LOG) {
             push_log(&mut state.logs, rest);
@@ -293,20 +296,22 @@ async fn pump(mut state: ParkedExec, active_deadline: Duration) -> ExecOutcome {
             // call, or a declined resume). `rest` is the error message. Surface
             // a terminal error completion so the model sees the failure — not a
             // silent `is_error:false` (acceptance: "resume(decline) errors").
-            let _ = state.child.wait().await;
+            kill_and_reap(&mut state.child, deadline).await;
             return completed_from_logs(&mut state, None, true, Some(rest));
         } else if let Some(rest) = line.strip_prefix(TAG_DONE) {
             // `rest` is the JSON-encoded final value (or "null").
             let result = serde_json::from_str::<Value>(rest).ok().flatten_null();
-            // Reap the child.
-            let _ = state.child.wait().await;
+            // A terminal marker is final from the protocol's perspective.
+            // Kill the child before reaping so a guest timer cannot keep Core
+            // waiting after it has already delivered its result.
+            kill_and_reap(&mut state.child, deadline).await;
             return completed(&mut state, result);
         } else if let Some(rest) = line.strip_prefix(TAG_CALL) {
             // A tool call request: { "id": <n>, "path": "...", "args": {...} }.
             let req: Value = match serde_json::from_str(rest) {
                 Ok(v) => v,
                 Err(e) => {
-                    let _ = state.child.kill().await;
+                    kill_and_reap(&mut state.child, deadline).await;
                     return ExecOutcome::error(format!("malformed tool-call from sandbox: {e}"));
                 }
             };
@@ -321,8 +326,8 @@ async fn pump(mut state: ParkedExec, active_deadline: Duration) -> ExecOutcome {
             // The wall-clock deadline must also bound the tool call itself
             // (contracts MED): a hanging MCP/Composio call would otherwise
             // escape `DEFAULT_DEADLINE_SECS` entirely. Wrap the invoke in the
-            // same remaining-time budget used for `read_line`.
-            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            // same remaining-time budget used for `read_frame`.
+            let remaining = deadline.saturating_duration_since(Instant::now());
             let invoked = tokio::time::timeout(
                 remaining,
                 state.invoker.invoke(ToolInvocation { path, args }),
@@ -331,7 +336,7 @@ async fn pump(mut state: ParkedExec, active_deadline: Duration) -> ExecOutcome {
             let outcome = match invoked {
                 Ok(o) => o,
                 Err(_) => {
-                    let _ = state.child.kill().await;
+                    kill_and_reap(&mut state.child, deadline).await;
                     return ExecOutcome::error(
                         "execution exceeded the wall-clock deadline and was killed",
                     );
@@ -348,8 +353,10 @@ async fn pump(mut state: ParkedExec, active_deadline: Duration) -> ExecOutcome {
                         "value": sanitized,
                         "error": r.error,
                     });
-                    if let Err(e) = write_line(&mut state.stdin, &reply.to_string()).await {
-                        let _ = state.child.kill().await;
+                    if let Err(e) =
+                        write_line_until(&mut state.stdin, &reply.to_string(), deadline).await
+                    {
+                        kill_and_reap(&mut state.child, deadline).await;
                         return ExecOutcome::error(format!("failed to reply to sandbox: {e}"));
                     }
                 }
@@ -362,7 +369,7 @@ async fn pump(mut state: ParkedExec, active_deadline: Duration) -> ExecOutcome {
                 }
             }
         }
-        // Any other line (stray stdout) is ignored — the protocol is tagged.
+        // Any other frame (stray stdout) is ignored — the protocol is tagged.
     }
 }
 
@@ -413,8 +420,10 @@ pub async fn resume_parked(
         state
     };
 
+    let deadline = Instant::now() + Duration::from_secs(super::DEFAULT_DEADLINE_SECS);
+
     if decision == ResumeDecision::Cancel {
-        let _ = state.child.kill().await;
+        kill_and_reap(&mut state.child, deadline).await;
         return Some(ExecOutcome::Completed {
             result: None,
             logs: std::mem::take(&mut state.logs),
@@ -437,12 +446,12 @@ pub async fn resume_parked(
             None
         },
     });
-    if let Err(e) = write_line(&mut state.stdin, &reply.to_string()).await {
-        let _ = state.child.kill().await;
+    if let Err(e) = write_line_until(&mut state.stdin, &reply.to_string(), deadline).await {
+        kill_and_reap(&mut state.child, deadline).await;
         return Some(ExecOutcome::error(format!("failed to resume sandbox: {e}")));
     }
 
-    Some(pump(state, Duration::from_secs(super::DEFAULT_DEADLINE_SECS)).await)
+    Some(pump_until(state, deadline).await)
 }
 
 /// Build the final program: the bootstrap (a stdio `tools` proxy) followed by
@@ -667,14 +676,11 @@ fn spawn_deno(
         .spawn()
 }
 
-async fn write_line(stdin: &mut ChildStdin, line: &str) -> std::io::Result<()> {
-    stdin.write_all(line.as_bytes()).await?;
-    stdin.write_all(b"\n").await?;
-    stdin.flush().await
-}
-
 /// Append a log line, capping total log volume at [`MAX_PREVIEW_CHARS`].
 fn push_log(logs: &mut Vec<String>, line: &str) {
+    if logs.len() >= MAX_LOG_LINES {
+        return;
+    }
     let used: usize = logs.iter().map(String::len).sum();
     if used >= MAX_PREVIEW_CHARS {
         return;
@@ -878,15 +884,14 @@ pub async fn run_eval_js(source: &str, payload: &Value, deadline: Duration) -> E
     };
     // The eval script never reads stdin; close it so nothing can block on it.
     drop(child.stdin.take());
-    let mut stdout = BufReader::new(child.stdout.take().expect("piped stdout"));
+    let mut stdout = BoundedFrameReader::new(child.stdout.take().expect("piped stdout"));
+    let deadline_at = Instant::now() + deadline;
 
     let read_result = async {
         loop {
-            let mut line = String::new();
-            match stdout.read_line(&mut line).await {
-                Ok(0) => return None, // EOF before any tag.
-                Ok(_) => {
-                    let line = line.trim_end_matches(['\n', '\r']);
+            match stdout.read_frame().await {
+                Ok(None) => return None, // EOF before any tag.
+                Ok(Some(line)) => {
                     if let Some(rest) = line.strip_prefix(TAG_EVAL_OK) {
                         return Some(match serde_json::from_str::<Value>(rest) {
                             Ok(v) => EvalJsOutcome::Value(v),
@@ -907,16 +912,17 @@ pub async fn run_eval_js(source: &str, payload: &Value, deadline: Duration) -> E
         }
     };
 
-    let outcome = match tokio::time::timeout(deadline, read_result).await {
+    let remaining = deadline_at.saturating_duration_since(Instant::now());
+    let outcome = match tokio::time::timeout(remaining, read_result).await {
         Ok(Some(o)) => o,
         Ok(None) => EvalJsOutcome::Error("eval produced no result before exit".to_owned()),
         Err(_) => {
             EvalJsOutcome::Error("eval exceeded the wall-clock deadline and was killed".to_owned())
         }
     };
-    // Reap the child (kill_on_drop covers the timeout path; this is belt-and-braces).
-    let _ = child.kill().await;
-    let _ = child.wait().await;
+    // A result marker is terminal even if guest timers keep the runtime alive;
+    // kill and reap with the same deadline used for the protocol read.
+    kill_and_reap(&mut child, deadline_at).await;
     outcome
 }
 
@@ -1035,6 +1041,15 @@ mod tests {
         }
         let total: usize = logs.iter().map(String::len).sum();
         assert!(total <= MAX_PREVIEW_CHARS);
+    }
+
+    #[test]
+    fn push_log_caps_empty_line_count() {
+        let mut logs = Vec::new();
+        for _ in 0..(MAX_LOG_LINES * 2) {
+            push_log(&mut logs, "");
+        }
+        assert_eq!(logs.len(), MAX_LOG_LINES);
     }
 
     #[test]
@@ -1268,6 +1283,179 @@ mod tests {
                 );
             }
             ExecOutcome::Paused { .. } => panic!("unexpected pause"),
+        }
+    }
+
+    /// A child that repeats a small protocol fragment without a newline must be
+    /// rejected at the frame cap instead of making `read_line` retain bytes until
+    /// the process exhausts Core memory. Live-gated.
+    #[tokio::test]
+    async fn live_repeating_no_newline_ptc_frame_is_bounded() {
+        if !deno_on_path() {
+            eprintln!("skipping live deno test: deno not on PATH");
+            return;
+        }
+        let invoker = Arc::new(SandboxToolInvoker::mock(Box::new(|_c| {
+            InvokeOutcome::Result(super::super::ToolInvokeResult {
+                value: json!(null),
+                is_error: false,
+                error: None,
+            })
+        })));
+        let result = tokio::time::timeout(
+            Duration::from_secs(3),
+            DenoExecutor::new().execute_with_augment_and_deadline(
+                "const bytes = new TextEncoder().encode('@@RYU_LOG@@x'); while (true) Deno.stdout.writeSync(bytes);",
+                invoker,
+                "ryu",
+                None,
+                &crate::SandboxAugment::default(),
+                Duration::from_millis(500),
+            ),
+        )
+        .await
+        .expect("an oversized unterminated frame must not hang");
+        match result {
+            ExecOutcome::Completed {
+                is_error, error, ..
+            } => {
+                assert!(is_error);
+                let message = error.unwrap_or_default();
+                assert!(
+                    message.contains("frame") || message.contains("deadline"),
+                    "expected a bounded-frame or deadline error, got {message:?}"
+                );
+            }
+            ExecOutcome::Paused { .. } => panic!("unexpected pause"),
+        }
+    }
+
+    /// Terminal markers are authoritative: a guest timer must not make Core wait
+    /// indefinitely for natural process exit. Covers both done and error markers.
+    /// Live-gated.
+    #[tokio::test]
+    async fn live_terminal_markers_kill_guest_with_lingering_timer() {
+        if !deno_on_path() {
+            eprintln!("skipping live deno test: deno not on PATH");
+            return;
+        }
+        let invoker = Arc::new(SandboxToolInvoker::mock(Box::new(|_c| {
+            InvokeOutcome::Result(super::super::ToolInvokeResult {
+                value: json!(null),
+                is_error: false,
+                error: None,
+            })
+        })));
+        let done = tokio::time::timeout(
+            Duration::from_secs(3),
+            DenoExecutor::new().execute_with_augment_and_deadline(
+                "setInterval(() => {}, 60_000); return 7;",
+                Arc::clone(&invoker),
+                "ryu",
+                None,
+                &crate::SandboxAugment::default(),
+                Duration::from_secs(1),
+            ),
+        )
+        .await
+        .expect("TAG_DONE must not wait for guest timers");
+        match done {
+            ExecOutcome::Completed {
+                result, is_error, ..
+            } => {
+                assert!(!is_error);
+                assert_eq!(result, Some(json!(7)));
+            }
+            ExecOutcome::Paused { .. } => panic!("unexpected pause"),
+        }
+
+        let error = tokio::time::timeout(
+            Duration::from_secs(3),
+            DenoExecutor::new().execute_with_augment_and_deadline(
+                "setInterval(() => {}, 60_000); throw new Error('timer-boom');",
+                invoker,
+                "ryu",
+                None,
+                &crate::SandboxAugment::default(),
+                Duration::from_secs(1),
+            ),
+        )
+        .await
+        .expect("TAG_ERROR must not wait for guest timers");
+        match error {
+            ExecOutcome::Completed {
+                is_error, error, ..
+            } => {
+                assert!(is_error);
+                assert!(error.unwrap_or_default().contains("timer-boom"));
+            }
+            ExecOutcome::Paused { .. } => panic!("unexpected pause"),
+        }
+    }
+
+    /// Tool replies remain correctly framed and preserve UTF-8 across the live
+    /// Deno round-trip. Live-gated.
+    #[tokio::test]
+    async fn live_tool_roundtrip_preserves_utf8_result() {
+        if !deno_on_path() {
+            eprintln!("skipping live deno test: deno not on PATH");
+            return;
+        }
+        let invoker = Arc::new(SandboxToolInvoker::mock(Box::new(|c| {
+            InvokeOutcome::Result(super::super::ToolInvokeResult {
+                value: json!({ "path": c.path, "text": "你好 🌍" }),
+                is_error: false,
+                error: None,
+            })
+        })));
+        let result = DenoExecutor::new()
+            .execute(
+                "const value = await tools.s.echo({}); console.log(value.text); return value;",
+                invoker,
+                "ryu",
+            )
+            .await;
+        match result {
+            ExecOutcome::Completed {
+                result,
+                logs,
+                is_error,
+                ..
+            } => {
+                assert!(!is_error);
+                assert_eq!(result, Some(json!({ "path": "s.echo", "text": "你好 🌍" })));
+                assert!(logs.iter().any(|line| line == "你好 🌍"));
+            }
+            ExecOutcome::Paused { .. } => panic!("unexpected pause"),
+        }
+    }
+
+    /// The eval reader shares the same bounded frame implementation as PTC. A
+    /// repeating unterminated frame must return promptly. Live-gated.
+    #[tokio::test]
+    async fn live_repeating_no_newline_eval_frame_is_bounded() {
+        if !deno_on_path() {
+            eprintln!("skipping live deno test: deno not on PATH");
+            return;
+        }
+        let result = tokio::time::timeout(
+            Duration::from_secs(3),
+            run_eval_js(
+                "const bytes = new TextEncoder().encode('@@RYU_EVAL_OK@@x'); while (true) Deno.stdout.writeSync(bytes);",
+                &json!({}),
+                Duration::from_millis(500),
+            ),
+        )
+        .await
+        .expect("an oversized unterminated eval frame must not hang");
+        match result {
+            EvalJsOutcome::Error(message) => {
+                assert!(
+                    message.contains("frame") || message.contains("deadline"),
+                    "expected a bounded-frame or deadline error, got {message:?}"
+                );
+            }
+            EvalJsOutcome::Value(value) => panic!("unexpected eval value: {value:?}"),
         }
     }
 

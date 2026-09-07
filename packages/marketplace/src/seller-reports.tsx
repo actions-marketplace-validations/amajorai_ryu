@@ -96,7 +96,7 @@ export function SellerReportsPanel() {
 			</div>
 
 			{error ? (
-				<p className="text-destructive text-sm">{error.message}</p>
+				<p className="text-sm text-status-destructive">{error.message}</p>
 			) : null}
 			{loading && reports.length === 0 ? (
 				<div className="flex items-center gap-2 text-muted-foreground text-sm">
@@ -123,7 +123,7 @@ export function SellerReportsPanel() {
 								<span className="rounded-full bg-muted px-2 py-0.5 text-[10px] text-muted-foreground uppercase">
 									{report.itemKind}
 								</span>
-								<span className="rounded-full bg-amber-500/15 px-2 py-0.5 text-[10px] text-amber-700 dark:text-amber-400">
+								<span className="rounded-full bg-warning/15 px-2 py-0.5 text-[10px] text-status-warning">
 									{REASON_LABEL[report.reason] ?? report.reason}
 								</span>
 							</div>

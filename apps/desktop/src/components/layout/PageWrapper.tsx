@@ -77,7 +77,7 @@ export function PageWrapper({ children }: PageWrapperProps) {
 	return (
 		<div
 			className={cn(
-				"/50 relative flex h-screen w-full overflow-hidden bg-background backdrop-blur-xl",
+				"relative flex h-screen w-full overflow-hidden bg-background backdrop-blur-xl",
 				// Maximized/fullscreen sits flush against the screen edges, where a
 				// hairline would read as a stray line rather than a window edge, so
 				// the border rides with the rounded corners.

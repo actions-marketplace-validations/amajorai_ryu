@@ -22,7 +22,9 @@ import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { Glob } from "bun";
 
-const files = [...new Glob("src/**/*.test.ts").scanSync(".")].sort();
+const files = [
+	...new Glob("{src,components}/**/*.test.{ts,tsx}").scanSync("."),
+].sort();
 if (files.length === 0) {
 	console.error("no test files found");
 	process.exit(1);
@@ -63,7 +65,6 @@ let failed = 0;
 for (const file of files) {
 	const run = spawnSync("bun", ["test", file], {
 		stdio: "inherit",
-		shell: true,
 		env: childEnv,
 	});
 	if (run.status !== 0) {

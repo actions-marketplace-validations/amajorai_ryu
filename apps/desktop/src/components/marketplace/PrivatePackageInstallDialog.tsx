@@ -569,7 +569,7 @@ export default function PrivatePackageInstallDialog({
 									</span>
 								</div>
 								{canInstall ? null : (
-									<div className="rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-3 text-destructive text-sm">
+									<div className="rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-3 text-sm text-status-destructive">
 										{preview.verification === "unsigned"
 											? "This release is not signed. Ask the publisher for a signed release before installing."
 											: "Ryu could not verify this release, so installation is unavailable."}
@@ -664,7 +664,7 @@ function ConnectionRow({
 			<HugeiconsIcon
 				className={
 					state === "connected"
-						? "size-4 shrink-0 text-emerald-500"
+						? "size-4 shrink-0 text-status-success"
 						: "size-4 shrink-0 text-muted-foreground"
 				}
 				icon={statusIcon(state)}
@@ -712,7 +712,7 @@ function ConnectionRow({
 
 function ErrorNotice({ message }: { message: string }) {
 	return (
-		<div className="flex items-start gap-2 rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-3 text-destructive text-sm">
+		<div className="flex items-start gap-2 rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-3 text-sm text-status-destructive">
 			<HugeiconsIcon className="mt-0.5 size-4 shrink-0" icon={Alert02Icon} />
 			<span>{message}</span>
 		</div>

@@ -9,7 +9,7 @@ import {
 import "../../src/index.css";
 
 function frame(label: string, start: string, end: string): string {
-	return `data:image/svg+xml;charset=utf-8,${encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 540"><defs><linearGradient id="g" x1="0" x2="1" y1="0" y2="1"><stop offset="0" stop-color="${start}"/><stop offset="1" stop-color="${end}"/></linearGradient></defs><rect width="960" height="540" fill="url(#g)"/><circle cx="780" cy="120" r="180" fill="#ffffff" fill-opacity=".12"/><rect x="64" y="72" width="210" height="10" rx="5" fill="#ffffff" fill-opacity=".5"/><rect x="64" y="108" width="420" height="24" rx="12" fill="#ffffff" fill-opacity=".9"/><rect x="64" y="164" width="310" height="12" rx="6" fill="#ffffff" fill-opacity=".42"/><text x="64" y="430" fill="#ffffff" font-family="Inter, sans-serif" font-size="42" font-weight="700">${label}</text><text x="64" y="474" fill="#ffffff" fill-opacity=".7" font-family="Inter, sans-serif" font-size="20">Live media source</text></svg>`)}`;
+	return `data:image/svg+xml;charset=utf-8,${encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 540"><defs><linearGradient id="g" x1="0" x2="1" y1="0" y2="1"><stop offset="0" stop-color="${start}"/><stop offset="1" stop-color="${end}"/></linearGradient></defs><rect width="960" height="540" fill="url(#g)"/><circle cx="780" cy="120" r="180" fill="#ffffff" fill-opacity=".12"/><rect x="64" y="72" width="210" height="10" rx="5" fill="#ffffff" fill-opacity=".5"/><rect x="64" y="108" width="420" height="24" rx="12" fill="#ffffff" fill-opacity=".9"/><rect x="64" y="164" width="310" height="12" rx="6" fill="#ffffff" fill-opacity=".42"/><text x="64" y="430" fill="#ffffff" font-family="Inter, sans-serif" font-size="42" font-weight="700">${label}</text><text x="64" y="474" fill="#ffffff" fill-opacity=".7" font-family="Inter, sans-serif" font-size="20">Sample media frame</text></svg>`)}`;
 }
 
 const SOURCES: Record<
@@ -41,21 +41,81 @@ const SOURCES: Record<
 	},
 };
 
+async function sampleRecording(): Promise<string> {
+	const canvas = document.createElement("canvas");
+	canvas.width = 960;
+	canvas.height = 540;
+	const context = canvas.getContext("2d");
+	if (!context) {
+		throw new Error("Canvas recording is unavailable");
+	}
+	const stream = canvas.captureStream(12);
+	const recorder = new MediaRecorder(stream);
+	const chunks: BlobPart[] = [];
+	let frame = 0;
+	const timer = setInterval(() => {
+		context.fillStyle = "#0099ff";
+		context.fillRect(0, 0, 960, 540);
+		context.fillStyle = "#ffffff";
+		context.font = "36px sans-serif";
+		context.fillText("Sample recording", 64, 260);
+		context.fillRect(64, 310, 24 + frame++ * 20, 6);
+	}, 40);
+	try {
+		await new Promise<void>((resolve, reject) => {
+			recorder.ondataavailable = (event) => chunks.push(event.data);
+			recorder.onstop = () => resolve();
+			recorder.onerror = () => reject(new Error("Sample recording failed"));
+			recorder.start();
+			setTimeout(() => {
+				if (recorder.state !== "inactive") {
+					recorder.stop();
+				}
+			}, 600);
+		});
+		return URL.createObjectURL(new Blob(chunks, { type: recorder.mimeType }));
+	} finally {
+		clearInterval(timer);
+		for (const track of stream.getTracks()) {
+			track.stop();
+		}
+	}
+}
+
 function Proof() {
 	const [active, setActive] = useState<keyof typeof SOURCES>("browser");
 	const source = SOURCES[active];
 
 	useEffect(() => {
-		publishMediaSource({
-			id: `proof:${active}`,
-			imageUrl: frame(source.title, source.start, source.end),
-			kind: source.kind,
-			title: source.title,
-			...(source.kind === "recording"
-				? { videoUrl: "data:video/mp4;base64,proof" }
-				: {}),
-		});
-		return () => clearMediaSource(`proof:${active}`);
+		let cancelled = false;
+		let videoUrl: string | undefined;
+		const publish = (recordingUrl?: string) =>
+			publishMediaSource({
+				id: `proof:${active}`,
+				imageUrl: frame(source.title, source.start, source.end),
+				kind: source.kind,
+				title: source.title,
+				...(recordingUrl ? { videoUrl: recordingUrl } : {}),
+			});
+		if (source.kind === "recording") {
+			void sampleRecording().then((url) => {
+				videoUrl = url;
+				if (cancelled) {
+					URL.revokeObjectURL(url);
+				} else {
+					publish(url);
+				}
+			});
+		} else {
+			publish();
+		}
+		return () => {
+			cancelled = true;
+			if (videoUrl) {
+				URL.revokeObjectURL(videoUrl);
+			}
+			clearMediaSource(`proof:${active}`);
+		};
 	}, [active, source]);
 
 	return (
@@ -63,7 +123,7 @@ function Proof() {
 			<div className="mx-auto max-w-5xl space-y-8">
 				<header className="max-w-2xl space-y-3">
 					<p className="font-semibold text-cyan-300 text-xs uppercase tracking-[0.22em]">
-						Live media proof
+						Media UI verification · sample frames
 					</p>
 					<h1 className="font-semibold text-4xl tracking-tight">
 						One picture-in-picture surface for every active tab

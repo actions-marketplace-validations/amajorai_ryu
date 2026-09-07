@@ -357,7 +357,7 @@ export function NewAutomationDialog({
 						/>
 					</div>
 
-					{error && <p className="text-destructive text-sm">{error}</p>}
+					{error && <p className="text-sm text-status-destructive">{error}</p>}
 				</div>
 
 				<DialogFooter>

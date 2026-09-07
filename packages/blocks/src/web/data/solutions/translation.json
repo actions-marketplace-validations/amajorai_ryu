@@ -5,10 +5,10 @@
   "category": "Language & Content",
   "icon": "Languages",
   "visualKey": "SkillsVisual",
-  "tagline": "Translate faster while keeping your terminology, tone, and meaning intact.",
+  "tagline": "Draft translations using your glossary and reference material, then review the wording.",
   "heroEyebrow": "Ryu for Translation",
-  "heroTitle": "Consistent translations across every language pair",
-  "heroSubtitle": "Ryu grounds each translation on your glossary and past work, lets you pick the best model per language, and keeps confidential source text private so you can draft faster without losing nuance.",
+  "heroTitle": "Ryu for translation",
+  "heroSubtitle": "Draft translations using your glossary and reference material, then review the wording.",
   "intro": "Machine translation drifts on terminology, mishandles tone, and rarely respects a client glossary. Ryu grounds every draft on your termbase, style guide, and approved past translations so wording stays consistent, then lets a human translator review and finalize. Confidential source material can stay on a local model so nothing leaves your machine.",
   "highlights": [
     {

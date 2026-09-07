@@ -247,7 +247,9 @@ export default function PrivatePackageShareDialog({
 								{result.maxRedemptions === 1 ? "" : "s"}.
 							</span>
 						</div>
-						{error ? <p className="text-destructive text-sm">{error}</p> : null}
+						{error ? (
+							<p className="text-sm text-status-destructive">{error}</p>
+						) : null}
 						<DialogFooter className="gap-2">
 							<Button
 								disabled={revoking || Boolean(result.revokedAt)}
@@ -393,7 +395,9 @@ export default function PrivatePackageShareDialog({
 								/>
 							</label>
 						</div>
-						{error ? <p className="text-destructive text-sm">{error}</p> : null}
+						{error ? (
+							<p className="text-sm text-status-destructive">{error}</p>
+						) : null}
 						<DialogFooter>
 							<Button onClick={onClose} variant="ghost">
 								Cancel

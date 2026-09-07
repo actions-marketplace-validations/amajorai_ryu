@@ -132,19 +132,19 @@ interface SpeechRecognitionLike {
 	continuous: boolean;
 	interimResults: boolean;
 	lang: string;
-	onend: (() => void) | null;
-	onerror: (() => void) | null;
-	onresult: ((event: SpeechRecognitionEventLike) => void) | null;
+	onend?: (() => void) | null;
+	onerror?: (() => void) | null;
+	onresult?: ((event: SpeechRecognitionEventLike) => void) | null;
 	start: () => void;
 	stop: () => void;
 }
 
 type SpeechRecognitionConstructor = new () => SpeechRecognitionLike;
 
-interface SpeechWindow extends Window {
+type SpeechWindow = Window & {
 	SpeechRecognition?: SpeechRecognitionConstructor;
 	webkitSpeechRecognition?: SpeechRecognitionConstructor;
-}
+};
 
 const MIN_AREA_SIZE = 8;
 

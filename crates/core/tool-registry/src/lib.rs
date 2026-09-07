@@ -598,19 +598,25 @@ fn bm25_score(query: &str, items: &mut [ToolDescriptor]) {
     let avg_dl = if avg_dl == 0.0 { 1.0 } else { avg_dl };
 
     let q_lower = query.trim().to_ascii_lowercase();
+    // Each query term has one corpus frequency, independent of the scored item.
+    // Computing this inside the item loop made common terms quadratic in catalog size.
+    let term_idfs: Vec<(&String, f32)> = q_terms
+        .iter()
+        .map(|term| {
+            let df = docs.iter().filter(|doc| doc.contains(term)).count() as f32;
+            (term, (((n - df + 0.5) / (df + 0.5)) + 1.0).ln())
+        })
+        .collect();
 
     for (i, d) in items.iter_mut().enumerate() {
         let doc = &docs[i];
         let dl = doc.len() as f32;
         let mut score = 0.0_f32;
-        for term in &q_terms {
-            let tf = doc.iter().filter(|w| *w == term).count() as f32;
+        for (term, idf) in &term_idfs {
+            let tf = doc.iter().filter(|w| *w == *term).count() as f32;
             if tf == 0.0 {
                 continue;
             }
-            // Document frequency across the candidate set.
-            let df = docs.iter().filter(|dd| dd.contains(term)).count() as f32;
-            let idf = (((n - df + 0.5) / (df + 0.5)) + 1.0).ln();
             let denom = tf + K1 * (1.0 - B + B * dl / avg_dl);
             score += idf * (tf * (K1 + 1.0)) / denom;
         }
@@ -997,6 +1003,82 @@ mod tests {
         assert!(!c.matches_allowlist(&["Slack".to_string()]));
     }
 
+    fn reference_bm25_score(query: &str, items: &mut [ToolDescriptor]) {
+        const K1: f32 = 1.5;
+        const B: f32 = 0.75;
+        let q_terms = tokenize(query);
+        if q_terms.is_empty() {
+            for d in items.iter_mut() {
+                d.score = Some(0.0);
+            }
+            return;
+        }
+
+        let docs: Vec<Vec<String>> = items.iter().map(|d| tokenize(&doc_text(d))).collect();
+        let n = docs.len().max(1) as f32;
+        let avg_dl = docs.iter().map(|d| d.len() as f32).sum::<f32>() / n;
+        let avg_dl = if avg_dl == 0.0 { 1.0 } else { avg_dl };
+
+        let q_lower = query.trim().to_ascii_lowercase();
+
+        for (i, d) in items.iter_mut().enumerate() {
+            let doc = &docs[i];
+            let dl = doc.len() as f32;
+            let mut score = 0.0_f32;
+            for term in &q_terms {
+                let tf = doc.iter().filter(|w| *w == term).count() as f32;
+                if tf == 0.0 {
+                    continue;
+                }
+                // Document frequency across the candidate set.
+                let df = docs.iter().filter(|dd| dd.contains(term)).count() as f32;
+                let idf = (((n - df + 0.5) / (df + 0.5)) + 1.0).ln();
+                let denom = tf + K1 * (1.0 - B + B * dl / avg_dl);
+                score += idf * (tf * (K1 + 1.0)) / denom;
+            }
+            // Exact id / name match boost so it sorts first.
+            if d.id.eq_ignore_ascii_case(&q_lower) || d.name.eq_ignore_ascii_case(&q_lower) {
+                score += 1000.0;
+            }
+            d.score = Some(score);
+        }
+    }
+
+    #[test]
+    fn performance_bm25_preserves_scores() {
+        let items: Vec<_> = (0..400)
+            .map(|i| {
+                desc(
+                    &format!("tool.{i}"),
+                    "search",
+                    &format!("search documents documents code {i}"),
+                    ToolKind::Mcp,
+                )
+            })
+            .collect();
+        let mut before = items.clone();
+        let mut after = items.clone();
+        let query = "search documents documents absent";
+        let start = std::time::Instant::now();
+        reference_bm25_score(query, &mut before);
+        let baseline = start.elapsed();
+        let start = std::time::Instant::now();
+        bm25_score(query, &mut after);
+        let optimized = start.elapsed();
+        assert_eq!(
+            before.iter().map(|d| d.score).collect::<Vec<_>>(),
+            after.iter().map(|d| d.score).collect::<Vec<_>>()
+        );
+        eprintln!("BM25 400 tools: before={baseline:?}, after={optimized:?}");
+        for query in ["", "tool.3", "SEARCH", "absent", "文档"] {
+            reference_bm25_score(query, &mut before);
+            bm25_score(query, &mut after);
+            assert_eq!(
+                before.iter().map(|d| d.score).collect::<Vec<_>>(),
+                after.iter().map(|d| d.score).collect::<Vec<_>>()
+            );
+        }
+    }
     #[tokio::test]
     async fn bm25_ranks_exact_match_first() {
         let items = vec![

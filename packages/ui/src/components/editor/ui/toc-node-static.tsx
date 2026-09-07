@@ -6,13 +6,13 @@ import type { SlateElementProps } from "platejs/static";
 import { SlateElement } from "platejs/static";
 
 const headingItemVariants = cva(
-	"block h-auto w-full cursor-pointer truncate rounded-none px-0.5 py-1.5 text-left font-medium text-muted-foreground underline decoration-[0.5px] underline-offset-4 hover:bg-accent hover:text-muted-foreground",
+	"block h-auto w-full cursor-pointer truncate rounded-none px-0.5 py-1.5 text-start font-medium text-muted-foreground underline decoration-[0.5px] underline-offset-4 hover:bg-accent hover:text-muted-foreground",
 	{
 		variants: {
 			depth: {
-				1: "pl-0.5",
-				2: "pl-[26px]",
-				3: "pl-[50px]",
+				1: "ps-0.5",
+				2: "ps-[26px]",
+				3: "ps-[50px]",
 			},
 		},
 	}

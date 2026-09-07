@@ -13,6 +13,7 @@ import { Button } from "@ryu/ui/components/button";
 import {
 	DropdownMenu,
 	DropdownMenuContent,
+	DropdownMenuGroup,
 	DropdownMenuItem,
 	DropdownMenuLabel,
 	DropdownMenuSeparator,
@@ -163,7 +164,7 @@ export function RecordingControls({ onClipReady }: RecordingControlsProps) {
 					<span
 						className={cn(
 							"size-1.5 rounded-full",
-							isPaused ? "bg-muted-foreground" : "animate-pulse bg-red-500"
+							isPaused ? "bg-muted-foreground" : "animate-pulse bg-destructive"
 						)}
 					/>
 					{formatElapsed(elapsedMs)}
@@ -185,7 +186,7 @@ export function RecordingControls({ onClipReady }: RecordingControlsProps) {
 				</Button>
 				<Button
 					aria-label="Stop recording"
-					className="size-7 rounded-full text-red-500"
+					className="size-7 rounded-full text-status-destructive"
 					disabled={isStopping}
 					onClick={handleStop}
 					size="icon"
@@ -229,7 +230,7 @@ export function RecordingControls({ onClipReady }: RecordingControlsProps) {
 					</DropdownMenuItem>
 
 					{available && available.displays.length > 0 ? (
-						<>
+						<DropdownMenuGroup>
 							<DropdownMenuSeparator />
 							<DropdownMenuLabel>Displays</DropdownMenuLabel>
 							{available.displays.map((display) => {
@@ -257,11 +258,11 @@ export function RecordingControls({ onClipReady }: RecordingControlsProps) {
 									</DropdownMenuItem>
 								);
 							})}
-						</>
+						</DropdownMenuGroup>
 					) : null}
 
 					{available && available.windows.length > 0 ? (
-						<>
+						<DropdownMenuGroup>
 							<DropdownMenuSeparator />
 							<DropdownMenuLabel>Windows</DropdownMenuLabel>
 							{available.windows.map((win) => {
@@ -283,7 +284,7 @@ export function RecordingControls({ onClipReady }: RecordingControlsProps) {
 									</DropdownMenuItem>
 								);
 							})}
-						</>
+						</DropdownMenuGroup>
 					) : null}
 				</DropdownMenuContent>
 			</DropdownMenu>

@@ -104,32 +104,6 @@ export function scheduleToTrigger(
  *  Used to match-or-update the existing one so re-saving never spawns a dupe. */
 export const SCHEDULED_AGENT_SUFFIX = " (scheduled)";
 
-/** Build the 1-node workflow definition that runs `agentId` on `schedule`:
- *  Input → Prompt(agent) → Output. Reuses `existingId` (overwrite) when set. */
-export function scheduledAgentWorkflow(
-	agentId: string,
-	agentName: string,
-	schedule: Schedule,
-	existingId: string,
-	requireApproval = false
-): Record<string, unknown> {
-	return {
-		id: existingId,
-		name: `${agentName}${SCHEDULED_AGENT_SUFFIX}`,
-		description: "Runs this agent automatically on a schedule.",
-		nodes: [
-			{ id: "input", type: "input", key: null },
-			{ id: "agent", type: "prompt", agent_id: agentId, prompt: "Run" },
-			{ id: "output", type: "output", key: null },
-		],
-		edges: [
-			{ from: "input", to: "agent" },
-			{ from: "agent", to: "output" },
-		],
-		triggers: [scheduleToTrigger(schedule, requireApproval)],
-	};
-}
-
 /**
  * Create (or update) the quick agent routine used by the legacy schedule picker.
  *

@@ -529,7 +529,7 @@ function OutcomeBadge({ outcome }: { outcome: ScheduleOutcome }) {
 		return (
 			<Badge className="gap-1" variant="secondary">
 				<HugeiconsIcon
-					className="size-3 text-green-600"
+					className="size-3 text-status-success"
 					icon={CheckmarkCircle02Icon}
 				/>
 				Succeeded
@@ -607,7 +607,7 @@ function JobCard({
 					/>
 				</div>
 				{job.lastOutcome === "failure" && job.lastError ? (
-					<p className="line-clamp-2 text-destructive text-xs">
+					<p className="line-clamp-2 text-status-destructive text-xs">
 						{job.lastError}
 					</p>
 				) : null}

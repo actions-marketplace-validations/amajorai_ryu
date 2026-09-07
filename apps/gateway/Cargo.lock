@@ -3022,7 +3022,7 @@ checksum = "9774ba4a74de5f7b1c1451ed6cd5285a32eddb5cccb8cc655a4e50009e06477f"
 
 [[package]]
 name = "ryu-deletion-guard"
-version = "0.2.8"
+version = "0.3.0"
 dependencies = [
  "regex",
  "shell-words",
@@ -3030,7 +3030,7 @@ dependencies = [
 
 [[package]]
 name = "ryu-gateway"
-version = "0.2.8"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3086,7 +3086,7 @@ dependencies = [
 
 [[package]]
 name = "ryu-gw-audit"
-version = "0.2.8"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "dashmap",
@@ -3100,7 +3100,7 @@ dependencies = [
 
 [[package]]
 name = "ryu-gw-budget"
-version = "0.2.8"
+version = "0.3.0"
 dependencies = [
  "dashmap",
  "ryu-gw-contracts",
@@ -3109,7 +3109,7 @@ dependencies = [
 
 [[package]]
 name = "ryu-gw-cache"
-version = "0.2.8"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "dashmap",
@@ -3123,7 +3123,7 @@ dependencies = [
 
 [[package]]
 name = "ryu-gw-channels"
-version = "0.2.8"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3143,14 +3143,14 @@ dependencies = [
 
 [[package]]
 name = "ryu-gw-contracts"
-version = "0.2.8"
+version = "0.3.0"
 dependencies = [
  "serde",
 ]
 
 [[package]]
 name = "ryu-gw-evals"
-version = "0.2.8"
+version = "0.3.0"
 dependencies = [
  "dashmap",
  "regex",
@@ -3161,7 +3161,7 @@ dependencies = [
 
 [[package]]
 name = "ryu-gw-firewall"
-version = "0.2.8"
+version = "0.3.0"
 dependencies = [
  "regex",
  "ryu-deletion-guard",
@@ -3172,7 +3172,7 @@ dependencies = [
 
 [[package]]
 name = "ryu-gw-governance"
-version = "0.2.8"
+version = "0.3.0"
 dependencies = [
  "base64",
  "ed25519-dalek",
@@ -3182,14 +3182,14 @@ dependencies = [
 
 [[package]]
 name = "ryu-gw-passthrough"
-version = "0.2.8"
+version = "0.3.0"
 dependencies = [
  "serde_json",
 ]
 
 [[package]]
 name = "ryu-gw-providers"
-version = "0.2.8"
+version = "0.3.0"
 dependencies = [
  "axum",
  "base64",
@@ -3208,7 +3208,7 @@ dependencies = [
 
 [[package]]
 name = "ryu-gw-router"
-version = "0.2.8"
+version = "0.3.0"
 dependencies = [
  "serde_json",
  "tracing",
@@ -3216,7 +3216,7 @@ dependencies = [
 
 [[package]]
 name = "ryu-tool-registry"
-version = "0.2.8"
+version = "0.3.0"
 dependencies = [
  "async-trait",
  "serde",

@@ -1,5 +1,6 @@
 import "@fontsource-variable/geist";
 import "@fontsource-variable/inter";
+import "@fontsource-variable/geist-mono";
 import { useEffect, useState } from "react";
 import { createRoot } from "react-dom/client";
 import {
@@ -8,6 +9,7 @@ import {
 	SidebarPreviewTitle,
 } from "../../src/components/layout/sidebar-item-preview.tsx";
 import {
+	CreateGitHubRepositoryDialog,
 	GitActionDialog,
 	type GitProgressPhase,
 	GitProgressStatus,
@@ -137,6 +139,10 @@ const STATUS_PULL_REQUESTS: Array<{
 
 function GitActionsProof() {
 	const [commitOpen, setCommitOpen] = useState(true);
+	const [branch, setBranch] = useState(BRANCH);
+	const [repositoryOpen, setRepositoryOpen] = useState(false);
+	const [repositoryName, setRepositoryName] = useState("");
+	const [visibility, setVisibility] = useState<"private" | "public">("private");
 	const [pullRequestOpen, setPullRequestOpen] = useState(false);
 	const [commitMessage, setCommitMessage] = useState("");
 	const [includeUnstaged, setIncludeUnstaged] = useState(true);
@@ -159,7 +165,10 @@ function GitActionsProof() {
 	} | null>(null);
 
 	useEffect(() => {
-		document.documentElement.classList.add("dark");
+		document.documentElement.classList.toggle(
+			"dark",
+			new URLSearchParams(window.location.search).get("theme") !== "light"
+		);
 		return () => document.documentElement.classList.remove("dark");
 	}, []);
 
@@ -187,10 +196,10 @@ function GitActionsProof() {
 
 	return (
 		<main className="min-h-screen bg-background p-8 text-foreground">
-			<div className="mx-auto grid min-h-[calc(100vh-4rem)] max-w-6xl grid-cols-[minmax(0,1fr)_300px] gap-6">
-				<section className="rounded-[28px] border border-border/70 bg-card p-8 shadow-2xl">
+			<div className="mx-auto grid min-h-[calc(100vh-4rem)] max-w-6xl grid-cols-1 gap-6 lg:grid-cols-[minmax(0,1fr)_300px]">
+				<section className="rounded-2xl border border-border/70 bg-card p-8">
 					<p className="font-heading font-semibold text-primary text-xs uppercase tracking-[0.18em]">
-						Ryu · Git workspace
+						Ryu · Git workspace · Sample data
 					</p>
 					<h1 className="mt-3 font-heading font-semibold text-3xl tracking-tight">
 						Ship changes from the pinned summary
@@ -276,6 +285,9 @@ function GitActionsProof() {
 					</div>
 
 					<div className="mt-6 flex flex-wrap gap-2">
+						<button onClick={() => setRepositoryOpen(true)} type="button">
+							Open repository dialog
+						</button>
 						<button
 							className="rounded-full border border-border/70 px-4 py-2 text-sm transition hover:bg-muted"
 							data-testid="show-generating"
@@ -309,7 +321,7 @@ function GitActionsProof() {
 					</div>
 				</section>
 
-				<aside className="rounded-[28px] border border-border/70 bg-card p-5">
+				<aside className="rounded-2xl border border-border/70 bg-card p-5">
 					<p className="font-medium text-sm">Verification surface</p>
 					<dl className="mt-4 space-y-3 text-xs">
 						<div>
@@ -390,7 +402,7 @@ function GitActionsProof() {
 			</div>
 
 			<GitActionDialog
-				branch={BRANCH}
+				branch={branch}
 				branches={BRANCHES}
 				branchesLoading={false}
 				commitMessage={commitMessage}
@@ -403,10 +415,19 @@ function GitActionsProof() {
 				onCreateBranch={async () => null}
 				onIncludeUnstagedChange={setIncludeUnstaged}
 				onOpenChange={setCommitOpen}
-				onSelectBranch={() => undefined}
+				onSelectBranch={setBranch}
 				onSubmit={handleCommit}
 				open={commitOpen}
 				progress={commitProgress}
+			/>
+			<CreateGitHubRepositoryDialog
+				name={repositoryName}
+				onNameChange={setRepositoryName}
+				onOpenChange={setRepositoryOpen}
+				onSubmit={() => setRepositoryOpen(false)}
+				onVisibilityChange={setVisibility}
+				open={repositoryOpen}
+				visibility={visibility}
 			/>
 			<PullRequestDialog
 				baseBranch="main"

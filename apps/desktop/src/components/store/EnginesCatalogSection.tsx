@@ -476,7 +476,7 @@ function EngineList({
 	}
 	if (error && total === 0) {
 		return (
-			<div className="p-4 text-destructive text-sm">
+			<div className="p-4 text-sm text-status-destructive">
 				Couldn't load engines: {error}
 			</div>
 		);

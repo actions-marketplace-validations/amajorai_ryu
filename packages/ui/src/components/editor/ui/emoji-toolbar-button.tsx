@@ -405,7 +405,7 @@ function EmojiPickerSearchAndClear({
 		<div className="flex items-center text-foreground">
 			<div
 				className={cn(
-					"absolute top-1/2 left-2.5 z-10 flex size-5 -translate-y-1/2 items-center justify-center text-foreground"
+					"absolute start-2.5 top-1/2 z-10 flex size-5 -translate-y-1/2 items-center justify-center text-foreground"
 				)}
 			>
 				{emojiSearchIcons.loupe}
@@ -414,7 +414,7 @@ function EmojiPickerSearchAndClear({
 				<Button
 					aria-label="Clear"
 					className={cn(
-						"absolute top-1/2 right-0.5 flex size-8 -translate-y-1/2 cursor-pointer items-center justify-center rounded-full border-none bg-transparent text-popover-foreground hover:bg-transparent"
+						"absolute end-0.5 top-1/2 flex size-8 -translate-y-1/2 cursor-pointer items-center justify-center rounded-full border-none bg-transparent text-popover-foreground hover:bg-transparent"
 					)}
 					onClick={clearSearch}
 					size="icon"
@@ -435,7 +435,7 @@ function EmojiPreview({ emoji }: Pick<UseEmojiPickerType, "emoji">) {
 			<div className="flex items-center justify-center text-2xl">
 				{emoji?.skins[0]?.native ?? ""}
 			</div>
-			<div className="overflow-hidden pl-2">
+			<div className="overflow-hidden ps-2">
 				<div className="truncate font-medium text-sm">{emoji?.name}</div>
 				<div className="truncate text-sm">{`:${emoji?.id}:`}</div>
 			</div>
@@ -447,7 +447,7 @@ function NoEmoji({ i18n }: Pick<UseEmojiPickerType, "i18n">) {
 	return (
 		<div className="flex h-14 max-h-14 min-h-14 items-center border-muted border-t p-2">
 			<div className="flex items-center justify-center text-2xl">😢</div>
-			<div className="overflow-hidden pl-2">
+			<div className="overflow-hidden ps-2">
 				<div className="truncate font-medium text-sm">
 					{i18n.searchNoResultsTitle}
 				</div>
@@ -461,7 +461,7 @@ function PickAnEmoji({ i18n }: Pick<UseEmojiPickerType, "i18n">) {
 	return (
 		<div className="flex h-14 max-h-14 min-h-14 items-center border-muted border-t p-2">
 			<div className="flex items-center justify-center text-2xl">☝️</div>
-			<div className="overflow-hidden pl-2">
+			<div className="overflow-hidden ps-2">
 				<div className="truncate font-medium text-sm">{i18n.pick}</div>
 			</div>
 		</div>

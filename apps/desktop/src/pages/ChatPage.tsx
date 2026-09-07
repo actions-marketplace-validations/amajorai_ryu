@@ -7,7 +7,6 @@ import type {
 	StreamedAcpControl,
 } from "@ryu/blocks/composer/composer-acp-sections.ts";
 import { createComposerDirectory } from "@ryu/blocks/composer/composer-directory.ts";
-import { handleComposerSettingsShortcut } from "@ryu/blocks/composer/composer-shortcuts.ts";
 import { answerNowDelayMs } from "@ryu/blocks/desktop/agent-elements/answer-now.ts";
 import {
 	ArtifactHostContext,
@@ -16,10 +15,6 @@ import {
 } from "@ryu/blocks/desktop/agent-elements/artifact-host-context.tsx";
 import { deriveContextUsage } from "@ryu/blocks/desktop/agent-elements/context-usage.tsx";
 import type { GoalCompletion } from "@ryu/blocks/desktop/agent-elements/goal-message.ts";
-import type {
-	ComposerMenuGroup,
-	ComposerMenuItem,
-} from "@ryu/blocks/desktop/agent-elements/input/composer-menu.tsx";
 import { extractMemoryCitations } from "@ryu/blocks/desktop/agent-elements/memory-citations.ts";
 import { isMessageReactionAction } from "@ryu/blocks/desktop/agent-elements/message-action-types.ts";
 import {
@@ -40,7 +35,6 @@ import type {
 	MessageReply,
 	SelectionActionContext,
 } from "@ryu/blocks/desktop/agent-elements/types.ts";
-import { useDeferredComposerPrompt } from "@ryu/blocks/desktop/agent-elements/use-deferred-question.ts";
 import {
 	WidgetHostContext,
 	type WidgetHostServices,
@@ -96,7 +90,6 @@ import type {
 	InputBarProps,
 	TemporaryChatSaveControls,
 } from "@/components/agent-elements/input-bar.tsx";
-import { InputBar } from "@/components/agent-elements/input-bar.tsx";
 import type { QueueBarProps } from "@/components/agent-elements/queue/queue-bar.tsx";
 import { formatQuotePrefix } from "@/components/agent-elements/quote.tsx";
 import { openExternal, previewLinkMetadata } from "@/lib/tauri-bridge.ts";
@@ -109,20 +102,16 @@ import {
 	ChatSearchBar,
 	type ChatSearchMode,
 } from "@/src/components/chat/ChatSearchBar.tsx";
+import { CouncilInputBar } from "@/src/components/chat/CouncilInputBar.tsx";
 import { DiffReviewPane } from "@/src/components/chat/DiffReviewPane.tsx";
 import {
 	type ForkDestination,
 	ForkDialog,
 } from "@/src/components/chat/ForkDialog.tsx";
 import { InlineArtifact } from "@/src/components/chat/InlineArtifact.tsx";
-import { MentionMenu } from "@/src/components/chat/MentionMenu.tsx";
 import { MergedThreadPicker } from "@/src/components/chat/MergedThreadPicker.tsx";
-import {
-	type ActivePermission,
-	PermissionPrompt,
-} from "@/src/components/chat/PermissionPrompt.tsx";
+import type { ActivePermission } from "@/src/components/chat/PermissionPrompt.tsx";
 import { ShareConversationDialog } from "@/src/components/chat/ShareConversationDialog.tsx";
-import { SlashCommandAutocomplete } from "@/src/components/chat/SlashCommandAutocomplete.tsx";
 import { WorkspaceBar } from "@/src/components/chat/WorkspaceBar.tsx";
 import { WorkspaceRequiredDialog } from "@/src/components/chat/WorkspaceRequiredDialog.tsx";
 import { PluginComposerBarControls } from "@/src/components/composer/PluginComposerBarControls.tsx";
@@ -161,6 +150,7 @@ import { useAgents } from "@/src/hooks/useAgents.ts";
 import { useAgentUsage } from "@/src/hooks/useAgentUsage.ts";
 import { useApps } from "@/src/hooks/useApps.ts";
 import { useChatPickerPlacement } from "@/src/hooks/useChatPickerPlacement.ts";
+import { useChatSearch } from "@/src/hooks/useChatSearch.ts";
 import { useComposerAutoQueue } from "@/src/hooks/useComposerAutoQueue.ts";
 import {
 	useComposerDraftAutosave,
@@ -171,7 +161,6 @@ import {
 	shouldShowComposerSelectionToast,
 	useComposerSelectionApplyMode,
 } from "@/src/hooks/useComposerSelectionApplyMode.ts";
-import { useComposerShortcutBindings } from "@/src/hooks/useComposerShortcutBindings.ts";
 import {
 	useComposioConnections,
 	useComposioStatus,
@@ -261,7 +250,6 @@ import {
 	ingestDocument,
 	updateDocument,
 } from "@/src/lib/api/spaces.ts";
-import type { Team } from "@/src/lib/api/teams.ts";
 import {
 	saveTemporaryChat,
 	TEMPORARY_CONTEXT_FLAG,
@@ -274,15 +262,19 @@ import {
 	widgetCallTool,
 	widgetSetState,
 } from "@/src/lib/api/widgets.ts";
-import type { Workflow } from "@/src/lib/api/workflows.ts";
 import type { Artifact } from "@/src/lib/artifacts.ts";
 import { artifactFromPayload } from "@/src/lib/artifacts.ts";
 import { hydrateHistoryMessage } from "@/src/lib/chat-history-hydrate.ts";
 import {
+	buildVersions,
+	extractAssistantText,
+	isAcpAgent,
+} from "@/src/lib/chat-message-selectors.ts";
+import { readDraggedChatReference } from "@/src/lib/chat-reference-drag.ts";
+import {
 	modelRoutingFieldsForInterface,
 	responseModeForInterface,
 } from "@/src/lib/chat-routing.ts";
-import { searchChatMessages } from "@/src/lib/chat-search.ts";
 import { getChatTabBusySpeed } from "@/src/lib/chat-tab-busy-speed.ts";
 import { textToDataUrl } from "@/src/lib/composer/attachments.ts";
 import {
@@ -305,18 +297,11 @@ import {
 import { basename, readProjectFile } from "@/src/lib/files.ts";
 import { appMentionVisual } from "@/src/lib/mentions/app-visuals.tsx";
 import {
-	applyMention,
 	buildComposioMentionSources,
 	buildMentionGroups,
-	CHAT_MENTION_KINDS,
-	resolveFirstNamedMentionId,
-	resolveReferencedChatIds,
 } from "@/src/lib/mentions/candidates.ts";
-import {
-	type SelectedHumanMention,
-	selectHumanNotificationTargets,
-} from "@/src/lib/mentions/human-notification.ts";
-import type { MentionItem, MentionSources } from "@/src/lib/mentions/types.ts";
+import type { SelectedHumanMention } from "@/src/lib/mentions/human-notification.ts";
+import type { MentionSources } from "@/src/lib/mentions/types.ts";
 import {
 	getAgentModel,
 	modelsForAgent,
@@ -349,12 +334,9 @@ import { isRealtimeMessageEcho } from "@/src/lib/realtime/message-origin.ts";
 import { useRealtimeRoom } from "@/src/lib/realtime/use-realtime-room.ts";
 import { CHAT_RETRY_STARTED_EVENT } from "@/src/lib/reconnect-retry.ts";
 import {
-	applySlashCommandOption,
 	mergeComposerCommands,
 	parseSlashCommandContribution,
-	parseSlashMenuState,
 	type SlashCommand,
-	type SlashCommandOptionSelection,
 } from "@/src/lib/slash-commands.ts";
 import { deriveTurnComposerProgress } from "@/src/lib/turn-composer-progress.ts";
 import { messageNeedsWorkspace } from "@/src/lib/workspace-intent.ts";
@@ -420,110 +402,6 @@ interface SavedPlanDocument {
 	spaceId: string;
 }
 
-/** Returns true when the selected agent uses ACP transport (never touches the gateway). */
-function isAcpAgent(
-	agentId: string | null,
-	agents: ReturnType<typeof useAgents>["agents"]
-): boolean {
-	if (!agentId) {
-		// No agent selected — default to ACP behaviour (no gateway needed).
-		return true;
-	}
-	// Engine ids selected directly from the engines list (e.g. "acp:claude")
-	if (agentId.startsWith("acp:")) {
-		return true;
-	}
-	// Check against known agents in the registry
-	const agent = agents.find((a) => a.id === agentId);
-	if (!agent) {
-		// Unknown id — default to ACP (no gateway required) to avoid false blocks.
-		return true;
-	}
-	// Prefer the transport Core reports — the authoritative signal — over any
-	// client-side re-derivation. Only "openai_compat" needs the gateway.
-	if (agent.transport) {
-		return agent.transport !== "openai_compat";
-	}
-	// Registry built-ins are always ACP
-	if (agent.builtIn) {
-		return true;
-	}
-	// Custom agents: if engine is explicitly set to an ACP variant, it's ACP
-	if (agent.engine?.startsWith("acp:")) {
-		return true;
-	}
-	// Custom agents with an explicit non-ACP engine or no engine: default to ACP
-	// (openai-compat agents would have a non-null engine that does NOT start with "acp:")
-	if (agent.engine && !agent.engine.startsWith("acp:")) {
-		return false;
-	}
-	return true;
-}
-
-/**
- * Build the version-pager map (message id → { index, count, ids }) from a loaded
- * history. Only messages that actually have alternate versions (siblingCount > 1
- * with sibling ids) get an entry, so the pager renders solely at real branch
- * points.
- */
-function buildVersions(
-	history: Array<{
-		id: string;
-		siblingIndex?: number;
-		siblingCount?: number;
-		siblingIds?: string[];
-	}>
-): Record<string, { index: number; count: number; ids: string[] }> {
-	const map: Record<string, { index: number; count: number; ids: string[] }> =
-		{};
-	for (const h of history) {
-		if (h.siblingCount && h.siblingCount > 1 && h.siblingIds?.length) {
-			map[h.id] = {
-				index: h.siblingIndex ?? 0,
-				count: h.siblingCount,
-				ids: h.siblingIds,
-			};
-		}
-	}
-	return map;
-}
-
-/** Plain text from the last assistant message's parts (for auto read-back). */
-function extractAssistantText(message: {
-	parts?: unknown[];
-	content?: string;
-}): string {
-	if (Array.isArray(message.parts) && message.parts.length > 0) {
-		return message.parts
-			.filter(
-				(part): part is { type: string; text?: string } =>
-					typeof part === "object" &&
-					part !== null &&
-					(part as { type?: string }).type === "text" &&
-					typeof (part as { text?: string }).text === "string"
-			)
-			.map((part) => part.text ?? "")
-			.join("\n\n")
-			.trim();
-	}
-	return typeof message.content === "string" ? message.content.trim() : "";
-}
-
-const MENTION_QUERY_RE = /(?:^|\s)@(\w*)$/;
-
-/**
- * Parse the last "@word" being typed in a string.
- * Returns the partial name after "@" if the cursor is at an in-progress mention,
- * or null if the cursor is not on a mention.
- */
-function parseMentionQuery(value: string): string | null {
-	const match = MENTION_QUERY_RE.exec(value);
-	if (!match) {
-		return null;
-	}
-	return match[1];
-}
-
 /** Ryu's own composer commands, always offered alongside agent-advertised ones.
  *  Plugin-owned commands are supplied by `pluginContributions.slash_commands` so
  *  disabling a plugin removes both its discoverability and its handler. */
@@ -536,40 +414,6 @@ const LOCAL_SLASH_COMMANDS: SlashCommand[] = [
 		source: "local",
 	},
 ];
-
-/** Scan message text for the first "@Name" mention and resolve it to an agent id. */
-function resolveFirstMention(
-	text: string,
-	agents: AgentSummary[]
-): string | null {
-	return resolveFirstNamedMentionId(text, agents);
-}
-
-/** Scan message text for the first "@Name" that matches a team, returning its id.
- *  Teams take precedence over agents when a name collides, since a team mention
- *  is the more specific "call all of them" intent. */
-function resolveFirstTeamMention(text: string, teams: Team[]): string | null {
-	return resolveFirstNamedMentionId(text, teams);
-}
-
-/** Scan message text for the first "@Name" that matches a chat-triggerable
- *  workflow, returning its id. A workflow mention is the most specific target
- *  of all — the message becomes the run's input, so it wins over agent/team.
- *
- *  Unlike agents/teams (matched on a `@word` token), workflow names are
- *  arbitrary ("Plan → Implement → Verify"), so the check is an exact
- *  `@Name` substring match — the same form the composer inserts when you pick a
- *  workflow from the mention menu. */
-function resolveFirstWorkflowMention(
-	text: string,
-	workflows: Workflow[]
-): string | null {
-	const lower = text.toLowerCase();
-	const found = workflows.find((w) =>
-		lower.includes(`@${w.name.toLowerCase()}`)
-	);
-	return found?.id ?? null;
-}
 
 // ---------------------------------------------------------------------------
 /**
@@ -596,515 +440,6 @@ export function buildPluginFlags(
 		}
 	}
 	return Object.keys(merged).length > 0 ? merged : undefined;
-}
-
-// #415: Council-aware InputBar — adds @mention autocomplete above the textarea
-// ---------------------------------------------------------------------------
-interface CouncilInputBarProps extends InputBarProps {
-	allAgents: AgentSummary[];
-	allTeams: Team[];
-	/** Chat-triggerable workflows (a root Input node), for @workflow mentions. */
-	allWorkflows: Workflow[];
-	/** Slash commands offered in the "/" popover (agent-advertised + local). */
-	availableCommands: SlashCommand[];
-	/** Host-owned metadata affordances for available app widgets. */
-	chatWidgetTemplates: PluginChatWidgetTemplate[];
-	composerSections: ComposerSettingsSection[];
-	/** Current signed-in Core user, excluded from Inbox mention fan-out. */
-	currentUserId: string | null;
-	/** Sources for the grouped "@" mention menu (apps/plugins/agents/workflows/users
-	 *  plus the existing reference sources). Agents/teams/workflows also drive the target. */
-	mentionSources: MentionSources;
-	/** Sends selected human mentions to the optional Inbox bridge after chat send. */
-	onHumanMentions: (mentions: SelectedHumanMention[], content: string) => void;
-	/** Supplies the resolved chat mentions to the request body for this turn. */
-	onReferencedChats: (conversationIds: string[]) => void;
-	onRespondPermission?: (
-		permission: ActivePermission,
-		optionId: string | null
-	) => void;
-	onTargetAgentChange: (agentId: string | null) => void;
-	onTeamChange: (teamId: string | null) => void;
-	/** Fired on each composer keystroke so the surface can broadcast a debounced
-	 * "typing" presence delta to the conversation room (multi-user collaboration). */
-	onTyping?: () => void;
-	onWorkflowChange: (workflowId: string | null) => void;
-	/** Active interactive ACP tool-permission prompt, rendered above the composer. */
-	permission?: ActivePermission | null;
-}
-
-interface DraggedChatReference {
-	id: string;
-	label: string;
-}
-
-function readDraggedChatReference(
-	dataTransfer: DataTransfer
-): DraggedChatReference | null {
-	try {
-		const value = JSON.parse(
-			dataTransfer.getData(CHAT_REFERENCE_DRAG_MIME)
-		) as Partial<DraggedChatReference>;
-		return typeof value.id === "string" && typeof value.label === "string"
-			? { id: value.id, label: value.label }
-			: null;
-	} catch {
-		return null;
-	}
-}
-
-function CouncilInputBar({
-	allAgents,
-	allTeams,
-	allWorkflows,
-	availableCommands,
-	chatWidgetTemplates,
-	composerSections,
-	currentUserId,
-	mentionSources,
-	onHumanMentions,
-	onReferencedChats,
-	onTargetAgentChange,
-	onTeamChange,
-	onWorkflowChange,
-	onTyping,
-	permission,
-	onRespondPermission,
-	value,
-	onChange,
-	onSend,
-	onTextareaKeyDown,
-	...rest
-}: CouncilInputBarProps) {
-	const botProduct = useProductMode() === "bot";
-	const isActiveTab = useIsActiveTab();
-	const composerShortcuts = useComposerShortcutBindings();
-	const showTechnicalPermissionDetails = useInterfaceLevel() !== "simple";
-	const [mentionQuery, setMentionQuery] = useState<string | null>(null);
-	const [dismissedSlashValue, setDismissedSlashValue] = useState<string | null>(
-		null
-	);
-	const textareaWrapRef = useRef<HTMLDivElement | null>(null);
-	const referencedChatIdsRef = useRef<Set<string>>(new Set());
-	const selectedHumanMentionsRef = useRef<SelectedHumanMention[]>([]);
-	const slashMenuCandidate = useMemo(
-		() => parseSlashMenuState(value ?? "", availableCommands),
-		[value, availableCommands]
-	);
-	const slashMenu =
-		botProduct || dismissedSlashValue === (value ?? "")
-			? null
-			: slashMenuCandidate;
-	const {
-		markComposerActivity: markPermissionActivity,
-		markComposerIdle: markPermissionIdle,
-		visiblePrompt: visiblePermission,
-	} = useDeferredComposerPrompt(permission);
-	const insertChatReference = useCallback(
-		(chat: DraggedChatReference) => {
-			referencedChatIdsRef.current.add(chat.id);
-			onChange?.(
-				`${value?.trimEnd() ?? ""}${value?.trim() ? " " : ""}@${chat.label} `
-			);
-			setMentionQuery(null);
-		},
-		[onChange, value]
-	);
-	useEffect(() => {
-		if (!isActiveTab) {
-			return;
-		}
-		const handleChatReferenceDrop = (event: Event) => {
-			insertChatReference((event as CustomEvent<DraggedChatReference>).detail);
-		};
-		window.addEventListener("ryu:chat-reference-drop", handleChatReferenceDrop);
-		return () =>
-			window.removeEventListener(
-				"ryu:chat-reference-drop",
-				handleChatReferenceDrop
-			);
-	}, [insertChatReference, isActiveTab]);
-
-	// Grouped "@" candidates for the current fragment (empty when the menu is
-	// closed). Recomputed per keystroke; buildMentionGroups is pure.
-	const mentionGroups = useMemo(
-		() =>
-			botProduct || mentionQuery === null
-				? []
-				: buildMentionGroups(mentionSources, mentionQuery, CHAT_MENTION_KINDS),
-		[botProduct, mentionQuery, mentionSources]
-	);
-	const directoryMentionGroups = useMemo(
-		() => (botProduct ? [] : buildMentionGroups(mentionSources, "")),
-		[botProduct, mentionSources]
-	);
-	const composerMenuGroups = useMemo<ComposerMenuGroup[]>(
-		() =>
-			botProduct
-				? []
-				: directoryMentionGroups
-						.filter((group) => group.kind !== "user")
-						.map((group) => ({
-							id: `directory:${group.kind}`,
-							label: group.label,
-							items: group.items.map((item) => ({
-								id: `${item.kind}:${item.id}`,
-								label: item.label,
-								description: item.description,
-								badge:
-									item.kind === "app"
-										? "App"
-										: item.kind === "app-item"
-											? "App item"
-											: item.kind === "plugin"
-												? "Plugin"
-												: item.kind === "integration"
-													? "Integration"
-													: item.kind === "page"
-														? "Page"
-														: item.kind === "output-style"
-															? "Profile"
-															: undefined,
-								icon:
-									item.visualIcon ??
-									(item.icon
-										? createElement(item.icon, { className: "size-4" })
-										: undefined),
-							})),
-						})),
-		[botProduct, directoryMentionGroups]
-	);
-	const composerMentionItems = useMemo(
-		() =>
-			botProduct
-				? []
-				: directoryMentionGroups
-						.flatMap((group) => group.items)
-						.map((item) => ({
-							accentColor: item.accentColor,
-							icon: item.icon
-								? createElement(item.icon, { className: "size-3.5" })
-								: undefined,
-							kind: item.kind,
-							label: item.label,
-							visualIcon: item.visualIcon,
-						})),
-		[botProduct, directoryMentionGroups]
-	);
-
-	const handleChange = useCallback(
-		(next: string) => {
-			onChange?.(next);
-			setDismissedSlashValue(null);
-			onTyping?.();
-			if (next.length > 0) {
-				markPermissionActivity();
-			} else {
-				markPermissionIdle();
-			}
-			const query = parseMentionQuery(next);
-			setMentionQuery(query);
-			if (query === null) {
-				onTargetAgentChange(null);
-				onTeamChange(null);
-				onWorkflowChange(null);
-			}
-		},
-		[
-			markPermissionActivity,
-			markPermissionIdle,
-			onChange,
-			onTyping,
-			onTargetAgentChange,
-			onTeamChange,
-			onWorkflowChange,
-		]
-	);
-
-	const handleSelectSlash = useCallback(
-		(command: SlashCommand) => {
-			// An imported user command (Codex prompt) expands straight into its
-			// template body — the "prompt fills the box, then send" convention
-			// Cursor/Codex use. Everything else inserts "/name " and leaves the
-			// cursor for the argument.
-			if (command.body) {
-				onChange?.(command.body);
-			} else {
-				onChange?.(`/${command.name} `);
-			}
-		},
-		[onChange]
-	);
-	const handleSelectSlashArgument = useCallback(
-		(selection: SlashCommandOptionSelection) => {
-			if (slashMenu?.kind !== "arguments") {
-				return;
-			}
-			const hasNextArgument =
-				slashMenu.argumentIndex < slashMenu.command.args.length - 1;
-			const nextValue = applySlashCommandOption(
-				value ?? "",
-				selection.option.value,
-				hasNextArgument
-			);
-			onChange?.(nextValue);
-			if (!hasNextArgument) {
-				setDismissedSlashValue(nextValue);
-			}
-		},
-		[onChange, slashMenu, value]
-	);
-
-	const handleSelect = useCallback(
-		(item: MentionItem) => {
-			if (botProduct) {
-				return;
-			}
-			onChange?.(applyMention(value ?? "", item));
-			if (item.kind === "chat") {
-				referencedChatIdsRef.current.add(item.id);
-			}
-			if (item.kind === "user") {
-				selectedHumanMentionsRef.current.push({
-					id: item.id,
-					label: item.label,
-				});
-			}
-			setMentionQuery(null);
-			// Agents/teams/workflows set the target directly from the picked id;
-			// spaces/skills/mcp/folders are plain reference tokens and plugins
-			// rewrite the composer — none of those set a target.
-			if (item.kind === "workflow") {
-				onWorkflowChange(item.id);
-				onTeamChange(null);
-				onTargetAgentChange(null);
-			} else if (item.kind === "team") {
-				onTeamChange(item.id);
-				onTargetAgentChange(null);
-				onWorkflowChange(null);
-			} else if (item.kind === "agent") {
-				onTargetAgentChange(item.id);
-				onTeamChange(null);
-				onWorkflowChange(null);
-			}
-		},
-		[
-			value,
-			onChange,
-			onTargetAgentChange,
-			onTeamChange,
-			onWorkflowChange,
-			botProduct,
-		]
-	);
-	const handleDirectorySelect = useCallback(
-		(item: ComposerMenuItem) => {
-			if (botProduct) {
-				return;
-			}
-			const mention = directoryMentionGroups
-				.flatMap((group) => group.items)
-				.find((candidate) => `${candidate.kind}:${candidate.id}` === item.id);
-			if (!mention) {
-				return;
-			}
-			if (mention.kind === "workflow") {
-				onWorkflowChange(mention.id);
-				onTeamChange(null);
-				onTargetAgentChange(null);
-			} else if (mention.kind === "team") {
-				onTeamChange(mention.id);
-				onTargetAgentChange(null);
-				onWorkflowChange(null);
-			} else if (mention.kind === "agent") {
-				onTargetAgentChange(mention.id);
-				onTeamChange(null);
-				onWorkflowChange(null);
-			}
-		},
-		[
-			directoryMentionGroups,
-			botProduct,
-			onWorkflowChange,
-			onTeamChange,
-			onTargetAgentChange,
-		]
-	);
-
-	const handleSend = useCallback(
-		(msg: { role: "user"; content: string }) => {
-			if (botProduct) {
-				setMentionQuery(null);
-				setDismissedSlashValue(value ?? "");
-				onTargetAgentChange(null);
-				onTeamChange(null);
-				onWorkflowChange(null);
-				onSend(msg);
-				return;
-			}
-			// A workflow mention is the most specific target — the message becomes
-			// the run's input — so it wins over a team mention, which wins over an
-			// agent mention.
-			const workflowId = resolveFirstWorkflowMention(msg.content, allWorkflows);
-			const teamId = resolveFirstTeamMention(msg.content, allTeams);
-			if (workflowId) {
-				onWorkflowChange(workflowId);
-				onTeamChange(null);
-				onTargetAgentChange(null);
-			} else if (teamId) {
-				onTeamChange(teamId);
-				onTargetAgentChange(null);
-				onWorkflowChange(null);
-			} else {
-				onTeamChange(null);
-				onWorkflowChange(null);
-				onTargetAgentChange(resolveFirstMention(msg.content, allAgents));
-			}
-			setMentionQuery(null);
-			setDismissedSlashValue(value ?? "");
-			const referencedConversationIds = resolveReferencedChatIds(
-				msg.content,
-				mentionSources.chats,
-				referencedChatIdsRef.current
-			);
-			const humanMentions = selectHumanNotificationTargets({
-				content: msg.content,
-				currentUserId,
-				selected: selectedHumanMentionsRef.current,
-			});
-			referencedChatIdsRef.current.clear();
-			selectedHumanMentionsRef.current = [];
-			onReferencedChats(referencedConversationIds);
-			onSend(msg);
-			onHumanMentions(humanMentions, msg.content);
-		},
-		[
-			onSend,
-			allAgents,
-			allTeams,
-			allWorkflows,
-			mentionSources.chats,
-			currentUserId,
-			onHumanMentions,
-			onTargetAgentChange,
-			onTeamChange,
-			onWorkflowChange,
-			onReferencedChats,
-			botProduct,
-		]
-	);
-
-	return (
-		<div
-			className="relative"
-			onDragOver={(event) => {
-				if (event.dataTransfer.types.includes(CHAT_REFERENCE_DRAG_MIME)) {
-					event.preventDefault();
-					event.stopPropagation();
-					event.dataTransfer.dropEffect = "copy";
-				}
-			}}
-			onDrop={(event) => {
-				const chat = readDraggedChatReference(event.dataTransfer);
-				if (!chat) {
-					return;
-				}
-				event.preventDefault();
-				event.stopPropagation();
-				insertChatReference(chat);
-			}}
-			ref={textareaWrapRef}
-		>
-			{chatWidgetTemplates.length > 0 && (
-				<div className="mx-auto mb-2 flex w-full max-w-[880px] flex-wrap items-center gap-1.5 px-3">
-					<span className="text-[11px] text-muted-foreground">
-						Available widgets
-					</span>
-					{chatWidgetTemplates.map((template) => {
-						const prompt = template.examples[0] ?? template.triggers[0];
-						if (!prompt) {
-							return null;
-						}
-						return (
-							<button
-								className="rounded-full border border-border/70 bg-background px-2.5 py-1 text-muted-foreground text-xs transition-colors hover:bg-muted hover:text-foreground"
-								key={`${template.plugin ?? "widget"}:${template.id}`}
-								onClick={() => onChange?.(prompt)}
-								type="button"
-							>
-								{template.title}
-							</button>
-						);
-					})}
-				</div>
-			)}
-			{!botProduct && mentionQuery !== null && (
-				<MentionMenu
-					anchorRef={textareaWrapRef}
-					groups={mentionGroups}
-					onDismiss={() => setMentionQuery(null)}
-					onSelect={handleSelect}
-				/>
-			)}
-			{slashMenu?.kind === "commands" && (
-				<SlashCommandAutocomplete
-					anchorRef={textareaWrapRef}
-					commands={availableCommands}
-					menu={slashMenu}
-					mode="commands"
-					onDismiss={() => setDismissedSlashValue(value ?? "")}
-					onSelect={handleSelectSlash}
-				/>
-			)}
-			{slashMenu?.kind === "arguments" && (
-				<SlashCommandAutocomplete
-					anchorRef={textareaWrapRef}
-					menu={slashMenu}
-					mode="arguments"
-					onDismiss={() => setDismissedSlashValue(value ?? "")}
-					onSelectArgument={handleSelectSlashArgument}
-				/>
-			)}
-			<InputBar
-				{...rest}
-				composerMenuGroups={composerMenuGroups}
-				composerPrompt={
-					visiblePermission && onRespondPermission
-						? {
-								content: (
-									<PermissionPrompt
-										embedded
-										onRespond={(optionId) =>
-											onRespondPermission(visiblePermission, optionId)
-										}
-										permission={visiblePermission}
-										showTechnicalDetails={showTechnicalPermissionDetails}
-									/>
-								),
-								id: `permission:${visiblePermission.requestId}`,
-							}
-						: undefined
-				}
-				mentionItems={composerMentionItems}
-				onChange={handleChange}
-				onComposerMenuSelect={handleDirectorySelect}
-				onSend={handleSend}
-				onTextareaKeyDown={(event) => {
-					if (
-						handleComposerSettingsShortcut(
-							event,
-							composerSections,
-							composerShortcuts
-						)
-					) {
-						event.preventDefault();
-					}
-					onTextareaKeyDown?.(event);
-				}}
-				value={value}
-			/>
-		</div>
-	);
 }
 
 // biome-ignore lint/complexity/noExcessiveCognitiveComplexity: legacy component
@@ -6408,12 +5743,10 @@ export default function ChatPage({
 				: processedMessages,
 		[merged.messages, processedMessages]
 	);
-	const chatSearchMatches = useMemo(
-		() =>
-			chatSearch.mode === "chat"
-				? searchChatMessages(renderedMessages, chatSearch.query)
-				: [],
-		[chatSearch.mode, chatSearch.query, renderedMessages]
+	const chatSearchMatches = useChatSearch(
+		renderedMessages,
+		chatSearch.query,
+		chatSearch.mode === "chat" && chatSearch.open
 	);
 	const activeChatSearchMatch =
 		chatSearchMatches[activeChatSearchMatchIndex] ?? null;

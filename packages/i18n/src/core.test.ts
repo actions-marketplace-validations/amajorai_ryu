@@ -13,8 +13,77 @@ import {
 	parseLanguagePackJson,
 	validateLanguagePack,
 } from "./core.ts";
+import { BUILT_IN_LANGUAGE_PACKS, EN_MESSAGES } from "./messages.ts";
 
 describe("language-pack contract", () => {
+	test("ships complete starter catalogs for common locales", () => {
+		const official = BUILT_IN_LANGUAGE_PACKS.filter((pack) =>
+			pack.id.startsWith("official/")
+		);
+		expect(official.map((pack) => pack.locale)).toEqual([
+			"es",
+			"fr",
+			"de",
+			"pt-BR",
+			"ja",
+			"zh-CN",
+			"it",
+			"ko",
+			"hi",
+			"ru",
+			"ar",
+		]);
+		for (const pack of official) {
+			expect(Object.keys(pack.messages).sort()).toEqual(
+				Object.keys(EN_MESSAGES).sort()
+			);
+			expect(validateLanguagePack(pack)).toMatchObject({
+				baseLocale: "en",
+				direction: pack.locale === "ar" ? "rtl" : "ltr",
+				locale: pack.locale,
+			});
+		}
+	});
+
+	test("auto-selects the closest starter locale without changing English defaults", () => {
+		const spanish = new I18nRuntime([], {
+			initialLocale: "es-MX",
+			initialPackId: null,
+		});
+		expect(spanish.selectedPackId).toBe("official/es");
+		expect(spanish.locale).toBe("es");
+		expect(spanish.translate("chat.new")).toBe("Nuevo chat");
+
+		const portuguese = new I18nRuntime([], {
+			initialLocale: "pt-PT",
+			initialPackId: null,
+		});
+		expect(portuguese.selectedPackId).toBe("official/pt-br");
+		expect(portuguese.translate("common.cancel")).toBe("Cancelar");
+
+		const traditionalChinese = new I18nRuntime([], {
+			initialLocale: "zh-Hant-TW",
+			initialPackId: null,
+		});
+		expect(traditionalChinese.selectedPackId).toBeNull();
+		expect(traditionalChinese.locale).toBe("zh-Hant-TW");
+
+		const arabic = new I18nRuntime([], {
+			initialLocale: "ar-SA",
+			initialPackId: null,
+		});
+		expect(arabic.selectedPackId).toBe("official/ar");
+		expect(arabic.direction).toBe("rtl");
+		expect(arabic.translate("common.cancel")).toBe("إلغاء");
+
+		const english = new I18nRuntime([], {
+			initialLocale: "en-US",
+			initialPackId: null,
+		});
+		expect(english.selectedPackId).toBeNull();
+		expect(english.translate("common.install")).toBe("Install");
+	});
+
 	test("keeps legacy literal ids deterministic and reuses catalog ids", () => {
 		const first = messageIdForLiteral("Search");
 		expect(first).toBe("common.search");

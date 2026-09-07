@@ -1,6 +1,7 @@
 "use client";
 
 import { Popover as PopoverPrimitive } from "@base-ui/react/popover";
+import { useDirection } from "@ryu/ui/components/direction.tsx";
 import { cn } from "@ryu/ui/lib/utils.ts";
 import {
 	type ComponentProps,
@@ -123,6 +124,7 @@ function PopoverContent({
 		"align" | "alignOffset" | "side" | "sideOffset"
 	>) {
 	const ctx = useContext(PopoverAnchorContext);
+	const direction = useDirection();
 	const handleKeyDown = onEscapeKeyDown
 		? (event: PopupKeyDownEvent) => {
 				onEscapeKeyDown(event);
@@ -145,7 +147,7 @@ function PopoverContent({
 			>
 				<PopoverPrimitive.Popup
 					className={cn(
-						"data-[side=bottom]:slide-in-from-top-2 data-[side=inline-end]:slide-in-from-left-2 data-[side=inline-start]:slide-in-from-right-2 data-[side=left]:slide-in-from-right-2 data-[side=right]:slide-in-from-left-2 data-[side=top]:slide-in-from-bottom-2 data-open:fade-in-0 data-open:zoom-in-95 data-closed:fade-out-0 data-closed:zoom-out-95 z-50 flex w-72 origin-(--transform-origin) flex-col gap-4 rounded-3xl bg-popover p-4 text-popover-foreground text-sm shadow-lg outline-hidden duration-100 data-closed:animate-out data-open:animate-in",
+						"data-[side=bottom]:slide-in-from-top-2 data-[side=inline-end]:slide-in-from-start-2 data-[side=inline-start]:slide-in-from-end-2 data-[side=left]:slide-in-from-right-2 data-[side=right]:slide-in-from-left-2 data-[side=top]:slide-in-from-bottom-2 data-open:fade-in-0 data-open:zoom-in-95 data-closed:fade-out-0 data-closed:zoom-out-95 z-50 flex w-72 origin-(--transform-origin) flex-col gap-4 rounded-3xl bg-popover p-4 text-popover-foreground text-sm shadow-lg outline-hidden duration-100 data-closed:animate-out data-open:animate-in",
 						className
 					)}
 					data-slot="popover-content"
@@ -153,6 +155,7 @@ function PopoverContent({
 					initialFocus={initialFocus ?? toFocusTarget(onOpenAutoFocus)}
 					onKeyDown={handleKeyDown}
 					{...props}
+					dir={direction}
 				/>
 			</PopoverPrimitive.Positioner>
 		</PopoverPrimitive.Portal>

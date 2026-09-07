@@ -449,7 +449,7 @@ function AgentDetailPanel({
 						onUninstall={onUninstall}
 					/>
 					{error && (
-						<span className="ml-auto flex items-center gap-1.5 text-destructive text-sm">
+						<span className="ml-auto flex items-center gap-1.5 text-sm text-status-destructive">
 							<HugeiconsIcon className="size-4 shrink-0" icon={Alert01Icon} />
 							{error}
 						</span>

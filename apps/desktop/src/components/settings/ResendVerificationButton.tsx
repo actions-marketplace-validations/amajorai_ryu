@@ -54,7 +54,7 @@ export function ResendVerificationButton({
 
 	return (
 		<Button
-			className="h-7 shrink-0 px-2 text-warning text-xs hover:text-warning dark:text-warning"
+			className="h-7 shrink-0 px-2 text-status-warning text-xs hover:text-status-warning dark:text-status-warning"
 			disabled={cooldown > 0}
 			loading={loading}
 			onClick={handleResend}

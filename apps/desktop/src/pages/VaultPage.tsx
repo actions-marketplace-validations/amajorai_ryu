@@ -380,7 +380,7 @@ export default function VaultPage() {
 							</Button>
 						</div>
 						{saveMutation.error ? (
-							<p className="text-destructive text-sm sm:col-span-2">
+							<p className="text-sm text-status-destructive sm:col-span-2">
 								{saveMutation.error instanceof Error
 									? saveMutation.error.message
 									: "Could not save secret."}
@@ -401,7 +401,7 @@ export default function VaultPage() {
 				>
 					<SettingsCard className="divide-y">
 						{vaultQuery.error ? (
-							<p className="p-4 text-destructive text-sm">
+							<p className="p-4 text-sm text-status-destructive">
 								{vaultQuery.error instanceof Error
 									? vaultQuery.error.message
 									: "Could not load vault secrets."}

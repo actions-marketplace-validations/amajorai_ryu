@@ -1926,19 +1926,24 @@ impl ConversationStore {
     /// Find an already-imported conversation by its import origin + agent-native
     /// session id, so a repeat import focuses the existing thread instead of
     /// creating a duplicate. Returns `None` when nothing matches (or the source
-    /// thread carried no native session id to key on).
+    /// thread carried no native session id to key on). Candidate rows are limited
+    /// to the same owner and organization pair as the requested tenancy, so a
+    /// human or sync service cannot reuse another scope.
     pub async fn find_imported_conversation(
         &self,
         origin: &str,
         native_session_id: &str,
+        tenancy: &Tenancy,
     ) -> Result<Option<String>> {
+        let (owner_user_id, org_id) = tenancy.parts();
         let conn = self.conn.lock().await;
         let id = conn
             .query_row(
                 "SELECT id FROM conversations
                  WHERE origin = ?1 AND native_session_id = ?2
+                   AND owner_user_id IS ?3 AND org_id IS ?4
                  ORDER BY updated_at DESC LIMIT 1",
-                params![origin, native_session_id],
+                params![origin, native_session_id, owner_user_id, org_id],
                 |row| row.get::<_, String>(0),
             )
             .optional()
@@ -6383,6 +6388,143 @@ mod tests {
         assert_eq!(meta.owner_user_id, None);
         assert_eq!(meta.org_id.as_deref(), Some("org-1"));
         assert_eq!(meta.visibility, "org");
+    }
+
+    #[tokio::test]
+    async fn imported_conversation_dedup_is_scoped_to_creation_tenancy() {
+        let store = ConversationStore::open_in_memory().unwrap();
+        let origin = "import:claude";
+        let native_id = "native-session-1";
+
+        store
+            .ensure_conversation(
+                "alice-import",
+                Some("agent-claude"),
+                Some("Alice"),
+                Tenancy::Owned {
+                    user_id: "alice".to_owned(),
+                    org_id: Some("org1".to_owned()),
+                },
+            )
+            .await
+            .unwrap();
+        store
+            .set_import_source("alice-import", origin, Some(native_id))
+            .await
+            .unwrap();
+
+        store
+            .ensure_conversation(
+                "shared-import",
+                Some("agent-claude"),
+                Some("Shared"),
+                Tenancy::SharedOrg {
+                    org_id: "org1".to_owned(),
+                },
+            )
+            .await
+            .unwrap();
+        store
+            .set_import_source("shared-import", origin, Some(native_id))
+            .await
+            .unwrap();
+
+        let alice = Tenancy::Owned {
+            user_id: "alice".to_owned(),
+            org_id: Some("org1".to_owned()),
+        };
+        let bob = Tenancy::Owned {
+            user_id: "bob".to_owned(),
+            org_id: Some("org1".to_owned()),
+        };
+        let shared = Tenancy::SharedOrg {
+            org_id: "org1".to_owned(),
+        };
+
+        assert_eq!(
+            store
+                .find_imported_conversation(origin, native_id, &alice)
+                .await
+                .unwrap(),
+            Some("alice-import".to_owned())
+        );
+        assert_eq!(
+            store
+                .find_imported_conversation(origin, native_id, &bob)
+                .await
+                .unwrap(),
+            None,
+            "Bob must never deduplicate into Alice's private import"
+        );
+        assert_eq!(
+            store
+                .find_imported_conversation(origin, native_id, &shared)
+                .await
+                .unwrap(),
+            Some("shared-import".to_owned())
+        );
+        assert_eq!(
+            store
+                .find_imported_conversation(origin, native_id, &Tenancy::Unattributed)
+                .await
+                .unwrap(),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn private_import_access_is_checked_before_reuse() {
+        let store = ConversationStore::open_in_memory().unwrap();
+        store
+            .ensure_conversation(
+                "alice-private-import",
+                Some("agent-claude"),
+                Some("Alice"),
+                Tenancy::Owned {
+                    user_id: "alice".to_owned(),
+                    org_id: Some("org1".to_owned()),
+                },
+            )
+            .await
+            .unwrap();
+        store
+            .set_import_source(
+                "alice-private-import",
+                "import:claude",
+                Some("native-session-2"),
+            )
+            .await
+            .unwrap();
+
+        let bob = crate::identity_verify::VerifiedCaller {
+            user_id: "bob".to_owned(),
+            email: None,
+            org_id: Some("org1".to_owned()),
+            role: crate::identity_verify::OrgRole::Member,
+            teams: Vec::new(),
+        };
+        let bob_tenancy = Tenancy::Owned {
+            user_id: bob.user_id.clone(),
+            org_id: bob.org_id.clone(),
+        };
+
+        assert_eq!(
+            store
+                .find_imported_conversation("import:claude", "native-session-2", &bob_tenancy)
+                .await
+                .unwrap(),
+            None,
+            "a different caller cannot reuse the private import key"
+        );
+        assert!(
+            crate::server::require_resource_write(
+                store.get_access_meta("alice-private-import").await,
+                Some(&bob),
+                "conversation not found",
+            )
+            .is_err(),
+            "the canonical conversation gate must deny Bob before message access"
+        );
     }
 
     #[tokio::test]

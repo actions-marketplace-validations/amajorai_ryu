@@ -230,7 +230,7 @@ function PageToolForm({
 				{tool.description}
 			</p>
 			{isWrite ? (
-				<p className="mb-3 rounded-xl bg-amber-500/10 px-2.5 py-2 text-[10px] text-amber-700 leading-relaxed dark:text-amber-300">
+				<p className="mb-3 rounded-xl bg-warning/10 px-2.5 py-2 text-[10px] text-status-warning leading-relaxed">
 					This action can change state or start a payment. Review the arguments
 					and confirm before it runs.
 				</p>
@@ -340,7 +340,7 @@ function PageToolForm({
 				})}
 			</div>
 			{error ? (
-				<p className="mt-3 text-destructive text-xs" role="alert">
+				<p className="mt-3 text-status-destructive text-xs" role="alert">
 					{error}
 				</p>
 			) : null}

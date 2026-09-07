@@ -50,7 +50,7 @@ function StateGlyph({
 		return <Minus className="size-3.5 text-muted-foreground/50" />;
 	}
 	if (running) {
-		return <Circle className="size-3 fill-green-500 text-green-500" />;
+		return <Circle className="size-3 fill-success text-status-success" />;
 	}
 	return <Circle className="size-3 text-muted-foreground" />;
 }
@@ -96,7 +96,7 @@ export function SidecarRow({
 						{entry.displayName}
 					</span>
 					{entry.deprecated ? (
-						<span className="flex items-center gap-1 font-medium text-amber-500 text-xs">
+						<span className="flex items-center gap-1 font-medium text-status-warning text-xs">
 							<AlertTriangle className="size-3" />
 							Deprecated
 						</span>
@@ -114,7 +114,7 @@ export function SidecarRow({
 					<span className="text-muted-foreground text-xs">Installing…</span>
 				) : isFailed ? (
 					<Button
-						className="h-7 px-2 text-amber-500 hover:text-amber-600"
+						className="h-7 px-2 text-status-warning hover:text-status-warning"
 						disabled={busy}
 						onClick={() => onAction?.("install")}
 						size="sm"
@@ -128,7 +128,7 @@ export function SidecarRow({
 						<>
 							{hasUpdate ? (
 								<Button
-									className="h-7 px-2 text-blue-500 hover:text-blue-600"
+									className="h-7 px-2 text-status-info hover:text-status-info"
 									disabled={busy}
 									onClick={() => onAction?.("install")}
 									size="sm"

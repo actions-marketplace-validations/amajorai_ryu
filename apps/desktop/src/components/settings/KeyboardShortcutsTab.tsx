@@ -188,7 +188,7 @@ function InAppRow({
 				<span className="flex flex-col gap-0.5">
 					<span>{action.label}</span>
 					{conflictLabels.length > 0 ? (
-						<span className="text-destructive text-xs">
+						<span className="text-status-destructive text-xs">
 							Also bound to {conflictLabels.join(", ")}
 						</span>
 					) : null}

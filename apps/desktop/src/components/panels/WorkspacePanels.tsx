@@ -1929,7 +1929,7 @@ export function PatchDiffPanel({
 	} else if (diffError) {
 		body = (
 			<div
-				className="flex h-full items-center justify-center p-4 text-center text-destructive text-xs"
+				className="flex h-full items-center justify-center p-4 text-center text-status-destructive text-xs"
 				role="alert"
 			>
 				{diffError}
@@ -2742,7 +2742,7 @@ function BrowserSidecarPanel({
 				</ul>
 				<div className="relative flex min-w-0 flex-1">
 					{error && (
-						<div className="pointer-events-none absolute top-2 right-2 left-2 z-10 rounded-md border border-destructive/30 bg-background/95 px-2 py-1 text-center text-destructive text-xs shadow-sm">
+						<div className="pointer-events-none absolute top-2 right-2 left-2 z-10 rounded-md border border-destructive/30 bg-background/95 px-2 py-1 text-center text-status-destructive text-xs shadow-sm">
 							{error}
 						</div>
 					)}
@@ -3125,7 +3125,7 @@ function SimDeviceList({
 										className={cn(
 											"size-1.5 shrink-0 rounded-full",
 											d.state === "booted"
-												? "bg-emerald-500"
+												? "bg-success"
 												: "bg-muted-foreground/40"
 										)}
 									/>
@@ -3295,7 +3295,7 @@ function SimpleTerminal({
 					if (line.type === "prompt") {
 						lineClassName = "text-primary";
 					} else if (line.type === "error") {
-						lineClassName = "text-destructive";
+						lineClassName = "text-status-destructive";
 					}
 					return (
 						// biome-ignore lint/suspicious/noArrayIndexKey: stable sequential terminal lines

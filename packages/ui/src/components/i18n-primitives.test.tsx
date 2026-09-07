@@ -3,6 +3,7 @@ import { I18nProvider, I18nText } from "@ryu/i18n/react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { AlertDismiss } from "./alert.tsx";
 import { Badge } from "./badge.tsx";
+import { I18nDirectionProvider, useDirection } from "./direction.tsx";
 import { Input } from "./input.tsx";
 import { Textarea } from "./textarea.tsx";
 
@@ -19,6 +20,24 @@ const PACK = {
 	schemaVersion: 1 as const,
 	version: "1.0.0",
 };
+
+const RTL_PACK = {
+	baseLocale: "ar",
+	direction: "rtl" as const,
+	id: "community/rtl-controls",
+	locale: "ar",
+	messages: {
+		"common.dismiss": "إغلاق",
+		"common.search": "بحث",
+	},
+	name: "RTL controls",
+	schemaVersion: 1 as const,
+	version: "1.0.0",
+};
+
+function DirectionProbe() {
+	return <span data-direction={useDirection()} />;
+}
 
 describe("shared i18n controls", () => {
 	test("localizes legacy input attributes and dismiss affordances", () => {
@@ -52,5 +71,17 @@ describe("shared i18n controls", () => {
 
 		expect(html).toContain(">Search</span>");
 		expect(html).toContain("Find");
+	});
+
+	test("bridges the active language pack direction into Base UI", () => {
+		const html = renderToStaticMarkup(
+			<I18nProvider initialPackId={RTL_PACK.id} packs={[RTL_PACK]}>
+				<I18nDirectionProvider>
+					<DirectionProbe />
+				</I18nDirectionProvider>
+			</I18nProvider>
+		);
+
+		expect(html).toContain('data-direction="rtl"');
 	});
 });

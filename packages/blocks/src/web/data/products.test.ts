@@ -1,8 +1,7 @@
 import { expect, test } from "bun:test";
-import {
-	getProductLandingStyle,
-	PRODUCT_LANDING_STYLES,
-} from "../product-landing-layouts.tsx";
+import { createElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
+import ProductLandingPage from "../product-landing-page.tsx";
 import { getProduct, products } from "./products.tsx";
 
 test("the standalone product set includes the direct service APIs", () => {
@@ -25,15 +24,14 @@ test("the standalone product set includes the direct service APIs", () => {
 	});
 });
 
-test("every public product has a distinct landing composition", () => {
-	expect(
-		products.every((product) => product.slug in PRODUCT_LANDING_STYLES)
-	).toBe(true);
-
-	const compositions = products.map((product) => {
-		const style = getProductLandingStyle(product.slug);
-		return `${style.hero}/${style.bento}`;
-	});
-
-	expect(new Set(compositions).size).toBe(products.length);
+test("every public product renders its content through the shared page", () => {
+	for (const product of products) {
+		const html = renderToStaticMarkup(
+			createElement(ProductLandingPage, { product })
+		);
+		expect(html.match(/<h1[\s>]/g)).toHaveLength(1);
+		expect(html).toContain(product.hero.title);
+		expect(html).toContain(`data-testid="product-page-${product.slug}"`);
+		expect(html).toContain(`Try ${product.name}`);
+	}
 });

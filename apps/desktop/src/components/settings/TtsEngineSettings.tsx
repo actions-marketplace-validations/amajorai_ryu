@@ -389,7 +389,7 @@ export function TtsEngineSettings() {
 
 			{loadFailed && (
 				<div className="flex items-center gap-2 px-3 pt-2">
-					<p className="text-destructive text-xs">
+					<p className="text-status-destructive text-xs">
 						Couldn’t load the voice engines. Check your connection and try
 						again.
 					</p>
@@ -403,7 +403,7 @@ export function TtsEngineSettings() {
 				</div>
 			)}
 			{testFailed && (
-				<p className="px-3 pt-2 text-destructive text-xs">
+				<p className="px-3 pt-2 text-status-destructive text-xs">
 					Couldn’t play the test audio. Make sure the engine is installed and
 					running, then try again.
 				</p>
