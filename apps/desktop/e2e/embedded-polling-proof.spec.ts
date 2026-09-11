@@ -818,3 +818,120 @@ test("production Video Studio bounds preview blobs to the current project and ab
 		animations: "disabled",
 	});
 });
+
+test("shared display clocks stop while hidden, catch up on return, and preserve active playback clocks", async ({
+	page,
+}) => {
+	await page.clock.install({ time: new Date("2026-09-12T00:00:00Z") });
+	await page.goto("/embedded-polling-proof.html");
+	const frame = page.frameLocator('iframe[title="Companion workspace"]');
+	const passive = frame.getByTestId("passive-clock");
+	const playback = frame.getByTestId("playback-clock");
+	await expect(passive).toHaveText(/\d+/);
+	const first = await passive.textContent();
+	await page.clock.fastForward(2000);
+	await expect(passive).not.toHaveText(first!);
+	await page.getByRole("button", { name: "Another tab", exact: true }).click();
+	await page.waitForTimeout(150);
+	const hidden = await passive.textContent();
+	await page.clock.fastForward(9000);
+	await expect(passive).toHaveText(hidden!);
+	await expect(playback).not.toHaveText(hidden!);
+	await page.getByRole("button", { name: "Companion", exact: true }).click();
+	await expect(passive).not.toHaveText(hidden!);
+	await frame.getByRole("button", { name: "Close panels" }).press("Enter");
+	await page.clock.fastForward(3000);
+	await expect(passive).toHaveCount(0);
+});
+
+test("production Research retains slow campaign reads and scopes details to the selection", async ({
+	page,
+}) => {
+	const errors: string[] = [];
+	page.on("pageerror", (error) => errors.push(error.message));
+	const html = await readFile(
+		"/tmp/ryu-research-performance-build/index.html",
+		"utf8"
+	);
+	const bridge = `<script>let lists=0,onlyB=false;addEventListener("message",e=>{if(e.data==="select-campaign-b")onlyB=true});const detailReads={};const campaigns=[{id:"a",name:"Campaign A",status:"running",started_at:"2026-09-12T00:00:00Z",baseline_score:0.6,best_score:0.8,attempt_count:2},{id:"b",name:"Campaign B",status:"running",started_at:"2026-09-12T00:00:00Z",baseline_score:0.7,best_score:0.9,attempt_count:1}];const waitFor=message=>new Promise(resolve=>{const done=e=>{if(e.data!==message)return;removeEventListener("message",done);resolve()};addEventListener("message",done)});window.ryu={app:{request:async({path})=>{if(path==="/campaigns"){document.body.dataset.campaignReads=String(++lists);if(lists===1)await waitFor("release-campaigns");return {campaigns:onlyB?campaigns.filter(campaign=>campaign.id==="b"):campaigns}}const id=path.split("/").at(-1);detailReads[id]=(detailReads[id]||0)+1;document.body.dataset.detailReads=JSON.stringify(detailReads);if(id==="a"&&detailReads[id]===1)await waitFor("release-detail-a");return {campaign:{...campaigns.find(campaign=>campaign.id===id),goal:"Goal "+id.toUpperCase(),attempts:[],reasoning:[]}}}}};</script>`;
+	await page.route("**/embedded-polling-child.html", (route) =>
+		route.fulfill({
+			contentType: "text/html",
+			body: html.replace("<head>", `<head>${bridge}`),
+		})
+	);
+	await page.clock.install({ time: new Date("2026-09-12T00:00:00Z") });
+	await page.goto("/embedded-polling-proof.html");
+	const frame = page.frameLocator('iframe[title="Companion workspace"]');
+	await expect(frame.locator("body")).toHaveAttribute(
+		"data-campaign-reads",
+		"1"
+	);
+	await page.clock.fastForward(16_000);
+	await expect(frame.locator("body")).toHaveAttribute(
+		"data-campaign-reads",
+		"1"
+	);
+	await page
+		.locator("iframe")
+		.evaluate((element: HTMLIFrameElement) =>
+			element.contentWindow?.postMessage("release-campaigns", "*")
+		);
+	await expect(frame.locator("body")).toHaveAttribute(
+		"data-detail-reads",
+		JSON.stringify({ a: 1 })
+	);
+	await page.clock.fastForward(11_000);
+	await expect(frame.locator("body")).toHaveAttribute(
+		"data-detail-reads",
+		JSON.stringify({ a: 1 })
+	);
+	await page
+		.locator("iframe")
+		.evaluate((element: HTMLIFrameElement) =>
+			element.contentWindow?.postMessage("select-campaign-b", "*")
+		);
+	await page.clock.fastForward(5000);
+	await expect(frame.getByText("Goal B", { exact: true })).toBeVisible();
+	await page
+		.locator("iframe")
+		.evaluate((element: HTMLIFrameElement) =>
+			element.contentWindow?.postMessage("release-detail-a", "*")
+		);
+	await page.clock.fastForward(1);
+	await expect(frame.getByText("Goal A", { exact: true })).toHaveCount(0);
+	await page.getByRole("button", { name: "Another tab", exact: true }).click();
+	await page.waitForTimeout(150);
+	const lists = await frame.locator("body").getAttribute("data-campaign-reads");
+	const details = await frame.locator("body").getAttribute("data-detail-reads");
+	await page.clock.fastForward(20_000);
+	await expect(frame.locator("body")).toHaveAttribute(
+		"data-campaign-reads",
+		lists!
+	);
+	await expect(frame.locator("body")).toHaveAttribute(
+		"data-detail-reads",
+		details!
+	);
+	await page.getByRole("button", { name: "Companion", exact: true }).click();
+	await expect
+		.poll(async () =>
+			Number(await frame.locator("body").getAttribute("data-campaign-reads"))
+		)
+		.toBeGreaterThan(Number(lists));
+	await frame
+		.getByRole("button", { name: "Refresh experiments", exact: true })
+		.press("Enter");
+	await expect
+		.poll(async () =>
+			Number(await frame.locator("body").getAttribute("data-campaign-reads"))
+		)
+		.toBeGreaterThan(Number(lists) + 1);
+	await expect(frame.getByText("Goal B", { exact: true })).toBeVisible();
+	expect(errors).toEqual([]);
+	await page.screenshot({
+		path: path.join(proofDir, "research-completed.png"),
+		fullPage: true,
+		animations: "disabled",
+	});
+});

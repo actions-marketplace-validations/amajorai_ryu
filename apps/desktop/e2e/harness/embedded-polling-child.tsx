@@ -1,4 +1,5 @@
 import { Button } from "@ryu/ui/components/button.tsx";
+import { useViewClock } from "@ryu/ui/hooks/use-view-clock.ts";
 import { isViewVisible } from "@ryu/ui/lib/view-visibility.ts";
 import { useState } from "react";
 import { createRoot } from "react-dom/client";
@@ -40,6 +41,16 @@ Object.assign(window, {
 		catalog: { snapshot: () => result(null) },
 	},
 });
+function Clocks() {
+	const passive = useViewClock();
+	const playback = useViewClock(1000, true);
+	return (
+		<div hidden>
+			<output data-testid="passive-clock">{passive}</output>
+			<output data-testid="playback-clock">{playback}</output>
+		</div>
+	);
+}
 function App() {
 	const [mounted, setMounted] = useState(true);
 	return (
@@ -49,7 +60,12 @@ function App() {
 					{mounted ? "Close panels" : "Open panels"}
 				</Button>
 			</div>
-			{mounted && <Warmup />}
+			{mounted && (
+				<>
+					<Clocks />
+					<Warmup />
+				</>
+			)}
 		</main>
 	);
 }

@@ -265,6 +265,7 @@ fn default_grant_allowlist() -> Vec<String> {
         // `mcp:web_search`/`mcp:file_read` are intentionally NOT here.)
         "mcp:spider",
         "mcp:agentbrowser",
+        "mcp:checks",
         // `@ryu/news` and `@ryu/tuition` are apps rather than plugins, but they hit
         // the same rule for the same reason: each declares its OWN server in
         // `mcp_servers` (`news`, `tuition`) and grants itself `mcp:<that server>`.

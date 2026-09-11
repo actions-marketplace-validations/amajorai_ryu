@@ -2149,10 +2149,10 @@ pub async fn run(
         //   c) else a plain completion.
         // The Restrict budget action strips `tools`; we inject the search tool
         // only when tools were NOT stripped (B-12).
-        let tools_restricted = matches!(
+	let tools_restricted = matches!(
             budget.as_ref().map(|b| b.action),
             Some(crate::config::BudgetAction::Restrict)
-        );
+	);
         let completion_result = match loop_kind {
             ToolLoopKind::Unified => {
                 let catalog = state
@@ -2229,6 +2229,12 @@ pub async fn run(
 
         match completion_result {
             Ok((mut response, billable_tool_calls)) => {
+                // Provider generation is complete and the response is fully
+                // buffered. Release the local-engine slot before an output
+                // evaluator makes a judge call through the same provider; a
+                // single-slot local engine must be re-entrant for that
+                // post-generation governance pass.
+                drop(_admission);
                 state.circuit_breaker.record_success(provider.name());
                 // Determine degraded mode: we served via a fallback when the primary
                 // was skipped and a different provider is now responding (#218).
@@ -2685,6 +2691,11 @@ pub async fn run_stream(
         budget.as_ref().map(|b| b.action),
         Some(crate::config::BudgetAction::Restrict)
     );
+	let output_eval_wants_reentrant_slot = {
+		let scanner = state.resolved_scanner(&ctx);
+		let registry = EvaluatorRegistry::from_config(&state.config);
+		output_inline_wants_transform(&scanner, &registry)
+	};
 
     let fallback_chain = clamped_fallback_chain(&state, &ctx, &decision);
     let mut last_err: Option<GatewayError> = None;
@@ -2728,8 +2739,8 @@ pub async fn run_stream(
         // and the slot frees before the fallback attempt. As on the non-stream
         // path, the re-entrant tool-loop case (`tools_active`) is left ungated to
         // avoid a parent holding a slot while a delegated child waits for one.
-        let admission_permit = if tools_active {
-            crate::concurrency::AdmissionPermit::none()
+		let admission_permit = if tools_active || output_eval_wants_reentrant_slot {
+			crate::concurrency::AdmissionPermit::none()
         } else {
             match state.admission.acquire(provider.name(), ctx.priority).await {
                 Ok(permit) => permit,
@@ -5391,7 +5402,72 @@ struct StreamObserverState {
     /// Managed policy-alert tier (item 4) carried to the stream-end debit so the
     /// control plane can email owners. `None` unless a budget cap with tier >=
     /// Warn matched this (streaming) request.
-    budget_alert_tier: Option<AlertTier>,
+	budget_alert_tier: Option<AlertTier>,
+}
+
+impl Drop for StreamObserverState {
+	fn drop(&mut self) {
+		if self.done {
+			return;
+		}
+		self.done = true;
+		let (raw_input, raw_output) = sse_parse_usage(&self.accumulated);
+		let input_tokens = if raw_input > 0 {
+			raw_input
+		} else {
+			self.estimated_input_tokens
+		};
+		let output_tokens = if raw_output > 0 {
+			raw_output
+		} else {
+			(self.accumulated.chars().count() as u64).div_ceil(4)
+		};
+		let latency_ms = self.start.elapsed().as_millis() as u64;
+		let total_tokens = input_tokens.saturating_add(output_tokens);
+		self.state
+			.audit
+			.add_tokens(&self.ctx.api_key, total_tokens);
+		self.state.metrics.add_tokens(input_tokens, output_tokens);
+		self.state.rate_limiter.record_tokens_for_key(
+			&self.ctx.api_key,
+			total_tokens.saturating_sub(self.estimated_input_tokens),
+			self.ctx.key_config.as_ref(),
+		);
+		let error = if self.accumulated.len() >= 8 * 1024 * 1024 {
+			"response stream exceeded the 8 MiB scan limit"
+		} else {
+			"stream disconnected before completion; usage estimated"
+		};
+		self.state.log_audit(AuditRecord {
+			request_id: self.ctx.request_id.clone(),
+			api_key: self.ctx.api_key.clone(),
+			user_name: self.ctx.user_name.clone(),
+			org_id: self.ctx.org_id.clone(),
+			team_id: self.ctx.team_id.clone(),
+			project_id: None,
+			provider: self.provider_name.clone(),
+			model: self.model.clone(),
+			input_tokens,
+			output_tokens,
+			cache_hit: false,
+			latency_ms,
+			eval_score: None,
+			error: Some(error.to_owned()),
+			skill_ids: self.ctx.skill_ids.clone(),
+			session_id: self.ctx.session_id.clone(),
+			user_id: self.ctx.user_id.clone(),
+			agent_id: self.ctx.agent_id.clone(),
+			feature: self.ctx.feature.clone(),
+			managed_inference: self.ctx.managed_inference,
+			provider_cost_micro_usd: None,
+			event_type: crate::audit::EventType::ModelCall,
+			backend: None,
+			command: None,
+			duration_ms: None,
+			exit_code: None,
+			widget_instance_id: None,
+		});
+	}
 }
 
 /// Wrap `body` with a stream observer that fires at stream end to:
