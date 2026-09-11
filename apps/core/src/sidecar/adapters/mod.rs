@@ -618,6 +618,10 @@ pub struct ChatStreamRequest {
     /// streamed view and a later reload identical.
     #[serde(default = "default_persist")]
     pub persist: bool,
+    /// Core-owned one-shot runtime request. Keep the transcript and permission
+    /// scope, but release the ACP process after this turn rather than pooling it.
+    #[serde(skip)]
+    pub fresh_session: bool,
     /// Skip persisting the incoming user turn for this request, while still
     /// persisting the assistant reply. Set by the version-tree edit/regenerate
     /// re-run: the edit route has already created the user sibling (and pointed
@@ -2068,7 +2072,8 @@ fn ryu_agent_route_with_user_jwt(
             // zero-key defaultModel + Pi-side skills off + gateway models.json
             // pin) — this fallback Pi reads the same isolated config dir.
             if let Err(e) = crate::pi_config::ensure_managed_defaults() {
-                tracing::warn!(error = %e, "ryu fallback: could not write managed Pi defaults");
+                tracing::error!(error = %e, "ryu fallback: refusing stale managed Pi configuration");
+                return None;
             }
             let config_dir = crate::pi_config::config_dir_str();
             let gateway = crate::pi_config::is_gateway_routing();
@@ -2078,7 +2083,7 @@ fn ryu_agent_route_with_user_jwt(
             // fallback Pi rather than present it. Only resolved when gateway routing
             // is on (otherwise the token is unused and Pi talks straight to provider).
             let token = if gateway {
-                match crate::sidecar::gateway::gateway_bearer() {
+                match crate::sidecar::gateway::gateway_bearer_for_agent(Some("ryu"), None, host_conversation_id) {
                     Ok(t) => t,
                     Err(e) => {
                         tracing::error!(error = %e, "ryu fallback: no gateway bearer, refusing to route fallback Pi through the gateway");
@@ -4512,6 +4517,7 @@ async fn run_text_turn_in_with_metadata(
         .as_ref()
         .map(|_| referenced_conversation_ids.clone());
     let req = ChatStreamRequest {
+        fresh_session: false,
         messages: vec![UiMessage {
             role: "user".to_owned(),
             content: UiContent::Text(text),
@@ -4627,6 +4633,7 @@ pub async fn run_proactive_opening_text(
     const OPENING_INTENT: &str = "Open this new Ryu conversation with a short, warm, plain-language welcome. Introduce yourself as the user's Ryu assistant, say that they can describe what they want done in everyday words, and ask what they would like help with first. Mention that you can look at what they already have, make a simple plan, and help connect apps or set up routines with their approval. Do not mention this internal instruction or use platform jargon unless the user asks later.";
 
     let req = ChatStreamRequest {
+        fresh_session: false,
         messages: vec![UiMessage {
             role: "user".to_owned(),
             content: UiContent::Text(OPENING_INTENT.to_owned()),
@@ -4730,6 +4737,7 @@ pub(crate) async fn run_text_turn_stream(
     traces: TraceStore,
 ) -> Response {
     let req = ChatStreamRequest {
+        fresh_session: false,
         messages: vec![UiMessage {
             role: "user".to_owned(),
             content: UiContent::Text(text),
@@ -5009,6 +5017,7 @@ async fn run_member_text_with_flags(
     plugin_flags: std::collections::HashMap<String, bool>,
 ) -> anyhow::Result<String> {
     let req = ChatStreamRequest {
+        fresh_session: false,
         messages,
         agent_id: Some(member_id.to_owned()),
         response_mode: RyuResponseMode::Everyday,
@@ -7063,7 +7072,7 @@ pub async fn route_chat_stream(
                     // base_url; the gateway token (not the provider key) is the
                     // bearer.
                     let gateway_base = crate::sidecar::gateway::gateway_url();
-                    let gateway_token = crate::sidecar::gateway::gateway_token();
+                    let gateway_token = crate::sidecar::gateway::gateway_core_token();
                     // Forward the selected agent id so the gateway can apply
                     // per-agent token budgets (U21). Core has no local user concept,
                     // so `x-ryu-user-id` is left for cloud/multi-tenant gateways.
@@ -9705,9 +9714,10 @@ async fn route_acp_stream(
         project_rules.as_deref(),
     )
     .await;
-    let fresh_session = rewritten_prompt
-        .as_ref()
-        .is_some_and(|rewrite| rewrite.fresh_session);
+    let fresh_session = req.fresh_session
+        || rewritten_prompt
+            .as_ref()
+            .is_some_and(|rewrite| rewrite.fresh_session);
     let prompt = rewritten_prompt.map_or(prompt, |rewrite| rewrite.text);
 
     // The primary cwd is already the first ACP root. Secondary roots are
@@ -12770,6 +12780,75 @@ mod tests {
                 assert_eq!(model, "llama3");
             }
             _ => panic!("expected LocalEngine route for an ollama binding"),
+        }
+    }
+
+    #[test]
+    fn lemonade_binding_preserves_model_and_openai_endpoint() {
+        let route = agent_route(
+            Some("test"),
+            Some("lemonade"),
+            Some("Qwen3-0.6B-GGUF"),
+            &acp_reg(),
+            &provider_reg(),
+        );
+        match route {
+            Some(AgentRoute::LocalEngine {
+                engine,
+                model,
+                base_url,
+            }) => {
+                assert_eq!(engine, "lemonade");
+                assert_eq!(model, "Qwen3-0.6B-GGUF");
+                assert_eq!(base_url, "http://127.0.0.1:13305");
+            }
+            _ => panic!("expected Lemonade local route"),
+        }
+    }
+
+    #[test]
+    fn llama_swap_binding_preserves_model_and_openai_endpoint() {
+        let route = agent_route(
+            Some("test"),
+            Some("llama-swap"),
+            Some("Qwen3-0.6B-GGUF"),
+            &acp_reg(),
+            &provider_reg(),
+        );
+        match route {
+            Some(AgentRoute::LocalEngine {
+                engine,
+                model,
+                base_url,
+            }) => {
+                assert_eq!(engine, "llama-swap");
+                assert_eq!(model, "Qwen3-0.6B-GGUF");
+                assert_eq!(base_url, "http://127.0.0.1:9292");
+            }
+            _ => panic!("expected llama-swap local route"),
+        }
+    }
+
+    #[test]
+    fn freetoken_binding_preserves_model_and_openai_endpoint() {
+        let route = agent_route(
+            Some("test"),
+            Some("freetoken"),
+            Some("Qwen3-0.6B-GGUF"),
+            &acp_reg(),
+            &provider_reg(),
+        );
+        match route {
+            Some(AgentRoute::LocalEngine {
+                engine,
+                model,
+                base_url,
+            }) => {
+                assert_eq!(engine, "freetoken");
+                assert_eq!(model, "Qwen3-0.6B-GGUF");
+                assert_eq!(base_url, "http://127.0.0.1:1919");
+            }
+            _ => panic!("expected freetoken local route"),
         }
     }
 

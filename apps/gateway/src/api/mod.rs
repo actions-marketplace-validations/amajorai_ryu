@@ -15,8 +15,10 @@ pub mod models;
 pub mod multimodal;
 pub mod providers;
 pub mod sandbox;
+pub mod security_contact;
 pub mod tools;
 pub mod traffic;
+pub mod voice_calls;
 
 use axum::{
     http::HeaderValue,
@@ -193,7 +195,15 @@ pub fn router(state: SharedState) -> Router {
         )
         // Health / meta
         .route("/health", get(health::health))
+        .route("/.well-known/security.txt", get(security_contact::security_txt))
         .route("/v1/health", get(health::health))
+        .route("/v1/auth/status", get(health::auth_status))
+        .route("/v1/auth/readiness", get(health::readiness))
+        // Twilio PSTN voice bridge. These provider callbacks authenticate inside
+        // the handlers because they arrive from outside the normal Gateway API
+        // bearer-auth boundary.
+        .route("/voice/twilio/answer", post(voice_calls::twilio_answer))
+        .route("/voice/twilio/stream", get(voice_calls::twilio_stream))
         // Ok-path policy-alert header writer. Runs on every governed response;
         // a no-op unless a handler stashed a `PolicyAlert` on the response
         // extensions. The error-path header is written directly by

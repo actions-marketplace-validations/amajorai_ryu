@@ -178,6 +178,7 @@ fn reserved_namespaces() -> Vec<String> {
         "native",
         "shell",
         "storage",
+        "backups",
         "chat",
         "widget",
         "media",
@@ -416,6 +417,10 @@ fn default_grant_allowlist() -> Vec<String> {
         "warmup:crud",
         "preferences:write",
         "usage:read",
+        // Only the verified current caller projection, never credentials or a user roster.
+        "identity:read",
+        // Read-only scan of caller-supplied text through the existing firewall.
+        "security:check",
         // Widget-render consent: a plugin (built-in Ryu App or third-party MCP
         // server) that declares a `contributes.widgets[]` binding must hold this
         // grant for its tool to auto-promote a sandboxed widget into chat. Gated
@@ -531,6 +536,9 @@ fn default_grant_allowlist() -> Vec<String> {
         // plugins (`goal`, `proof`) so they can persist run state. Same re-enable
         // rationale as the companion scopes above. Swappable via the env override.
         "storage:kv",
+        // App/tenant-scoped encrypted snapshots to operator-approved destinations.
+        // No node backups, other apps, filesystem paths, or credential access.
+        "backups:app",
         // The sealing primitive: an app seals/opens its OWN data under a per-plugin
         // subkey Core derives and the app never holds (`host.crypto_*`). On the
         // allowlist rather than owner-scoped because `crypto` is a RESERVED

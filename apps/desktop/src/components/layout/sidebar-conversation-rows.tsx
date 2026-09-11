@@ -1,3 +1,7 @@
+import {
+	type AvatarConversationState,
+	avatarStateFromRunStatus,
+} from "@ryu/ui/components/avatar-conversation.tsx";
 // Conversation rows for the desktop sidebar.
 //
 // AppSidebar owns the conversation state and callbacks. This module owns only
@@ -397,12 +401,14 @@ function SidebarGitPullRequestStatus({
  *  four-point layout stays legible at the 16px disclosure size and makes a
  *  council/team thread read as a group before its title is read. */
 export function ParticipantOrbitAvatar({
+	conversationState,
 	participants,
 	agents,
 	size = "sm",
 }: {
 	agents: AgentSummary[];
 	participants: string[];
+	conversationState?: AvatarConversationState;
 	size?: "md" | "sm";
 }) {
 	const large = size === "md";
@@ -452,6 +458,7 @@ export function ParticipantOrbitAvatar({
 				>
 					<AgentAvatar
 						className={`${large ? "size-5" : "size-2.5"} rounded-full object-cover`}
+						conversationState={conversationState}
 						engine={engineForAgent(agent)}
 						glyph={agent.avatarGlyph}
 						size={large ? "20px" : "10px"}
@@ -746,6 +753,9 @@ export function ChatRow({
 									<span className="flex items-center gap-1" key={id}>
 										<AgentAvatar
 											className="size-3.5 shrink-0 rounded-[2px] object-contain"
+											conversationState={avatarStateFromRunStatus(
+												conv.runStatus
+											)}
 											engine={engineForAgent({
 												id,
 												engine: agent?.engine ?? null,
@@ -830,6 +840,7 @@ export function ChatRow({
 								>
 									<ParticipantOrbitAvatar
 										agents={agents}
+										conversationState={avatarStateFromRunStatus(conv.runStatus)}
 										participants={conversationParticipantIds(conv)}
 									/>
 								</span>
@@ -840,6 +851,7 @@ export function ChatRow({
 											? "opacity-0"
 											: "opacity-100 group-hover/row:opacity-0"
 									}`}
+									conversationState={avatarStateFromRunStatus(conv.runStatus)}
 									engine={engineForAgent(latestAgent)}
 									glyph={latestAgent.avatarGlyph}
 									size="16px"

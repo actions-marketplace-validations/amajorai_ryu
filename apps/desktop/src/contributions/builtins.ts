@@ -64,6 +64,7 @@ import AgentEditPage from "@/src/pages/AgentEditPage.tsx";
 import ArtifactViewPage from "@/src/pages/ArtifactViewPage.tsx";
 import ChannelsPage from "@/src/pages/ChannelsPage.tsx";
 import ChatPage from "@/src/pages/ChatPage.tsx";
+import ComputePage from "@/src/pages/ComputePage.tsx";
 import DownloadsPage from "@/src/pages/DownloadsPage.tsx";
 import FileEditorPage from "@/src/pages/FileEditorPage.tsx";
 import IdentitiesPage from "@/src/pages/IdentitiesPage.tsx";
@@ -77,6 +78,7 @@ import ProjectFilesPage from "@/src/pages/ProjectFilesPage.tsx";
 import ProjectGitGraphPage from "@/src/pages/ProjectGitGraphPage.tsx";
 import ReviewPage from "@/src/pages/ReviewPage.tsx";
 import SettingsPage from "@/src/pages/SettingsPage.tsx";
+import SharePage from "@/src/pages/SharePage.tsx";
 import SpaceAppDocPage from "@/src/pages/SpaceAppDocPage.tsx";
 import SpaceDatabaseEditorPage from "@/src/pages/SpaceDatabaseEditorPage.tsx";
 import SpaceDatabaseRowPage from "@/src/pages/SpaceDatabaseRowPage.tsx";
@@ -287,6 +289,8 @@ export function seedBuiltinRoutes(): void {
 			})
 		)
 	);
+	exact("/compute", () => createElement(ComputePage));
+	exact("/share", () => createElement(SharePage));
 	// Agents/Spaces/Workflows no longer have standalone list pages — they're
 	// consolidated into the unified Library; the bare routes redirect there.
 	exact("/agents", () =>

@@ -269,6 +269,11 @@ export interface MessageListProps {
 	messageActions?: ContributedMessageAction[];
 	messages: UIMessage[];
 	onAgentUiSubmit?: AgentUiSubmit;
+	onAnnotateImage?: (image: {
+		filename?: string;
+		id: string;
+		url: string;
+	}) => void;
 	/**
 	 * Branch ("fork into new chat") a message. When provided, a branch button is
 	 * shown in each message's hover toolbar; clicking it calls this with the id of
@@ -646,6 +651,7 @@ function getImageGenerationPart(part: unknown): ImageGenerationPartData | null {
  */
 function AssistantGeneratedImage({
 	filename,
+	onAnnotateImage,
 	onRetry,
 	prompt,
 	showStatus,
@@ -654,6 +660,7 @@ function AssistantGeneratedImage({
 	url,
 }: ImageGenerationPartData & {
 	filename?: string;
+	onAnnotateImage?: MessageListProps["onAnnotateImage"];
 	onRetry?: () => void;
 	showStatus: boolean;
 }) {
@@ -699,6 +706,7 @@ function AssistantGeneratedImage({
 						alt={prompt ?? "Generated image"}
 						filename={filename ?? prompt ?? "Generated image"}
 						imageClassName="size-full object-contain"
+						onAnnotate={onAnnotateImage}
 						onLoad={handleLoad}
 						src={url}
 					/>
@@ -1705,6 +1713,7 @@ export const MessageList = memo(function MessageList({
 	onUndoFileEdits,
 	onOpenLink,
 	onOpenMention,
+	onAnnotateImage,
 	onWorkflowResume,
 	previewResolvers,
 	mentionItems,
@@ -2357,6 +2366,8 @@ export const MessageList = memo(function MessageList({
 							<div
 								className={cn(
 									"relative space-y-2",
+									!(isLastTurn || isSearchActive) &&
+										"[contain-intrinsic-size:auto_10rem] [content-visibility:auto]",
 									continuesRun ? "mt-0.5" : "mt-2",
 									isSearchActive &&
 										"rounded-xl bg-primary/5 ring-2 ring-primary/35 ring-offset-2 ring-offset-background"
@@ -2493,6 +2504,7 @@ export const MessageList = memo(function MessageList({
 														userMsgId
 													)}
 													messageActions={userActions}
+													onAnnotateImage={onAnnotateImage}
 													onContributedMessageAction={
 														onContributedMessageAction
 													}
@@ -2761,6 +2773,7 @@ export const MessageList = memo(function MessageList({
 																			mentionItems={mentionItems}
 																			msg={msg}
 																			onAgentUiSubmit={onAgentUiSubmit}
+																			onAnnotateImage={onAnnotateImage}
 																			onOpenFile={onOpenFile}
 																			onOpenLink={onOpenLink}
 																			onOpenMention={onOpenMention}
@@ -3059,6 +3072,7 @@ function AssistantParts({
 	onOpenFile,
 	onOpenLink,
 	onOpenMention,
+	onAnnotateImage,
 	mentionItems,
 	previewResolvers,
 	onRetryGeneration,
@@ -3079,6 +3093,7 @@ function AssistantParts({
 	onOpenFile?: (path: string) => void;
 	onOpenLink?: (url: string) => void;
 	onOpenMention?: (item: MentionItem) => void;
+	onAnnotateImage?: MessageListProps["onAnnotateImage"];
 	mentionItems?: MentionItem[];
 	previewResolvers?: LinkPreviewResolvers;
 	onRetryGeneration?: MessageListProps["onRetryGeneration"];
@@ -3274,6 +3289,7 @@ function AssistantParts({
 				pushPart(
 					<AssistantGeneratedImage
 						key={`${msg.id}-image-generation-${i}`}
+						onAnnotateImage={onAnnotateImage}
 						onRetry={
 							onRetryGeneration && retryPrompt
 								? () => onRetryGeneration(msg.id, "image", retryPrompt)
@@ -3319,6 +3335,7 @@ function AssistantParts({
 					<AssistantGeneratedImage
 						filename={image.filename}
 						key={`${msg.id}-image-${i}`}
+						onAnnotateImage={onAnnotateImage}
 						showStatus={false}
 						status="complete"
 						url={image.url}

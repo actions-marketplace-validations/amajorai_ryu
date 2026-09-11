@@ -17,19 +17,28 @@ if (
 	input.tab_id !== null &&
 	input.tab_id !== ""
 ) {
-	await callNamed("agentbrowser.agent_browser_tab_switch", {
+	const switched = await callNamed("agentbrowser.agent_browser_tab_switch", {
 		tab: input.tab_id,
 	});
+	if (switched?.isError || switched?.error || switched?.available === false) {
+		return switched;
+	}
 }
 const typed = await callTool({
 	selector: input.ref,
 	text: input.text,
 	clear: input.replace === true,
 });
+if (typed?.isError || typed?.error || typed?.available === false) {
+	return typed;
+}
 if (!input.submit) {
 	return { ok: true, ref: input.ref, submitted: false, raw: typed };
 }
 const pressed = await callNamed("agentbrowser.agent_browser_press", {
 	key: "Enter",
 });
+if (pressed?.isError || pressed?.error || pressed?.available === false) {
+	return pressed;
+}
 return { ok: true, ref: input.ref, submitted: true, raw: { typed, pressed } };

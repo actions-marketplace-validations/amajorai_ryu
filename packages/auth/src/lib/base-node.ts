@@ -27,8 +27,10 @@ import type { PlanId } from "./plans.ts";
  */
 export const PLANS_INCLUDING_BASE_NODE: readonly PlanId[] = [
 	"pro",
+	"plus",
 	"max",
 	"teams",
+	"teams-lite",
 	"business",
 ];
 
@@ -61,8 +63,10 @@ export const planIncludesBaseNode = (
  */
 export const BASE_NODE_TYPE_BY_PLAN: Readonly<Record<string, string>> = {
 	pro: "cx23",
+	plus: "cx23",
 	max: "cx33",
 	teams: "cx43",
+	"teams-lite": "cx43",
 	business: "cx53",
 };
 
@@ -78,6 +82,7 @@ export const BASE_NODE_TYPE_BY_PLAN_IN_SINGAPORE: Readonly<
 	Record<string, string>
 > = {
 	teams: "cpx22",
+	"teams-lite": "cpx22",
 	business: "cpx32",
 };
 
@@ -93,7 +98,7 @@ export const baseNodeTypeForPlan = (
 	if (!(plan && planIncludesBaseNode(plan))) {
 		return null;
 	}
-	if (plan === "teams") {
+	if (plan === "teams" || plan === "teams-lite") {
 		return teamsNodeTierForSeats(seats).type;
 	}
 	return BASE_NODE_TYPE_BY_PLAN[plan] ?? "cx23";
@@ -109,7 +114,7 @@ export const baseNodeTypeForPlanAtLocation = (
 		return null;
 	}
 	if (location?.trim().toLowerCase() === "sin") {
-		if (plan === "teams") {
+		if (plan === "teams" || plan === "teams-lite") {
 			return BASE_NODE_TYPE_BY_PLAN_IN_SINGAPORE.teams ?? "cpx22";
 		}
 		return BASE_NODE_TYPE_BY_PLAN_IN_SINGAPORE[plan] ?? null;
@@ -189,7 +194,7 @@ export const baseNodeCountForPlan = (
 	if (!(plan && planIncludesBaseNode(plan))) {
 		return 0;
 	}
-	if (plan !== "teams") {
+	if (plan !== "teams" && plan !== "teams-lite") {
 		return 1;
 	}
 	return teamsNodeTierForSeats(seats).count;
@@ -211,15 +216,15 @@ export const baseNodeCountForPlanAtLocation = (
 
 /**
  * How the qualifying plans are NAMED in customer-facing copy ("…is included
- * with Pro, Max, Teams or Business"). Presentational only — never parse it. Every string
+ * with Plus, Pro, Max, Teams or Business"). Presentational only — never parse it. Every string
  * that used to hardcode "Max" reads this, so widening or narrowing the set is
  * one edit here plus {@link PLANS_INCLUDING_BASE_NODE}, not a nine-file sed.
  */
-export const BASE_NODE_PLANS_LABEL = "Pro, Max, Teams or Business";
+export const BASE_NODE_PLANS_LABEL = "Plus, Pro, Max, Teams or Business";
 
 /**
- * The same set in a conjunctive sentence position ("included with Pro, Max,
+ * The same set in a conjunctive sentence position ("included with Plus, Pro, Max,
  * Teams and Business"). Two constants rather than one because English needs both and a
  * caller that picks the wrong one reads as a typo to a customer.
  */
-export const BASE_NODE_PLANS_LABEL_ALL = "Pro, Max, Teams and Business";
+export const BASE_NODE_PLANS_LABEL_ALL = "Plus, Pro, Max, Teams and Business";

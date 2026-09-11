@@ -858,7 +858,7 @@ async fn call_sub_agent(
     }
 
     let gw_url = crate::sidecar::gateway::gateway_url();
-    let gw_token = crate::sidecar::gateway::gateway_token();
+    let gw_token = crate::sidecar::gateway::gateway_core_token();
 
     // Model + clean-context system message. An inline ephemeral agent definition
     // (an LLM-authored "dynamic subagent" with no registered `agent_id`) overrides

@@ -453,8 +453,12 @@ pub const MANIFEST_FILE_NAME: &str = MANIFEST_FILE_NAMES[0];
 const SAFE_ACTIONS_MANIFEST: &str =
     include_str!("../../../../generated/ryu-runtime/apps-store/safe-actions/manifest.json");
 
+const VIDEO_STUDIO_MANIFEST: &str =
+    include_str!("../../../../generated/ryu-runtime/apps-store/video-studio/manifest.json");
+
 #[cfg(test)]
 const BUILTIN_MANIFESTS: &[&str] = &[
+    VIDEO_STUDIO_MANIFEST,
     SAFE_ACTIONS_MANIFEST,
     // Backstage is a Core-tier satellite, so the hermetic test catalog must
     // carry the same manifest identity as the production runtime set. Keeping
@@ -795,6 +799,7 @@ const BUILTIN_MANIFESTS: &[&str] = &[
     // sidecar; its frame talks only through the generic model/media/storage bridges
     // and can optionally hand captions to Outpost through `social:crud`.
     include_str!("../../../../generated/ryu-runtime/apps-store/content/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/apps-store/convert/manifest.json"),
     // Token Table — a cosmetic six-seat Hold'em Companion over the generic
     // `app:http` + `app:realtime` bridges. Its authoritative SQLite game state
     // lives in the standalone `ryu-token-table` sidecar; Core only loads the
@@ -1051,8 +1056,8 @@ const BUILTIN_MANIFESTS: &[&str] = &[
     // its `node` server is never spawned unless a developer installs it. The
     // canonical copy under `plugins-store/` and this fixture are byte-identical.
     include_str!("../../../../generated/ryu-runtime/plugins-store/plugins/sample-widget/manifest.json"),
-    // The eleven built-in personality profiles (ELI5, I have ADHD, Explanatory, Learning,
-    // Proactive, Plain text, Plain Technical, No AI slop, No Hype, Bro, Gen Z). Zero runnables
+    // The twelve built-in personality profiles (ELI5, I have ADHD, Concise, Explanatory,
+    // Learning, Proactive, Plain text, Plain Technical, No AI slop, No Hype, Bro, Gen Z). Zero runnables
     // and zero `permission_grants`: a profile body is inert prose appended to (or
     // replacing) the agent's base instructions
     // for a turn, so nothing evaluates it — the same argument `ThemeContribution`
@@ -1065,7 +1070,7 @@ const BUILTIN_MANIFESTS: &[&str] = &[
     // `builtin_code::BUILTIN_OUTPUT_STYLES` — a built-in ships only this manifest,
     // so an un-embedded style file would resolve to nothing.
     //
-    // Pre-installed but INERT: agents default to their own voice and none of the eleven
+    // Pre-installed but INERT: agents default to their own voice and none of the twelve
     // sets `force-for-plugin`, so registering it changes no prompt until a user assigns
     // one in the agent editor or browses the Store's Personality Profiles tab.
     include_str!("../../../../generated/ryu-runtime/plugins-store/plugins/output-styles/manifest.json"),
@@ -1298,6 +1303,7 @@ const BUILTIN_MANIFESTS: &[&str] = &[
 // user installs it. Keeping the preinstalled set here prevents a fresh node from
 // trying to materialize its own defaults over the network.
 const CORE_RUNTIME_BUILTIN_MANIFESTS: &[&str] = &[
+    VIDEO_STUDIO_MANIFEST,
     SAFE_ACTIONS_MANIFEST,
     // These packages are part of CORE_PREINSTALLED. Keep their manifests in the
     // production registry as well as the hermetic test catalog so a fresh node
@@ -1355,6 +1361,7 @@ const CORE_RUNTIME_BUILTIN_MANIFESTS: &[&str] = &[
     include_str!("../../../../generated/ryu-runtime/apps-store/checks/manifest.json"),
     include_str!("../../../../generated/ryu-runtime/apps-store/clips/manifest.json"),
     include_str!("../../../../generated/ryu-runtime/apps-store/content/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/apps-store/convert/manifest.json"),
     include_str!("../../../../generated/ryu-runtime/apps-store/crm/manifest.json"),
     include_str!("../../../../generated/ryu-runtime/apps-store/dashboards/manifest.json"),
     include_str!("../../../../generated/ryu-runtime/apps-store/dictation/manifest.json"),
@@ -1462,6 +1469,12 @@ pub const CANVAS_UI_HTML: &str = include_str!("fixtures/canvas.ui.html");
 /// install path, just like the other opt-in Companion apps.
 pub const DRAWSOME_PLUGIN_ID: &str = "@ryu/drawesome";
 pub const DRAWSOME_UI_HTML: &str = include_str!("fixtures/drawesome.ui.html");
+
+/// The Convert app's plugin id and prebuilt Companion bundle. The app owns
+/// browser-local file conversion and uses only the generic storage/toast bridges
+/// for its small metadata surface.
+pub const CONVERT_PLUGIN_ID: &str = "@ryu/convert";
+pub const CONVERT_UI_HTML: &str = include_str!("fixtures/convert.ui.html");
 
 /// The Slides app's prebuilt, self-contained UI bundle. Seeded for explicit app
 /// installs through the same compiled-in companion table as the other Path B apps.

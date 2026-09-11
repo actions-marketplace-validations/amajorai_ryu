@@ -22,6 +22,7 @@ describe("expressive Ryu eye language", () => {
 			["random", ...EXPRESSIVE_EXPRESSION_IDS]
 		);
 		expect(isExpressiveExpressionSelection("laughing")).toBe(true);
+		expect(isExpressiveExpressionSelection("dead")).toBe(true);
 		expect(isExpressiveExpressionSelection("random")).toBe(true);
 		expect(isExpressiveExpressionSelection("not-a-mood")).toBe(false);
 	});
@@ -39,6 +40,13 @@ describe("expressive Ryu eye language", () => {
 		expect(clampedStart.eyes).toEqual(from.eyes);
 		expect(clampedStart.gaze).toEqual(from.gaze);
 		expect(blendExpressiveFrames(from, to, 2)).toEqual(to);
+	});
+
+	test("renders the dead expression as crossed-out eyes", () => {
+		const frame = expressiveFrame("dead");
+
+		expect(frame.label).toBe("Dead");
+		expect(frame.eyes.map((eye) => eye.shape)).toEqual(["x", "x"]);
 	});
 
 	test("random animation always selects a supported mood", () => {

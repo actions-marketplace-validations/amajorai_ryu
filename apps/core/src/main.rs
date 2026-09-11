@@ -34,6 +34,7 @@ mod crash;
 mod crypto_host;
 mod dashboards_client;
 mod data_path;
+mod backups;
 /// The `document.parse` extraction facade. Shipped in `9bf1e2023` **without a
 /// `mod` line**, so it was never in the module tree and never compiled — the
 /// deepest form of the gap it was written to close. Declared here so
@@ -343,13 +344,9 @@ async fn main() {
             source = ?resolved.source,
             "node auth token resolved; protected routes require a bearer"
         ),
-        // Not fatal on loopback (Core behaves exactly as it did before this
-        // existed). `enforce_remote_auth` below still REFUSES to expose a tokenless
-        // node beyond loopback, so an unwritable home cannot yield an open node on
-        // a public IP.
-        None => {
-            tracing::warn!("no node auth token could be established; local API is UNAUTHENTICATED")
-        }
+        // A credential initialization failure must never weaken API admission,
+        // including on loopback. No listener or child service is started.
+        None => boot_fail!("node credentials could not be initialized; refusing unauthenticated startup"),
     }
 
     // Ghost sidecar env: the Ghost MCP server moved from a hardcoded built-in to
@@ -643,6 +640,9 @@ async fn main() {
         // Docker Model Runner — adopt-only: Ryu downloads/spawns nothing, it just
         // routes to Docker's built-in OpenAI-compatible model server on :12434.
         Arc::new(DockerModelRunnerManager::new()),
+        Arc::new(sidecar::providers::LemonadeManager::new()),
+        Arc::new(sidecar::providers::LlamaSwapManager::new()),
+        Arc::new(sidecar::providers::FreeTokenManager::new()),
         // apfel — Apple Foundation Models (Apple Silicon macOS 26+). Adopt-a-binary
         // (PATH/`brew`), serves Apple Intelligence as an OpenAI-compat local engine.
         // Registered on every platform so the catalog shows it (disabled) off a
@@ -741,6 +741,9 @@ async fn main() {
         // re-seed the installed set on restart. `start_all` skips non-resident
         // local engines, so listing it here has no spawn cost.
         "docker-model-runner".into(),
+        "lemonade".into(),
+        "llama-swap".into(),
+        "freetoken".into(),
         // apfel (Apple Foundation Models). Like docker-model-runner it never
         // auto-spawns (`start_all` skips non-resident local engines), but it MUST
         // be in startup_order so `seed_installed_from_disk` re-seeds a persisted
@@ -1850,6 +1853,13 @@ async fn main() {
         Err(e) => boot_fail!("failed to open experience store: {e:#}"),
     };
 
+    let improvement_store = match ryu_improvement::ImprovementStore::open(
+        crate::paths::ryu_dir().join("improvements.db"),
+    ) {
+        Ok(store) => store,
+        Err(e) => boot_fail!("failed to open improvement store: {e}"),
+    };
+
     let agent_ui_templates = match server::agent_ui_templates::AgentUiTemplateStore::open_default()
     {
         Ok(store) => store,
@@ -1918,6 +1928,7 @@ async fn main() {
         collab,
         finetune,
         experience: experience_store,
+        improvements: improvement_store,
         agent_ui_templates,
         // Captured for the public `/api/realtime/ws` handler's in-handler node
         // token enforcement (the public router has no `auth_token` Extension).

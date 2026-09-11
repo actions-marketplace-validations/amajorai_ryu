@@ -78,8 +78,9 @@ import { openExternal } from "@/lib/tauri-bridge.ts";
 import { useSkillDistributionFlow } from "@/src/components/skills/SkillDistributionProvider.tsx";
 import {
 	useCurrentTabId,
-	useTabsContext,
+	useTabSelector,
 } from "@/src/contexts/TabsContext.tsx";
+import { waitForApplicationRealtime } from "@/src/contributions/host/application-realtime-lifetime.ts";
 import { ApplicationRealtimeQueue } from "@/src/contributions/host/application-realtime-queue.ts";
 import {
 	type CommandEntry,
@@ -99,7 +100,7 @@ import {
 	listApprovals,
 	rejectApproval,
 } from "@/src/lib/api/approvals.ts";
-import { searchGifs } from "@/src/lib/api/assets.ts";
+import { searchGifs, searchImages } from "@/src/lib/api/assets.ts";
 import { blueprintRequest } from "@/src/lib/api/blueprint.ts";
 import {
 	listChatBroadcastConversations,
@@ -125,6 +126,7 @@ import {
 	deleteInbox,
 	listInboxes,
 	listMessages,
+	mailRequest,
 	rotateInboundSecret,
 	sendMessage,
 } from "@/src/lib/api/mail.ts";
@@ -224,6 +226,7 @@ import { generateVideo as apiGenerateVideo } from "@/src/lib/api/video.ts";
 import {
 	speakText as apiSpeakText,
 	transcribeAudio as apiTranscribeAudio,
+	transcribeAudioDetailed as apiTranscribeAudioDetailed,
 	listTtsEngines,
 } from "@/src/lib/api/voice.ts";
 import {
@@ -620,29 +623,25 @@ function PanelPlaceholder({
 export function PluginHostPanel({
 	companion,
 	mountContext,
+	onMessage,
 }: {
 	companion: PluginCompanion;
 	/** Optional host-supplied context baked into the frame as `window.ryu.context`
 	 *  (e.g. `{ spaceId, docId }` when the app is opened as a Space document). */
 	mountContext?: unknown;
+	/** Optional messages emitted by this companion's sandboxed frame. */
+	onMessage?: (data: unknown) => void;
 }) {
 	const node = useActiveNode();
 	const getActiveNode = useActiveNodeGetter();
 	const i18n = useI18n();
 	const { distributeInstalledSkill } = useSkillDistributionFlow();
-	const [connected, setConnected] = useState(false);
+	const [connectedNonce, setConnectedNonce] = useState<string | null>(null);
+	const realtimeLifetimeRef = useRef<AbortController | null>(null);
 	const realtimeSessionsRef = useRef(
 		new Map<string, ApplicationRealtimeSession>()
 	);
-	useEffect(() => {
-		return () => {
-			for (const session of realtimeSessionsRef.current.values()) {
-				session.connection.close();
-				session.queue.end();
-			}
-			realtimeSessionsRef.current.clear();
-		};
-	}, []);
+
 	// The theme-token bridge (W7): seed the companion's first paint from the
 	// desktop's resolved theme, then push subsequent changes into the already
 	// mounted null-origin frame. Keeping the initial snapshot separate avoids
@@ -673,7 +672,11 @@ export function PluginHostPanel({
 	// chat tab for an item's session through the `activityOpenSession` bridge verb (the
 	// extracted page used `useTabsContext().openTab` directly; the sandboxed frame reaches
 	// it here). PluginHostPanel renders as tab content, so it sits under TabsProvider.
-	const { openTab, updateTabTitle, updateTabsIconWhere } = useTabsContext();
+	const openTab = useTabSelector((state) => state.openTab);
+	const updateTabTitle = useTabSelector((state) => state.updateTabTitle);
+	const updateTabsIconWhere = useTabSelector(
+		(state) => state.updateTabsIconWhere
+	);
 	// The current tab id — the `@ryu/skill-editor` companion's `skills.setTitle` verb
 	// renames its own owning tab (the desktop page's `updateTabTitle(currentTabId, …)`).
 	const currentTabId = useCurrentTabId();
@@ -692,9 +695,16 @@ export function PluginHostPanel({
 		isError,
 		refetch,
 	} = useQuery({
-		queryKey: ["plugin-ui-bundle", node.url, node.token, companion.pluginId],
+		queryKey: [
+			"plugin-ui-bundle",
+			node.url,
+			node.token,
+			node.userJwt,
+			companion.pluginId,
+		],
 		// Fetch by the OWNING plugin id (the store key), not the companion id.
-		queryFn: () => fetchPluginUiBundle(toTarget(node), companion.pluginId),
+		queryFn: ({ signal }) =>
+			fetchPluginUiBundle(toTarget(node), companion.pluginId, signal),
 		retry: false,
 		staleTime: 60_000,
 	});
@@ -705,15 +715,38 @@ export function PluginHostPanel({
 	// there). The nonce is also the ExtensionHost effect's key, so the bridge
 	// listener is rebuilt in step with the document it is waiting on.
 	const [attempt, setAttempt] = useState(0);
-	const grantsKey = companion.approvedGrants.join(" ");
-	// One nonce per attempt. Host-generated, never plugin/user input.
+	const grantsKey = [...new Set(companion.approvedGrants)].sort().join(" ");
+	const documentScope = JSON.stringify([
+		node.url,
+		node.token,
+		node.userJwt,
+		companion.id,
+		mountContext ?? null,
+		companion.csp ?? null,
+	]);
+	// One nonce per document and authorization scope. Cosmetic renders keep it stable.
+	// biome-ignore lint/correctness/useExhaustiveDependencies: code and serialized scope deliberately reset the document handshake.
 	const nonce = useMemo(
 		() =>
 			typeof crypto?.randomUUID === "function"
 				? crypto.randomUUID()
 				: `nonce-${attempt}-${Date.now()}-${Math.round(Math.random() * 1e9)}`,
-		[attempt, grantsKey]
+		[attempt, grantsKey, code, documentScope]
 	);
+	const connected = connectedNonce === nonce;
+	// biome-ignore lint/correctness/useExhaustiveDependencies: document replacement owns realtime connection cleanup.
+	useEffect(() => {
+		const lifetime = new AbortController();
+		realtimeLifetimeRef.current = lifetime;
+		return () => {
+			lifetime.abort();
+			for (const session of realtimeSessionsRef.current.values()) {
+				session.connection.close();
+				session.queue.end();
+			}
+			realtimeSessionsRef.current.clear();
+		};
+	}, [nonce]);
 
 	// Startup progress: `stalled` flips when the bridge has not connected within
 	// STALL_AFTER_MS, which is what turns the honest "Starting…" state into an
@@ -726,7 +759,7 @@ export function PluginHostPanel({
 		setStalled(false);
 		const id = setTimeout(() => setStalled(true), STALL_AFTER_MS);
 		return () => clearTimeout(id);
-	}, [connected, attempt]);
+	}, [connected, nonce]);
 
 	// Retry cooldown, ticked only while it runs (an idle panel must not re-render
 	// once a second forever). Armed on press, not on success: the press is what
@@ -746,7 +779,7 @@ export function PluginHostPanel({
 	const retry = useCallback(() => {
 		setCooldownUntil(Date.now() + RETRY_COOLDOWN_MS);
 		setNow(Date.now());
-		setConnected(false);
+		setConnectedNonce(null);
 		setAttempt((n) => n + 1);
 		// Re-fetch too: a bundle that failed (or was served by a node still booting)
 		// must be re-read, not re-mounted from the same cached miss.
@@ -949,6 +982,8 @@ export function PluginHostPanel({
 					requested: boolean;
 					process_id: string;
 				}>,
+			backupsRequest: (method, input) =>
+				pluginHostInvoke(toTarget(node), companion.pluginId, method, input),
 			storageGet: (input) =>
 				pluginHostInvoke(
 					toTarget(node),
@@ -1087,6 +1122,7 @@ export function PluginHostPanel({
 					size: input.size,
 					provider: input.provider,
 					model: input.model,
+					requestId: input.request_id,
 					inputImages: input.input_images,
 				});
 				return await Promise.all(urls.map(inlineToDataUrl));
@@ -1095,6 +1131,7 @@ export function PluginHostPanel({
 				const clips = await apiGenerateVideo(toTarget(node), input.prompt, {
 					provider: input.provider,
 					model: input.model,
+					requestId: input.request_id,
 				});
 				return await Promise.all(
 					clips.map(async (c) => ({
@@ -1109,12 +1146,16 @@ export function PluginHostPanel({
 					voice: input.voice,
 					speed: input.speed,
 					language: input.language,
+					requestId: input.request_id,
 				});
 				return await blobToDataUrl(blob);
 			},
 			transcribeAudio: async (input) => {
 				const blob = await dataUrlToBlob(input.audio);
-				return await apiTranscribeAudio(
+				const transcribe = input.detailed
+					? apiTranscribeAudioDetailed
+					: apiTranscribeAudio;
+				return await transcribe(
 					toTarget(node),
 					blob,
 					input.filename ?? "recording.wav"
@@ -1167,6 +1208,32 @@ export function PluginHostPanel({
 					}))
 				);
 				return { configured: resp.configured, results };
+			},
+			// Image catalogs use the same host-owned egress boundary as GIFs. The
+			// Core response carries provider attribution and rights metadata; only
+			// the media bytes are transformed into CSP-safe data URLs here.
+			searchImages: async ({ provider, query }) => {
+				const resp = await searchImages(toTarget(node), provider, query);
+				const results = await Promise.all(
+					resp.results.map(async (image) => ({
+						id: image.id,
+						title: image.title,
+						preview: await inlineToDataUrl(image.preview_url),
+						url: await inlineToDataUrl(image.url),
+						width: image.width,
+						height: image.height,
+						attribution: image.attribution,
+						sourceUrl: image.source_url,
+						licenseUrl: image.license_url,
+						rights: image.rights,
+					}))
+				);
+				return {
+					configured: resp.configured,
+					provider: resp.provider,
+					error: resp.error,
+					results,
+				};
 			},
 			// Fine-tune runs — the @ryu/finetune app drives Core's orchestration +
 			// durable job store through the governed bridge (host holds the node token).
@@ -1439,17 +1506,53 @@ export function PluginHostPanel({
 				createInbox(toTarget(node), {
 					name: input.name,
 					address: input.address,
+					client_id: input.clientId,
+					metadata: input.metadata,
+					pod_id: input.podId,
+					provider: input.provider as "webhook" | "imap" | undefined,
 				}) as unknown as Promise<MailInbox>,
 			mailDelete: async ({ id }) => {
 				await deleteInbox(toTarget(node), id);
 			},
 			mailRotateSecret: ({ id }) => rotateInboundSecret(toTarget(node), id),
-			mailSend: ({ inboxId, to, subject, text }) =>
+			mailSend: ({
+				attachments,
+				bcc,
+				cc,
+				clientId,
+				headers,
+				html,
+				inboxId,
+				inReplyTo,
+				labels,
+				references,
+				replyTo,
+				subject,
+				text,
+				trackOpens,
+				to,
+			}) =>
 				sendMessage(toTarget(node), inboxId, {
-					to,
+					attachments: attachments as Parameters<
+						typeof sendMessage
+					>[2]["attachments"],
+					bcc,
+					cc,
+					clientId,
+					headers,
+					html,
+					inReplyTo,
+					labels,
+					references: Array.isArray(references)
+						? references.join(" ")
+						: references,
+					replyTo,
 					subject,
 					text,
+					trackOpens,
+					to,
 				}) as unknown as Promise<MailMessage>,
+			mailRequest: (input) => mailRequest(toTarget(node), input),
 			// The inbound forwarder URL is derived from the node URL (the desktop page
 			// built it client-side); the host owns node.url, the sandboxed frame does
 			// not (the workflowsWebhook precedent).
@@ -1715,9 +1818,17 @@ export function PluginHostPanel({
 			// user JWT remain in this trusted host; only the opaque join result crosses
 			// the RPC boundary into the null-origin companion.
 			realtimeConnect: async ({ room_id }) => {
+				const signal = realtimeLifetimeRef.current?.signal;
+				if (!signal || signal.aborted) {
+					throw new Error("companion document is closed");
+				}
+				const jwt = await waitForApplicationRealtime(getRealtimeJwt(), signal);
+				if (signal.aborted) {
+					throw new Error("companion document is closed");
+				}
 				const connectionId = crypto.randomUUID();
 				const queue = new ApplicationRealtimeQueue();
-				let connection: RealtimeConnection;
+				let connection: RealtimeConnection | undefined;
 				let resolveJoin: (ack: {
 					access: "read" | "write";
 					memberId: string;
@@ -1734,54 +1845,55 @@ export function PluginHostPanel({
 					resolveJoin = resolve;
 					rejectJoin = reject;
 				});
+				// A transport can fail before the join await is reached.
+				void join.catch(() => undefined);
 				const timeout = window.setTimeout(() => {
 					rejectJoin(new Error("realtime join timed out"));
 				}, 15_000);
-				const jwt = await getRealtimeJwt();
 				const closeOnOverflow = () => {
-					connection.close();
+					connection?.close();
 					realtimeSessionsRef.current.delete(connectionId);
 				};
-				connection = new RealtimeConnection(toTarget(node), {
-					appId: companion.pluginId,
-					handlers: {
-						onClose: (event) => {
-							queue.close({
-								code: event.code,
-								reason: event.reason,
-								type: "close",
-							});
-							queue.end();
-							rejectJoin(
-								new Error(`realtime closed: ${event.reason || event.code}`)
-							);
-							realtimeSessionsRef.current.delete(connectionId);
-						},
-						onJoinAck: (ack) => resolveJoin(ack),
-						onNamedEvent: ({ name, data }) => {
-							if (!queue.push({ data, name, type: "event" })) {
-								closeOnOverflow();
-							}
-						},
-						onPresence: (data) => {
-							if (!queue.push({ data, type: "presence" })) {
-								closeOnOverflow();
-							}
-						},
-						onResyncRequired: ({ dropped, reason }) => {
-							if (!queue.push({ dropped, reason, type: "resync_required" })) {
-								closeOnOverflow();
-							}
-						},
-					},
-					jwt,
-					kind: "application",
-					roomId: room_id,
-				});
-				realtimeSessionsRef.current.set(connectionId, { connection, queue });
-				connection.connect();
 				try {
-					const ack = await join;
+					connection = new RealtimeConnection(toTarget(node), {
+						appId: companion.pluginId,
+						handlers: {
+							onClose: (event) => {
+								queue.close({
+									code: event.code,
+									reason: event.reason,
+									type: "close",
+								});
+								queue.end();
+								rejectJoin(
+									new Error(`realtime closed: ${event.reason || event.code}`)
+								);
+								realtimeSessionsRef.current.delete(connectionId);
+							},
+							onJoinAck: (ack) => resolveJoin(ack),
+							onNamedEvent: ({ name, data }) => {
+								if (!queue.push({ data, name, type: "event" })) {
+									closeOnOverflow();
+								}
+							},
+							onPresence: (data) => {
+								if (!queue.push({ data, type: "presence" })) {
+									closeOnOverflow();
+								}
+							},
+							onResyncRequired: ({ dropped, reason }) => {
+								if (!queue.push({ dropped, reason, type: "resync_required" })) {
+									closeOnOverflow();
+								}
+							},
+						},
+						jwt,
+						kind: "application",
+						roomId: room_id,
+					});
+					realtimeSessionsRef.current.set(connectionId, { connection, queue });
+					connection.connect();
+					const ack = await waitForApplicationRealtime(join, signal);
 					window.clearTimeout(timeout);
 					return {
 						access: ack.access,
@@ -1792,7 +1904,7 @@ export function PluginHostPanel({
 					};
 				} catch (error) {
 					window.clearTimeout(timeout);
-					connection.close();
+					connection?.close();
 					queue.end();
 					realtimeSessionsRef.current.delete(connectionId);
 					throw error;
@@ -2139,7 +2251,14 @@ export function PluginHostPanel({
 			companion.id,
 			mountContext
 		);
-	}, [code, nonce, companion.id, mountContext, initialThemeTokens]);
+	}, [
+		code,
+		nonce,
+		companion.id,
+		companion.csp,
+		mountContext,
+		initialThemeTokens,
+	]);
 
 	const panelTitle = companion.label || companion.name;
 
@@ -2193,7 +2312,8 @@ export function PluginHostPanel({
 				<ExtensionHost
 					granted={granted}
 					nonce={nonce}
-					onConnected={() => setConnected(true)}
+					onConnected={() => setConnectedNonce(nonce)}
+					onMessage={onMessage}
 					services={services}
 					srcdoc={srcdoc}
 					themeTokens={themeTokens}

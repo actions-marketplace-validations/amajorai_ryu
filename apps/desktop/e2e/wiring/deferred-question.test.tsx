@@ -22,25 +22,30 @@ let currentContainer: HTMLElement | null = null;
 const Harness = ({
 	question,
 	idleMs = 20,
+	paused = false,
 }: {
 	question: PendingQuestion | null;
 	idleMs?: number;
+	paused?: boolean;
 }) => {
-	const deferred = useDeferredQuestion(question, idleMs);
+	const deferred = useDeferredQuestion(question, idleMs, paused);
 	markComposerActivity = deferred.markComposerActivity;
 	markComposerIdle = deferred.markComposerIdle;
 	visibleQuestion = deferred.visibleQuestion;
 	return null;
 };
 
-const renderHarness = async (question: PendingQuestion | null) => {
+const renderHarness = async (
+	question: PendingQuestion | null,
+	paused = false
+) => {
 	if (!(currentRoot && currentContainer)) {
 		currentContainer = document.createElement("div");
 		document.body.appendChild(currentContainer);
 		currentRoot = createRoot(currentContainer);
 	}
 	await act(async () => {
-		currentRoot?.render(<Harness question={question} />);
+		currentRoot?.render(<Harness paused={paused} question={question} />);
 	});
 };
 
@@ -100,6 +105,16 @@ describe("useDeferredQuestion", () => {
 		await act(async () => {
 			markComposerIdle();
 		});
+
+		expect(visibleQuestion).toEqual({ id: "question-1" });
+	});
+
+	it("keeps the pending question out of the composer while unavailable", async () => {
+		await renderHarness({ id: "question-1" }, true);
+
+		expect(visibleQuestion).toBeNull();
+
+		await renderHarness({ id: "question-1" });
 
 		expect(visibleQuestion).toEqual({ id: "question-1" });
 	});

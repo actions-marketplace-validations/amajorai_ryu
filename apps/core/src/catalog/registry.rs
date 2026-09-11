@@ -113,6 +113,7 @@ pub fn is_comparable_version(version: &str) -> bool {
 /// accounts for CPU architecture.
 pub fn required_platforms(name: &str) -> &'static [&'static str] {
     match name {
+        "freetoken" => &["linux", "windows"],
         // MLX is Apple's array framework — Apple Silicon macOS only. The vision
         // (mlx-vlm), native mlx-serve, and oMLX engines build on the same
         // framework, so they share the platform label.
@@ -136,6 +137,10 @@ pub fn required_platforms(name: &str) -> &'static [&'static str] {
     }
 }
 
+fn freetoken_platform_supported(os: &str, arch: &str) -> bool {
+    arch == "x86_64" && matches!(os, "linux" | "windows")
+}
+
 /// Whether THIS Core node can actually install/run `name`, given its own OS and
 /// CPU architecture. The NODE is authoritative — not the client driving it — so
 /// a remote desktop on Windows correctly sees a macOS-only engine as unsupported
@@ -146,6 +151,7 @@ pub fn required_platforms(name: &str) -> &'static [&'static str] {
 /// Apple MLX runtimes cannot run, so the arch is part of the gate.
 pub fn supported_on_node(name: &str) -> bool {
     match name {
+        "freetoken" => freetoken_platform_supported(std::env::consts::OS, std::env::consts::ARCH),
         "mlx" | "mlx-vlm" | "omlx" => cfg!(target_os = "macos") && cfg!(target_arch = "aarch64"),
         // The native mlx-serve release currently requires macOS 26.2+ in
         // addition to Apple Silicon. Keep this gate server-side because the
@@ -412,6 +418,39 @@ pub fn static_registry() -> Vec<CatalogEntry> {
             deprecated: false,
             recommended: false,
         },
+        CatalogEntry {
+            name: "lemonade",
+            display_name: "Lemonade Server",
+            description: "Connect to Lemonade Server · OpenAI-compatible chat · install Lemonade and download models first at lemonade-server.ai",
+            category: SidecarCategory::Provider,
+            source: SidecarSource::Github {
+                repo: "lemonade-sdk/lemonade",
+            },
+            deprecated: false,
+            recommended: false,
+        },
+        CatalogEntry {
+            name: "llama-swap",
+            display_name: "llama-swap",
+            description: "On-demand model switching · connect to your configured llama-swap server · OpenAI-compatible · backend processes and models managed by llama-swap",
+            category: SidecarCategory::Provider,
+            source: SidecarSource::Github {
+                repo: "mostlygeek/llama-swap",
+            },
+            deprecated: false,
+            recommended: false,
+        },
+        CatalogEntry {
+            name: "freetoken",
+            display_name: "FreeToken",
+            description: "MoE inference on NVIDIA GPUs · connect to an installed FreeToken server · Windows/Linux x86_64 · no native macOS runtime",
+            category: SidecarCategory::Provider,
+            source: SidecarSource::Github {
+                repo: "FlashML-org/FreeToken",
+            },
+            deprecated: false,
+            recommended: false,
+        },
         // Docker Model Runner — an adopt-only engine. Ryu downloads nothing; it
         // routes to Docker's built-in OpenAI-compatible model server (Docker
         // Desktop 4.40+ / Docker Engine + `model` plugin) once the user enables
@@ -601,6 +640,18 @@ mod tests {
     use super::*;
 
     #[test]
+    fn freetoken_platform_matrix_enforces_supported_operating_systems_and_architecture() {
+        for (os, arch, expected) in [
+            ("linux", "x86_64", true), ("windows", "x86_64", true),
+            ("macos", "aarch64", false), ("macos", "x86_64", false),
+            ("linux", "aarch64", false), ("windows", "aarch64", false),
+            ("freebsd", "x86_64", false),
+        ] {
+            assert_eq!(freetoken_platform_supported(os, arch), expected, "{os}/{arch}");
+        }
+    }
+
+    #[test]
     fn registry_has_correct_count() {
         let r = static_registry();
         // 23 base entries + 4 sandbox backends (wasmtime, docker, microsandbox,
@@ -612,7 +663,7 @@ mod tests {
         // moved with it — this one did not, hence the rebase). NOTE: this is a
         // global count over a shared tree — if a concurrent feature adds a catalog
         // row, rebase this number with it.
-        assert_eq!(r.len(), 27);
+        assert_eq!(r.len(), 30);
     }
 
     #[test]
@@ -714,8 +765,8 @@ mod tests {
         assert_eq!(tools.len(), 5);
         // llamacpp, ollama, vllm, sglang, mlx, mlx-vlm, mlx-serve, omlx (Apple Silicon only),
         // docker-model-runner (adopt-only), apfel (Apple FM, Apple Silicon macOS 26+),
-        // mesh-llm (adopt-or-start, OpenAI-compatible distributed runtime).
-        assert_eq!(providers.len(), 11);
+        // mesh-llm (adopt-or-start), lemonade and llama-swap (externally managed).
+        assert_eq!(providers.len(), 14);
         // whisper.cpp + audio.cpp + OuteTTS + Ryu TTS multi-engine sidecar
         // (parakeet is also a model, not a Store engine entry).
         assert_eq!(voice.len(), 4);

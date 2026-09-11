@@ -43,7 +43,7 @@ import { cn } from "@ryu/ui/lib/utils";
 import { format, formatDistanceToNow } from "date-fns";
 import { useCallback, useMemo } from "react";
 import { useChatHistoryContext } from "@/src/contexts/ChatHistoryContext.tsx";
-import { useTabsContext } from "@/src/contexts/TabsContext.tsx";
+import { useTabSelector } from "@/src/contexts/TabsContext.tsx";
 import { type RunSummary, useRuns } from "@/src/hooks/useRuns.ts";
 import { useSchedules } from "@/src/hooks/useSchedules.ts";
 import type { ScheduledJob } from "@/src/lib/api/schedules.ts";
@@ -333,7 +333,7 @@ function AgentRunOverview({ jobs }: { jobs: ScheduledJob[] }) {
 
 export function AgentRunHistoryView({ agentId }: AgentRunHistoryViewProps) {
 	const { refresh, setActiveConversationId } = useChatHistoryContext();
-	const { openTab } = useTabsContext();
+	const openTab = useTabSelector((state) => state.openTab);
 	const history = useAgentHistory(agentId);
 	const { jobs } = useSchedules();
 	const routines = useMemo(

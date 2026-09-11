@@ -89,15 +89,17 @@ export interface ImportedThreadResult {
 	 * existing conversation, updated with any new native messages, rather than a
 	 * freshly created one. */
 	alreadyImported: boolean;
-	conversationId: string;
+	conversationId: string | null;
 	/** Workspace folder the thread ran in, if the transcript recorded one. Used
 	 * to register the folder as a project so the chat appears grouped. */
 	cwd?: string;
+	dryRun: boolean;
 	messageCount: number;
 	/** Messages appended to the Ryu conversation by this import. */
 	messagesAdded: number;
 	title: string;
 	truncated: boolean;
+	wouldCreate: boolean;
 }
 
 /**
@@ -107,14 +109,18 @@ export interface ImportedThreadResult {
 export async function importAgentThread(
 	target: ApiTarget,
 	agentId: string,
-	threadId: string
+	threadId: string,
+	options?: { dryRun?: boolean }
 ): Promise<ImportedThreadResult> {
 	const resp = await authenticatedFetch(
 		target,
 		`/api/agents/${encodeURIComponent(agentId)}/threads/import`,
 		{
 			method: "POST",
-			body: JSON.stringify({ thread_id: threadId }),
+			body: JSON.stringify({
+				dry_run: options?.dryRun ?? false,
+				thread_id: threadId,
+			}),
 		}
 	);
 	if (!resp.ok) {
@@ -122,20 +128,24 @@ export async function importAgentThread(
 	}
 	const body = (await resp.json()) as {
 		already_imported?: boolean;
-		conversation_id: string;
+		conversation_id?: string | null;
 		cwd?: string;
+		dry_run?: boolean;
 		message_count?: number;
 		messages_added?: number;
 		truncated?: boolean;
 		title?: string;
+		would_create?: boolean;
 	};
 	return {
 		alreadyImported: body.already_imported ?? false,
-		conversationId: body.conversation_id,
+		conversationId: body.conversation_id ?? null,
 		cwd: body.cwd,
+		dryRun: body.dry_run ?? false,
 		messageCount: body.message_count ?? 0,
 		messagesAdded: body.messages_added ?? body.message_count ?? 0,
 		truncated: body.truncated ?? false,
 		title: body.title ?? "Imported thread",
+		wouldCreate: body.would_create ?? false,
 	};
 }

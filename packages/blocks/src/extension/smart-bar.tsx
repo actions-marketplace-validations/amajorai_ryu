@@ -3,7 +3,9 @@
 import {
 	ArrowUpRight,
 	AtSign,
+	Bookmark,
 	Globe,
+	MessageSquare,
 	Search,
 	Sparkles,
 	TerminalSquare,
@@ -66,6 +68,31 @@ export interface SmartBarProps {
 	 * renders standalone; the live extension injects the browser `executeIntent`.
 	 */
 	onExecute?: (intent: SmartIntent) => void;
+	/** Called when a local result is selected with click or Enter. */
+	onSelectSuggestion?: (suggestion: SmartBarSuggestion) => void;
+	/** Called when the user types so a host can query its local index. */
+	onValueChange?: (value: string) => void;
+	/** Indicates whether the local index is being queried or is ready. */
+	suggestionStatus?: "idle" | "loading" | "ready";
+	/** Local, already-authorized records to show below the route suggestions. */
+	suggestions?: readonly SmartBarSuggestion[];
+}
+
+export interface SmartBarSuggestion {
+	description: string;
+	id: string;
+	kind: "bookmark" | "conversation";
+	title: string;
+}
+
+function SuggestionIcon({ kind }: { kind: SmartBarSuggestion["kind"] }) {
+	const Icon = kind === "bookmark" ? Bookmark : MessageSquare;
+	return (
+		<Icon
+			aria-hidden="true"
+			className="size-4 shrink-0 text-muted-foreground"
+		/>
+	);
 }
 
 /**
@@ -78,9 +105,14 @@ export function SmartBar({
 	autoFocus = false,
 	embedded = false,
 	onExecute,
+	onSelectSuggestion,
+	onValueChange,
+	suggestions = [],
+	suggestionStatus = "idle",
 }: SmartBarProps) {
 	const [value, setValue] = useState(defaultValue);
 	const [cycle, setCycle] = useState(0);
+	const [suggestionIndex, setSuggestionIndex] = useState(-1);
 	const inputRef = useRef<HTMLInputElement>(null);
 
 	const { primary, alternatives } = useMemo(() => route(value), [value]);
@@ -91,10 +123,31 @@ export function SmartBar({
 	const activeIndex = Math.min(cycle, destinations.length - 1);
 	const active = destinations[activeIndex] ?? primary;
 	const hasInput = value.trim().length > 0;
+	const activeSuggestionIndex =
+		suggestions.length > 0 && suggestionIndex >= 0
+			? Math.min(suggestionIndex, suggestions.length - 1)
+			: -1;
+	const activeSuggestion =
+		activeSuggestionIndex >= 0 ? suggestions[activeSuggestionIndex] : undefined;
+	const suggestionsId = "ryu-smart-bar-local-results";
 
 	const ActiveIcon = INTENT_ICON[active.kind];
 
 	const onKeyDown = (e: KeyboardEvent<HTMLInputElement>) => {
+		if (e.key === "ArrowDown" && suggestions.length > 0) {
+			e.preventDefault();
+			setSuggestionIndex((index) =>
+				index >= suggestions.length - 1 ? 0 : index + 1
+			);
+			return;
+		}
+		if (e.key === "ArrowUp" && suggestions.length > 0) {
+			e.preventDefault();
+			setSuggestionIndex((index) =>
+				index <= 0 ? suggestions.length - 1 : index - 1
+			);
+			return;
+		}
 		if (e.key === "Tab" && destinations.length > 1) {
 			e.preventDefault();
 			setCycle((c) => (c + 1) % destinations.length);
@@ -102,6 +155,10 @@ export function SmartBar({
 		}
 		if (e.key === "Enter") {
 			e.preventDefault();
+			if (activeSuggestion) {
+				onSelectSuggestion?.(activeSuggestion);
+				return;
+			}
 			if (hasInput) {
 				onExecute?.(active);
 			}
@@ -110,6 +167,7 @@ export function SmartBar({
 		if (e.key === "Escape") {
 			setValue("");
 			setCycle(0);
+			setSuggestionIndex(-1);
 		}
 	};
 
@@ -124,12 +182,20 @@ export function SmartBar({
 			>
 				<ActiveIcon className="size-5 shrink-0 text-muted-foreground" />
 				<input
+					aria-activedescendant={
+						activeSuggestionIndex >= 0
+							? `${suggestionsId}-${activeSuggestionIndex}`
+							: undefined
+					}
+					aria-controls={suggestions.length > 0 ? suggestionsId : undefined}
 					aria-label={PLACEHOLDER}
 					autoFocus={autoFocus}
 					className="flex-1 bg-transparent text-[14px] leading-[1.6] outline-none placeholder:text-muted-foreground"
 					onChange={(e) => {
 						setValue(e.target.value);
 						setCycle(0);
+						setSuggestionIndex(-1);
+						onValueChange?.(e.target.value);
 					}}
 					onKeyDown={onKeyDown}
 					placeholder={PLACEHOLDER}
@@ -138,6 +204,56 @@ export function SmartBar({
 					value={value}
 				/>
 			</div>
+
+			{hasInput && suggestionStatus !== "idle" ? (
+				<div
+					aria-label="Local Ryu results"
+					className="mt-2 overflow-hidden rounded-xl border border-border/70 bg-card shadow-sm"
+					id={suggestionsId}
+					role="listbox"
+				>
+					<div className="flex items-center justify-between border-border/60 border-b px-3 py-2 text-[11px] text-muted-foreground">
+						<span className="font-medium uppercase tracking-wider">
+							Local Ryu results
+						</span>
+						<span aria-live="polite">
+							{suggestionStatus === "loading"
+								? "Searching…"
+								: suggestions.length > 0
+									? `${suggestions.length} found`
+									: "No matches"}
+						</span>
+					</div>
+					{suggestions.length > 0 ? (
+						<div className="p-1">
+							{suggestions.map((suggestion, index) => (
+								<button
+									aria-selected={index === activeSuggestionIndex}
+									className={`flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-left transition-colors hover:bg-muted ${
+										index === activeSuggestionIndex ? "bg-muted" : ""
+									}`}
+									id={`${suggestionsId}-${index}`}
+									key={suggestion.id}
+									onClick={() => onSelectSuggestion?.(suggestion)}
+									onMouseEnter={() => setSuggestionIndex(index)}
+									role="option"
+									type="button"
+								>
+									<SuggestionIcon kind={suggestion.kind} />
+									<span className="min-w-0 flex-1">
+										<span className="block truncate font-medium text-foreground text-sm">
+											{suggestion.title}
+										</span>
+										<span className="block truncate text-muted-foreground text-xs">
+											{suggestion.description}
+										</span>
+									</span>
+								</button>
+							))}
+						</div>
+					) : null}
+				</div>
+			) : null}
 
 			{hasInput ? (
 				<div className="mt-3 flex flex-wrap items-center gap-2">

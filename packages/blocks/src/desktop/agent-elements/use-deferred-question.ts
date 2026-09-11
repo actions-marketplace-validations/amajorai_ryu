@@ -6,13 +6,14 @@ export const QUESTION_TYPING_IDLE_MS = COMPOSER_PROMPT_TYPING_IDLE_MS;
 
 /**
  * Keep agent-initiated composer prompts (questions and approvals) out of the
- * composer while its user is actively drafting. The raw request stays in the
- * transcript until the idle timer wins, so delaying the card never makes the
- * pending request disappear altogether.
+ * composer while its user is actively drafting or unavailable. The raw request
+ * stays in the transcript until the idle timer wins or the user returns, so
+ * delaying the card never makes the pending request disappear altogether.
  */
 export function useDeferredComposerPrompt<T>(
 	prompt: T | null,
-	idleMs = COMPOSER_PROMPT_TYPING_IDLE_MS
+	idleMs = COMPOSER_PROMPT_TYPING_IDLE_MS,
+	paused = false
 ) {
 	const [isComposerActive, setIsComposerActive] = useState(false);
 	const idleTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -43,13 +44,17 @@ export function useDeferredComposerPrompt<T>(
 	return {
 		markComposerActivity,
 		markComposerIdle,
-		visiblePrompt: isComposerActive ? null : prompt,
+		visiblePrompt: paused || isComposerActive ? null : prompt,
 	};
 }
 
 /** Backwards-compatible name for consumers that specifically handle questions. */
-export function useDeferredQuestion<T>(question: T | null, idleMs?: number) {
-	const deferred = useDeferredComposerPrompt(question, idleMs);
+export function useDeferredQuestion<T>(
+	question: T | null,
+	idleMs?: number,
+	paused = false
+) {
+	const deferred = useDeferredComposerPrompt(question, idleMs, paused);
 	return {
 		...deferred,
 		visibleQuestion: deferred.visiblePrompt,

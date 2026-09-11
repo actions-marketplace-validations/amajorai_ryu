@@ -36,6 +36,7 @@ use std::{
 use serde::{Deserialize, Serialize};
 
 pub mod api;
+mod builtin;
 pub mod store;
 
 pub use api::{routes, SkillsCtx};
@@ -846,13 +847,14 @@ impl SkillRegistry {
     /// Load skills from disk and return a populated registry.
     ///
     /// Mirrors [`crate::plugin_manifest::PluginManifestLoader`]'s pattern: built-in
-    /// fixtures first (none today), then user skills from `RYU_SKILLS_DIR` or the
+    /// embedded first-party defaults, then user skills from `RYU_SKILLS_DIR` or the
     /// universal `~/.claude/skills/` directory. A one-time, best-effort migration
     /// lifts any legacy `~/.ryu/skills/*.md` files into the standard layout first
     /// so every skill ends up in one place.
     pub fn load() -> Self {
         ensure_active_set_seeded();
         migrate_legacy_skills();
+        builtin::install_defaults();
         let registry = Self::empty();
         registry.reload();
         registry

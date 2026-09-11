@@ -164,6 +164,8 @@ export function paneRectStyle(rect: PaneRect): CSSProperties {
 		position: "absolute",
 		left: axisCalc(rect.left),
 		top: axisCalc(rect.top),
+		transition:
+			"left var(--ryu-split-pane-transition-duration, 220ms) cubic-bezier(0.23, 1, 0.32, 1), top var(--ryu-split-pane-transition-duration, 220ms) cubic-bezier(0.23, 1, 0.32, 1), width var(--ryu-split-pane-transition-duration, 220ms) cubic-bezier(0.23, 1, 0.32, 1), height var(--ryu-split-pane-transition-duration, 220ms) cubic-bezier(0.23, 1, 0.32, 1)",
 		width: axisCalc(rect.width),
 		height: axisCalc(rect.height),
 	};
@@ -218,6 +220,7 @@ export function SplitGutters({
 	const activeRef = useRef<GutterSpec | null>(null);
 	const startSizesRef = useRef<number[]>([]);
 	const startPosRef = useRef(0);
+	const previousPaneTransitionDurationRef = useRef<string | null>(null);
 
 	const onPointerMove = useCallback(
 		(e: PointerEvent) => {
@@ -261,6 +264,18 @@ export function SplitGutters({
 		window.removeEventListener("pointercancel", endDrag);
 		document.body.style.cursor = "";
 		document.body.style.userSelect = "";
+		const previous = previousPaneTransitionDurationRef.current;
+		if (previous === "") {
+			document.body.style.removeProperty(
+				"--ryu-split-pane-transition-duration"
+			);
+		} else if (previous !== null) {
+			document.body.style.setProperty(
+				"--ryu-split-pane-transition-duration",
+				previous
+			);
+		}
+		previousPaneTransitionDurationRef.current = null;
 	}, [onPointerMove]);
 
 	// NOTE: no momentum here, on purpose. A divider is placed, not thrown —
@@ -273,6 +288,14 @@ export function SplitGutters({
 			// Keeps the drag alive when the pointer outruns the thin gutter.
 			e.currentTarget.setPointerCapture?.(e.pointerId);
 			activeRef.current = spec;
+			previousPaneTransitionDurationRef.current =
+				document.body.style.getPropertyValue(
+					"--ryu-split-pane-transition-duration"
+				);
+			document.body.style.setProperty(
+				"--ryu-split-pane-transition-duration",
+				"0.001ms"
+			);
 			startSizesRef.current = [...spec.sizes];
 			startPosRef.current =
 				spec.orientation === "columns" ? e.clientX : e.clientY;

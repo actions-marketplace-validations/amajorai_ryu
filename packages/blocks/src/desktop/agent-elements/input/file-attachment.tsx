@@ -3,7 +3,7 @@ import { cn } from "@ryu/ui/lib/utils";
 import { IconX as X } from "@tabler/icons-react";
 import { useRef, useState } from "react";
 import { FileTypeIcon } from "../file-type-icon.tsx";
-import { ImageLightbox } from "../image-lightbox.tsx";
+import { ImageLightbox, type LightboxImage } from "../image-lightbox.tsx";
 
 export interface FileAttachmentProps {
 	className?: string;
@@ -16,6 +16,7 @@ export interface FileAttachmentProps {
 	filename: string;
 	id: string;
 	isImage?: boolean;
+	onAnnotate?: (image: LightboxImage) => void;
 	onRemove?: () => void;
 	size?: number;
 	url?: string;
@@ -38,6 +39,7 @@ export function FileAttachment({
 	isImage,
 	url,
 	onRemove,
+	onAnnotate,
 	className,
 	display = "chip",
 	enableImagePreview = true,
@@ -139,6 +141,7 @@ export function FileAttachment({
 			{canPreview && url && (
 				<ImageLightbox
 					images={[{ id, url, filename }]}
+					onAnnotate={onAnnotate}
 					onClose={() => setIsLightboxOpen(false)}
 					open={isLightboxOpen}
 					originRef={lightboxOriginRef}

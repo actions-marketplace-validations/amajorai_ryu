@@ -2312,6 +2312,7 @@ function AppDetailPanel({
 }) {
 	const host = useCatalogHost();
 	const runScan = host.runCatalogScan;
+	const auditNode = host.useActiveNode();
 	const { Markdown, fetchVersionDetail: hostFetchVersionDetail } = host;
 	// How much of this listing the user has asked to see. Read ONCE here and
 	// threaded down as a narrow boolean: a detail panel must not learn the ladder,
@@ -2571,10 +2572,12 @@ function AppDetailPanel({
 						? () =>
 								runScan({
 									description: detail?.description ?? entry.description,
+									files: detail?.designSystem?.files ?? undefined,
 									id: entry.id,
 									kind: "plugin",
 									metadata: {
 										developer: detail?.developer ?? entry.developer,
+										designSystemNavigation: detail?.designSystem?.navigation,
 										license: detail?.license ?? entry.license,
 										origin: detail?.origin ?? entry.origin,
 										repositoryUrl: detail?.repositoryUrl ?? entry.repo_url,
@@ -2603,7 +2606,9 @@ function AppDetailPanel({
 						? (version) => installVersion(entry.id, version)
 						: undefined
 				}
+				key={auditNode.url}
 				Markdown={Markdown}
+				onOpenAuditConversation={host.openAuditConversation}
 				onTabChange={setTab}
 				overview={overview}
 				reviewsService={reviewsService}

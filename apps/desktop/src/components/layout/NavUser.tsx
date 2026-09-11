@@ -1,3 +1,4 @@
+import { AgentAvailabilityDot } from "@ryu/blocks/desktop/agent-availability";
 import { settingsApi, useSubscription } from "@ryu/settings";
 import {
 	AlertDialog,
@@ -77,6 +78,7 @@ import { APPROVALS_ALIAS } from "@/src/contributions/companion-alias.ts";
 import { useCompanionAlias } from "@/src/contributions/use-companion-alias.ts";
 import { useCreditsWallet } from "@/src/hooks/useCreditsWallet.ts";
 import { useOrgBillingStatus } from "@/src/hooks/useOrgBillingStatus.ts";
+import { useUserAvailability } from "@/src/hooks/useUserAvailability.ts";
 // # 0.1.0: Island disabled — uncomment with the User Nav item below.
 // import { IslandVisibilityMenuItem } from "./IslandVisibilityMenuItem.tsx";
 // # 0.1.0: Capture toggle disabled — uncomment with the User Nav item below.
@@ -92,7 +94,11 @@ import { addAccountViaDeviceAuth } from "../../../lib/oauth.ts";
 import { useAppStore } from "../../store/useAppStore.ts";
 import { DownloadCenter } from "../downloads/DownloadCenter.tsx";
 import { InboxCenter } from "../inbox/InboxCenter.tsx";
-import { SettingsDialog } from "../settings/SettingsDialog.tsx";
+import {
+	preloadSettingsDialog,
+	SettingsDialog,
+} from "../settings/LazySettingsDialog.tsx";
+import { AvailabilityStatusButton } from "./AvailabilityMenu.tsx";
 import { CreateMenu } from "./CreateMenu.tsx";
 import { HelpSubmenu } from "./HelpSubmenu.tsx";
 
@@ -189,8 +195,10 @@ const PLAN_LABELS: Record<string, string> = {
 	"desktop-license": "Ryu Desktop",
 	"marketplace-membership": "A Major Pass",
 	pro: "Ryu Pro",
+	plus: "Ryu Plus",
 	max: "Ryu Max",
 	teams: "Ryu Teams",
+	"teams-lite": "Ryu Teams Lite",
 };
 
 function planLabel(
@@ -214,12 +222,19 @@ function showTrialCountdown(
 }
 
 // The single next-tier upsell shown in the account menu. Ladder: Free/Trial →
-// Pro, Pro/Lifetime → Max, Max → Teams, Teams → nothing (top of the ladder).
+// Pro, Plus → Pro, Pro/Lifetime → Max, Max → Teams, Teams → nothing (top of
+// the public ladder). Plus is private, so Free/Trial still defaults to Pro.
 // Trial resolves currentPlan to null (proUnlocked, plan null), so it falls to
 // the "Upgrade to Pro" default — the conversion pitch the trial should push.
 function nextTierLabel(plan: string | null | undefined): string | null {
 	if (plan === "teams") {
 		return null;
+	}
+	if (plan === "teams-lite") {
+		return "Upgrade to Teams";
+	}
+	if (plan === "plus") {
+		return "Upgrade to Pro";
 	}
 	if (plan === "max") {
 		return "Upgrade to Teams";
@@ -541,6 +556,7 @@ export function NavUser({
 	const setSettingsOpen = useSettingsDialog((s) => s.setOpen);
 	const openSettings = useSettingsDialog((s) => s.openSettings);
 	const { data: session, isPending } = useSession();
+	const availability = useUserAvailability();
 	const { verdict } = useEntitlementContext();
 	// Whether ANY enabled app answers to the Inbox path. The tray previews that app's
 	// data (pending approvals + quest check-off suggestions) and its every action ends
@@ -701,22 +717,28 @@ export function NavUser({
 												/>
 											}
 										>
-											<Avatar className="size-6 shrink-0 rounded-full">
-												<AvatarImage
-													alt={user?.name ?? ""}
-													src={user?.image ?? undefined}
-												/>
-												<AvatarFallback className="overflow-hidden rounded-full bg-transparent p-0">
-													<DitherAvatar
-														className="size-full"
-														name={ditherAvatarSeed({
-															id: user?.id,
-															email: user?.email,
-															name: user?.name,
-														})}
+											<div className="relative shrink-0">
+												<Avatar className="size-6 rounded-full">
+													<AvatarImage
+														alt={user?.name ?? ""}
+														src={user?.image ?? undefined}
 													/>
-												</AvatarFallback>
-											</Avatar>
+													<AvatarFallback className="overflow-hidden rounded-full bg-transparent p-0">
+														<DitherAvatar
+															className="size-full"
+															name={ditherAvatarSeed({
+																id: user?.id,
+																email: user?.email,
+																name: user?.name,
+															})}
+														/>
+													</AvatarFallback>
+												</Avatar>
+												<AgentAvailabilityDot
+													className="absolute right-0 bottom-0 size-2.5 ring-2 ring-sidebar"
+													status={availability.status}
+												/>
+											</div>
 											<ButtonLabel className="flex-1 font-medium text-sm">
 												{user?.name ?? "Account"}
 											</ButtonLabel>
@@ -740,7 +762,11 @@ export function NavUser({
 													profilePath={profilePath}
 												/>
 												{!botProduct && (
-													<DropdownMenuItem onClick={() => openSettings()}>
+													<DropdownMenuItem
+														onClick={() => openSettings()}
+														onFocus={preloadSettingsDialog}
+														onPointerEnter={preloadSettingsDialog}
+													>
 														<Settings className="mr-2 size-4" />
 														Settings
 													</DropdownMenuItem>
@@ -849,6 +875,7 @@ export function NavUser({
 							</ContextMenuContent>
 						</ContextMenu>
 					)}
+					{showUser && <AvailabilityStatusButton />}
 
 					<div className="ml-auto flex items-center gap-0.5">
 						{!botProduct && <CreateMenu />}

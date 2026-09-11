@@ -44,6 +44,8 @@ mod history;
 #[cfg(test)]
 mod version_history_tests;
 
+pub mod backup;
+
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};

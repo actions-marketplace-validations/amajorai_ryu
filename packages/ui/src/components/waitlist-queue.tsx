@@ -611,6 +611,7 @@ export function WaitlistQueue({
 						metalTheme={metalTheme}
 						name={userName}
 						position={position ?? null}
+						referralUrl={referralUrl}
 						totalWaiting={totalWaiting ?? null}
 						username={reserved}
 					/>

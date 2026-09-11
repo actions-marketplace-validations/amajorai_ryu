@@ -51,13 +51,14 @@ describe("AppIcon theme preview", () => {
 		expect(html).not.toContain("<canvas");
 	});
 
-	test("keeps the dither avatar for an art-less non-theme", () => {
+	test("paints a stable material and monogram for an art-less non-theme", () => {
 		const html = renderToStaticMarkup(
 			<AppIcon name="Something" seedId="@acme/x" />
 		);
 		expect(swatchBarStyles(html)).toEqual([]);
 		// The avatar is a seeded canvas, not a colour swatch.
-		expect(html).toContain("<canvas");
+		expect(html).not.toContain("<canvas");
+		expect(html).toContain('data-app-icon="fallback"');
 	});
 
 	test("paints a seeded plate behind glyph art when requested", () => {
@@ -65,7 +66,8 @@ describe("AppIcon theme preview", () => {
 			<AppIcon iconId="chat-01" name="Chat" seedId="@ryu/chat" seedPlate />
 		);
 
-		expect(html).toContain("<canvas");
+		expect(html).not.toContain("<canvas");
+		expect(html).toContain('data-app-icon="fallback"');
 		expect(html).toContain("mask-image");
 	});
 
@@ -80,4 +82,53 @@ describe("AppIcon theme preview", () => {
 
 		expect(html).toContain("object-contain p-1.5");
 	});
+});
+
+describe("unframed engine logos", () => {
+	test("removes tile surfaces, rings and shadows in cards and heroes", () => {
+		for (const variant of ["card", "hero"] as const) {
+			const html = renderToStaticMarkup(
+				<AppIcon
+					iconAppearance="bare"
+					iconBackground="#fff"
+					iconUrl="/logo.svg"
+					variant={variant}
+				/>
+			);
+			expect(html).not.toMatch(
+				/bg-muted|bg-background|shadow-lg|ring-white|background:/
+			);
+			expect(html).toContain("object-contain");
+		}
+	});
+	test("monochrome marks invert in dark mode and on dark hero bands", () => {
+		const card = renderToStaticMarkup(
+			<AppIcon iconAppearance="monochrome" iconUrl="/logo.svg" />
+		);
+		expect(card).toContain("dark:invert");
+		const hero = renderToStaticMarkup(
+			<AppIcon iconAppearance="monochrome" iconUrl="/logo.svg" variant="hero" />
+		);
+		expect(hero).toContain("invert");
+		expect(hero).not.toContain("dark:invert");
+		const color = renderToStaticMarkup(
+			<AppIcon iconAppearance="bare" iconUrl="/logo.svg" />
+		);
+		expect(color).not.toContain("invert");
+	});
+});
+
+test("explicit dark brand art follows the app theme without inversion", () => {
+	const html = renderToStaticMarkup(
+		<AppIcon
+			iconAppearance="bare"
+			iconUrl="/light.png"
+			iconUrlDark="/dark.png"
+		/>
+	);
+	expect(html).toContain("/light.png");
+	expect(html).toContain("/dark.png");
+	expect(html).toContain("dark:hidden");
+	expect(html).toContain("dark:block");
+	expect(html).not.toContain("invert");
 });

@@ -363,6 +363,7 @@ export default function SignInForm({
 											className="w-full gap-3"
 											disabled={submitting}
 											onClick={() => onDeviceApproval(email)}
+											size="lg"
 											type="button"
 											variant="secondary"
 										>

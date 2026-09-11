@@ -39,6 +39,40 @@ afterEach(() => {
 });
 
 describe("SidebarLibrarySection", () => {
+	test("preserves engine artwork and opening behavior in grid and list views", () => {
+		const onOpen = mock(() => undefined);
+		for (const view of ["grid", "list"] as const) {
+			act(() =>
+				root.render(
+					<SidebarLibrarySection
+						icon={GridIcon}
+						items={[
+							{
+								...item,
+								name: "Lemonade Server",
+								onOpen,
+								iconNode: <img alt="Lemonade" src="/engine-logo.svg" />,
+							},
+						]}
+						label="Engines"
+						query=""
+						view={view}
+					/>
+				)
+			);
+			expect(
+				container.querySelector('img[alt="Lemonade"]')?.getAttribute("src")
+			).toBe("/engine-logo.svg");
+			const card = container.querySelector('[role="button"]');
+			act(() =>
+				card?.dispatchEvent(
+					new KeyboardEvent("keydown", { key: "Enter", bubbles: true })
+				)
+			);
+		}
+		expect(onOpen).toHaveBeenCalledTimes(2);
+	});
+
 	test("renders Skills as a book shelf while the default stays a LibraryCard", () => {
 		act(() => {
 			root.render(

@@ -4,6 +4,7 @@ import {
 	BrainIcon,
 	Chat01Icon,
 	ComputerIcon,
+	CpuIcon,
 	DeliverySecure01Icon,
 	DollarCircleIcon,
 	Download01Icon,
@@ -17,6 +18,7 @@ import {
 	PotionIcon,
 	Settings01Icon,
 	Settings02Icon,
+	Share01Icon,
 	ShieldKeyIcon,
 	Sun01Icon,
 	Target01Icon,
@@ -75,7 +77,7 @@ import {
 import { toggleFullscreen } from "@/src/lib/fullscreen.ts";
 import { listenWhenReady } from "@/src/lib/tauri-ready.ts";
 import { compactAge } from "@/src/lib/time.ts";
-import { SettingsDialog } from "../settings/SettingsDialog.tsx";
+import { SettingsDialog } from "../settings/LazySettingsDialog.tsx";
 
 /** Safely read a string field off an opaque plugin-contribution record. */
 function contribString(
@@ -124,6 +126,8 @@ type SettingsSection =
  */
 const NAV_ITEMS = [
 	{ to: "/chat", label: "Chat", icon: Chat01Icon },
+	{ to: "/compute", label: "Compute", icon: CpuIcon },
+	{ to: "/share", label: "Share", icon: Share01Icon },
 	{ to: "/library/agent", label: "Agents", icon: Target01Icon },
 	{ to: "/engines", label: "Engines", icon: LayerIcon },
 	{ to: "/models", label: "Models", icon: BrainIcon },

@@ -201,6 +201,26 @@ pub fn load_job(id: &str) -> std::io::Result<ScheduledJob> {
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
 }
 
+/// Record a finished run against the current configuration, not the snapshot
+/// captured before executing agent tools. A run may reschedule or delete itself.
+pub fn append_execution(id: &str, record: ExecRecord) -> std::io::Result<()> {
+    append_execution_at(&jobs_dir().join(format!("{id}.json")), record)
+}
+
+fn append_execution_at(path: &std::path::Path, record: ExecRecord) -> std::io::Result<()> {
+    let bytes = match std::fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    let mut current: ScheduledJob = serde_json::from_slice(&bytes)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+    current.record_execution(record);
+    let json = serde_json::to_vec_pretty(&current)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+    std::fs::write(path, json)
+}
+
 /// List all persisted scheduled jobs.
 pub fn list_jobs() -> Vec<ScheduledJob> {
     let dir = jobs_dir();
@@ -267,6 +287,33 @@ mod tests {
             last_outcome: None,
             history: Vec::new(),
         }
+    }
+
+    #[test]
+    fn completion_preserves_rescheduled_config_and_does_not_resurrect_deleted_job() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("job.json");
+        let mut updated = job();
+        updated.schedule = Schedule::Every {
+            interval: "6h".into(),
+        };
+        updated.enabled = false;
+        updated.target = JobTarget::Agent {
+            agent_id: "watch".into(),
+            prompt: "Recheck after reset".into(),
+            model: Some("low-cost-model".into()),
+            conversation_id: None,
+        };
+        std::fs::write(&path, serde_json::to_vec(&updated).unwrap()).unwrap();
+        append_execution_at(&path, record(ExecOutcome::Success, "2026-09-11T00:00:00Z")).unwrap();
+        let saved: ScheduledJob = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(saved.schedule, updated.schedule);
+        assert_eq!(saved.target, updated.target);
+        assert!(!saved.enabled);
+        assert_eq!(saved.history.len(), 1);
+        std::fs::remove_file(&path).unwrap();
+        append_execution_at(&path, record(ExecOutcome::Success, "2026-09-11T00:01:00Z")).unwrap();
+        assert!(!path.exists());
     }
 
     #[test]

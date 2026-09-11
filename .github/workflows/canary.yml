@@ -3,7 +3,7 @@ name: canary
 # Bleeding-edge build of the open-core headless set (core / gateway / cli + the 11
 # feature-app backend sidecars) on EVERY push to main that touches the built sources,
 # published as a PRERELEASE on its own versioned tag (`v0.1.2-canary.20260804.36`). This is
-# the fresh-on-merge companion to nightly.yml (the once-a-day snapshot); use canary to test
+# the fresh-on-merge companion to nightly.yml (the every-three-hours snapshot); use canary to test
 # the very latest main. The channel keeps the last `RETAIN` builds (see `prepare`); before
 # 2026-08-04 it was a single rolling `canary` tag, so only one build ever existed.
 #

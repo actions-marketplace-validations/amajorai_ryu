@@ -221,6 +221,7 @@ export default function SkillsCatalogSection({
 	initialSelectedId?: string;
 } = {}) {
 	const host = useCatalogHost();
+	const auditNode = host.useActiveNode();
 	// One resolver for the section (a host implementation reads live node state to
 	// answer it), threaded to the cards. Null for a plain SKILL.md, which is most.
 	const usePluginSettingsOpener =
@@ -330,6 +331,7 @@ export default function SkillsCatalogSection({
 					<div className="grid h-full min-w-0 grid-cols-[minmax(0,1fr)_minmax(280px,36%)] overflow-hidden">
 						<div className="min-h-0 overflow-auto border-r">
 							<SkillDetailPanel
+								auditScope={auditNode.url}
 								canAuthor={canAuthor}
 								detail={detail}
 								distributeSkill={host.distributeSkill}
@@ -343,6 +345,7 @@ export default function SkillsCatalogSection({
 								Markdown={host.Markdown}
 								onCreate={openNewSkill}
 								onEdit={openEditSkill}
+								onOpenAuditConversation={host.openAuditConversation}
 								onSelectOrg={setOrg}
 								onToggleEnabled={setSkillEnabled}
 								renderAffordance={host.renderAffordance}
@@ -1005,7 +1008,9 @@ function SkillDetailPanel({
 	canAuthor,
 	installLayer,
 	renderAffordance,
+	auditScope,
 	runCatalogScan,
+	onOpenAuditConversation,
 	Markdown,
 }: {
 	selectedId: string | null;
@@ -1025,7 +1030,9 @@ function SkillDetailPanel({
 	canAuthor: boolean;
 	installLayer: CatalogInstall | null;
 	renderAffordance: CatalogHost["renderAffordance"];
+	auditScope: string;
 	runCatalogScan: CatalogHost["runCatalogScan"];
+	onOpenAuditConversation?: (id: string) => void;
 	Markdown: ComponentType<CatalogMarkdownProps>;
 }) {
 	if (!selectedId) {
@@ -1187,7 +1194,8 @@ function SkillDetailPanel({
 			<ListingSection title="Health">
 				<ScorecardPanel
 					agentScan={agentScan}
-					key={card.id}
+					key={JSON.stringify([auditScope, detail])}
+					onOpenConversation={onOpenAuditConversation}
 					scorecard={scorecard}
 				/>
 			</ListingSection>

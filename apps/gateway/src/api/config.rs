@@ -1461,6 +1461,14 @@ mod tests {
     }
 
     #[allow(clippy::await_holding_lock)]
+    // These persistence/browser-defense cases exercise the explicit development
+    // opt-out, not the authenticated production default.
+    fn explicit_local_development_config() -> GatewayConfig {
+        let mut config = GatewayConfig::default();
+        config.auth.require_auth = false;
+        config
+    }
+
     #[tokio::test]
     async fn computer_use_put_updates_the_persisted_config_and_view() {
         use axum::extract::{ConnectInfo, State};
@@ -1469,7 +1477,7 @@ mod tests {
         use std::net::SocketAddr;
 
         let _guard = crate::config::test_config_path::ConfigPathGuard::isolated("computer-use-put");
-        GatewayConfig::default()
+        explicit_local_development_config()
             .save()
             .expect("seed the persisted config");
 
@@ -1479,7 +1487,7 @@ mod tests {
         })
         .expect("disabled audit logger");
         let state = std::sync::Arc::new(AppState::new_for_test(
-            GatewayConfig::default(),
+            explicit_local_development_config(),
             audit,
             EvalsRunner::new(EvalsConfig::default()),
         ));
@@ -2141,9 +2149,9 @@ mod tests {
         use std::net::SocketAddr;
         use std::sync::Arc;
 
-        // Zero-config desktop posture: no auth, no master key — the loopback
+        // Explicit local development posture: no auth, no master key — the loopback
         // exception would otherwise admit an anonymous local caller.
-        let config = GatewayConfig::default();
+        let config = explicit_local_development_config();
         let audit = AuditLogger::new(&AuditConfig {
             enabled: false,
             db_path: String::new(),
@@ -2185,10 +2193,18 @@ mod tests {
         use std::net::SocketAddr;
         use std::sync::Arc;
 
-        // No-auth loopback posture (zero-config desktop): the peer is always
+        // No-auth loopback posture (explicit local development): the peer is always
         // 127.0.0.1 in a DNS-rebinding attack, so peer posture alone can't tell the
         // browser from a legit server-side caller — the Host header does.
-        let state = Arc::new(AppState::new_for_test_default());
+        let state = Arc::new(AppState::new_for_test(
+            explicit_local_development_config(),
+            AuditLogger::new(&AuditConfig {
+                enabled: false,
+                db_path: String::new(),
+            })
+            .unwrap(),
+            EvalsRunner::new(EvalsConfig::default()),
+        ));
         let loopback: SocketAddr = "127.0.0.1:9999".parse().unwrap();
 
         // Rebinding shape: browser points evil.com at 127.0.0.1, so the request is
@@ -2414,7 +2430,7 @@ mod tests {
         let path = guard.path().to_path_buf();
 
         // ── Arrange: what an earlier PUT left on disk ─────────────────────────
-        let mut persisted = GatewayConfig::default();
+        let mut persisted = explicit_local_development_config();
         persisted.routing.model_map.insert(
             "claude-3-5-sonnet".to_string(),
             ModelMapping {
@@ -2488,11 +2504,11 @@ mod tests {
         })
         .expect("disabled audit logger");
         let state = Arc::new(AppState::new_for_test(
-            GatewayConfig::default(),
+            explicit_local_development_config(),
             audit,
             EvalsRunner::new(EvalsConfig::default()),
         ));
-        // Loopback + no auth + no master key ⇒ the zero-config desktop admin path,
+        // Loopback + no auth + no master key ⇒ the explicit local development admin path,
         // so no credential header is needed (and no env-provided key can skew it).
         let peer = ConnectInfo("127.0.0.1:5".parse::<SocketAddr>().unwrap());
 
@@ -2698,7 +2714,7 @@ mod tests {
         })
         .expect("disabled audit logger");
         let state = Arc::new(AppState::new_for_test(
-            GatewayConfig::default(),
+            explicit_local_development_config(),
             audit,
             EvalsRunner::new(EvalsConfig::default()),
         ));
@@ -2752,7 +2768,7 @@ mod tests {
         })
         .expect("disabled audit logger");
         let state = Arc::new(AppState::new_for_test(
-            GatewayConfig::default(),
+            explicit_local_development_config(),
             audit,
             EvalsRunner::new(EvalsConfig::default()),
         ));

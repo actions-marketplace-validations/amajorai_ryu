@@ -21,7 +21,42 @@ const entry: CatalogEntry = {
 
 const detail: PluginCatalogDetail = {
 	archived: false,
+	apiSurface: {
+		runnables: [
+			{ id: "example-mail-companion", kind: "companion", name: "Example Mail" },
+		],
+	},
 	description: entry.description,
+	designSystem: {
+		files: [
+			{
+				contents: '@import "@ryu/ui/app-ui.css";',
+				path: "ui/src/styles.css",
+			},
+			{
+				contents: [
+					'import { markCompanionAppRoot, subscribeCompanionTheme } from "@ryu/app-host/companion-theme";',
+					'import { RyuAppShell } from "@ryu/blocks/companion/app-ui";',
+					"markCompanionAppRoot(document.getElementById('root'));",
+					"subscribeCompanionTheme();",
+				].join("\n"),
+				path: "ui/src/main.tsx",
+			},
+			{
+				contents: [
+					'import { Button, Empty, Spinner } from "@ryu/ui/components";',
+					'<RyuAppShell className="bg-background text-foreground">',
+					'<Button aria-label="Save" disabled={loading}>Save</Button>',
+					"{loading ? <Spinner /> : null}",
+					"{empty ? <Empty /> : null}",
+					"{error ? <p>Unable to load</p> : null}",
+					"</RyuAppShell>",
+				].join("\n"),
+				path: "ui/src/App.tsx",
+			},
+		],
+		navigation: "manifest",
+	},
 	engines: { ryu: ">=0.3.0" },
 	issuesEnabled: true,
 	license: "MIT",

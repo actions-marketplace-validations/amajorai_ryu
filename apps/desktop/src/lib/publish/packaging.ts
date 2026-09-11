@@ -1,3 +1,7 @@
+import {
+	type GhostAvatarAppearance,
+	parseGhostAvatar,
+} from "@ryu/ui/components/ghost-avatar.ts";
 // apps/desktop/src/lib/publish/packaging.ts
 //
 // Universal "Publish" packaging (Phase 5a): turn a Runnable's SHAREABLE config
@@ -211,10 +215,12 @@ export interface AgentPublishPersona {
 		to?: string | null;
 	} | null;
 	emoji?: string | null;
-	expressive?: {
-		animation?: string | null;
-		expression?: string | null;
-	} | null;
+	expressive?:
+		| (GhostAvatarAppearance & {
+				animation?: string | null;
+				expression?: string | null;
+		  })
+		| null;
 	icon?: string | null;
 	icon_color?: string | null;
 	tone?: string | null;
@@ -251,7 +257,12 @@ export interface AgentAvatarDeclaration {
 		to: string | null;
 	} | null;
 	emoji: string | null;
-	expressive: { animation: string | null; expression: string | null } | null;
+	expressive:
+		| (GhostAvatarAppearance & {
+				animation: string | null;
+				expression: string | null;
+		  })
+		| null;
 	icon: string | null;
 	icon_color: string | null;
 	tone: string | null;
@@ -364,6 +375,7 @@ function buildAvatar(persona: AgentPublishPersona | null): {
 		: null;
 	const expressive = persona.expressive
 		? {
+				...parseGhostAvatar(persona.expressive),
 				animation: trimOrNull(persona.expressive.animation),
 				expression: trimOrNull(persona.expressive.expression),
 			}

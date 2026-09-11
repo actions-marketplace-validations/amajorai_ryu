@@ -33,6 +33,11 @@ test("registers targeted Inbox notifications as a separate capability", () => {
 //    the JSON — their whole job is to be an INDEPENDENT copy. ──────────────────
 
 const OLD_METHOD_CAPABILITY: Record<string, Capability> = {
+	"backups.destinations": "backups.app",
+	"backups.create": "backups.app",
+	"backups.list": "backups.app",
+	"backups.get": "backups.app",
+	"backups.restore": "backups.app",
 	"host.capabilities": "host.capabilities",
 	"i18n.get": "i18n",
 	"i18n.translate": "i18n",
@@ -99,6 +104,7 @@ const OLD_METHOD_CAPABILITY: Record<string, Capability> = {
 	"registry.ttsEngines": "core.listAgents",
 	"registry.agents": "core.listAgents",
 	"assets.searchGifs": "core.listAgents",
+	"assets.searchImages": "core.listAgents",
 	"finetune.capability": "finetune.runs",
 	"finetune.start": "finetune.runs",
 	"finetune.list": "finetune.runs",
@@ -177,6 +183,7 @@ const OLD_METHOD_CAPABILITY: Record<string, Capability> = {
 	"mail.rotateSecret": "mail.crud",
 	"mail.send": "mail.crud",
 	"mail.inboundUrl": "mail.crud",
+	"mail.request": "mail.crud",
 	"calendar.jobs": "calendar.crud",
 	"calendar.workflows": "calendar.crud",
 	"calendar.agents": "calendar.crud",
@@ -264,6 +271,7 @@ const OLD_METHOD_CAPABILITY: Record<string, Capability> = {
 };
 
 const OLD_GRANT_CAPABILITY: Record<string, Capability> = {
+	"backups:app": "backups.app",
 	"native:haptics": "native.haptics",
 	"native:notifications": "native.notifications",
 	"native:live_activities": "native.liveActivities",

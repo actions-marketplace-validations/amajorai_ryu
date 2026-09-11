@@ -177,10 +177,10 @@ async fn local_generate(state: &ServerState, transcript: &str) -> Option<String>
 
 /// Route through the Gateway with an explicit model id (power-user override).
 async fn gateway_generate(state: &ServerState, model: &str, transcript: &str) -> Option<String> {
-    use crate::sidecar::gateway::{gateway_token, gateway_url};
+    use crate::sidecar::gateway::{gateway_core_token, gateway_url};
     let base = gateway_url();
     let base = base.trim_end_matches('/');
-    let token = gateway_token();
+    let token = gateway_core_token();
     let body = post_completion(
         state,
         &format!("{base}/v1/chat/completions"),

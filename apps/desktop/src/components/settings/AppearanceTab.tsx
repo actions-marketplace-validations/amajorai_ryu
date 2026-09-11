@@ -25,12 +25,8 @@ import {
 } from "@ryu/ui/components/collapsible";
 import {
 	ColorPicker,
-	ColorPickerArea,
 	ColorPickerContent,
-	ColorPickerEyeDropper,
-	ColorPickerFormatSelect,
-	ColorPickerHueSlider,
-	ColorPickerInput,
+	ColorPickerPanel,
 	ColorPickerTrigger,
 } from "@ryu/ui/components/color-picker";
 import { Input } from "@ryu/ui/components/input";
@@ -476,9 +472,9 @@ function ColorField({
 	value: string;
 	onChange: (key: keyof CustomTokens, val: string) => void;
 }) {
-	// `value` may be a raw preset string (oklch/rgba, possibly translucent). The
-	// swatch + picker only speak 6-digit hex, so derive a display hex here — the
-	// picker emitting an opaque hex on edit is the user's explicit choice.
+	// `value` may be a raw preset string (oklch/rgba, possibly translucent). Keep
+	// that lossless token in theme state while the trigger uses a compact hex
+	// display value for the shared picker.
 	const hexVal = colorToHex(value);
 	const textColor = getContrastColor(hexVal);
 
@@ -504,11 +500,7 @@ function ColorField({
 						{hexVal}
 					</ColorPickerTrigger>
 					<ColorPickerContent className="z-50">
-						<ColorPickerArea />
-						<ColorPickerHueSlider />
-						<ColorPickerEyeDropper />
-						<ColorPickerFormatSelect />
-						<ColorPickerInput />
+						<ColorPickerPanel />
 					</ColorPickerContent>
 				</ColorPicker>
 			</div>
@@ -526,7 +518,8 @@ function PrimaryColorField({
 	onChange: (key: keyof CustomTokens, val: string) => void;
 }) {
 	// `value` may be a raw preset string (oklch). Derive a display hex so the
-	// swatch renders and preset-matching works; the picker still emits hex.
+	// trigger renders and preset-matching works; the picker still emits hex for
+	// this explicitly hex-formatted field.
 	const hexVal = colorToHex(value);
 	const matchesPreset = PRIMARY_PRESETS.some(
 		(p) => (mode === "light" ? p.light : p.dark).toLowerCase() === hexVal
@@ -577,11 +570,7 @@ function PrimaryColorField({
 						title="Custom color"
 					/>
 					<ColorPickerContent className="z-50">
-						<ColorPickerArea />
-						<ColorPickerHueSlider />
-						<ColorPickerEyeDropper />
-						<ColorPickerFormatSelect />
-						<ColorPickerInput />
+						<ColorPickerPanel />
 					</ColorPickerContent>
 				</ColorPicker>
 			</div>

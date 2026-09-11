@@ -13,7 +13,7 @@
   "description": "Rust language server (rust-analyzer) for the ryu agent: definitions, references, hover, symbols, implementations, call hierarchies and diagnostics after every edit. You install rust-analyzer; the plugin ships config.",
   "tagline": "Rust code intelligence via rust-analyzer",
   "keywords": ["rust", "rust-analyzer", "language-server", "developer"],
-  "icon": "gear-01",
+  "icon": "structure-check",
   "iconDither": {
     "from": 320,
     "to": "transparent",

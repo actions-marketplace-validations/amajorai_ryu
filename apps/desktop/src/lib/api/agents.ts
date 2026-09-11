@@ -16,7 +16,8 @@
 
 import type { ExpressiveExpressionSelection } from "@ryu/ui/components/expressive.ts";
 import type { ExpressiveAnimationSelection } from "@ryu/ui/components/expressive-animation.ts";
-import type { GlyphValue } from "@ryu/ui/components/glyph.ts";
+import type { GhostAvatarAppearance } from "@ryu/ui/components/ghost-avatar.ts";
+import { asGlyphValue, type GlyphValue } from "@ryu/ui/components/glyph.ts";
 import { track } from "@/src/lib/analytics.ts";
 import { type ApiTarget, buyerTokenHeader, request } from "./client.ts";
 import type { SamplingConfig } from "./inference.ts";
@@ -210,10 +211,12 @@ export interface AgentPersona {
 	/** Native emoji used as the avatar glyph. Null = none. */
 	emoji?: string | null;
 	/** Ryu ghost avatar with a named mood or the cycling `random` selection. */
-	expressive?: {
-		expression?: ExpressiveExpressionSelection | null;
-		animation?: ExpressiveAnimationSelection | null;
-	} | null;
+	expressive?:
+		| (GhostAvatarAppearance & {
+				expression?: ExpressiveExpressionSelection | null;
+				animation?: ExpressiveAnimationSelection | null;
+		  })
+		| null;
 	/** Custom icon id (Iconify / icons0 / Hugeicons), an alternative avatar
 	 * source to an uploaded image or a dither gradient. Null = none. */
 	icon?: string | null;
@@ -353,7 +356,7 @@ function toSummary(a: AgentSummaryWire): AgentSummary {
 		name: a.name,
 		avatarUrl: a.avatar_url ?? null,
 		avatarGlyph:
-			a.avatar_glyph ??
+			asGlyphValue(a.avatar_glyph) ??
 			(a.avatar_url ? { kind: "avatar", dataUrl: a.avatar_url } : null),
 		description: a.description ?? null,
 		systemPrompt: a.system_prompt ?? null,
@@ -470,10 +473,14 @@ export function toAgentBody(input: AgentInput): Record<string, unknown> {
 	return body;
 }
 
-export async function fetchAgents(target: ApiTarget): Promise<AgentSummary[]> {
+export async function fetchAgents(
+	target: ApiTarget,
+	signal?: AbortSignal
+): Promise<AgentSummary[]> {
 	const json = await request<{ agents?: AgentSummaryWire[] }>(
 		target,
-		"/api/agents"
+		"/api/agents",
+		{ signal }
 	);
 	return (json.agents ?? []).map(toSummary);
 }
@@ -601,6 +608,24 @@ export async function installAgent(
 	track({ event: "agent_installed", agent_id: id });
 }
 
+export interface AgentLifecyclePreview {
+	action: "install" | "uninstall";
+	dryRun: true;
+	id: string;
+	success: boolean;
+	[key: string]: unknown;
+}
+
+export function previewAgentInstall(
+	target: ApiTarget,
+	id: string
+): Promise<AgentLifecyclePreview> {
+	return request<AgentLifecyclePreview>(target, "/api/agents/catalog/install", {
+		method: "POST",
+		body: { dryRun: true, id },
+	});
+}
+
 /** Remove a built-in agent from the installed set (the flagship `ryu` cannot be removed). */
 export async function uninstallAgent(
 	target: ApiTarget,
@@ -611,6 +636,17 @@ export async function uninstallAgent(
 		body: { id },
 	});
 	track({ event: "agent_uninstalled", agent_id: id });
+}
+
+export function previewAgentUninstall(
+	target: ApiTarget,
+	id: string
+): Promise<AgentLifecyclePreview> {
+	return request<AgentLifecyclePreview>(
+		target,
+		"/api/agents/catalog/uninstall",
+		{ method: "POST", body: { dryRun: true, id } }
+	);
 }
 
 /**

@@ -83,6 +83,9 @@ for (const line of free.split("\n")) {
 		}
 	}
 }
+if (payload?.error || payload?.result?.isError) {
+	return { raw: free };
+}
 const text =
 	payload &&
 	payload.result &&
@@ -118,4 +121,7 @@ const items = text
 			raw: block,
 		};
 	});
+if (items.some((item) => !item.url)) {
+	return { raw: free };
+}
 return shape(items, "mcp.exa.ai (free tier, no key)");

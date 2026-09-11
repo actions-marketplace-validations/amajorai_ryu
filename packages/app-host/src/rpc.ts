@@ -1,3 +1,4 @@
+import type { TranscriptionDetail } from "@ryuhq/core-client/voice";
 import type { RouteClaim } from "./rpc-routes.ts";
 
 export {
@@ -170,6 +171,7 @@ export type Capability =
 	| "agent.run"
 	| "storage.kv"
 	| "crypto.seal"
+	| "backups.app"
 	// Spaces documents (grant `spaces:docs`) — an app owns Space documents of kind
 	// `app:<plugin_id>`: persisted, search-embedded, backlinked, versioned,
 	// Space-routed. This is the integration that lets a feature (e.g. whiteboard) be
@@ -539,16 +541,38 @@ export interface MailMessage {
 /** The create-inbox payload (forwarded verbatim to Core). */
 export interface MailCreatePayload {
 	address: string;
+	clientId?: string;
+	metadata?: Record<string, unknown>;
 	name: string;
+	podId?: string;
 	provider?: string;
 }
 
 /** The send payload (forwarded verbatim to Core). */
 export interface MailSendPayload {
+	attachments?: unknown;
+	bcc?: string[];
+	cc?: string[];
+	clientId?: string;
+	headers?: Record<string, string>;
+	html?: string;
 	inboxId: string;
+	inReplyTo?: string;
+	labels?: string[];
+	references?: string | string[];
+	replyTo?: string[];
 	subject: string;
 	text?: string;
 	to: string[];
+	trackOpens?: boolean;
+}
+
+/** A relative, manifest-scoped mail route request. The host owns auth and rejects
+ * public inbound/tracking paths before this reaches the node client. */
+export interface MailRequestPayload {
+	body?: unknown;
+	method?: "DELETE" | "GET" | "PATCH" | "POST";
+	path: string;
 }
 
 // --- Calendar payload shapes (grant `calendar:crud`). Minimal INLINE aliases so
@@ -1305,6 +1329,7 @@ export interface HostServices {
 		provider?: string;
 		model?: string;
 		input_images?: string[];
+		request_id?: string;
 	}): Promise<string[]>;
 	/** Generate video clip(s) from a prompt (`/api/video/generate`, polling cloud
 	 *  jobs internally). Returns `{ url, mediaType }[]` with `url` a `data:` URL. */
@@ -1312,6 +1337,7 @@ export interface HostServices {
 		prompt: string;
 		provider?: string;
 		model?: string;
+		request_id?: string;
 	}): Promise<{ url: string; mediaType: string }[]>;
 	/** Return the host's current global snapshot for this widget so the frame can
 	 *  refresh after the bridge connects (spec §1.3 `widget.getGlobals`). */
@@ -1412,6 +1438,8 @@ export interface HostServices {
 	mailRotateSecret?(input: { id: string }): Promise<string>;
 	/** Send a message (`POST /api/mail/inboxes/:id/send`). Returns the stored record. */
 	mailSend?(input: MailSendPayload): Promise<MailMessage>;
+	/** Call one of the app's authenticated `/api/mail/*` JSON routes. */
+	mailRequest?(input: MailRequestPayload): Promise<unknown>;
 	/** Delete a meeting + its history (`DELETE /api/meetings/:id`). */
 	meetingsDelete?(input: { id: string }): Promise<void>;
 	/** Stop + summarize (`POST /api/meetings/:id/finalize`). Returns the updated record. */
@@ -1631,6 +1659,28 @@ export interface HostServices {
 			url: string;
 			width: number;
 			height: number;
+		}[];
+	}>;
+	/** Search node-proxied Openverse or Unsplash images. The host inlines both
+	 * preview and full image URLs so CSP-locked frames receive only data URLs. */
+	searchImages?(input: {
+		provider: "openverse" | "unsplash";
+		query: string;
+	}): Promise<{
+		configured: boolean;
+		provider: "openverse" | "unsplash";
+		error?: string;
+		results: {
+			id: string;
+			title: string;
+			preview: string;
+			url: string;
+			width: number;
+			height: number;
+			attribution: string;
+			sourceUrl: string;
+			licenseUrl?: string | null;
+			rights: string;
 		}[];
 	}>;
 	/** Governed follow-up: `POST /api/widgets/follow-up`. Injects a
@@ -1885,6 +1935,8 @@ export interface HostServices {
 	 *  next to the data. Carries no key material; let an app tell the user what
 	 *  its sealed data is actually worth before storing anything sensitive. */
 	cryptoStatus?(): Promise<CryptoStatus>;
+	/** App-scoped backups; Core derives identity and keeps credentials sealed. */
+	backupsRequest?(method: string, input: unknown): Promise<unknown>;
 	/** Delete a durable KV value (`host.storage_delete`). */
 	storageDelete?(input: { namespace?: string; key: string }): Promise<void>;
 	/** Read the app's own durable KV value (`host.storage_get`). `null` when unset. */
@@ -1941,11 +1993,12 @@ export interface HostServices {
 	/** Open Settings — a shell-navigation verb (the recording-off empty state's
 	 *  `navigate("/settings")`); fire-and-forget from the frame's view. */
 	timelineOpenSettings?(): void;
-	/** Transcribe an audio `data:` URL (`/api/voice/transcribe`). Returns the text. */
+	/** Transcribe audio. Detailed callers can retain engine segment timestamps. */
 	transcribeAudio?(input: {
 		audio: string;
 		filename?: string;
-	}): Promise<string>;
+		detailed?: boolean;
+	}): Promise<string | TranscriptionDetail>;
 	/** Synthesize speech (`/api/voice/speak`). Returns a `data:` audio URL. */
 	ttsSpeak?(input: {
 		text: string;
@@ -1953,6 +2006,7 @@ export interface HostServices {
 		voice?: string;
 		speed?: number;
 		language?: string;
+		request_id?: string;
 	}): Promise<string>;
 	/**
 	 * Open a native file picker, upload selected file(s) into the Uploads system
@@ -2777,6 +2831,19 @@ export async function dispatchRpc(
 			}
 			return await services.runAgent(input);
 		}
+		case "backups.destinations":
+		case "backups.create":
+		case "backups.list":
+		case "backups.get":
+		case "backups.restore": {
+			if (!services.backupsRequest) {
+				throw new CodedRpcError(
+					"server_error",
+					"Backups are not available on this host"
+				);
+			}
+			return await services.backupsRequest(method, args[0] ?? {});
+		}
 		case "storage.get": {
 			const input = asStorageKeyArg(args[0]);
 			if (!input) {
@@ -3162,6 +3229,19 @@ export async function dispatchRpc(
 				throw new CapabilityError("assets.searchGifs is not available");
 			}
 			return await services.searchGifs(input);
+		}
+		case "assets.searchImages": {
+			const input = asImageSearchArg(args[0]);
+			if (!input) {
+				throw new CodedRpcError(
+					"invalid_args",
+					"assets.searchImages requires { provider, query }"
+				);
+			}
+			if (!services.searchImages) {
+				throw new CapabilityError("assets.searchImages is not available");
+			}
+			return await services.searchImages(input);
 		}
 		case "monitors.list":
 			if (!services.monitorsList) {
@@ -4092,6 +4172,22 @@ export async function dispatchRpc(
 				);
 			}
 			return await services.mailInboundUrl(input);
+		}
+		case "mail.request": {
+			const input = asMailRequestArg(args[0]);
+			if (!input) {
+				throw new CodedRpcError(
+					"invalid_args",
+					"mail.request requires a safe /api/mail/* path and optional method/body"
+				);
+			}
+			if (!services.mailRequest) {
+				throw new CodedRpcError(
+					"server_error",
+					"mail.request is not available"
+				);
+			}
+			return await services.mailRequest(input);
 		}
 		case "calendar.jobs":
 			if (!services.calendarJobs) {
@@ -5795,7 +5891,7 @@ export function asSpacesListArg(data: unknown): { space_id: string } | null {
 }
 
 /** Narrow to `media.image` input: `prompt` required non-empty; `count` optional
- *  finite non-negative; `size`/`provider`/`model` optional strings. */
+ * finite non-negative; `size`/`provider`/`model`/`request_id` optional strings. */
 export function asMediaImageArg(data: unknown): {
 	prompt: string;
 	count?: number;
@@ -5803,6 +5899,7 @@ export function asMediaImageArg(data: unknown): {
 	provider?: string;
 	model?: string;
 	input_images?: string[];
+	request_id?: string;
 } | null {
 	if (typeof data !== "object" || data === null) {
 		return null;
@@ -5818,6 +5915,7 @@ export function asMediaImageArg(data: unknown): {
 		provider?: string;
 		model?: string;
 		input_images?: string[];
+		request_id?: string;
 	} = { prompt: o.prompt };
 	const count = optionalNonNegNumber(o, "count");
 	if (count === null) {
@@ -5826,7 +5924,7 @@ export function asMediaImageArg(data: unknown): {
 	if (count !== undefined) {
 		out.count = count;
 	}
-	for (const f of ["size", "provider", "model"] as const) {
+	for (const f of ["size", "provider", "model", "request_id"] as const) {
 		const v = optionalString(o, f);
 		if (v === null) {
 			return null;
@@ -5853,12 +5951,13 @@ export function asMediaImageArg(data: unknown): {
 	return out;
 }
 
-/** Narrow to `media.video` input: `prompt` required non-empty; `provider`/`model`
- *  optional strings. */
+/** Narrow to `media.video` input: `prompt` required non-empty; `provider`/`model`/
+ * `request_id` optional strings. */
 export function asMediaVideoArg(data: unknown): {
 	prompt: string;
 	provider?: string;
 	model?: string;
+	request_id?: string;
 } | null {
 	if (typeof data !== "object" || data === null) {
 		return null;
@@ -5867,10 +5966,15 @@ export function asMediaVideoArg(data: unknown): {
 	if (typeof o.prompt !== "string" || o.prompt.length === 0) {
 		return null;
 	}
-	const out: { prompt: string; provider?: string; model?: string } = {
+	const out: {
+		prompt: string;
+		provider?: string;
+		model?: string;
+		request_id?: string;
+	} = {
 		prompt: o.prompt,
 	};
-	for (const f of ["provider", "model"] as const) {
+	for (const f of ["provider", "model", "request_id"] as const) {
 		const v = optionalString(o, f);
 		if (v === null) {
 			return null;
@@ -5883,13 +5987,14 @@ export function asMediaVideoArg(data: unknown): {
 }
 
 /** Narrow to `media.tts` input: `text` required non-empty; `engine`/`voice`/
- *  `language` optional strings; `speed` optional finite non-negative. */
+ * `language`/`request_id` optional strings; `speed` optional finite non-negative. */
 export function asMediaTtsArg(data: unknown): {
 	text: string;
 	engine?: string;
 	voice?: string;
 	speed?: number;
 	language?: string;
+	request_id?: string;
 } | null {
 	if (typeof data !== "object" || data === null) {
 		return null;
@@ -5904,8 +6009,9 @@ export function asMediaTtsArg(data: unknown): {
 		voice?: string;
 		speed?: number;
 		language?: string;
+		request_id?: string;
 	} = { text: o.text };
-	for (const f of ["engine", "voice", "language"] as const) {
+	for (const f of ["engine", "voice", "language", "request_id"] as const) {
 		const v = optionalString(o, f);
 		if (v === null) {
 			return null;
@@ -5928,7 +6034,7 @@ export function asMediaTtsArg(data: unknown): {
  *  `data:` URL); `filename` optional string. */
 export function asMediaTranscribeArg(
 	data: unknown
-): { audio: string; filename?: string } | null {
+): { audio: string; filename?: string; detailed?: boolean } | null {
 	if (typeof data !== "object" || data === null) {
 		return null;
 	}
@@ -5940,9 +6046,14 @@ export function asMediaTranscribeArg(
 	if (filename === null) {
 		return null;
 	}
-	return filename === undefined
-		? { audio: o.audio }
-		: { audio: o.audio, filename };
+	if (o.detailed !== undefined && typeof o.detailed !== "boolean") {
+		return null;
+	}
+	return {
+		audio: o.audio,
+		...(filename === undefined ? {} : { filename }),
+		...(o.detailed === undefined ? {} : { detailed: o.detailed }),
+	};
 }
 
 /** Narrow an arg to `{ query: string }` (assets.searchGifs). An empty query is
@@ -5956,6 +6067,24 @@ export function asAssetQueryArg(data: unknown): { query: string } | null {
 		return null;
 	}
 	return { query: o.query };
+}
+
+/** Narrow an arg to the provider-aware image catalog query. */
+export function asImageSearchArg(data: unknown): {
+	provider: "openverse" | "unsplash";
+	query: string;
+} | null {
+	if (typeof data !== "object" || data === null) {
+		return null;
+	}
+	const o = data as Record<string, unknown>;
+	if (
+		(o.provider !== "openverse" && o.provider !== "unsplash") ||
+		typeof o.query !== "string"
+	) {
+		return null;
+	}
+	return { provider: o.provider, query: o.query };
 }
 
 /** Narrow an arg to `{ id: string }` (finetune.get / cancel / stream). */
@@ -6488,7 +6617,56 @@ export function asMailSendArg(data: unknown): MailSendPayload | null {
 		inboxId: o.inboxId,
 		to: o.to as string[],
 		subject: o.subject,
+		...(Array.isArray(o.attachments) ? { attachments: o.attachments } : {}),
+		...(Array.isArray(o.bcc) ? { bcc: o.bcc as string[] } : {}),
+		...(Array.isArray(o.cc) ? { cc: o.cc as string[] } : {}),
+		...(typeof o.clientId === "string" ? { clientId: o.clientId } : {}),
+		...(typeof o.headers === "object" &&
+		o.headers !== null &&
+		!Array.isArray(o.headers)
+			? { headers: o.headers as Record<string, string> }
+			: {}),
+		...(typeof o.html === "string" ? { html: o.html } : {}),
+		...(typeof o.inReplyTo === "string" ? { inReplyTo: o.inReplyTo } : {}),
+		...(Array.isArray(o.labels) ? { labels: o.labels as string[] } : {}),
+		...(typeof o.references === "string" || Array.isArray(o.references)
+			? { references: o.references as string | string[] }
+			: {}),
+		...(Array.isArray(o.replyTo) ? { replyTo: o.replyTo as string[] } : {}),
 		...(o.text === undefined ? {} : { text: o.text as string }),
+		...(typeof o.trackOpens === "boolean" ? { trackOpens: o.trackOpens } : {}),
+	};
+}
+
+export function asMailRequestArg(data: unknown): MailRequestPayload | null {
+	if (typeof data !== "object" || data === null || Array.isArray(data)) {
+		return null;
+	}
+	const value = data as Record<string, unknown>;
+	if (
+		typeof value.path !== "string" ||
+		!/^\/api\/mail\/(?:status|inboxes|messages|attachments|webhooks|lists|pods|domains|events)(?:\/|$)/.test(
+			value.path
+		) ||
+		value.path.includes("..") ||
+		/%(?:2e|2f|5c)/i.test(value.path) ||
+		value.path.includes("\\")
+	) {
+		return null;
+	}
+	const method = value.method ?? "GET";
+	if (
+		method !== "GET" &&
+		method !== "POST" &&
+		method !== "PATCH" &&
+		method !== "DELETE"
+	) {
+		return null;
+	}
+	return {
+		path: value.path,
+		method,
+		...(value.body === undefined ? {} : { body: value.body }),
 	};
 }
 

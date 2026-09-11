@@ -6,6 +6,7 @@
   "description": "Opt-in notification when all delegated agents finish.",
   "tagline": "Know when the worker is done",
   "category": "Productivity",
+  "icon": "rocket-01",
   "iconDither": { "from": 344, "to": "transparent", "direction": "down" },
   "author": { "name": "Ryu", "url": "https://ryuhq.com" },
   "repository": "https://github.com/amajorai/ryu-marketplace/tree/main/plugins/plugins/tokenmaxxing",

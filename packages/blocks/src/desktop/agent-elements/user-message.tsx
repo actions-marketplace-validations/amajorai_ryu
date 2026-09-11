@@ -92,6 +92,11 @@ export interface UserMessageProps {
 	messageActionState?: MessageActionRuntimeState;
 	/** Message actions contributed by enabled plugins. */
 	messageActions?: readonly ContributedMessageAction[];
+	onAnnotateImage?: (image: {
+		filename?: string;
+		id: string;
+		url: string;
+	}) => void;
 	/** Dispatch a contributed action back to the shell. */
 	onContributedMessageAction?: (
 		action: ContributedMessageAction,
@@ -290,6 +295,7 @@ export const UserMessage = memo(function UserMessage({
 	onOpenFile,
 	onOpenLink,
 	onOpenMention,
+	onAnnotateImage,
 	mentionItems,
 	previewResolvers,
 }: UserMessageProps) {
@@ -400,6 +406,7 @@ export const UserMessage = memo(function UserMessage({
 				<ImageLightbox
 					images={lightboxImages}
 					initialIndex={lightboxIndex ?? 0}
+					onAnnotate={onAnnotateImage}
 					onClose={() => setLightboxIndex(null)}
 					open={lightboxIndex !== null}
 					originRef={lightboxOriginRef}

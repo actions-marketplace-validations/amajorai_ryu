@@ -13,7 +13,7 @@
   "description": "Expand the current chat composer in place while keeping the same draft, attachments, and send controls.",
   "tagline": "Write prompts with more room",
   "keywords": ["chat", "composer", "prompt", "expand"],
-  "icon": "expand-diagonal",
+  "icon": "layers-01",
   "iconDither": { "from": 268, "to": "transparent", "direction": "down" },
   "surfaces": {
     "gateway": { "support": "none" },

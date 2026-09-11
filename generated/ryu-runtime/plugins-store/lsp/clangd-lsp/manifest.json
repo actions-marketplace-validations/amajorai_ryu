@@ -13,7 +13,7 @@
   "description": "C/C++ language server (clangd) for the ryu agent: definitions, references, hover, symbols, implementations, call hierarchies and diagnostics after every edit. You install clangd; the plugin ships config.",
   "tagline": "C/C++ code intelligence via clangd",
   "keywords": ["c", "c++", "clangd", "language-server", "developer"],
-  "icon": "code-browser",
+  "icon": "computer-terminal-02",
   "iconDither": {
     "from": 32,
     "to": "transparent",

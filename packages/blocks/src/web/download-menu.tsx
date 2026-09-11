@@ -35,6 +35,7 @@ export function DownloadMenu({
 	label = "Download",
 	showChevron = true,
 	showPlatform = false,
+	showSeparator = true,
 	separatorClassName,
 	size = "default",
 	variant = "default",
@@ -45,6 +46,7 @@ export function DownloadMenu({
 	showChevron?: boolean;
 	/** Use the longer OS-aware label reserved for the dedicated download page. */
 	showPlatform?: boolean;
+	showSeparator?: boolean;
 	separatorClassName?: string;
 	size?: "default" | "lg" | "sm";
 	variant?: "default" | "ghost" | "outline";
@@ -97,7 +99,7 @@ export function DownloadMenu({
 	return (
 		<ButtonGroup>
 			<Button
-				className={cn("gap-1.5", className)}
+				className={cn("gap-1.5", !showSeparator && "border-r-0", className)}
 				nativeButton={false}
 				render={
 					<a
@@ -119,7 +121,9 @@ export function DownloadMenu({
 				) : null}
 				{primaryLabel}
 			</Button>
-			<ButtonGroupSeparator className={separatorClassName} />
+			{showSeparator ? (
+				<ButtonGroupSeparator className={separatorClassName} />
+			) : null}
 			<DropdownMenu>
 				<DropdownMenuTrigger
 					render={

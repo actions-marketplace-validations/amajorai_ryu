@@ -21,7 +21,7 @@ import { MarkdownEditor } from "@/src/components/editor/MarkdownEditor.tsx";
 import { useSpacesContext } from "@/src/contexts/SpacesContext.tsx";
 import {
 	useCurrentTabId,
-	useTabsContext,
+	useTabSelector,
 } from "@/src/contexts/TabsContext.tsx";
 import { useActiveNode } from "@/src/hooks/useActiveNode.ts";
 import {
@@ -191,7 +191,8 @@ export default function SpaceDatabaseRowPage({
 	rowId: string;
 }) {
 	const { getDocument, saveDocument, createPage } = useSpacesContext();
-	const { openTab, updateTabTitle } = useTabsContext();
+	const openTab = useTabSelector((state) => state.openTab);
+	const updateTabTitle = useTabSelector((state) => state.updateTabTitle);
 	const tabId = useCurrentTabId();
 	const node = useActiveNode();
 

@@ -55,6 +55,8 @@ import type {
 	LibraryViewMode,
 	ViewMode,
 } from "@ryu/blocks/desktop/view-toggle.tsx";
+import AppIcon from "@ryu/marketplace/catalog/chrome/app-icon";
+import { engineLogoProps } from "@ryu/marketplace/catalog/engine-logos";
 import { Badge } from "@ryu/ui/components/badge.tsx";
 import { Button } from "@ryu/ui/components/button.tsx";
 import {
@@ -107,7 +109,7 @@ import ToolsLibrary from "@/src/components/tools/ToolsLibrary.tsx";
 import { DestructiveConfirmDialog } from "@/src/components/ui/DestructiveConfirmDialog.tsx";
 import { useChatHistoryContext } from "@/src/contexts/ChatHistoryContext.tsx";
 import { useSpacesContext } from "@/src/contexts/SpacesContext.tsx";
-import { useTabsContext } from "@/src/contexts/TabsContext.tsx";
+import { useTabSelector } from "@/src/contexts/TabsContext.tsx";
 import { useCompanionAlias } from "@/src/contributions/use-companion-alias.ts";
 import { useActiveNode } from "@/src/hooks/useActiveNode.ts";
 import { useAgents } from "@/src/hooks/useAgents.ts";
@@ -407,7 +409,9 @@ function LibraryCollections({
 		setTypeFilter(null);
 	}, [section]);
 
-	const { activateTab, openTab, tabs } = useTabsContext();
+	const activateTab = useTabSelector((state) => state.activateTab);
+	const openTab = useTabSelector((state) => state.openTab);
+	const tabs = useTabSelector((state) => state.tabs);
 	const { distributeInstalledSkill } = useSkillDistributionFlow();
 	const { openCreateAgent } = useCreateAgentDialog();
 	const { favorites, toggle: toggleFavorite } = useFavorites();
@@ -880,6 +884,13 @@ function LibraryCollections({
 		});
 		const engineItems = [
 			...localEngines.map((engine) => ({
+				iconNode: (
+					<AppIcon
+						{...engineLogoProps(engine.name)}
+						className="size-8"
+						name={engine.name}
+					/>
+				),
 				icon: SECTION_ICONS.engines,
 				id: `provider:${engine.name}`,
 				name: engine.displayName || engine.name,
@@ -887,6 +898,13 @@ function LibraryCollections({
 				subtitle: "Text",
 			})),
 			...alongsideEngines.map((engine) => ({
+				iconNode: (
+					<AppIcon
+						{...engineLogoProps(engine.name)}
+						className="size-8"
+						name={engine.name}
+					/>
+				),
 				icon: SECTION_ICONS.engines,
 				id: `${engine.category}:${engine.name}`,
 				name: engine.displayName || engine.name,
@@ -894,6 +912,13 @@ function LibraryCollections({
 				subtitle: engine.category,
 			})),
 			...sandboxBackends.map((backend) => ({
+				iconNode: (
+					<AppIcon
+						{...engineLogoProps(backend.name)}
+						className="size-8"
+						name={backend.name}
+					/>
+				),
 				icon: SECTION_ICONS.engines,
 				id: `sandbox:${backend.name}`,
 				name: backend.name,

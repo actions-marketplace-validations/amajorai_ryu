@@ -10,7 +10,7 @@
   "version": "0.1.15",
   "stability": "experimental",
   "category": "Productivity",
-  "description": "The eleven built-in personality profiles \u2014 ELI5, I have ADHD, Explanatory, Learning, Proactive, Plain text, Plain Technical, No AI slop, No Hype, Bro and Gen Z. Assign a profile to each agent to shape how it talks \u2014 role, tone, default response shape \u2014 without changing what it knows, which tools it has, or which model runs. Browse profiles here and choose one in the agent editor.",
+  "description": "The twelve built-in personality profiles \u2014 ELI5, I have ADHD, Concise, Explanatory, Learning, Proactive, Plain text, Plain Technical, No AI slop, No Hype, Bro and Gen Z. Assign a profile to each agent to shape how it talks \u2014 role, tone, default response shape \u2014 without changing what it knows, which tools it has, or which model runs. Browse profiles here and choose one in the agent editor.",
   "tagline": "Give each agent its own voice",
   "keywords": ["output-style", "tone", "prompt", "accessibility", "writing"],
   "icon": "file-export",
@@ -59,6 +59,10 @@
       {
         "id": "i-have-adhd",
         "file": "output-styles/i-have-adhd.md"
+      },
+      {
+        "id": "concise",
+        "file": "output-styles/concise.md"
       },
       {
         "id": "explanatory",

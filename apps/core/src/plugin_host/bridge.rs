@@ -9,6 +9,10 @@
 use std::collections::HashSet;
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
 
 use serde_json::{json, Value};
 
@@ -29,6 +33,9 @@ const GRANT_STORAGE: &str = "storage:kv";
 /// Grant required to call `host.crypto_*` (seal/open the plugin's own data under a
 /// per-plugin subkey it never holds). See [`PluginHookBridge::crypto`].
 const GRANT_CRYPTO: &str = "crypto:seal";
+#[path = "backup_bridge.rs"]
+mod backup_bridge;
+
 /// Grant required to call `host.runAgent` (spawn a full tool-using sub-agent).
 const GRANT_RUN_AGENT: &str = "hook:run-agent";
 /// Grant required to call `host.spaces_*` (own Space documents).
@@ -97,12 +104,19 @@ fn project_catalog_provider(provider: &Value) -> Value {
 /// path here.
 pub fn dispatch_path_for(method: &str) -> Option<&'static str> {
     Some(match method {
+        "security.check" => "host.security_check",
+        "identity.current" => "host.identity_current",
         "catalog.snapshot" => "host.catalogSnapshot",
         "catalog.models" => "host.catalogModels",
         "model.complete" => "host.sideModel",
         "agent.run" => "host.runAgent",
         "agent.runFanout" => "host.runFanout",
         "storage.get" => "host.storage_get",
+        "backups.destinations" => "host.backups_destinations",
+        "backups.create" => "host.backups_create",
+        "backups.list" => "host.backups_list",
+        "backups.get" => "host.backups_get",
+        "backups.restore" => "host.backups_restore",
         "storage.set" => "host.storage_set",
         "storage.delete" => "host.storage_delete",
         "storage.keys" => "host.storage_keys",
@@ -110,6 +124,7 @@ pub fn dispatch_path_for(method: &str) -> Option<&'static str> {
         "crypto.seal" => "host.crypto_seal",
         "crypto.open" => "host.crypto_open",
         "crypto.status" => "host.crypto_status",
+        "spaces.search" => "host.spaces_search",
         "spaces.ensureSpace" => "host.spaces_ensure_space",
         "spaces.createDoc" => "host.spaces_create_doc",
         "spaces.getDoc" => "host.spaces_get_doc",
@@ -128,6 +143,8 @@ pub fn dispatch_path_for(method: &str) -> Option<&'static str> {
         "background.list" => "host.background_list",
         "background.stop" => "host.background_stop",
         "usage.snapshot" => "host.usageSnapshot",
+        "gateway.budgetSpend" => "host.gatewayBudgetSpend",
+        "gateway.audit" => "host.gatewayAudit",
         "learning.recordFeedback" => "host.recordFeedback",
         "learning.synthesizeSkill" => "host.synthesizeSkill",
         "hooks.run" => "host.runHook",
@@ -172,6 +189,8 @@ pub struct PluginHookBridge {
     verified_caller: Option<crate::identity_verify::VerifiedCaller>,
     authorized_conversation_id: Option<String>,
     storage_tenant: Option<String>,
+    middleware_next: Option<crate::plugin_host::MiddlewareNext>,
+    middleware_next_used: Arc<AtomicBool>,
 }
 
 impl PluginHookBridge {
@@ -193,6 +212,8 @@ impl PluginHookBridge {
             verified_caller,
             authorized_conversation_id,
             storage_tenant: None,
+            middleware_next: None,
+            middleware_next_used: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -210,10 +231,53 @@ impl PluginHookBridge {
         bridge
     }
 
+    /// Attach the Core-owned continuation for a middleware hook invocation.
+    /// This is intentionally not part of the public host-API table: it exists
+    /// only inside the sandbox runtime and inherits the current hook's lease.
+    pub(crate) fn with_middleware_next(mut self, next: crate::plugin_host::MiddlewareNext) -> Self {
+        self.middleware_next = Some(next);
+        self
+    }
+
     async fn handle_inner(&self, path: String, args: Value) -> InvokeOutcome {
         // The sandbox proxy delivers `host.<method>` as the path.
         let method = path.strip_prefix("host.").unwrap_or(&path);
         match method {
+            "security_check" => {
+                if !self.grants.contains("security:check") {
+                    return err("security:check is not granted".to_owned());
+                }
+                let text = match args.get("text").and_then(Value::as_str) {
+                    Some(text) if text.len() <= 2_000_000 => text,
+                    _ => return err("security.check requires text up to 2 MB".to_owned()),
+                };
+                let client = match reqwest::Client::builder().redirect(reqwest::redirect::Policy::none()).timeout(std::time::Duration::from_secs(15)).build() {
+                    Ok(client) => client,
+                    Err(_) => return err("Security scanner unavailable".to_owned()),
+                };
+                let endpoint = format!("{}/v1/firewall/check", crate::sidecar::gateway::gateway_url().trim_end_matches('/'));
+                let mut request = client.post(endpoint).json(&json!({ "text": text, "checks": ["secret"] }));
+                if let Some(token) = crate::sidecar::gateway::gateway_token() { request = request.bearer_auth(token); }
+                let response = match request.send().await {
+                    Ok(response) if response.status().is_success() => response,
+                    _ => return err("Security scanner unavailable; operation refused".to_owned()),
+                };
+                match response.json::<Value>().await {
+                    Ok(value) if value.get("allowed").is_some_and(Value::is_boolean) => ok(json!({"allowed": value["allowed"], "reason": value.get("reason").cloned().unwrap_or(Value::Null)})),
+                    _ => err("Invalid security scanner response".to_owned()),
+                }
+            },
+            "identity_current" => {
+                if !self.grants.contains("identity:read") {
+                    return err("identity:read is not granted".to_owned());
+                }
+                let principal = self.verified_caller.as_ref().map(|caller| json!({
+                    "id": caller.user_id,
+                    "email": caller.email.as_deref().unwrap_or_default(),
+                    "workspaceIds": caller.org_id.iter().collect::<Vec<_>>(),
+                }));
+                ok(json!({ "principal": principal, "requiresIdentity": crate::sidecar::control_plane::registered_org().is_some() }))
+            },
             "catalogSnapshot" => self.catalog_snapshot(args).await,
             "catalogModels" => self.catalog_models(args).await,
             "sideModel" => self.side_model(args).await,
@@ -225,7 +289,13 @@ impl PluginHookBridge {
             | "storage_keys"
             | "storage_compare_and_set" => self.storage(method, args).await,
             "crypto_seal" | "crypto_open" | "crypto_status" => self.crypto(method, args).await,
-            "spaces_ensure_space"
+            "backups_destinations"
+            | "backups_create"
+            | "backups_list"
+            | "backups_get"
+            | "backups_restore" => self.backups(method, args).await,
+            "spaces_search"
+            | "spaces_ensure_space"
             | "spaces_create_doc"
             | "spaces_get_doc"
             | "spaces_update_doc"
@@ -243,13 +313,40 @@ impl PluginHookBridge {
             "background_list" => self.background_list(args).await,
             "background_stop" => self.background_stop(args).await,
             "usageSnapshot" => self.usage_snapshot(args).await,
+            "gatewayBudgetSpend" => self.gateway_budget_spend(args).await,
+            "gatewayAudit" => self.gateway_audit(args).await,
             "recordFeedback" => self.record_feedback(args).await,
             "synthesizeSkill" => self.synthesize_skill(args).await,
             "runHook" => self.run_own_hook(args).await,
+            "next" => self.next(args).await,
             "notify" => self.notify(args).await,
             "notifications_send" => self.notifications_send(args).await,
             "navigate" => self.navigate(args),
             other => err(format!("unknown host capability '{other}'")),
+        }
+    }
+
+    /// Continue a middleware hook chain with a serialized `HookContext`.
+    /// `next` is one-shot per hook invocation, which prevents accidental
+    /// duplicate downstream side effects while retaining normal onion semantics.
+    async fn next(&self, args: Value) -> InvokeOutcome {
+        let Some(next) = self.middleware_next.as_ref() else {
+            return err("host.next is only available to middleware hooks".to_owned());
+        };
+        if self.middleware_next_used.swap(true, Ordering::AcqRel) {
+            return err("middleware hook next() may only be called once".to_owned());
+        }
+        let Some(context) = args.get("context").cloned() else {
+            return err("host.next requires a context object".to_owned());
+        };
+        let context = match serde_json::from_value::<crate::plugin_host::HookContext>(context) {
+            Ok(context) => context,
+            Err(error) => return err(format!("host.next received an invalid context: {error}")),
+        };
+        let directive = next(context).await;
+        match serde_json::to_value(directive) {
+            Ok(value) => ok(value),
+            Err(error) => err(format!("host.next could not serialize its result: {error}")),
         }
     }
 
@@ -662,6 +759,138 @@ impl PluginHookBridge {
         match serde_json::to_value(ryu_usage::fetch_usage(agent_id).await) {
             Ok(snapshot) => ok(snapshot),
             Err(e) => err(e.to_string()),
+        }
+    }
+
+    /// `host.gatewayBudgetSpend()` — read the Gateway-owned charged-spend
+    /// counters and configured caps without exposing its admin credential.
+    async fn gateway_budget_spend(&self, _args: Value) -> InvokeOutcome {
+        if !self.grants.contains(GRANT_USAGE_READ) {
+            return err(format!(
+                "capability '{GRANT_USAGE_READ}' not granted to plugin '{}'",
+                self.plugin_id
+            ));
+        }
+        let url = format!(
+            "{}/v1/budget/spend",
+            crate::sidecar::gateway::gateway_url().trim_end_matches('/')
+        );
+        let client = match reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(3))
+            .build()
+        {
+            Ok(client) => client,
+            Err(error) => return err(format!("Gateway budget client unavailable: {error}")),
+        };
+        let mut request = client.get(url);
+        if let Some(token) = crate::sidecar::gateway::gateway_admin_key() {
+            request = request.bearer_auth(token);
+        }
+        let response = match request.send().await {
+            Ok(response) => response,
+            Err(error) => {
+                return ok(json!({
+                    "reachable": false,
+                    "error": "Gateway budget is unavailable",
+                    "detail": error.to_string(),
+                    "users": {},
+                    "agents": {},
+                    "sessions": {},
+                    "limits": {},
+                }));
+            }
+        };
+        if !response.status().is_success() {
+            return ok(json!({
+                "reachable": false,
+                "status": response.status().as_u16(),
+                "error": "Gateway budget request was refused",
+                "users": {},
+                "agents": {},
+                "sessions": {},
+                "limits": {},
+            }));
+        }
+        match response.json::<Value>().await {
+            Ok(value) => ok(json!({
+                "reachable": true,
+                "users": value.get("users").cloned().unwrap_or_else(|| json!({})),
+                "agents": value.get("agents").cloned().unwrap_or_else(|| json!({})),
+                "sessions": value.get("sessions").cloned().unwrap_or_else(|| json!({})),
+                "limits": value.get("limits").cloned().unwrap_or_else(|| json!({})),
+                "currency": value.get("currency").cloned().unwrap_or_else(|| json!("USD")),
+                "unit": value.get("unit").cloned().unwrap_or_else(|| json!("micro_usd")),
+            })),
+            Err(error) => ok(json!({
+                "reachable": false,
+                "error": "Gateway budget response was invalid",
+                "detail": error.to_string(),
+                "users": {},
+                "agents": {},
+                "sessions": {},
+                "limits": {},
+            })),
+        }
+    }
+
+    /// `host.gatewayAudit({ limit })` — read redacted Gateway audit rows without
+    /// exposing the Gateway admin credential to the plugin or sidecar.
+    async fn gateway_audit(&self, args: Value) -> InvokeOutcome {
+        if !self.grants.contains(GRANT_USAGE_READ) {
+            return err(format!(
+                "capability '{GRANT_USAGE_READ}' not granted to plugin '{}'",
+                self.plugin_id
+            ));
+        }
+        let limit = args
+            .get("limit")
+            .and_then(Value::as_u64)
+            .unwrap_or(100)
+            .clamp(1, 100) as u32;
+        let url = format!(
+            "{}/v1/audit?limit={limit}",
+            crate::sidecar::gateway::gateway_url().trim_end_matches('/')
+        );
+        let client = match reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(3))
+            .build()
+        {
+            Ok(client) => client,
+            Err(error) => return err(format!("Gateway audit client unavailable: {error}")),
+        };
+        let mut request = client.get(url);
+        if let Some(token) = crate::sidecar::gateway::gateway_admin_key() {
+            request = request.bearer_auth(token);
+        }
+        let response = match request.send().await {
+            Ok(response) => response,
+            Err(_error) => {
+                return ok(json!({
+                    "reachable": false,
+                    "error": "Gateway audit is unavailable",
+                    "entries": [],
+                }));
+            }
+        };
+        if !response.status().is_success() {
+            return ok(json!({
+                "reachable": false,
+                "status": response.status().as_u16(),
+                "error": "Gateway audit request was refused",
+                "entries": [],
+            }));
+        }
+        match response.json::<Value>().await {
+            Ok(value) => ok(json!({
+                "reachable": true,
+                "entries": value.get("entries").cloned().unwrap_or_else(|| json!([])),
+                "count": value.get("count").cloned().unwrap_or_else(|| json!(0)),
+            })),
+            Err(error) => ok(json!({
+                "reachable": false,
+                "error": format!("Gateway audit response was malformed: {error}"),
+                "entries": [],
+            })),
         }
     }
 
@@ -1457,6 +1686,37 @@ impl PluginHookBridge {
                 self.plugin_id
             ));
         }
+        if method == "spaces_search" {
+            let space_id = match args.get("space_id").and_then(Value::as_str) {
+                Some(id) if !id.is_empty() && id.len() <= 100 => id.to_owned(),
+                _ => return err("space_id is required".to_owned()),
+            };
+            let query = match args.get("query").and_then(Value::as_str) {
+                Some(query) if !query.trim().is_empty() && query.len() <= 8_000 => query.to_owned(),
+                _ => return err("query must contain 1 to 8000 bytes".to_owned()),
+            };
+            let response = crate::server::search_space(
+                axum::extract::State(self.state.clone()),
+                axum::Extension(self.verified_caller.clone()),
+                axum::extract::Path(space_id),
+                axum::Json(crate::server::SearchBody {
+                    query,
+                    limit: args.get("limit").and_then(Value::as_u64).unwrap_or(8).clamp(1, 50) as usize,
+                    link_expansion: None,
+                }),
+            ).await;
+            let status = response.status();
+            if !status.is_success() {
+                return err(format!("Space retrieval denied or unavailable ({status})"));
+            }
+            return match axum::body::to_bytes(response.into_body(), 4 * 1024 * 1024).await {
+                Ok(bytes) => match serde_json::from_slice::<Value>(&bytes) {
+                    Ok(value) => ok(value),
+                    Err(_) => err("Invalid Space retrieval response".to_owned()),
+                },
+                Err(_) => err("Space retrieval response exceeds limit".to_owned()),
+            };
+        }
         let store = &self.state.spaces;
         let owner = self.verified_caller.as_ref().map_or_else(
             crate::server::spaces::background_owner,
@@ -1476,6 +1736,40 @@ impl PluginHookBridge {
             .and_then(Value::as_str)
             .unwrap_or_default()
             .trim();
+
+        // App namespace ownership does not replace the request caller's Space ACL.
+        // Apply the same coarse and resource gates used by the public document routes.
+        use crate::identity_verify::permissions::{SPACE_READ, SPACE_WRITE};
+        let caller = &self.verified_caller;
+        if method == "spaces_ensure_space" {
+            if crate::server::enforce_permission(&self.state, caller, SPACE_WRITE).await.is_err() {
+                return err("Space creation is not permitted for this caller".to_owned());
+            }
+        } else if matches!(method, "spaces_create_doc" | "spaces_list_docs") && !space_id.is_empty() {
+            let write = method == "spaces_create_doc";
+            if crate::server::enforce_permission_on(&self.state, caller, if write { SPACE_WRITE } else { SPACE_READ }, crate::acl::KIND_SPACE, space_id).await.is_err() {
+                return err("Space access is not permitted for this caller".to_owned());
+            }
+            if write && crate::server::require_space_content_write(&self.state, caller, space_id, "space not found").await.is_err() {
+                return err("Space is unavailable or not writable".to_owned());
+            }
+        } else if matches!(method, "spaces_get_doc" | "spaces_update_doc" | "spaces_delete_doc") && !doc_id.is_empty() {
+            let write = method != "spaces_get_doc";
+            let Some(parent) = crate::server::document_parent_space(&self.state, doc_id).await else {
+                if !write { return ok(Value::Null); }
+                return err("Document is unavailable".to_owned());
+            };
+            if crate::server::enforce_permission_on(&self.state, caller, if write { SPACE_WRITE } else { SPACE_READ }, crate::acl::KIND_SPACE, &parent).await.is_err() {
+                return err("Document access is not permitted for this caller".to_owned());
+            }
+            let meta = crate::server::spaces::doc_access_meta(store, doc_id).await;
+            let allowed = if write {
+                crate::server::require_resource_write(meta, caller.as_ref(), "document not found")
+            } else {
+                crate::server::require_resource_read(meta, caller.as_ref(), "document not found")
+            };
+            if allowed.is_err() { return err("Document is unavailable or access was denied".to_owned()); }
+        }
 
         match method {
             // `host.spaces.ensureSpace({ name, description? })` — resolve a Space by
@@ -1562,14 +1856,16 @@ impl PluginHookBridge {
                 if space_id.is_empty() {
                     return err("host.spaces.listDocs requires a non-empty 'space_id'".to_string());
                 }
-                match store.app_list_docs(&self.plugin_id, space_id).await {
-                    Ok(docs) => match serde_json::to_value(docs) {
-                        Ok(v) => ok(v),
-                        Err(e) => err(e.to_string()),
-                    },
+                match store.list_documents(space_id, crate::server::caller_doc_filter(caller)).await {
+                    Ok(docs) => {
+                        let kind = format!("app:{}", self.plugin_id);
+                        let visible: Vec<Value> = docs.into_iter().filter(|doc| doc.kind == kind).map(|doc| json!({"id":doc.id,"title":doc.title,"updated_at":doc.updated_at})).collect();
+                        ok(json!(visible))
+                    }
                     Err(e) => err(e.to_string()),
                 }
             }
+
             "spaces_delete_doc" => {
                 if doc_id.is_empty() {
                     return err("host.spaces.deleteDoc requires a non-empty 'doc_id'".to_string());
@@ -1818,6 +2114,8 @@ mod tests {
         assert_eq!(grant_for("conversation.setTitle"), Some(GRANT_SET_TITLE));
         assert_eq!(grant_for("preferences.get"), Some(GRANT_PREFERENCES_READ));
         assert_eq!(grant_for("background.list"), Some(GRANT_BACKGROUND_CONTROL));
+        assert_eq!(grant_for("gateway.budgetSpend"), Some(GRANT_USAGE_READ));
+        assert_eq!(grant_for("gateway.audit"), Some(GRANT_USAGE_READ));
         assert_eq!(grant_for("notifications.send"), Some(GRANT_NOTIFY_TARGET));
     }
 
@@ -1869,6 +2167,8 @@ mod tests {
             "preferences.get",
             "background.list",
             "background.stop",
+            "gateway.budgetSpend",
+            "gateway.audit",
         ] {
             assert!(
                 dispatch_path_for(method).is_some(),
@@ -1882,11 +2182,18 @@ mod tests {
     fn handled_method(m: &str) -> bool {
         matches!(
             m,
-            "catalogSnapshot"
+            "security_check"
+                | "identity_current"
+                | "catalogSnapshot"
                 | "catalogModels"
                 | "sideModel"
                 | "runAgent"
                 | "runFanout"
+                | "backups_destinations"
+                | "backups_create"
+                | "backups_list"
+                | "backups_get"
+                | "backups_restore"
                 | "storage_get"
                 | "storage_set"
                 | "storage_delete"
@@ -1895,6 +2202,7 @@ mod tests {
                 | "crypto_seal"
                 | "crypto_open"
                 | "crypto_status"
+                | "spaces_search"
                 | "spaces_ensure_space"
                 | "spaces_create_doc"
                 | "spaces_get_doc"
@@ -1911,6 +2219,8 @@ mod tests {
                 | "setConversationTitle"
                 | "getPreference"
                 | "usageSnapshot"
+                | "gatewayBudgetSpend"
+                | "gatewayAudit"
                 | "background_list"
                 | "background_stop"
                 | "recordFeedback"

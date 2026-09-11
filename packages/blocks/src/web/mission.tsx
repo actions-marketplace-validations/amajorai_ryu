@@ -1,5 +1,6 @@
 "use client";
 
+import { TextMorph } from "@ryu/ui/components/text-morph";
 import { useEffect, useState } from "react";
 import { landingSurfaceCardFlexXlClass } from "./landing-card-tones.ts";
 import { SectionTitle, sectionSubtitleClass } from "./sections.tsx";
@@ -52,7 +53,9 @@ function CollaborationViz() {
 						/>
 					</div>
 					<span className="rounded-full bg-muted/60 px-2 py-0.5 text-foreground/60 text-xs transition-all duration-300">
-						{tasks[step]}
+						<TextMorph duration={280} numbers={false}>
+							{tasks[step]}
+						</TextMorph>
 					</span>
 					<div className="relative flex w-full items-center">
 						<div className="h-px w-full bg-border" />
@@ -188,7 +191,11 @@ function ScaleViz() {
 				))}
 			</div>
 
-			<p className="text-foreground/40 text-xs">{current.label}</p>
+			<p className="text-foreground/40 text-xs">
+				<TextMorph duration={280} numbers={false}>
+					{current.label}
+				</TextMorph>
+			</p>
 		</div>
 	);
 }

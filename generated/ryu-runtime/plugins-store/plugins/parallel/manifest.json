@@ -11,6 +11,7 @@
   "stability": "experimental",
   "description": "Web search and content extraction via Parallel (https://parallel.ai), exposed as three declarative HTTP tools. Provides the swappable `web.search` and `web.extract` layers, so selecting it in the layer picker re-points the stable `web.search` / `web.extract` tools at Parallel without changing what agents call. Search works with NO key through Parallel's public Search MCP endpoint; a BYOK Parallel API key unlocks the higher-limit REST API and extraction.",
   "iconUrl": "https://avatars.githubusercontent.com/u/210743255?v=4",
+  "iconPadding": "md",
   "iconDither": { "from": 168, "to": "transparent", "direction": "down" },
   "tagline": "Objective-driven web search built for agent loops",
   "keywords": ["search", "web", "extract", "mcp"],

@@ -22,7 +22,12 @@ import {
 	SelectTrigger,
 	SelectValue,
 } from "@ryu/ui/components/select.tsx";
-import { Tabs, TabsList, TabsTrigger } from "@ryu/ui/components/tabs";
+import {
+	Tabs,
+	TabsIndicator,
+	TabsList,
+	TabsTrigger,
+} from "@ryu/ui/components/tabs";
 import { cn } from "@ryu/ui/lib/utils";
 import {
 	ArrowLeft,
@@ -80,12 +85,16 @@ export type PricingPlanSlug =
 	| "lifetime"
 	| "marketplace-membership-monthly"
 	| "marketplace-membership-yearly"
+	| "plus-monthly"
+	| "plus-yearly"
 	| "pro-monthly"
 	| "pro-yearly"
 	| "max-monthly"
 	| "max-yearly"
 	| "teams-monthly"
 	| "teams-yearly"
+	| "teams-lite-monthly"
+	| "teams-lite-yearly"
 	| "business-monthly"
 	| "business-yearly"
 	| "business-agents-monthly"
@@ -98,9 +107,11 @@ export type PricingPlanSlug =
 export type CurrentPricingPlan =
 	| "desktop-license"
 	| "marketplace-membership"
+	| "plus"
 	| "pro"
 	| "max"
 	| "teams"
+	| "teams-lite"
 	| "business";
 
 /**
@@ -144,6 +155,8 @@ const noop = () => {
  * it here in the same commit.
  * -------------------------------------------------------------------------- */
 export const PRO_MONTHLY_USD = 49;
+/** Private lower-usage Pro companion price; omitted from the public shelf. */
+export const PLUS_MONTHLY_USD = 39;
 /** The recurring A Major Pass price per user. */
 export const MARKETPLACE_PASS_MONTHLY_USD = 20;
 /** A Major Pass yearly price per user (two months free). */
@@ -161,6 +174,11 @@ export const MAX_MONTHLY_USD = 99;
 export const TEAMS_MONTHLY_USD = 250;
 /** @deprecated Use {@link TEAMS_MONTHLY_USD}. */
 export const TEAMS_MONTHLY_PER_SEAT_USD = 50;
+/** Private Teams Lite floor: $100 below Teams at five seats. */
+export const TEAMS_LITE_MONTHLY_USD = 150;
+/** Teams Lite's first-five-seat price; later seats use the standard $50 rate. */
+export const TEAMS_LITE_MONTHLY_PER_SEAT_USD = 30;
+export const TEAMS_LITE_ADDITIONAL_SEAT_USD = 50;
 /**
  * Max is SINGLE-SEAT. The constant stays at 1 (and the card shows no seat
  * stepper) because Max used to be seat-scalable, which put two multi-seat
@@ -179,6 +197,8 @@ export const MAX_MIN_SEATS = 1;
  * while its member-seat quantity changes.
  * -------------------------------------------------------------------------- */
 export const PRO_INCLUDED_USD = 15;
+/** Plus keeps Pro capacity with a lower fixed monthly credit pool. */
+export const PLUS_INCLUDED_USD = 10;
 export const MAX_INCLUDED_USD = 30;
 export const TEAMS_INCLUDED_USD = 50;
 /** Current Teams credit grant: one $50 pool for each five billed seats. */
@@ -186,13 +206,22 @@ export const TEAMS_INCLUDED_CREDIT_BUNDLE_SIZE = 5;
 export const TEAMS_INCLUDED_PER_BUNDLE_USD = 50;
 /** @deprecated Use {@link TEAMS_INCLUDED_USD}. */
 export const TEAMS_INCLUDED_PER_SEAT_USD = TEAMS_INCLUDED_USD;
+/** Teams Lite is a private lower-usage offer with a $20 pool per five seats. */
+export const TEAMS_LITE_INCLUDED_USD = 20;
+export const TEAMS_LITE_INCLUDED_CREDIT_BUNDLE_SIZE = 5;
+export const TEAMS_LITE_INCLUDED_PER_BUNDLE_USD = 20;
 
 /**
  * Hosted business-automation prices. These mirror
  * `@ryu/auth/lib/agent-plans` without making this presentational package depend
  * on the control-plane catalog.
  */
-export type HostedAgentPricingPlanId = "teams" | "business" | "pro" | "max";
+export type HostedAgentPricingPlanId =
+	| "teams"
+	| "teams-lite"
+	| "business"
+	| "pro"
+	| "max";
 
 export const PRO_AGENT_INCLUDED = 5;
 export const PRO_AGENT_BASE_USD = 250;
@@ -239,6 +268,13 @@ export function hostedAgentIncludedCreditUsd(
 	if (planId === "business") {
 		return businessIncludedCreditUsd(agentCount);
 	}
+	if (planId === "teams-lite") {
+		const seats = normalizeTeamsSeatCount(agentCount);
+		return (
+			Math.ceil(seats / TEAMS_LITE_INCLUDED_CREDIT_BUNDLE_SIZE) *
+			TEAMS_LITE_INCLUDED_PER_BUNDLE_USD
+		);
+	}
 	const isTeams = planId === "teams";
 	if (isTeams) {
 		const seats = normalizeTeamsSeatCount(agentCount);
@@ -271,6 +307,13 @@ export function hostedAgentMonthlyPriceUsd(
 ): number {
 	if (planId === "business") {
 		return businessMonthlyPriceUsd(agentCount);
+	}
+	if (planId === "teams-lite") {
+		const seats = normalizeTeamsSeatCount(agentCount);
+		return (
+			Math.min(seats, TEAMS_MIN_SEATS) * TEAMS_LITE_MONTHLY_PER_SEAT_USD +
+			Math.max(0, seats - TEAMS_MIN_SEATS) * TEAMS_LITE_ADDITIONAL_SEAT_USD
+		);
 	}
 	if (planId === "teams") {
 		return TEAMS_MONTHLY_PER_SEAT_USD * normalizeTeamsSeatCount(agentCount);
@@ -389,8 +432,8 @@ export function annualTotalPrice(monthly: number): number {
 }
 
 /**
- * The price block for a recurring plan. Always shows the whole-dollar monthly
- * list price with a "/mo" suffix, with the true annual total spelled out beneath.
+ * The price block for a recurring plan. Yearly billing shows the discounted
+ * monthly equivalent with the true annual total spelled out beneath.
  *
  * The headline is always the PER-PERSON price — the number the plan is
  * advertised at — so the comparison across cards stays apples-to-apples; the
@@ -414,7 +457,7 @@ function PriceBlock({
 	totalMonthly?: boolean;
 }) {
 	const annualTotal = annualTotalPrice(monthly);
-	const perMonth = monthly;
+	const perMonth = effectiveMonthlyPrice(monthly, isYearly);
 	const seat = perSeat ? "/seat" : "";
 	// Only more than one seat has a total worth spelling out; at one seat the
 	// total IS the headline.
@@ -570,10 +613,12 @@ export function PricingBillingToggle({
 				value={isYearly ? "yearly" : "monthly"}
 			>
 				<TabsList
+					aria-label="Billing period"
 					className="min-w-max p-0"
 					manageLayout={false}
 					variant="default"
 				>
+					<TabsIndicator className="bg-foreground! shadow-none dark:bg-foreground!" />
 					<TabsTrigger
 						className="data-active:bg-foreground data-active:text-background! dark:data-active:bg-foreground dark:data-active:text-background!"
 						value="monthly"
@@ -1096,6 +1141,97 @@ export function ProPlanCard({
 	);
 }
 
+/** Private Plus card — a lower-usage individual companion to Pro. */
+export function PlusPlanCard({
+	isYearly = false,
+	loadingPlan = null,
+	onCheckout = noop,
+	currentPlan = null,
+}: PlanCardProps) {
+	const isCurrent = currentPlan === "plus";
+	const isLoading =
+		loadingPlan === "plus-monthly" || loadingPlan === "plus-yearly";
+
+	return (
+		<PricingCardBorder variant="plus">
+			<CardHeader>
+				<CardTitle className="flex items-center gap-2 text-xl">
+					Plus
+					<PlanBadge plan="plus" size="md" />
+				</CardTitle>
+				<CardDescription>
+					A private lower-usage Pro companion for one person
+				</CardDescription>
+			</CardHeader>
+			<CardContent className="flex-1">
+				<PriceBlock isYearly={isYearly} monthly={PLUS_MONTHLY_USD} />
+				<div className="mb-6 border-border/70 border-b pb-3">
+					<p className="font-medium text-sm">Private offer</p>
+					<p className="mt-1 text-muted-foreground text-xs">
+						Lower included usage than Pro, with the same personal CX23 capacity.
+					</p>
+				</div>
+				<ul className="space-y-3">
+					<li className="flex items-center">
+						<Users className="mr-2 size-4" />
+						<span>1 personal workspace</span>
+					</li>
+					<li className="flex items-center">
+						<Download className="mr-2 size-4" />
+						<span>Full app on all your devices</span>
+					</li>
+					<li className="flex items-center">
+						<Bot className="mr-2 size-4" />
+						<span>Personal chats, agents, and spaces</span>
+					</li>
+					<li className="flex items-center">
+						<Cloud className="mr-2 size-4" />
+						<span>300+ cloud AI models</span>
+					</li>
+					<li className="flex items-center">
+						<Coins className="mr-2 size-4" />
+						<span>
+							<span className="font-heading tabular-nums">
+								${PLUS_INCLUDED_USD}
+							</span>
+							/month AI usage included
+						</span>
+					</li>
+					<li className="flex items-center">
+						<Mail className="mr-2 size-4" />
+						<span>
+							Agent Inboxes, 10,000 monthly sends, and 20 GB mail storage
+						</span>
+					</li>
+					<li className="flex items-center">
+						<Coins className="mr-2 size-4" />
+						<span>16.5% deposit fee ($2.75 minimum)</span>
+					</li>
+					<li className="flex items-center">
+						<Server className="mr-2 size-4" />
+						<span>20 GB of space storage</span>
+					</li>
+					<li className="flex items-center">
+						<Cloud className="mr-2 size-4" />
+						<span>
+							Managed server with 2 vCPU, 4 GB RAM, and 40 GB SSD. Singapore is
+							a paid add-on
+						</span>
+					</li>
+				</ul>
+			</CardContent>
+			<CardFooter>
+				<PlanCta
+					isCurrent={isCurrent}
+					isLoading={isLoading}
+					label={currentPlan ? "Upgrade" : "Start with Plus"}
+					onClick={() => onCheckout(isYearly ? "plus-yearly" : "plus-monthly")}
+				/>
+			</CardFooter>
+		</PricingCardBorder>
+	);
+}
+
 /**
  * Max plan card — the individual power tier, with the optional Cloud panel.
  *
@@ -1311,20 +1447,20 @@ export function HostedAgentPlanCard({
 	planId: HostedAgentPricingPlanId;
 }) {
 	const isTeams = planId === "teams";
+	const isTeamsLite = planId === "teams-lite";
 	const isBusiness = planId === "business";
 	const isPro = planId === "pro";
-	const minAgents =
-		isTeams || isBusiness
-			? TEAMS_AGENT_INCLUDED
-			: isPro
-				? PRO_AGENT_INCLUDED
-				: MAX_AGENT_INCLUDED;
-	const effectiveAgentCount =
-		isTeams || isBusiness
-			? normalizeTeamsSeatCount(agentCount)
-			: normalizeHostedAgentCount(agentCount, minAgents);
+	const isOrganization = isTeams || isTeamsLite || isBusiness;
+	const minAgents = isOrganization
+		? TEAMS_AGENT_INCLUDED
+		: isPro
+			? PRO_AGENT_INCLUDED
+			: MAX_AGENT_INCLUDED;
+	const effectiveAgentCount = isOrganization
+		? normalizeTeamsSeatCount(agentCount)
+		: normalizeHostedAgentCount(agentCount, minAgents);
 	const exceedsTeamsSelfServe =
-		(isTeams || isBusiness) && effectiveAgentCount > TEAMS_MAX_SEATS;
+		isOrganization && effectiveAgentCount > TEAMS_MAX_SEATS;
 	// Once the slider crosses the self-serve ceiling, keep the Teams card as a
 	// clear maximum anchor rather than showing a price for a quantity it cannot
 	// sell. Enterprise owns the selected 51+ quantity and the CTA below.
@@ -1333,7 +1469,7 @@ export function HostedAgentPlanCard({
 		: effectiveAgentCount;
 	const monthlyPrice = hostedAgentMonthlyPriceUsd(
 		planId,
-		isTeams || isBusiness ? displayAgentCount : effectiveAgentCount
+		isOrganization ? displayAgentCount : effectiveAgentCount
 	);
 	const slug =
 		`${planId}-${isYearly ? "yearly" : "monthly"}` as PricingPlanSlug;
@@ -1341,28 +1477,38 @@ export function HostedAgentPlanCard({
 	const isLoading = loadingPlan === slug;
 	const includedCredits = hostedAgentIncludedCreditUsd(
 		planId,
-		isTeams || isBusiness ? displayAgentCount : effectiveAgentCount
+		isOrganization ? displayAgentCount : effectiveAgentCount
 	);
 	const planName = isTeams
 		? "Teams"
-		: isBusiness
-			? "Business"
-			: isPro
-				? "Pro Plan"
-				: "Max Plan";
-	const planBadge: PlanTier = isTeams
-		? "teams"
-		: isBusiness
-			? "business"
-			: isPro
-				? "pro"
-				: "max";
+		: isTeamsLite
+			? "Teams Lite"
+			: isBusiness
+				? "Business"
+				: isPro
+					? "Pro Plan"
+					: "Max Plan";
+	const planBadge: PlanTier = isTeamsLite
+		? "teams-lite"
+		: isTeams
+			? "teams"
+			: isBusiness
+				? "business"
+				: isPro
+					? "pro"
+					: "max";
 
 	return (
 		<PricingCardBorder
 			isRecommended={isRecommended}
 			variant={
-				isTeams ? "teams" : isBusiness ? "business" : isPro ? "pro" : "max"
+				isTeams || isTeamsLite
+					? "teams"
+					: isBusiness
+						? "business"
+						: isPro
+							? "pro"
+							: "max"
 			}
 		>
 			<CardHeader>
@@ -1377,11 +1523,13 @@ export function HostedAgentPlanCard({
 				<CardDescription>
 					{isTeams
 						? "A shared deployment for agents your team can run and oversee"
-						: isBusiness
-							? "More capacity for managed agent deployments with your tools and workflows"
-							: isPro
-								? "Personal Ryu access for running and customising workflows"
-								: "Custom capacity, deployment, and governance for your organization"}
+						: isTeamsLite
+							? "A private lower-usage shared deployment for a small team"
+							: isBusiness
+								? "More capacity for managed agent deployments with your tools and workflows"
+								: isPro
+									? "Personal Ryu access for running and customising workflows"
+									: "Custom capacity, deployment, and governance for your organization"}
 				</CardDescription>
 			</CardHeader>
 			<CardContent className="flex-1">
@@ -1389,15 +1537,15 @@ export function HostedAgentPlanCard({
 					isYearly={isYearly}
 					monthly={monthlyPrice}
 					perSeat={false}
-					seats={isTeams || isBusiness ? displayAgentCount : 1}
-					totalMonthly={isTeams || isBusiness}
+					seats={isOrganization ? displayAgentCount : 1}
+					totalMonthly={isOrganization}
 				/>
 				{isBusiness ? <IncludedPlanBanner plan="Teams" /> : null}
 				<ul className="space-y-3">
 					<li className="flex items-center">
 						<Bot className="mr-2 size-4" />
 						<span>
-							{isTeams || isBusiness
+							{isOrganization
 								? `${displayAgentCount} seats included`
 								: `${effectiveAgentCount} ${effectiveAgentCount === 1 ? "agent" : "agents"} can run a named business process`}
 						</span>
@@ -1416,7 +1564,7 @@ export function HostedAgentPlanCard({
 						<span>
 							{isBusiness
 								? "Performance server with 16 vCPU, 32 GB RAM, and 320 GB SSD"
-								: isTeams
+								: isTeams || isTeamsLite
 									? displayAgentCount >= 50
 										? "Two managed servers with 8 vCPU, 16 GB RAM, and 160 GB SSD each"
 										: "Managed server with 8 vCPU, 16 GB RAM, and 160 GB SSD"
@@ -1428,12 +1576,12 @@ export function HostedAgentPlanCard({
 					<li className="flex items-center">
 						<Shield className="mr-2 size-4" />
 						<span>
-							{isTeams || isBusiness
+							{isOrganization
 								? "Access controls, spend controls, and audit history"
 								: "Spend controls and audit history"}
 						</span>
 					</li>
-					{isTeams || isBusiness ? (
+					{isOrganization ? (
 						<>
 							<li className="flex items-center">
 								<CreditCard className="mr-2 size-4" />
@@ -1452,14 +1600,14 @@ export function HostedAgentPlanCard({
 					<li className="flex items-center">
 						<Wrench className="mr-2 size-4" />
 						<span>
-							{isTeams || isBusiness
+							{isOrganization
 								? "Guided setup for agent workflows"
 								: isPro
 									? "Guided setup for your workflows"
 									: "White-label delivery and named onboarding support"}
 						</span>
 					</li>
-					{isTeams || isBusiness ? (
+					{isOrganization ? (
 						<li className="flex items-center">
 							<Coins className="mr-2 size-4" />
 							<span>16% deposit fee ($2.75 minimum)</span>
@@ -1480,16 +1628,18 @@ export function HostedAgentPlanCard({
 						isCurrent={isCurrent}
 						isLoading={isLoading}
 						label={
-							isTeams
-								? "Start with Teams"
-								: isBusiness
-									? "Start with Business"
-									: isPro
-										? "Start with Pro"
-										: "Start with Max"
+							isTeamsLite
+								? "Start with Teams Lite"
+								: isTeams
+									? "Start with Teams"
+									: isBusiness
+										? "Start with Business"
+										: isPro
+											? "Start with Pro"
+											: "Start with Max"
 						}
 						onClick={() => onCheckout(slug)}
-						variant={isTeams || isBusiness || isPro ? undefined : "outline"}
+						variant={isOrganization || isPro ? undefined : "outline"}
 					/>
 				)}
 			</CardFooter>

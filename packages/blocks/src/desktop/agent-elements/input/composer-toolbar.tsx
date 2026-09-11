@@ -4,6 +4,7 @@ import { ExpandIcon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { Button } from "@ryu/ui/components/button";
 import { Wave } from "@ryu/ui/components/wave";
+import { motion, type Transition } from "motion/react";
 import type { ContextUsage } from "../context-usage.tsx";
 import type { ComposerMenuGroup, ComposerMenuItem } from "./composer-menu.tsx";
 import { ContextMeter } from "./context-meter.tsx";
@@ -19,7 +20,7 @@ import { SendButton } from "./send-button.tsx";
 import { VoiceInputButton } from "./voice-input-button.tsx";
 
 export interface ComposerToolbarProps {
-	/** Textarea content placed between the control clusters in compact mode. */
+	/** Editor content kept in one stable slot across compact and full layouts. */
 	center?: React.ReactNode;
 	/**
 	 * Single-row layout for a compact one-line composer. Also keeps dictation in a
@@ -80,6 +81,8 @@ export interface ComposerToolbarProps {
 
 	/** Content rendered on the left, next to the attachment button. */
 	leftActions?: React.ReactNode;
+	/** Whether the shared-layout morph is enabled for this toolbar. */
+	motionEnabled?: boolean;
 	onAttach?: () => void;
 	onDirectorySelect?: (item: ComposerMenuItem) => void;
 	/** Open the larger dialog composer when the host feature is enabled. */
@@ -89,6 +92,8 @@ export interface ComposerToolbarProps {
 	/** Generate a video from the current composer text. */
 	onGenerateVideo?: () => void;
 	onMenuOpenChange?: (open: boolean) => void;
+	/** Open the app-owned sketch dialog. */
+	onSketch?: () => void;
 	onStartVoice: () => void;
 	onStop: () => void;
 	onStopVoice: () => void;
@@ -99,6 +104,8 @@ export interface ComposerToolbarProps {
 	rightActions?: React.ReactNode;
 	/** Whether the attachment button is shown at all. */
 	showAttach: boolean;
+	/** Motion transition used for the compact/full layout handoff. */
+	transition?: Transition;
 	voiceDisabled?: boolean;
 
 	/**
@@ -152,6 +159,7 @@ function resolvePlusMenu(
 		| "onGenerateVideo"
 		| "isGeneratingVideo"
 		| "showAttach"
+		| "onSketch"
 	>
 ): {
 	imageGen: MediaGenControls | undefined;
@@ -183,6 +191,7 @@ function resolvePlusMenu(
 		// of them. The affordance is shared, so it must not degrade per host.
 		showPlusMenu: Boolean(
 			p.showAttach ||
+				p.onSketch ||
 				p.goalControls ||
 				p.ghostControls ||
 				p.pluginControls?.length ||
@@ -202,6 +211,7 @@ function resolvePlusMenu(
 export function ComposerToolbar({
 	showAttach,
 	onAttach,
+	onSketch,
 	goalControls,
 	ghostControls,
 	doubleCheckControls,
@@ -235,6 +245,8 @@ export function ComposerToolbar({
 	voiceMode,
 	compact = false,
 	center,
+	motionEnabled = true,
+	transition,
 }: ComposerToolbarProps) {
 	// The primary action always reflects what the user can do next: a typed
 	// message sends (and the host queues it when a turn is active), while Stop
@@ -264,18 +276,21 @@ export function ComposerToolbar({
 		onGenerateVideo,
 		isGeneratingVideo,
 		showAttach,
+		onSketch,
 	});
 	const showDirectory = Boolean(
 		directoryGroups?.some((group) => group.items.length > 0)
 	);
 
 	const leftCluster = (
-		<div
+		<motion.div
 			className={
 				compact
-					? "flex shrink-0 items-center gap-1"
+					? "col-start-1 row-start-1 flex shrink-0 items-center gap-1"
 					: "flex min-w-0 items-center gap-1"
 			}
+			layout={motionEnabled ? "position" : false}
+			transition={transition}
 		>
 			{(showPlusMenu || showDirectory) && (
 				<GoalPlusButton
@@ -289,19 +304,24 @@ export function ComposerToolbar({
 					onAttach={showAttach ? onAttach : undefined}
 					onDirectorySelect={onDirectorySelect}
 					onMenuOpenChange={onMenuOpenChange}
+					onSketch={onSketch}
 					pluginControls={pluginControls}
 					videoGen={videoGen}
 				/>
 			)}
 			{leftActions}
-		</div>
+		</motion.div>
 	);
 
 	const rightCluster = (
-		<div
+		<motion.div
 			className={
-				compact ? "flex shrink-0 items-center gap-1" : "flex items-center gap-1"
+				compact
+					? "col-start-3 row-start-1 flex shrink-0 items-center gap-1"
+					: "flex items-center gap-1"
 			}
+			layout={motionEnabled ? "position" : false}
+			transition={transition}
 		>
 			{/* Context-window meter sits leftmost in the trailing cluster, just
 			    before the model selector — the window is a model attribute. */}
@@ -375,30 +395,46 @@ export function ComposerToolbar({
 				}
 				voiceMode={voiceMode}
 			/>
-		</div>
+		</motion.div>
 	);
 
-	if (compact) {
-		return (
-			<div
-				className="flex min-h-12 items-center gap-2 px-3 py-2.5"
-				data-composer-layout="compact"
-			>
-				{leftCluster}
-				{center}
-				{rightCluster}
-			</div>
-		);
-	}
-
-	// Full layout: leading and trailing controls share the row below the editor.
-	return (
+	const actionRow = (
 		<div
-			className="flex items-center justify-between gap-2 px-2 pt-0.5 pb-2"
-			data-composer-layout="full"
+			className={
+				compact
+					? "contents"
+					: "order-2 flex items-center justify-between gap-2 px-2 pt-0.5 pb-2"
+			}
 		>
 			{leftCluster}
 			{rightCluster}
 		</div>
+	);
+
+	return (
+		<motion.div
+			className={
+				compact
+					? "grid min-h-12 grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-2 px-3 py-2.5"
+					: "flex flex-col gap-0"
+			}
+			data-composer-layout={compact ? "compact" : "full"}
+			data-composer-motion={motionEnabled ? "on" : "off"}
+			layout={motionEnabled}
+			transition={transition}
+		>
+			<motion.div
+				className={
+					compact
+						? "col-start-2 row-start-1 flex min-w-0 flex-1 items-center"
+						: "order-1 w-full"
+				}
+				layout={motionEnabled}
+				transition={transition}
+			>
+				{center}
+			</motion.div>
+			{actionRow}
+		</motion.div>
 	);
 }

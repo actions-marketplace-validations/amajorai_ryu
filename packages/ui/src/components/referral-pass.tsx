@@ -2,6 +2,7 @@
 
 import { Logo } from "./logo.tsx";
 import { PassCardShell, type PassEdge } from "./pass-card-shell.tsx";
+import { PassQrBack } from "./pass-qr-back.tsx";
 import { AutoFitText, FIT_STEP_PX } from "./waitlist-pass.tsx";
 
 /**
@@ -67,6 +68,8 @@ export interface ReferralPassProps {
 	 * toggle that can disagree with the OS — callers pass their resolved theme.
 	 */
 	metalTheme?: "auto" | "dark" | "light";
+	/** Canonical referral link encoded on the back of the pass. */
+	referralUrl?: string | null;
 	/**
 	 * Kill the card's self-motion — the idle turn, the float, and
 	 * drag-to-rotate. Needed anywhere another gesture reads the same pointer.
@@ -105,6 +108,7 @@ export function ReferralPass({
 	holder,
 	joined,
 	metalTheme = "auto",
+	referralUrl,
 	still = false,
 }: ReferralPassProps) {
 	const trimmedCode = code?.trim() ?? "";
@@ -116,6 +120,14 @@ export function ReferralPass({
 
 	return (
 		<PassCardShell
+			back={
+				<PassQrBack
+					caption="Scan to share"
+					metalTheme={metalTheme}
+					seed={seed}
+					value={referralUrl}
+				/>
+			}
 			backdrop="warp"
 			className={className}
 			ditherSeed={seed}

@@ -643,6 +643,11 @@ pub(crate) const BUILTIN_OUTPUT_STYLES: &[(&str, &str, &str)] = &[
     ),
     (
         "@ryu/output-styles",
+        "output-styles/concise.md",
+        include_str!("../../../../generated/ryu-runtime/plugins-store/plugins/output-styles/output-styles/concise.md"),
+    ),
+    (
+        "@ryu/output-styles",
         "output-styles/eli5.md",
         include_str!("../../../../generated/ryu-runtime/plugins-store/plugins/output-styles/output-styles/eli5.md"),
     ),
@@ -710,6 +715,11 @@ pub(crate) const BUILTIN_OUTPUT_STYLES: &[(&str, &str, &str)] = &[
         "@ryu/output-styles",
         "output-styles/bro.md",
         include_str!("../../../../generated/ryu-runtime/plugins-store/plugins/output-styles/output-styles/bro.md"),
+    ),
+    (
+        "@ryu/output-styles",
+        "output-styles/concise.md",
+        include_str!("../../../../generated/ryu-runtime/plugins-store/plugins/output-styles/output-styles/concise.md"),
     ),
     (
         "@ryu/output-styles",

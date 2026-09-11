@@ -262,6 +262,13 @@ export interface SkillInstallResult {
 	slug: string;
 }
 
+export interface SkillInstallPreview {
+	action: "install";
+	dryRun: true;
+	success: boolean;
+	[key: string]: unknown;
+}
+
 export class SkillTargetsRequiredError extends Error {
 	constructor() {
 		super("Choose default agents on this computer.");
@@ -381,6 +388,40 @@ export async function installSkill(
 		path: json.result.path,
 		distribution: json.distribution ?? null,
 	};
+}
+
+/** Resolve target selection and source metadata without writing the canonical
+ * skill registry or distributing files to agent targets. */
+export function previewSkillInstall(
+	target: ApiTarget,
+	id: string,
+	source?: string,
+	options: SkillInstallOptions = {}
+): Promise<SkillInstallPreview> {
+	return request<SkillInstallPreview>(target, "/api/skills/catalog/install", {
+		method: "POST",
+		body: {
+			dryRun: true,
+			id,
+			...(source ? { source } : {}),
+			...options,
+		},
+		headers: buyerTokenHeader(target),
+	});
+}
+
+export function previewSkillInstallFromSource(
+	target: ApiTarget,
+	source: string
+): Promise<SkillInstallPreview> {
+	return request<SkillInstallPreview>(
+		target,
+		"/api/skills/install-from-source",
+		{
+			method: "POST",
+			body: { dryRun: true, source },
+		}
+	);
 }
 
 // ── Installed skills + enable/disable (activation) ────────────────────────────

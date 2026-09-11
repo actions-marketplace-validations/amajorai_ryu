@@ -1,4 +1,5 @@
 import { afterAll, beforeEach, describe, expect, it, mock } from "bun:test";
+import { POLAR_API_VERSION } from "./polar-api.ts";
 
 let customers: {
 	id: string;
@@ -7,9 +8,28 @@ let customers: {
 }[] = [];
 const create = mock(async () => ({}));
 const update = mock(async () => ({}));
+type BeforeRequestHook = (
+	request: Request
+) => Request | undefined | Promise<Request | undefined>;
+let polarHttpClient: { beforeRequest?: BeforeRequestHook } | undefined;
+
+class MockHTTPClient {
+	beforeRequest: BeforeRequestHook | undefined;
+
+	addHook(_hook: string, fn: BeforeRequestHook): this {
+		this.beforeRequest = fn;
+		return this;
+	}
+}
+
 mock.module("@ryu/env/server", () => ({ env: {} }));
 mock.module("@polar-sh/sdk", () => ({
+	HTTPClient: MockHTTPClient,
 	Polar: class {
+		constructor(options: { httpClient?: MockHTTPClient }) {
+			polarHttpClient = options.httpClient;
+		}
+
 		customers = {
 			list: async () => ({ result: { items: customers } }),
 			create,
@@ -43,6 +63,11 @@ describe("personal customer provisioning", () => {
 		).toBe(true);
 		expect(create).not.toHaveBeenCalled();
 		expect(update).not.toHaveBeenCalled();
+	});
+	it("pins every SDK request to the stable Polar API contract", async () => {
+		const request = new Request("https://api.polar.sh/v1/customers");
+		await polarHttpClient?.beforeRequest?.(request);
+		expect(request.headers.get("Polar-Version")).toBe(POLAR_API_VERSION);
 	});
 	const otherCustomers: typeof customers = [
 		{ id: "payer-A", externalId: "ryu:organization:A", metadata: {} },

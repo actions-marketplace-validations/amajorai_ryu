@@ -338,6 +338,9 @@ pub async fn generate_video(
             Json(json!({ "error": "missing `prompt` (the text to render)" })),
         );
     }
+    if let Err(error) = ryu_image::validate_media_provider(&body) {
+        return (StatusCode::BAD_REQUEST, Json(json!({"error": error})));
+    }
     let host = CoreImageHost::new(state.manager.clone());
     // Cloud provider selected → submit a Gateway video job (job-based; poll via
     // `GET /api/video/jobs/:id`). Else the local engine (synchronous).
@@ -352,7 +355,7 @@ pub async fn generate_video(
         .await;
         return (status(code), Json(value));
     }
-    let (code, value) = ryu_image::proxy(&host.sd_base_url(), "/sdcpp/v1/vid_gen", body).await;
+    let (code, value) = ryu_image::video::generate_local_video(&host, body).await;
     (status(code), Json(value))
 }
 
@@ -369,11 +372,11 @@ pub async fn generate_video(
     responses((status = 200, description = "OK", body = serde_json::Value))
 )]
 pub async fn poll_video_job(Path(id): Path<String>) -> impl IntoResponse {
-    use crate::sidecar::gateway::{gateway_token, gateway_url};
+    use crate::sidecar::gateway::{gateway_core_token, gateway_url};
     let base = gateway_url();
     let url = format!("{}/v1/videos/generations/{id}", base.trim_end_matches('/'));
     let mut req = ryu_image::media_client().get(&url);
-    if let Some(t) = gateway_token() {
+    if let Some(t) = gateway_core_token() {
         req = req.bearer_auth(t);
     }
     let resp = match req.send().await {

@@ -11,6 +11,12 @@ export const BUSINESS_SEAT_PRICE_TIERS = [
 	{ fromSeats: 6, pricePerSeatMicroUsd: 50_000_000, toSeats: 50 },
 ] as const satisfies readonly PlanSeatPriceTier[];
 
+/** Teams Lite charges $30 across seats one through five, then $50 per seat. */
+export const TEAMS_LITE_SEAT_PRICE_TIERS = [
+	{ fromSeats: 1, pricePerSeatMicroUsd: 30_000_000, toSeats: 5 },
+	{ fromSeats: 6, pricePerSeatMicroUsd: 50_000_000, toSeats: 50 },
+] as const satisfies readonly PlanSeatPriceTier[];
+
 /**
  * Calculate the total monthly amount for a graduated seat price.
  *

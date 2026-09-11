@@ -38,7 +38,7 @@ import { openExternal } from "@/lib/tauri-bridge.ts";
 import { useSkillDistributionFlow } from "@/src/components/skills/SkillDistributionProvider.tsx";
 import { ActiveModelControl } from "@/src/components/store/ActiveModelControl.tsx";
 import { useDesktopDependencyLookup } from "@/src/components/store/dependency-lookup.ts";
-import { useTabsContext } from "@/src/contexts/TabsContext.tsx";
+import { useTabSelector } from "@/src/contexts/TabsContext.tsx";
 import { SKILL_EDITOR_ALIAS } from "@/src/contributions/companion-alias.ts";
 import { useCompanionAlias } from "@/src/contributions/use-companion-alias.ts";
 import { useActiveNode } from "@/src/hooks/useActiveNode.ts";
@@ -169,7 +169,7 @@ function useMarketplaceAccess(): boolean {
 /** Mount once above every store surface that renders the shared catalog sections. */
 export function DesktopCatalogHost({ children }: { children: ReactNode }) {
 	const activeNode = useCatalogNode();
-	const { openTab } = useTabsContext();
+	const openTab = useTabSelector((state) => state.openTab);
 	const { distributeInstalledSkill } = useSkillDistributionFlow();
 	const navigate = useCallback(
 		(path: string) => {
@@ -233,6 +233,8 @@ export function DesktopCatalogHost({ children }: { children: ReactNode }) {
 				),
 			navigate,
 			openExternal,
+			openAuditConversation: (conversationId) =>
+				openTab("/chat", { conversationId }),
 			runCatalogScan: (input) =>
 				runCatalogScan(
 					{
@@ -277,6 +279,7 @@ export function DesktopCatalogHost({ children }: { children: ReactNode }) {
 		// it, switching nodes would keep reading versions from the previous one.
 		[
 			navigate,
+			openTab,
 			skillEditorOwner,
 			distributeInstalledSkill,
 			activeNode.url,

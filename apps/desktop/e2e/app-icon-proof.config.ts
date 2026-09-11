@@ -1,0 +1,14 @@
+import { defineConfig, devices } from "@playwright/test";
+export default defineConfig({
+	testDir: ".",
+	testMatch: "app-icon-story.spec.ts",
+	outputDir: "../../../docs/proof/app-icons-v2/test-results",
+	workers: 1,
+	use: { ...devices["Desktop Chrome"], baseURL: "http://127.0.0.1:5198" },
+	webServer: {
+		command:
+			"bun x vite preview --config harness/vite.icons.config.ts --host 127.0.0.1 --port 5198 --strictPort",
+		url: "http://127.0.0.1:5198/app-icon-story.html",
+		reuseExistingServer: false,
+	},
+});

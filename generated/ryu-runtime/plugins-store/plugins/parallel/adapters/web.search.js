@@ -92,6 +92,9 @@ const parse = (text) => {
 };
 const rpc = typeof free === "string" ? parse(free) : free;
 const result = rpc ? rpc.result : null;
+if (rpc?.error || result?.isError) {
+	return { raw: free };
+}
 // `structuredContent` is the same object the text block stringifies, so prefer it
 // and only parse the text when an older server omits it.
 let payload = result ? result.structuredContent : null;

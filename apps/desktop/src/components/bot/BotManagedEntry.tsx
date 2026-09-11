@@ -16,12 +16,14 @@ import Layout from "@/src/components/layout/Layout.tsx";
 import { useCreditsWallet } from "@/src/hooks/useCreditsWallet.ts";
 import { toTarget } from "@/src/lib/api/client.ts";
 import {
-	defaultCloudAgentSelection,
+	EMPTY_AGENT_SELECTION,
+	getLaneAgentSelection,
 	setLaneAgentSelection,
 } from "@/src/lib/api/preferences.ts";
 import { useNodeStore } from "@/src/store/useNodeStore.ts";
 import {
 	type BotManagedEntryState,
+	resolveBotCloudSelection,
 	resolveBotManagedEntryState,
 } from "./bot-managed-entry-state.ts";
 
@@ -99,7 +101,7 @@ function BotEntryCard({
 
 /**
  * Account-only Bot entry point. It adopts the user's existing managed node and
- * writes the shared cloud-lane default; it never provisions a node, handles a
+ * ensures the shared cloud-lane default; it never provisions a node, handles a
  * credential, or changes the runtime's authorization gates from the client.
  */
 export function BotManagedEntry() {
@@ -142,13 +144,19 @@ export function BotManagedEntry() {
 				: [...current.nodes, node],
 		}));
 		// This is the existing shared managed provider seam. Bot does not expose a
-		// picker, BYOK key, or routing toggle; it simply selects the subscription
-		// default that Core/Gateway already understand.
-		await setLaneAgentSelection(
-			toTarget(node),
-			"cloud",
-			defaultCloudAgentSelection(true)
-		).catch(() => false);
+		// picker, BYOK key, or routing toggle. Console owners/admins can configure
+		// the managed node's cloud lane, so preserve that value and seed the
+		// subscription's Auto cloud default only when the lane is unset.
+		const target = toTarget(node);
+		const currentSelection = await getLaneAgentSelection(target, "cloud").catch(
+			() => EMPTY_AGENT_SELECTION
+		);
+		const resolved = resolveBotCloudSelection(currentSelection);
+		if (resolved.shouldPersist) {
+			await setLaneAgentSelection(target, "cloud", resolved.selection).catch(
+				() => false
+			);
+		}
 		setBusy(false);
 		setState("ready");
 	}, [entitlement?.managedInference, hydrateCloudNodes, resolvingSubscription]);

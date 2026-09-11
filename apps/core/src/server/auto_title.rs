@@ -126,10 +126,10 @@ async fn gateway_title(
     system: &str,
     user_input: &str,
 ) -> Option<String> {
-    use crate::sidecar::gateway::{gateway_token, gateway_url};
+    use crate::sidecar::gateway::{gateway_core_token, gateway_url};
     let base = gateway_url();
     let base = base.trim_end_matches('/');
-    let token = gateway_token();
+    let token = gateway_core_token();
     let body = post_completion(
         client,
         &format!("{base}/v1/chat/completions"),

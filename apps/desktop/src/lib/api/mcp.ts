@@ -108,10 +108,14 @@ function toTool(t: ToolWire): McpTool {
 	};
 }
 
-export async function fetchMcpServers(target: ApiTarget): Promise<McpServer[]> {
+export async function fetchMcpServers(
+	target: ApiTarget,
+	signal?: AbortSignal
+): Promise<McpServer[]> {
 	const json = await request<{ servers?: ServerWire[] }>(
 		target,
-		"/api/mcp/servers"
+		"/api/mcp/servers",
+		{ signal }
 	);
 	return (json.servers ?? []).map(toServer);
 }
@@ -122,12 +126,14 @@ export async function fetchMcpServers(target: ApiTarget): Promise<McpServer[]> {
  */
 export async function fetchMcpTools(
 	target: ApiTarget,
-	agentId?: string
+	agentId?: string,
+	signal?: AbortSignal
 ): Promise<McpTool[]> {
 	const suffix = agentId ? `?agent=${encodeURIComponent(agentId)}` : "";
 	const json = await request<{ tools?: ToolWire[] }>(
 		target,
-		`/api/mcp/tools${suffix}`
+		`/api/mcp/tools${suffix}`,
+		{ signal }
 	);
 	return (json.tools ?? []).map(toTool);
 }
@@ -430,6 +436,14 @@ export interface McpInstallResult {
 	url: string | null;
 }
 
+export interface McpInstallPreview {
+	action: "install";
+	dryRun: true;
+	server: McpInstallResult & { args?: string[]; description?: string | null };
+	success: boolean;
+	[key: string]: unknown;
+}
+
 /**
  * Install a catalog server as a **disabled** `~/.ryu/mcp.json` entry. Core never
  * auto-launches the registry command; the user must explicitly enable/start it
@@ -456,6 +470,19 @@ export async function installMcpServer(
 		command: json.server.command,
 		url: json.server.url ?? null,
 	};
+}
+
+/** Resolve a catalog MCP server without writing mcp.json, lifecycle state, or
+ * warming its package in the Download Center. */
+export function previewMcpServerInstall(
+	target: ApiTarget,
+	id: string,
+	force = false
+): Promise<McpInstallPreview> {
+	return request<McpInstallPreview>(target, "/api/mcp/catalog/install", {
+		method: "POST",
+		body: { dryRun: true, force, id },
+	});
 }
 
 /** One installed MCP server whose recorded catalog version trails the registry.

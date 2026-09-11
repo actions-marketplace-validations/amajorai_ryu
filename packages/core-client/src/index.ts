@@ -7,6 +7,8 @@
 // This root re-exports only the HTTP primitives so a consumer can pull the
 // target/request types without reaching for a subpath. Domain modules are NOT
 // re-exported here on purpose (avoid a kitchen-sink barrel — see CLAUDE.md).
+
+export * from "./backups.ts";
 export {
 	type ApiTarget,
 	apiUrl,

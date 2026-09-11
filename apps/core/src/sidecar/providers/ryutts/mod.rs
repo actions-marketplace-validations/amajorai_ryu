@@ -48,11 +48,13 @@ pub fn default_tts_engine() -> String {
 /// Loopback port the TTS sidecar binds to. Distinct from llama.cpp (8080),
 /// embeddings (8081), mlx (8082), sd (8083), mlx-vlm (8084), and whisper (8090).
 pub const TTS_PORT: u16 = 8085;
-const TTS_ADDR: &str = "127.0.0.1:8085";
+fn tts_address() -> String {
+    format!("127.0.0.1:{}", crate::profile::port(TTS_PORT))
+}
 
 /// Base URL the sidecar serves on once resident.
 pub fn tts_base_url() -> String {
-    format!("http://{TTS_ADDR}")
+    format!("http://{}", tts_address())
 }
 
 /// The shared-secret bearer the TTS sidecar authenticates. Voice is a Core-internal
@@ -369,7 +371,7 @@ impl Sidecar for RyuTtsManager {
             if Self::server_reachable(&client).await {
                 adopted_external.store(true, Ordering::Relaxed);
                 tracing::info!(
-                    "Ryu Audio sidecar already running on {TTS_ADDR} — adopting existing server"
+                    address = %tts_address(), "Ryu Audio sidecar already running — adopting existing server"
                 );
                 return Ok(());
             }
@@ -402,7 +404,7 @@ impl Sidecar for RyuTtsManager {
                 // Make `ryu_tts` importable without depending on the cwd.
                 ("PYTHONPATH".into(), dir.to_string_lossy().to_string()),
                 ("RYU_TTS_HOST".into(), "127.0.0.1".into()),
-                ("RYU_TTS_PORT".into(), TTS_PORT.to_string()),
+                ("RYU_TTS_PORT".into(), crate::profile::port(TTS_PORT).to_string()),
                 // Shared-secret the sidecar fail-closed-checks on every non-/health
                 // route; Core presents the same value via `bearer()`.
                 (crate::sidecar::ext_proxy::ENV_EXT_TOKEN.into(), bearer()),
@@ -432,7 +434,7 @@ impl Sidecar for RyuTtsManager {
             // Uvicorn binds quickly, but the first import can take a moment.
             tokio::time::timeout(std::time::Duration::from_secs(30), async {
                 loop {
-                    if tokio::net::TcpStream::connect(TTS_ADDR).await.is_ok() {
+                    if tokio::net::TcpStream::connect(tts_address()).await.is_ok() {
                         break;
                     }
                     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
@@ -441,7 +443,7 @@ impl Sidecar for RyuTtsManager {
             .await
             .context("Ryu Audio sidecar did not start within 30s")?;
 
-            tracing::info!("Ryu Audio sidecar started on {TTS_ADDR}");
+            tracing::info!(address = %tts_address(), "Ryu Audio sidecar started");
             Ok(())
         })
     }

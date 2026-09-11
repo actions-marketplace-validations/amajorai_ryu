@@ -1,3 +1,7 @@
+import {
+	parseTranscriptionDetail,
+	type TranscriptionDetail,
+} from "@ryuhq/core-client/voice";
 // apps/desktop/src/lib/api/voice.ts
 //
 // Typed client for Core's Voice Recognition data path (`POST /api/voice/transcribe`).
@@ -13,12 +17,12 @@
 import { type ApiTarget, authenticatedFetch } from "./client.ts";
 
 /** Transcribe a recorded audio blob via Core's selected STT runtime. */
-export async function transcribeAudio(
+async function transcriptionResponse(
 	target: ApiTarget,
 	audio: Blob,
 	filename = "recording.wav",
 	engine?: string
-): Promise<string> {
+): Promise<unknown> {
 	const form = new FormData();
 	form.append("file", audio, filename);
 	const selectedEngine = engine?.trim();
@@ -45,8 +49,32 @@ export async function transcribeAudio(
 		throw new Error(detail);
 	}
 
-	const body = (await resp.json()) as { text?: string };
-	return (body.text ?? "").trim();
+	return await resp.json();
+}
+
+export async function transcribeAudioDetailed(
+	target: ApiTarget,
+	audio: Blob,
+	filename = "recording.wav",
+	engine?: string
+): Promise<TranscriptionDetail> {
+	return parseTranscriptionDetail(
+		await transcriptionResponse(target, audio, filename, engine)
+	);
+}
+export async function transcribeAudio(
+	target: ApiTarget,
+	audio: Blob,
+	filename = "recording.wav",
+	engine?: string
+): Promise<string> {
+	const result = await transcriptionResponse(target, audio, filename, engine);
+	return result &&
+		typeof result === "object" &&
+		"text" in result &&
+		typeof result.text === "string"
+		? result.text.trim()
+		: "";
 }
 
 /** S1-mini styling controls exposed by the Speech Processing layer. */
@@ -245,6 +273,8 @@ export interface SpeakOptions {
 	language?: string;
 	/** Reference wav path/URL for cloning-capable engines. */
 	referenceAudio?: string;
+	/** Correlates this narration with an app-owned Gateway audit request. */
+	requestId?: string;
 	/** Speaking-rate multiplier where supported. */
 	speed?: number;
 	/** Voice id (engine-specific); defaults to the engine's default voice. */
@@ -263,6 +293,7 @@ export async function speakText(
 		method: "POST",
 		body: JSON.stringify({
 			text,
+			request_id: options.requestId,
 			engine: options.engine,
 			voice: options.voice,
 			speed: options.speed,

@@ -23,6 +23,9 @@
  * copied, so a second face cannot drift from the first by retyping a number.
  */
 
+import { passQrColors } from "../../lib/pass-qr.ts";
+import { createQRCodeGeometry } from "../../lib/qr-code.ts";
+import { ditherAvatarHue } from "../dither-kit/avatar.tsx";
 import { METAL_EDGE_RING_PX } from "../metal-edge.tsx";
 import { FACE_RADIUS_PX } from "../pass-card-shell.tsx";
 import {
@@ -400,6 +403,7 @@ export function passFaceBox(scale: number): PassFaceBox {
 export interface PassFaceEnv {
 	avatar?: CanvasImageSource | null;
 	family: string;
+	isDark: boolean;
 	palette: PassPalette;
 	scale: number;
 }
@@ -420,12 +424,21 @@ export interface PassFaceContent {
 	name: string;
 	/** Already gated by `QUEUE_STATS_MIN` upstream — drawn if present, hidden if not. */
 	position?: number | null;
+	/** Absolute invite destination for the QR on a waitlist pass export. */
+	referralUrl?: string | null;
 	username?: string | null;
 }
 
 /** The waitlist pass, as a painter. Today's face, unchanged, behind the seam. */
 export function waitlistFacePainter(content: PassFaceContent): PassFacePainter {
 	return {
+		back: (ctx, env) =>
+			paintBackQr(ctx, {
+				caption: "Scan to invite",
+				env,
+				seed: content.username || content.name || "ryu",
+				value: content.referralUrl,
+			}),
 		front: (ctx, env) => paintFrontType(ctx, { content, ...env }),
 	};
 }
@@ -563,12 +576,13 @@ export function paintFrontType(
 		avatar,
 		content,
 		family,
+		isDark,
 		palette,
 		scale,
 	}: PassFaceEnv & { content: PassFaceContent }
 ): void {
 	const { available, bottom, left } = passFaceBox(scale);
-	const env: PassFaceEnv = { avatar, family, palette, scale };
+	const env: PassFaceEnv = { avatar, family, isDark, palette, scale };
 
 	ctx.textBaseline = "alphabetic";
 
@@ -650,7 +664,129 @@ export function paintFrontType(
 	}
 }
 
-/** The back: the mark, centred, and nothing else — same as the live back face. */
+/** Paint the same dot QR used by the live waitlist/referral pass backs. */
+export function paintBackQr(
+	ctx: CanvasRenderingContext2D,
+	{
+		caption,
+		env,
+		seed,
+		value,
+	}: {
+		caption: string;
+		env: PassFaceEnv;
+		seed: string;
+		value?: string | null;
+	}
+): void {
+	const { family, isDark, scale } = env;
+	const size = 224 * scale;
+	const left = (CARD_WIDTH_PX * scale - size) / 2;
+	const top = (CARD_HEIGHT_PX * scale - size) / 2 - 8 * scale;
+	const colors = passQrColors(ditherAvatarHue(seed), isDark);
+	const geometry = value ? createQRCodeGeometry(value.trim(), size, "H") : null;
+
+	ctx.save();
+	ctx.fillStyle = colors.surface;
+	ctx.shadowColor = colors.glow;
+	ctx.shadowBlur = 24 * scale;
+	ctx.beginPath();
+	ctx.roundRect(
+		left - 14 * scale,
+		top - 14 * scale,
+		size + 28 * scale,
+		size + 28 * scale,
+		26 * scale
+	);
+	ctx.fill();
+	ctx.shadowBlur = 0;
+
+	if (geometry) {
+		const {
+			circleRadius,
+			circles,
+			finderPositions,
+			finderSize,
+			innerBlackSize,
+			innerPadding,
+			innerWhiteSize,
+			moduleSize,
+		} = geometry;
+		ctx.fillStyle = colors.foreground;
+		for (const [row, column] of finderPositions) {
+			const x = left + column * moduleSize;
+			const y = top + row * moduleSize;
+			ctx.beginPath();
+			ctx.roundRect(x, y, finderSize, finderSize, 12 * scale);
+			ctx.fill();
+			ctx.fillStyle = colors.surface;
+			ctx.beginPath();
+			ctx.roundRect(
+				x + innerPadding,
+				y + innerPadding,
+				innerWhiteSize,
+				innerWhiteSize,
+				8 * scale
+			);
+			ctx.fill();
+			ctx.fillStyle = colors.foreground;
+			ctx.beginPath();
+			ctx.roundRect(
+				x + innerPadding * 2,
+				y + innerPadding * 2,
+				innerBlackSize,
+				innerBlackSize,
+				3 * scale
+			);
+			ctx.fill();
+		}
+		ctx.fillStyle = colors.foreground;
+		for (const { cx, cy } of circles) {
+			ctx.beginPath();
+			ctx.arc(left + cx, top + cy, circleRadius, 0, Math.PI * 2);
+			ctx.fill();
+		}
+
+		const logoPlate = 40 * scale;
+		ctx.fillStyle = colors.surface;
+		ctx.beginPath();
+		ctx.roundRect(
+			left + (size - logoPlate) / 2,
+			top + (size - logoPlate) / 2,
+			logoPlate,
+			logoPlate,
+			10 * scale
+		);
+		ctx.fill();
+		drawGhost(ctx, {
+			color: colors.foreground,
+			scale,
+			size: 25,
+			x: (CARD_WIDTH_PX - 25) / 2,
+			y: (CARD_HEIGHT_PX - 25) / 2 - 8,
+		});
+	} else {
+		ctx.strokeStyle = colors.glow;
+		ctx.lineWidth = scale;
+		ctx.setLineDash([4 * scale, 4 * scale]);
+		ctx.beginPath();
+		ctx.roundRect(left, top, size, size, 24 * scale);
+		ctx.stroke();
+		ctx.setLineDash([]);
+	}
+
+	ctx.font = font(family, 500, 10, scale);
+	ctx.fillStyle = colors.foreground;
+	ctx.textAlign = "center";
+	ctx.fillText(
+		geometry ? caption.toUpperCase() : "INVITE LINK IS PREPARING",
+		(CARD_WIDTH_PX * scale) / 2,
+		(CARD_HEIGHT_PX - 52) * scale
+	);
+	ctx.restore();
+}
+
+/** The legacy default back for passes that do not carry a share destination. */
 export function paintBackType(
 	ctx: CanvasRenderingContext2D,
 	{ palette, scale }: { palette: PassPalette; scale: number }

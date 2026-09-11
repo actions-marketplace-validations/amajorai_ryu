@@ -13,7 +13,7 @@
   "description": "Go language server (gopls) for the ryu agent: definitions, references, hover, symbols, implementations, call hierarchies and diagnostics after every edit. You install gopls; the plugin ships config.",
   "tagline": "Go code intelligence via gopls",
   "keywords": ["go", "golang", "gopls", "language-server", "developer"],
-  "icon": "code-02",
+  "icon": "binary-code",
   "iconDither": {
     "from": 96,
     "to": "transparent",

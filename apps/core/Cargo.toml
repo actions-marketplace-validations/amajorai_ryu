@@ -1,6 +1,6 @@
 [package]
 name = "ryu-core"
-version = "0.3.0"
+version = "0.3.1"
 edition = "2021"
 license = "Apache-2.0"
 
@@ -11,6 +11,7 @@ license = "Apache-2.0"
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(feature, values("voice-parakeet", "voice-vad"))'] }
 
 [dependencies]
+ryu-gw-credentials = { path = "../../crates/gateway/credentials" }
 tokio = { version = "1", features = ["full", "test-util"] }
 axum = { version = "0.7", features = ["ws", "multipart"] }
 tower = "0.4"
@@ -32,6 +33,7 @@ tokio-tungstenite = { version = "0.24", features = ["connect"] }
 ryu-email-send = { path = "../../crates/core/email-send" }
 ryu-a2a = { path = "../../crates/core/a2a" }
 ryu-app-events = { path = "../../crates/core/app-events" }
+ryu-backup = { path = "../../crates/core/backup" }
 ryu-egress = { path = "../../crates/core/egress" }
 # Shared permanent-deletion classifier used by Core's local preflight, ACP/MCP
 # seams, and the Gateway scanner. The crate is pure and has no filesystem side
@@ -341,6 +343,8 @@ ryu-stt = { path = "../../crates/core/stt" }
 # sdcpp sidecar) are injected via the crate's `ImageHost` trait. See
 # `apps/core/src/image_host.rs`.
 ryu-image = { path = "../../crates/core/image" }
+ryu-improvement = { path = "../../crates/core/improvement" }
+ryu-improvement-contracts = { path = "../../crates/core/improvement-contracts" }
 # Voice-activity-detection modality primitive — extracted Core capability crate.
 # In-process FOREVER (per-frame hot path, never IPC): the endpointing/barge-in gate
 # + energy backend are always compiled; the Silero VAD ONNX inference is behind the
@@ -692,7 +696,7 @@ tool-exec-securexec = ["ryu-tool-exec/tool-exec-securexec"]
 #   5. release.yml — the `build` job; fires on a `v*` tag pushed directly to the
 #      public repo. Rare, but it uploads with `--clobber`, so it can OVERWRITE a
 #      correctly-featured asset that `mirror-releases.yml` copied under that tag.
-#   6. nightly.yml — the `build` job. Runs DAILY on the public repo.
+#   6. nightly.yml — the `build` job. Runs every 3 hours on the public repo.
 #   7. canary.yml  — the `build` job. Runs on EVERY push to public main.
 # (6) and (7) are not hypothetical: `apps/core/src/update/mod.rs` has first-class
 # channel support, so a node on the nightly or canary channel installs exactly

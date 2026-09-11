@@ -1,6 +1,15 @@
 {
-  "tags": ["sites", "publishing", "hosting", "domains", "public edge"],
-  "author": { "name": "Ryu", "url": "https://ryuhq.com" },
+  "tags": [
+    "sites",
+    "publishing",
+    "hosting",
+    "domains",
+    "public edge"
+  ],
+  "author": {
+    "name": "Ryu",
+    "url": "https://ryuhq.com"
+  },
   "repository": "https://github.com/amajorai/ryu-sites",
   "homepage": "https://github.com/amajorai/ryu-sites",
   "privacyPolicyUrl": "https://ryuhq.com/privacy",
@@ -10,8 +19,8 @@
   "version": "0.1.0",
   "stability": "experimental",
   "category": "Developer Tools",
-  "description": "A local-first Sites control surface for previewing projects, public-edge routes, domains, quotas, and Help Center widgets.",
-  "tagline": "Make every public route explainable",
+  "description": "Create, refine, save and deploy websites with private access, browser-local data and scoped Ryu capabilities.",
+  "tagline": "Build websites on Ryu",
   "keywords": [
     "sites",
     "publishing",
@@ -22,16 +31,34 @@
   ],
   "icon": "browser",
   "surfaces": {
-    "gateway": { "support": "none" },
-    "core": { "support": "none" },
-    "desktop": { "support": "full" },
-    "island": { "support": "none" },
-    "mobile": { "support": "none" },
-    "extension": { "support": "none" },
-    "web": { "support": "none" },
-    "cli": { "support": "none" }
+    "gateway": {
+      "support": "none"
+    },
+    "core": {
+      "support": "none"
+    },
+    "desktop": {
+      "support": "full"
+    },
+    "island": {
+      "support": "none"
+    },
+    "mobile": {
+      "support": "none"
+    },
+    "extension": {
+      "support": "none"
+    },
+    "web": {
+      "support": "none"
+    },
+    "cli": {
+      "support": "none"
+    }
   },
-  "engines": { "ryu": ">=0.1.0" },
+  "engines": {
+    "ryu": ">=0.1.0"
+  },
   "runnables": [
     {
       "id": "sites-companion",
@@ -44,42 +71,92 @@
       }
     }
   ],
-  "permission_grants": [],
-  "companion": { "label": "Sites", "icon": "browser" },
+  "permission_grants": [
+    "app:http",
+    "hook:side-model",
+    "spaces:docs",
+    "identity:read",
+    "security:check"
+  ],
+  "companion": {
+    "label": "Sites",
+    "icon": "browser"
+  },
   "contributes": {
     "sidebar_buttons": [
       {
-        "id": "sites-overview",
-        "title": "Overview",
-        "icon": "dashboard-square-02",
-        "target": "/plugin/app__sites-companion",
-        "context": { "view": "overview" },
-        "order": 70
-      },
-      {
         "id": "sites-projects",
-        "title": "Projects",
+        "title": "Sites",
         "icon": "activity-03",
         "target": "/plugin/app__sites-companion",
-        "context": { "view": "projects" },
+        "context": {
+          "view": "projects"
+        },
         "order": 71
-      },
-      {
-        "id": "sites-edge",
-        "title": "Public edge",
-        "icon": "link-01",
-        "target": "/plugin/app__sites-companion",
-        "context": { "view": "edge" },
-        "order": 72
-      },
-      {
-        "id": "sites-widget",
-        "title": "Widget",
-        "icon": "sparkles",
-        "target": "/plugin/app__sites-companion",
-        "context": { "view": "widget" },
-        "order": 73
       }
     ]
-  }
+  },
+  "sidecars": [
+    {
+      "name": "sites",
+      "process": {
+        "kind": "local",
+        "command": "ryu-sites",
+        "command_env": "RYU_SITES_BIN",
+        "port_env": "RYU_SITES_PORT"
+      },
+      "port": 8021,
+      "health_path": "/health",
+      "lazy": false,
+      "http": {
+        "mount": "/api/sites",
+        "public_mount": "/api/sites",
+        "routes": [
+          {
+            "path": "/status",
+            "permission": "sites.manage"
+          },
+          {
+            "path": "/runtime",
+            "permission": "sites.manage"
+          },
+          {
+            "path": "/projects",
+            "permission": "sites.manage"
+          },
+          {
+            "path": "/projects/:id",
+            "permission": "sites.manage"
+          },
+          {
+            "path": "/projects/:id/:action",
+            "permission": "sites.manage"
+          },
+          {
+            "path": "/projects/:id/versions/:version",
+            "permission": "sites.manage"
+          },
+          {
+            "path": "/projects/:id/domains/check",
+            "permission": "sites.manage"
+          }
+        ]
+      },
+      "host_api": {
+        "grants": [
+          "spaces:docs",
+          "hook:side-model",
+          "identity:read",
+          "security:check"
+        ]
+      }
+    }
+  ],
+  "permission_levels": [
+    {
+      "id": "sites.manage",
+      "label": "Manage sites",
+      "description": "Create and edit sites, configure their visitor access, save versions and change deployments."
+    }
+  ]
 }

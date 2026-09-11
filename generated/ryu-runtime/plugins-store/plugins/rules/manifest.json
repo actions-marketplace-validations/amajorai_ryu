@@ -13,7 +13,7 @@
   "tagline": "Project rules that follow every agent",
   "keywords": ["rules", "cursor", "claude", "context", "agents"],
   "category": "Developer Tools",
-  "icon": "file-check-02",
+  "icon": "tick-double-01",
   "iconDither": { "from": 214, "to": "transparent", "direction": "down" },
   "surfaces": {
     "gateway": { "support": "none" },

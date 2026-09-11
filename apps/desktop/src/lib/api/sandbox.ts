@@ -69,3 +69,21 @@ export async function setSandboxBackend(
 	track({ event: "sandbox_backend_set", backend: name });
 	return json.active ?? name;
 }
+
+export interface SandboxBackendPreview {
+	action: "set";
+	dryRun: true;
+	success: boolean;
+	[key: string]: unknown;
+}
+
+/** Validate a default backend choice without writing sandbox-backend.json. */
+export function previewSandboxBackend(
+	target: ApiTarget,
+	name: string
+): Promise<SandboxBackendPreview> {
+	return request<SandboxBackendPreview>(target, "/api/sandbox/backend", {
+		method: "POST",
+		body: { dryRun: true, name },
+	});
+}

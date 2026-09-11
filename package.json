@@ -41,6 +41,7 @@
     "test:toolsmith": "node --test tools/toolsmith/harness.test.mjs tools/toolsmith/manifest.test.mjs tools/toolsmith/purity.test.mjs"
   },
   "dependencies": {
+    "@earendil-works/pi-coding-agent": "^0.84.4",
     "@ryu/env": "workspace:*",
     "dotenv": "catalog:",
     "mermaid": "^11.15.0",

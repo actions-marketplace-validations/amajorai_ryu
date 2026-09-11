@@ -436,6 +436,24 @@ export async function installWorkflowTemplate(
 	return json.workflow_id;
 }
 
+export interface WorkflowTemplateInstallPreview {
+	action: "install";
+	dryRun: true;
+	success: boolean;
+	[key: string]: unknown;
+}
+
+export function previewWorkflowTemplateInstall(
+	target: ApiTarget,
+	templateId: string
+): Promise<WorkflowTemplateInstallPreview> {
+	return postJson<WorkflowTemplateInstallPreview>(
+		target,
+		"/api/workflows/catalog/install",
+		{ dryRun: true, template_id: templateId }
+	);
+}
+
 // ── Version history (server-backed) ─────────────────────────────────────────
 
 /** Metadata for one saved workflow version. */

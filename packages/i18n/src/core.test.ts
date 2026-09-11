@@ -7,12 +7,15 @@ import {
 	languagePackArchive,
 	languagePackJson,
 	languagePackPortableManifest,
+	literalMessageId,
+	localeFromAcceptLanguage,
 	MAX_LANGUAGE_PACK_BYTES,
 	messageIdForLiteral,
 	parseLanguagePackArchive,
 	parseLanguagePackJson,
 	validateLanguagePack,
 } from "./core.ts";
+import { REPEATED_LITERAL_TRANSLATIONS } from "./literal-translations.ts";
 import { BUILT_IN_LANGUAGE_PACKS, EN_MESSAGES } from "./messages.ts";
 
 describe("language-pack contract", () => {
@@ -34,8 +37,19 @@ describe("language-pack contract", () => {
 			"ar",
 		]);
 		for (const pack of official) {
-			expect(Object.keys(pack.messages).sort()).toEqual(
-				Object.keys(EN_MESSAGES).sort()
+			expect(
+				Object.keys(pack.messages)
+					.filter((id) => !id.startsWith("literal."))
+					.sort()
+			).toEqual(Object.keys(EN_MESSAGES).sort());
+			expect(
+				Object.keys(pack.messages)
+					.filter((id) => id.startsWith("literal."))
+					.sort()
+			).toEqual(
+				Object.keys(REPEATED_LITERAL_TRANSLATIONS)
+					.map((value) => literalMessageId(value))
+					.sort()
 			);
 			expect(validateLanguagePack(pack)).toMatchObject({
 				baseLocale: "en",
@@ -82,6 +96,15 @@ describe("language-pack contract", () => {
 		});
 		expect(english.selectedPackId).toBeNull();
 		expect(english.translate("common.install")).toBe("Install");
+	});
+
+	test("resolves request locales by quality without accepting invalid tags", () => {
+		expect(localeFromAcceptLanguage("fr-CA;q=0.4, ar-SA;q=0.9, en;q=0.8")).toBe(
+			"ar-SA"
+		);
+		expect(localeFromAcceptLanguage("en_US;q=0.9, de;q=0.5")).toBe("de");
+		expect(localeFromAcceptLanguage("*;q=0.5")).toBe("en");
+		expect(localeFromAcceptLanguage(null)).toBe("en");
 	});
 
 	test("keeps legacy literal ids deterministic and reuses catalog ids", () => {
@@ -170,6 +193,23 @@ describe("language-pack contract", () => {
 			packName: "English (chronically online)",
 			packVersion: "1.0.0",
 		});
+	});
+
+	test("translates repeated legacy UI literals through stable ids", () => {
+		const runtime = new I18nRuntime([], {
+			initialLocale: "es-MX",
+			initialPackId: null,
+		});
+		expect(
+			runtime.translate(
+				messageIdForLiteral("Open in new tab"),
+				{},
+				"Open in new tab"
+			)
+		).toBe("Abrir en una pestaña nueva");
+		expect(
+			runtime.translate(messageIdForLiteral("Loading…"), {}, "Loading…")
+		).toBe("Cargando");
 	});
 
 	test("keeps right-to-left packs scoped and reports their direction", () => {

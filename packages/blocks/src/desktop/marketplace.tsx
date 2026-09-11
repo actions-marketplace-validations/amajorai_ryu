@@ -1,5 +1,9 @@
 "use client";
 
+import AppIconArtwork, {
+	composerIconFor,
+} from "@ryu/ui/components/app-icon-artwork.tsx";
+
 // Presentational layer of the desktop Marketplace money layer. The live app now
 // folds this into the Customize (Store) shell: the item card + browse grid drive
 // the inline "From the Marketplace" strips in each catalog section
@@ -184,12 +188,17 @@ export function TrustBadge({ status }: { status: MarketplaceVerification }) {
  *  a `border` that the catalog card never had, which is why the two read as
  *  different components in the same list. */
 function MarketplaceCardLogo({
+	id,
 	iconUrl,
 	name,
 }: {
 	iconUrl?: string | null;
 	name: string;
+	id: string;
 }) {
+	if (composerIconFor(id)) {
+		return <AppIconArtwork className="size-10" id={id} />;
+	}
 	return (
 		<span
 			className={cn(
@@ -259,7 +268,11 @@ export function MarketplaceItemCard({
 
 	const headingContent = (
 		<div className="flex min-w-0 items-center gap-3 text-left">
-			<MarketplaceCardLogo iconUrl={card.iconUrl} name={card.name} />
+			<MarketplaceCardLogo
+				iconUrl={card.iconUrl}
+				id={card.id}
+				name={card.name}
+			/>
 			<div className="min-w-0">
 				<h3 className="truncate font-medium text-sm">{card.name}</h3>
 				{card.author ? (

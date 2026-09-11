@@ -28,6 +28,7 @@ import {
 	Radio,
 	RefreshCw,
 	Settings2,
+	Share2,
 	Shield,
 	Smartphone,
 	Sparkles,
@@ -40,6 +41,7 @@ import {
 import type { ReactNode } from "react";
 import { BotAppVisual } from "../bot-visual.tsx";
 import { ConsoleWorkflowVisual } from "../console-workflow-visual.tsx";
+import { GatewayRequestPreview } from "../gateway-request-preview.tsx";
 import type {
 	BentoItem,
 	CtaLink,
@@ -54,6 +56,7 @@ import {
 	CliVisual,
 	CloudVisual,
 	CodePaneSplit,
+	ComputeExchangeVisual,
 	ConnectionsVisual,
 	CoreVisual,
 	DesktopVisual,
@@ -299,7 +302,7 @@ export const products: Product[] = [
 				"Give any product a single governed API for models, tools, and Skills. Route calls, enforce permissions, protect data, and keep an audit trail without rebuilding your agent loop.",
 			primaryCta: EARLY_ACCESS,
 			secondaryCta: BOOK_DEMO,
-			visual: <ToolGatewayVisual />,
+			visual: <GatewayRequestPreview />,
 		},
 		highlights: [
 			{
@@ -655,40 +658,41 @@ export const products: Product[] = [
 		navLabel: "Notify",
 		category: "Platform",
 		standalone: true,
-		tagline: "A durable, real-time event inbox for products and agents.",
+		tagline:
+			"Durable events, live activities, and delivery for products and agents.",
 		Icon: Bell,
 		hero: {
-			eyebrow: "Ryu Notify · standalone event API",
-			title: "Send and track events through one API",
+			eyebrow: "Ryu Notify · standalone notification API",
+			title: "One dependable edge for every important event",
 			subtitle:
-				"Send structured events from your product, keep their history, and let your dashboard or agents follow updates as they happen.",
+				"Publish rich events or simple topics, collect an approval, stream live work, and route durable deliveries without giving every producer a different notification contract.",
 			primaryCta: EARLY_ACCESS,
 			secondaryCta: { label: "Read the API", href: "/docs/standalone/notify" },
 			visual: <NotifyVisual />,
 		},
 		highlights: [
 			{
-				title: "One HTTP request",
+				title: "Rich events or simple topics",
 				description:
-					"Publish a title, body, source, and structured data from a job, app, or agent.",
+					"Publish structured JSON or plain text to a topic with priority, tags, actions, and safe metadata.",
 				icon: Cable,
 			},
 			{
-				title: "Durable by default",
+				title: "Durable delivery",
 				description:
-					"Events survive a process restart in a service-owned SQLite store.",
+					"Events and destination attempts survive a restart, retry with backoff, and remain tenant-scoped.",
 				icon: RefreshCw,
 			},
 			{
-				title: "Live when you need it",
+				title: "Live activities",
 				description:
-					"Tail a tenant's events with a bounded Server-Sent Events stream.",
+					"Start, update, and end progress activities over the same bounded Server-Sent Events edge.",
 				icon: Radio,
 			},
 			{
-				title: "Safe retries",
+				title: "Human controls",
 				description:
-					"Idempotency keys and stable request errors keep retries from duplicating events.",
+					"Collect approval, yes/no, or text replies; mute recipients and silence noisy fingerprints when needed.",
 				icon: Shield,
 			},
 		],
@@ -696,7 +700,7 @@ export const products: Product[] = [
 			eyebrow: "The event contract",
 			title: "A small service around important moments.",
 			subtitle:
-				"Notify accepts the event, bounds the payload, redacts common credential-shaped keys, and gives consumers a history and a live edge.",
+				"Notify accepts the event, bounds the payload, redacts common credential-shaped keys, and gives consumers history, live state, channel delivery, and aggregates.",
 			items: [
 				{
 					title: "Structured events",
@@ -723,6 +727,12 @@ export const products: Product[] = [
 					icon: Check,
 				},
 				{
+					title: "Channel adapters",
+					description:
+						"Use signed webhooks, ntfy-compatible headers, or a BuzzKit HTTP bridge while Mail and Core keep their own delivery boundaries.",
+					icon: Share2,
+				},
+				{
 					title: "Action links",
 					description:
 						"Attach up to three HTTPS links for the run, record, or dashboard a person needs.",
@@ -739,13 +749,13 @@ export const products: Product[] = [
 		splits: [
 			{
 				eyebrow: "Drop-in integration",
-				title: "Receive updates from Box and Mail",
+				title: "Compose Box, Mail, and agent updates",
 				description:
-					"Ryu Notify does not reach into product databases. Agent Mail and Box remain the owners of their work; small adapters publish metadata to the same API so an operator can follow both from one consumer.",
+					"Ryu Notify does not reach into product databases. Agent Mail and Box remain the owners of their work; small adapters publish safe metadata to the same event, topic, and delivery contract so an operator can follow both from one consumer.",
 				bullets: [
 					"Use the same endpoint from any language",
 					"Keep service credentials separate",
-					"Use fingerprints to group related events in your own UI",
+					"Use fingerprints, groups, and aggregates to see the shape of the work",
 				],
 				visual: <NotifyVisual />,
 			},
@@ -757,7 +767,7 @@ export const products: Product[] = [
 			},
 			{
 				q: "Does it send push, email, or SMS?",
-				a: "Not in this first service slice. It stores events and exposes HTTP and SSE; a consumer can add its own delivery channels without giving Notify provider credentials.",
+				a: "Notify delivers to signed webhooks, ntfy-compatible endpoints, and a BuzzKit HTTP bridge. Native Apple/Expo push, email/SMS transports, and Ryu user notifications remain owned by Core or Mail.",
 			},
 			{
 				q: "Can I call it from Box or Agent Mail?",
@@ -770,7 +780,7 @@ export const products: Product[] = [
 				"Run Ryu Notify beside your product, or ask us about a hosted service built around the same API.",
 			primaryCta: EARLY_ACCESS,
 			secondaryCta: { label: "Read the API", href: "/docs/standalone/notify" },
-			note: "Standalone · Tenant-scoped · SQLite · HTTP + SSE",
+			note: "Standalone · Tenant-scoped · SQLite · REST + SSE · Durable delivery",
 		},
 	},
 
@@ -1087,6 +1097,222 @@ export const products: Product[] = [
 			primaryCta: EARLY_ACCESS,
 			secondaryCta: BOOK_DEMO,
 			note: "Pay per run · Credits · No install · No subscription required",
+		},
+	},
+
+	{
+		slug: "compute",
+		name: "Ryu Compute",
+		navLabel: "Compute",
+		category: "Surfaces",
+		tagline: "Rent governed compute for a bounded run.",
+		Icon: Cpu,
+		hero: {
+			eyebrow: "Ryu Compute · early access",
+			title: "Borrow the compute you need",
+			subtitle:
+				"Choose a CPU or GPU workcell for a bounded job. The provider supplies capacity, not access to its machine.",
+			primaryCta: EARLY_ACCESS,
+			secondaryCta: BOOK_DEMO,
+			visual: <ComputeExchangeVisual mode="compute" />,
+		},
+		highlights: [
+			{
+				title: "Choose the lane",
+				description:
+					"Match the job to CPU or GPU capacity instead of keeping another machine running.",
+				icon: Cpu,
+			},
+			{
+				title: "Bounded workcell",
+				description:
+					"A short-lived lease gives the run a clean workspace without a host login.",
+				icon: Box,
+			},
+			{
+				title: "Keep the receipt",
+				description:
+					"The intended run record carries the measured duration and cost together.",
+				icon: GitBranch,
+			},
+			{
+				title: "Ryu governed",
+				description:
+					"Identity, permissions, budgets, and audit stay in the Gateway policy path.",
+				icon: Shield,
+			},
+		],
+		bento: {
+			eyebrow: "The compute exchange",
+			title: "A workcell, not a remote desktop.",
+			subtitle:
+				"Compute is the demand-side surface for temporary capacity. The provider keeps the machine; the lease gets only the work boundary.",
+			items: [
+				{
+					title: "Filter for the job",
+					description:
+						"Choose a workload shape and a maximum lease length before a future provider search.",
+					icon: Cpu,
+				},
+				{
+					title: "No host access",
+					description:
+						"The contract is a Ryu workcell, not SSH, VNC, or a borrowed desktop session.",
+					icon: Shield,
+				},
+				{
+					title: "Use the active node",
+					description:
+						"Your own node stays visible and private while the next job looks for capacity.",
+					icon: Cloud,
+				},
+				{
+					title: "Pay for measured work",
+					description:
+						"The future lease receipt makes duration, status, and cost inspectable.",
+					icon: Zap,
+				},
+			],
+		},
+		splits: [
+			{
+				eyebrow: "The buyer boundary",
+				title: "Borrow capacity without borrowing a person's computer",
+				description:
+					"Ryu Compute is designed around short-lived, governed workcells. It should not expose the provider's files, credentials, network, or interactive desktop to the renter.",
+				bullets: [
+					"CPU and GPU lanes",
+					"Short, explicit lease lengths",
+					"No SSH, VNC, or node-token handoff",
+				],
+				visual: <ComputeExchangeVisual mode="compute" />,
+			},
+		],
+		faq: [
+			{
+				q: "Is Compute live today?",
+				a: "The Desktop Compute surface is early access. This build does not submit a lease or charge a wallet; the provider network and lease API are still being connected.",
+			},
+			{
+				q: "Does a renter get access to the provider's machine?",
+				a: "No. The intended contract is a scoped Ryu workcell. A provider should never hand out its node token, host files, private keys, or unrestricted remote session.",
+			},
+		],
+		cta: {
+			title: "Use capacity when you need it.",
+			subtitle:
+				"Join the early-access conversation for governed compute lanes and bounded agent workcells.",
+			primaryCta: EARLY_ACCESS,
+			secondaryCta: BOOK_DEMO,
+			note: "Early access · CPU/GPU lanes · Bounded workcells",
+		},
+	},
+
+	{
+		slug: "share",
+		name: "Ryu Share",
+		navLabel: "Share",
+		category: "Surfaces",
+		tagline: "Share idle Ryu capacity without giving up your machine.",
+		Icon: Share2,
+		hero: {
+			eyebrow: "Ryu Share · early access",
+			title: "Put an idle node to work",
+			subtitle:
+				"Offer a clean workcell or an approved agent on your schedule. You choose the boundary, the hours, and when to pause.",
+			primaryCta: EARLY_ACCESS,
+			secondaryCta: BOOK_DEMO,
+			visual: <ComputeExchangeVisual mode="share" />,
+		},
+		highlights: [
+			{
+				title: "Offer what you choose",
+				description:
+					"Share spare compute, a signed agent package, or both—not an open-ended machine login.",
+				icon: Share2,
+			},
+			{
+				title: "Protect active work",
+				description:
+					"Keep the node private while you use it and pause provider work instantly.",
+				icon: Shield,
+			},
+			{
+				title: "Keep keys local",
+				description:
+					"The node token, private files, and provider credentials stay on the host.",
+				icon: Key,
+			},
+			{
+				title: "Earn per run",
+				description:
+					"The intended payout follows verified usage, not an unbounded reservation.",
+				icon: Zap,
+			},
+		],
+		bento: {
+			eyebrow: "The provider exchange",
+			title: "Your node. Your hours. Your boundary.",
+			subtitle:
+				"Ryu Share is the supply-side surface for people with idle cloud or local capacity. It makes availability and safety visible before a listing can exist.",
+			items: [
+				{
+					title: "When idle",
+					description:
+						"Refuse new work whenever the machine is doing your work or its capacity is full.",
+					icon: RefreshCw,
+				},
+				{
+					title: "On a schedule",
+					description:
+						"Publish a predictable window instead of leaving a node available all day.",
+					icon: Radio,
+				},
+				{
+					title: "Approved agents",
+					description:
+						"Hosted-agent offers use signed packages with declared tools and limits.",
+					icon: Bot,
+				},
+				{
+					title: "Meter before payout",
+					description:
+						"A future control plane verifies the run before releasing provider earnings.",
+					icon: Zap,
+				},
+			],
+		},
+		splits: [
+			{
+				eyebrow: "The host boundary",
+				title: "Share a workcell, never your whole computer",
+				description:
+					"The provider experience should feel like switching on a safe operating window—not opening a port and hoping a stranger behaves.",
+				bullets: [
+					"Local and cloud nodes use one policy shape",
+					"A kill switch stays with the provider",
+					"No renter access to host credentials or files",
+				],
+				visual: <ComputeExchangeVisual mode="share" />,
+			},
+		],
+		faq: [
+			{
+				q: "Can I share my laptop while I am using it?",
+				a: "The intended provider policy is opt-in availability. Choose When idle or a schedule, and the node should refuse new leases while active work needs its capacity.",
+			},
+			{
+				q: "Is provider enrollment live?",
+				a: "Not yet. The Desktop Share surface currently previews the offer and safety controls; it does not publish a node, accept a lease, meter a renter, or release a payout.",
+			},
+		],
+		cta: {
+			title: "Make idle compute useful.",
+			subtitle:
+				"Join the early-access conversation for provider enrollment, safe workcells, and transparent payouts.",
+			primaryCta: EARLY_ACCESS,
+			secondaryCta: BOOK_DEMO,
+			note: "Early access · Provider control · Safe workcells",
 		},
 	},
 

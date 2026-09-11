@@ -29,6 +29,11 @@ import {
 	useTableSelectionDom,
 	useTableValue,
 } from "@platejs/table/react";
+import {
+	ColorPicker,
+	ColorPickerContent,
+	ColorPickerPanel,
+} from "@ryu/ui/components/color-picker";
 import { Button } from "@ryu/ui/components/editor/ui/button.tsx";
 import {
 	DropdownMenu,
@@ -102,10 +107,6 @@ import {
 
 import { blockSelectionVariants } from "./block-selection.tsx";
 import {
-	ColorDropdownMenuItems,
-	DEFAULT_COLORS,
-} from "./font-color-toolbar-button.tsx";
-import {
 	BorderAllIcon,
 	BorderBottomIcon,
 	BorderLeftIcon,
@@ -113,12 +114,7 @@ import {
 	BorderRightIcon,
 	BorderTopIcon,
 } from "./table-icons.tsx";
-import {
-	Toolbar,
-	ToolbarButton,
-	ToolbarGroup,
-	ToolbarMenuGroup,
-} from "./toolbar.tsx";
+import { Toolbar, ToolbarButton, ToolbarGroup } from "./toolbar.tsx";
 
 type TableResizeDirection = "bottom" | "left" | "right";
 
@@ -1135,7 +1131,6 @@ function ColorDropdownMenu({
 
 	const onUpdateColor = useCallback(
 		(color: string) => {
-			setOpen(false);
 			setCellBackground(editor, {
 				color,
 				selectedCells:
@@ -1160,13 +1155,16 @@ function ColorDropdownMenu({
 			</DropdownMenuTrigger>
 
 			<DropdownMenuContent align="start">
-				<ToolbarMenuGroup label="Colors">
-					<ColorDropdownMenuItems
-						className="px-2"
-						colors={DEFAULT_COLORS}
-						updateColor={onUpdateColor}
-					/>
-				</ToolbarMenuGroup>
+				<ColorPicker
+					defaultValue="#000000"
+					inline
+					onValueChange={onUpdateColor}
+					swatches={["#000000", "#ffffff", "#ff3b30", "#f0f0f0"]}
+				>
+					<ColorPickerContent className="w-[340px] border-0 bg-transparent p-0 shadow-none">
+						<ColorPickerPanel />
+					</ColorPickerContent>
+				</ColorPicker>
 				<DropdownMenuGroup>
 					<DropdownMenuItem className="p-2" onClick={onClearColor}>
 						<EraserIcon />

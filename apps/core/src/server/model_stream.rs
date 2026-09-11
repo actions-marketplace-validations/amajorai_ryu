@@ -101,7 +101,7 @@ async fn open_gateway_stream(
     if let Some(provider) = request.provider.as_deref() {
         outbound = outbound.header("x-ryu-slot-chat-provider", provider);
     }
-    if let Some(token) = crate::sidecar::gateway::gateway_token() {
+    if let Some(token) = crate::sidecar::gateway::gateway_core_token() {
         outbound = outbound.bearer_auth(token);
     }
     let response = outbound.send().await.map_err(|_| GatewayError {

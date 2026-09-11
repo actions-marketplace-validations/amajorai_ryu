@@ -1,4 +1,5 @@
 import type { LanguageDirection, LanguagePack } from "./core.ts";
+import { officialLiteralMessages } from "./literal-translations.ts";
 import type { MessageId } from "./messages.ts";
 
 type MessageCatalog = Record<MessageId, string>;
@@ -3924,20 +3925,54 @@ const ARABIC_MESSAGES: MessageCatalog = {
 };
 
 export const OFFICIAL_LANGUAGE_PACKS: readonly LanguagePack[] = [
-	officialPack("official/es", "es", "Español", SPANISH_MESSAGES),
-	officialPack("official/fr", "fr", "Français", FRENCH_MESSAGES),
-	officialPack("official/de", "de", "Deutsch", GERMAN_MESSAGES),
+	officialPack("official/es", "es", "Español", {
+		...SPANISH_MESSAGES,
+		...officialLiteralMessages("es"),
+	}),
+	officialPack("official/fr", "fr", "Français", {
+		...FRENCH_MESSAGES,
+		...officialLiteralMessages("fr"),
+	}),
+	officialPack("official/de", "de", "Deutsch", {
+		...GERMAN_MESSAGES,
+		...officialLiteralMessages("de"),
+	}),
+	officialPack("official/pt-br", "pt-BR", "Português (Brasil)", {
+		...PORTUGUESE_MESSAGES,
+		...officialLiteralMessages("pt-BR"),
+	}),
+	officialPack("official/ja", "ja", "日本語", {
+		...JAPANESE_MESSAGES,
+		...officialLiteralMessages("ja"),
+	}),
+	officialPack("official/zh-cn", "zh-CN", "简体中文", {
+		...CHINESE_MESSAGES,
+		...officialLiteralMessages("zh-CN"),
+	}),
+	officialPack("official/it", "it", "Italiano", {
+		...ITALIAN_MESSAGES,
+		...officialLiteralMessages("it"),
+	}),
+	officialPack("official/ko", "ko", "한국어", {
+		...KOREAN_MESSAGES,
+		...officialLiteralMessages("ko"),
+	}),
+	officialPack("official/hi", "hi", "हिन्दी", {
+		...HINDI_MESSAGES,
+		...officialLiteralMessages("hi"),
+	}),
+	officialPack("official/ru", "ru", "Русский", {
+		...RUSSIAN_MESSAGES,
+		...officialLiteralMessages("ru"),
+	}),
 	officialPack(
-		"official/pt-br",
-		"pt-BR",
-		"Português (Brasil)",
-		PORTUGUESE_MESSAGES
+		"official/ar",
+		"ar",
+		"العربية",
+		{
+			...ARABIC_MESSAGES,
+			...officialLiteralMessages("ar"),
+		},
+		"rtl"
 	),
-	officialPack("official/ja", "ja", "日本語", JAPANESE_MESSAGES),
-	officialPack("official/zh-cn", "zh-CN", "简体中文", CHINESE_MESSAGES),
-	officialPack("official/it", "it", "Italiano", ITALIAN_MESSAGES),
-	officialPack("official/ko", "ko", "한국어", KOREAN_MESSAGES),
-	officialPack("official/hi", "hi", "हिन्दी", HINDI_MESSAGES),
-	officialPack("official/ru", "ru", "Русский", RUSSIAN_MESSAGES),
-	officialPack("official/ar", "ar", "العربية", ARABIC_MESSAGES, "rtl"),
 ];

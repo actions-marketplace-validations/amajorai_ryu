@@ -233,7 +233,6 @@ impl Scheduler {
             let Ok(_permit) = permits.acquire().await else {
                 return;
             };
-            let mut job = job;
 
             // Human-in-the-loop gate: a `require_approval` job does not run on
             // firing — it raises an approval request and runs only once the user
@@ -324,8 +323,7 @@ impl Scheduler {
                 }
             };
 
-            job.record_execution(record);
-            if let Err(e) = store::save_job(&job) {
+            if let Err(e) = store::append_execution(&job.id, record) {
                 tracing::error!("failed to persist job '{}' after execution: {e}", job.id);
             }
         });

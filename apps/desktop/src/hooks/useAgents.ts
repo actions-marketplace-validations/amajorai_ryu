@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useState } from "react";
+import { useQuery } from "@tanstack/react-query";
+import { useCallback, useMemo } from "react";
 import { personaToGlyphValue } from "@/src/lib/agent-persona.ts";
 import {
 	type Agent,
@@ -16,9 +17,10 @@ import {
 	fetchActiveEngine,
 	fetchEngines,
 } from "@/src/lib/api/engines.ts";
-import { useAgentsRefresh, useCoreRefresh } from "@/src/lib/core-refresh.ts";
+import { useAgentsRefresh } from "@/src/lib/core-refresh.ts";
 import { PlanCapError } from "@/src/lib/gating/planCapBridge.ts";
 import { useEntityCap } from "@/src/lib/gating/useEntityCap.ts";
+import { queryClient } from "@/src/lib/query-client.ts";
 import { useActiveNode } from "./useActiveNode.ts";
 
 export interface UseAgentsResult {
@@ -63,6 +65,14 @@ function recordToSummary(agent: Agent): AgentSummary {
 	};
 }
 
+interface AgentRoster {
+	activeEngine: ActiveEngine | null;
+	agents: AgentSummary[];
+	engines: Engine[];
+}
+const EMPTY_AGENTS: AgentSummary[] = [];
+const EMPTY_ENGINES: Engine[] = [];
+
 /// Loads agents and available engines from the active Core node and exposes CRUD
 /// operations that keep the in-memory list in sync after each mutation, so the
 /// chat picker reflects edits immediately. The list carries lightweight
@@ -78,42 +88,56 @@ export function useAgents(): UseAgentsResult {
 
 	const { guard, limitFor } = useEntityCap();
 
-	const [agents, setAgents] = useState<AgentSummary[]>([]);
-	const [engines, setEngines] = useState<Engine[]>([]);
-	const [activeEngine, setActiveEngine] = useState<ActiveEngine | null>(null);
-	const [loading, setLoading] = useState(true);
-	const [error, setError] = useState<string | null>(null);
-
+	const queryKey = useMemo(
+		() => ["desktop-agent-roster", url, token, userJwt],
+		[url, token, userJwt]
+	);
+	const query = useQuery(
+		{
+			queryKey,
+			queryFn: async () => {
+				const target: ApiTarget = { url, token, userJwt };
+				const [agents, engines, activeEngine] = await Promise.all([
+					fetchAgents(target),
+					fetchEngines(target),
+					fetchActiveEngine(target).catch(() => null),
+				]);
+				return { agents, engines, activeEngine };
+			},
+			staleTime: 30_000,
+		},
+		queryClient
+	);
+	const agents = query.data?.agents ?? EMPTY_AGENTS;
+	const engines = query.data?.engines ?? EMPTY_ENGINES;
+	const activeEngine = query.data?.activeEngine ?? null;
+	const loading = query.isPending;
+	const error = query.error?.message ?? null;
 	const reload = useCallback(async () => {
-		setLoading(true);
-		setError(null);
-		const node: ApiTarget = { url, token, userJwt };
-		try {
-			const [agentList, engineList, active] = await Promise.all([
-				fetchAgents(node),
-				fetchEngines(node),
-				fetchActiveEngine(node).catch(() => null),
-			]);
-			setAgents(agentList);
-			setEngines(engineList);
-			setActiveEngine(active);
-		} catch (e) {
-			setError(e instanceof Error ? e.message : "Failed to load agents");
-		} finally {
-			setLoading(false);
-		}
-	}, [url, token]);
-
-	useEffect(() => {
-		reload().catch(() => undefined);
-	}, [reload]);
-
-	// Auto-recover when Core reconnects or the user hits "Refresh all".
-	useCoreRefresh(reload);
-	// Pick up roster changes made elsewhere — installing or removing an agent in
-	// the Store flips Core's `installed` flag, and this hook's consumers (sidebar,
-	// composer picker, Library) stay mounted, so they need the nudge to refetch.
+		await queryClient.refetchQueries(
+			{ queryKey, exact: true },
+			{ cancelRefetch: false }
+		);
+	}, [queryKey]);
+	// Global refresh already invalidates the shared query. Roster-only events
+	// coalesce concurrent observers onto the same request as well.
 	useAgentsRefresh(reload);
+	const setAgents = useCallback(
+		(update: (agents: AgentSummary[]) => AgentSummary[]) => {
+			const hadRoster = queryClient.getQueryData(queryKey) !== undefined;
+			queryClient.setQueryData<AgentRoster>(queryKey, (current) => ({
+				agents: update(current?.agents ?? EMPTY_AGENTS),
+				engines: current?.engines ?? EMPTY_ENGINES,
+				activeEngine: current?.activeEngine ?? null,
+			}));
+			if (!hadRoster) {
+				// A successful mutation can beat the initial list request. Publish its
+				// result immediately, then recover the rest of the roster in the background.
+				void queryClient.invalidateQueries({ queryKey, exact: true });
+			}
+		},
+		[queryKey]
+	);
 
 	const create = useCallback(
 		async (input: AgentInput) => {
@@ -123,29 +147,32 @@ export function useAgents(): UseAgentsResult {
 				throw new PlanCapError("maxAgents", limitFor("maxAgents"));
 			}
 			const agent = await apiCreateAgent({ url, token, userJwt }, input);
+			await queryClient.cancelQueries({ queryKey, exact: true });
 			setAgents((prev) => [recordToSummary(agent), ...prev]);
 			return agent;
 		},
-		[url, token, guard, limitFor, agents.length]
+		[url, token, userJwt, guard, limitFor, agents.length, setAgents, queryKey]
 	);
 
 	const update = useCallback(
 		async (id: string, input: AgentInput) => {
 			const agent = await apiUpdateAgent({ url, token, userJwt }, id, input);
+			await queryClient.cancelQueries({ queryKey, exact: true });
 			setAgents((prev) =>
 				prev.map((a) => (a.id === id ? { ...a, ...recordToSummary(agent) } : a))
 			);
 			return agent;
 		},
-		[url, token]
+		[url, token, userJwt, setAgents, queryKey]
 	);
 
 	const remove = useCallback(
 		async (id: string) => {
 			await apiDeleteAgent({ url, token, userJwt }, id);
+			await queryClient.cancelQueries({ queryKey, exact: true });
 			setAgents((prev) => prev.filter((a) => a.id !== id));
 		},
-		[url, token]
+		[url, token, userJwt, setAgents, queryKey]
 	);
 
 	return {

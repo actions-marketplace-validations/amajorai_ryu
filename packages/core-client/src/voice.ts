@@ -17,25 +17,86 @@ import {
 	makeHeaders,
 } from "./client.ts";
 
+export interface TranscriptionDetail {
+	segments: { startMs: number; endMs: number; text: string }[];
+	text: string;
+	words?: { startMs: number; endMs: number; text: string }[];
+}
+export function parseTranscriptionDetail(value: unknown): TranscriptionDetail {
+	if (
+		!value ||
+		typeof value !== "object" ||
+		!("text" in value) ||
+		typeof value.text !== "string"
+	) {
+		throw new Error("Invalid transcription response");
+	}
+	const raw = "segments" in value ? value.segments : [];
+	if (!Array.isArray(raw) || raw.length > 5000) {
+		throw new Error("Invalid transcription segments");
+	}
+	const segments = raw.map((segment: unknown) => {
+		if (
+			!segment ||
+			typeof segment !== "object" ||
+			!("startMs" in segment) ||
+			!("endMs" in segment) ||
+			!("text" in segment) ||
+			typeof segment.startMs !== "number" ||
+			typeof segment.endMs !== "number" ||
+			!Number.isSafeInteger(segment.startMs) ||
+			!Number.isSafeInteger(segment.endMs) ||
+			segment.startMs < 0 ||
+			segment.endMs < segment.startMs ||
+			segment.endMs > 7_200_000 ||
+			typeof segment.text !== "string" ||
+			segment.text.length > 8000
+		) {
+			throw new Error("Invalid transcription segment");
+		}
+		return {
+			startMs: segment.startMs,
+			endMs: segment.endMs,
+			text: segment.text.trim(),
+		};
+	});
+	let words: TranscriptionDetail["segments"] | undefined;
+	if ("words" in value) {
+		if (!Array.isArray(value.words) || value.words.length > 5000) {
+			throw new Error("Invalid transcription words");
+		}
+		if (value.words.length) {
+			words = parseTranscriptionDetail({
+				text: value.text,
+				segments: value.words,
+			}).segments;
+		}
+	}
+	return { text: value.text.trim(), segments, ...(words ? { words } : {}) };
+}
+
 /** Transcribe a recorded audio blob via Core's whisper proxy. Returns the text. */
-export async function transcribeAudio(
+async function transcriptionResponse(
 	target: ApiTarget,
 	audio: Blob,
-	filename = "recording.wav"
-): Promise<string> {
+	filename = "recording.wav",
+	engine?: string
+): Promise<unknown> {
 	const form = new FormData();
 	form.append("file", audio, filename);
 
 	// Don't use makeHeaders' JSON content-type — FormData sets its own multipart
 	// boundary. Carry only the bearer token when present.
-	const headers: Record<string, string> = {};
-	const auth = makeHeaders(target.token, target.userJwt).Authorization;
-	if (auth) {
-		headers.Authorization = auth;
-	}
+	const headers = new Headers(makeHeaders(target.token, target.userJwt));
+	headers.delete("Content-Type");
 
 	const resp = await fetchForTarget(target)(
-		apiUrl(target, "/api/voice/transcribe"),
+		apiUrl(
+			target,
+			engine?.trim()
+				? `/api/voice/transcribe?engine=${encodeURIComponent(engine.trim())}`
+				: "/api/voice/transcribe"
+		),
 		{
 			method: "POST",
 			headers,
@@ -56,8 +117,31 @@ export async function transcribeAudio(
 		throw new Error(detail);
 	}
 
-	const body = (await resp.json()) as { text?: string };
-	return (body.text ?? "").trim();
+	return await resp.json();
+}
+
+export async function transcribeAudioDetailed(
+	target: ApiTarget,
+	audio: Blob,
+	filename = "recording.wav",
+	engine?: string
+): Promise<TranscriptionDetail> {
+	return parseTranscriptionDetail(
+		await transcriptionResponse(target, audio, filename, engine)
+	);
+}
+export async function transcribeAudio(
+	target: ApiTarget,
+	audio: Blob,
+	filename = "recording.wav"
+): Promise<string> {
+	const result = await transcriptionResponse(target, audio, filename);
+	return result &&
+		typeof result === "object" &&
+		"text" in result &&
+		typeof result.text === "string"
+		? result.text.trim()
+		: "";
 }
 
 /** S1-mini styling controls exposed by the Speech Processing layer. */

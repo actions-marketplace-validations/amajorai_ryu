@@ -38,7 +38,7 @@ import {
 	useRef,
 	useState,
 } from "react";
-import { useTabsContext } from "@/src/contexts/TabsContext.tsx";
+import { useTabSelector } from "@/src/contexts/TabsContext.tsx";
 import { useApps } from "@/src/hooks/useApps.ts";
 import {
 	pluginCompanionPath,
@@ -252,7 +252,7 @@ export interface AppLaunchpadProps {
 export function AppLaunchpad({ className }: AppLaunchpadProps) {
 	const { companions } = usePluginContributions();
 	const { apps } = useApps();
-	const { openTab } = useTabsContext();
+	const openTab = useTabSelector((state) => state.openTab);
 
 	// The owning app of each companion, so a tile paints the app's real manifest
 	// art. A companion contribution carries only its own optional `icon`; most

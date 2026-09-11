@@ -19,17 +19,20 @@ export function ProductHeroFrame({
 	return (
 		<section
 			className="mx-auto max-w-6xl px-6 pt-16 pb-16 md:pt-24 md:pb-20"
-			data-product-hero-layout="split"
+			data-product-hero-layout="showcase"
 		>
-			<div className="grid items-center gap-12 lg:grid-cols-2 lg:gap-16">
-				<div className="min-w-0 max-w-xl">
+			<div className="space-y-12 md:space-y-16">
+				<div className="min-w-0 max-w-2xl">
 					<h1 className={landingHeadlineClass}>{title}</h1>
 					<p className={landingSubheadlineClass}>{subtitle}</p>
 					<div className="mt-8 flex flex-wrap items-center gap-3">
 						{actions}
 					</div>
 				</div>
-				<div className="min-w-0 bg-muted/40 p-6 md:p-8" data-product-visual>
+				<div
+					className="flex min-h-80 min-w-0 items-center justify-center overflow-hidden bg-muted/40 p-6 md:min-h-[24rem] md:p-10 [&>*]:w-full [&>*]:max-w-3xl"
+					data-product-visual
+				>
 					{visual}
 				</div>
 			</div>

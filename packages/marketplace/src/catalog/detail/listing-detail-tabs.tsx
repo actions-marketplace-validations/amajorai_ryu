@@ -57,6 +57,7 @@ export type DetailTabId =
 
 export function ListingDetailTabs({
 	agentScan,
+	onOpenAuditConversation,
 	entry,
 	detail,
 	Markdown,
@@ -73,6 +74,7 @@ export function ListingDetailTabs({
 }: {
 	/** Optional configured-agent review. Omitted on read-only hosts. */
 	agentScan?: () => Promise<CatalogScanResult>;
+	onOpenAuditConversation?: (id: string) => void;
 	entry: CatalogEntry;
 	detail: PluginCatalogDetail | null;
 	/** Markdown renderer — crosses the host seam (desktop uses Streamdown, web
@@ -258,7 +260,8 @@ export function ListingDetailTabs({
 						agentScan={agentScan}
 						developerCommand={`ryu plugin doctor ${entry.id}`}
 						developerDoctor={developerDoctor}
-						key={entry.id}
+						key={JSON.stringify([entry, detail])}
+						onOpenConversation={onOpenAuditConversation}
 						scorecard={scorecard}
 					/>
 				</TabsContent>

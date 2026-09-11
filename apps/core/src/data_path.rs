@@ -177,7 +177,7 @@ const BACKUP_EXCLUDE_NAMES: &[&str] = &[
     "ryu-core.pid",
 ];
 
-fn is_backup_excluded(path: &Path) -> bool {
+pub(crate) fn is_backup_excluded(path: &Path) -> bool {
     path.file_name()
         .and_then(|name| name.to_str())
         .is_some_and(|name| BACKUP_EXCLUDE_NAMES.contains(&name))

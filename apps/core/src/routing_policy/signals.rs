@@ -254,7 +254,7 @@ async fn gateway_wallet_usd() -> Option<f64> {
         .build()
         .ok()?;
     let mut request = client.get(&url);
-    if let Some(token) = crate::sidecar::gateway::gateway_token() {
+    if let Some(token) = crate::sidecar::gateway::gateway_admin_key() {
         request = request.bearer_auth(token);
     }
     let response = request.send().await.ok()?;

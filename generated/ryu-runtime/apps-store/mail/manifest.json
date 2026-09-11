@@ -9,7 +9,7 @@
   "name": "Mail",
   "version": "0.1.14",
   "stability": "experimental",
-  "description": "Agent Inboxes — email as a service for agents. Runs the out-of-process ryu-mail sidecar; Core proxies /api/mail/* to it. Its sandboxed companion is a per-node mail client (list inboxes, read messages, compose/send, create an inbox) driving /api/mail/* via the mail:crud bridge capability.",
+  "description": "Agent Inboxes — email as a service for agents. Runs the out-of-process ryu-mail sidecar; Core proxies /api/mail/* to it. Its sandboxed companion and developer clients cover inboxes, messages, threads, attachments, drafts, scheduling, labels, webhooks, delivery events, lists, pods, and domains through the mail:crud bridge/API.",
   "keywords": ["email", "inbox", "communication", "agents"],
   "icon": "mail-01",
   "iconDither": { "from": 279, "to": "transparent", "direction": "down" },
@@ -23,7 +23,7 @@
     "mobile": { "support": "limited" },
     "extension": { "support": "none" },
     "web": { "support": "full" },
-    "cli": { "support": "list" }
+    "cli": { "support": "full" }
   },
   "engines": {
     "ryu": ">=0.1.0"
@@ -58,6 +58,7 @@
         "max_body_bytes": 27262976,
         "routes": [
           { "path": "/status", "permission": "mail.read" },
+          { "path": "/ws", "method": "GET", "permission": "mail.read" },
           { "path": "/inboxes", "method": "GET", "permission": "mail.read" },
           { "path": "/inboxes", "method": "POST", "permission": "mail.manage" },
           {
@@ -100,7 +101,278 @@
             "method": "GET",
             "permission": "mail.read"
           },
-          { "path": "/inbound/:id", "auth": "public" }
+          {
+            "path": "/messages/:id/raw",
+            "method": "GET",
+            "permission": "mail.read"
+          },
+          {
+            "path": "/inboxes/:id/messages/search",
+            "method": "GET",
+            "permission": "mail.read"
+          },
+          {
+            "path": "/inboxes/:id/messages/:message_id",
+            "method": "GET",
+            "permission": "mail.read"
+          },
+          {
+            "path": "/inboxes/:id/messages/:message_id",
+            "method": "PATCH",
+            "permission": "mail.manage"
+          },
+          {
+            "path": "/inboxes/:id/messages/:message_id",
+            "method": "DELETE",
+            "permission": "mail.manage"
+          },
+          {
+            "path": "/inboxes/:id/messages/:message_id/raw",
+            "method": "GET",
+            "permission": "mail.read"
+          },
+          {
+            "path": "/inboxes/:id/messages/:message_id/attachments/:attachment_id",
+            "method": "GET",
+            "permission": "mail.read"
+          },
+          {
+            "path": "/inboxes/:id/messages/:message_id/reply",
+            "method": "POST",
+            "permission": "mail.send"
+          },
+          {
+            "path": "/inboxes/:id/messages/:message_id/reply-all",
+            "method": "POST",
+            "permission": "mail.send"
+          },
+          {
+            "path": "/inboxes/:id/messages/:message_id/forward",
+            "method": "POST",
+            "permission": "mail.send"
+          },
+          {
+            "path": "/inboxes/:id/threads",
+            "method": "GET",
+            "permission": "mail.read"
+          },
+          {
+            "path": "/inboxes/:id/threads/search",
+            "method": "GET",
+            "permission": "mail.read"
+          },
+          {
+            "path": "/inboxes/:id/threads/:thread_id",
+            "method": "GET",
+            "permission": "mail.read"
+          },
+          {
+            "path": "/inboxes/:id/threads/:thread_id",
+            "method": "PATCH",
+            "permission": "mail.manage"
+          },
+          {
+            "path": "/inboxes/:id/threads/:thread_id",
+            "method": "DELETE",
+            "permission": "mail.manage"
+          },
+          {
+            "path": "/inboxes/:id/threads/:thread_id/attachments/:attachment_id",
+            "method": "GET",
+            "permission": "mail.read"
+          },
+          {
+            "path": "/inboxes/:id/drafts",
+            "method": "GET",
+            "permission": "mail.read"
+          },
+          {
+            "path": "/inboxes/:id/drafts",
+            "method": "POST",
+            "permission": "mail.manage"
+          },
+          {
+            "path": "/inboxes/:id/drafts/:draft_id",
+            "method": "GET",
+            "permission": "mail.read"
+          },
+          {
+            "path": "/inboxes/:id/drafts/:draft_id",
+            "method": "PATCH",
+            "permission": "mail.manage"
+          },
+          {
+            "path": "/inboxes/:id/drafts/:draft_id",
+            "method": "DELETE",
+            "permission": "mail.manage"
+          },
+          {
+            "path": "/inboxes/:id/drafts/:draft_id/send",
+            "method": "POST",
+            "permission": "mail.send"
+          },
+          {
+            "path": "/webhooks",
+            "method": "GET",
+            "permission": "mail.read"
+          },
+          {
+            "path": "/webhooks",
+            "method": "POST",
+            "permission": "mail.manage"
+          },
+          {
+            "path": "/webhooks/:id",
+            "method": "GET",
+            "permission": "mail.read"
+          },
+          {
+            "path": "/webhooks/:id",
+            "method": "PATCH",
+            "permission": "mail.manage"
+          },
+          {
+            "path": "/webhooks/:id",
+            "method": "DELETE",
+            "permission": "mail.manage"
+          },
+          {
+            "path": "/webhooks/:id/headers",
+            "method": "GET",
+            "permission": "mail.read"
+          },
+          {
+            "path": "/webhooks/:id/headers",
+            "method": "PATCH",
+            "permission": "mail.manage"
+          },
+          {
+            "path": "/webhooks/:id/deliveries",
+            "method": "GET",
+            "permission": "mail.read"
+          },
+          {
+            "path": "/inboxes/:id/webhooks",
+            "method": "GET",
+            "permission": "mail.read"
+          },
+          {
+            "path": "/inboxes/:id/webhooks",
+            "method": "POST",
+            "permission": "mail.manage"
+          },
+          {
+            "path": "/inboxes/:id/webhooks/:webhook_id",
+            "method": "GET",
+            "permission": "mail.read"
+          },
+          {
+            "path": "/inboxes/:id/webhooks/:webhook_id",
+            "method": "PATCH",
+            "permission": "mail.manage"
+          },
+          {
+            "path": "/inboxes/:id/webhooks/:webhook_id",
+            "method": "DELETE",
+            "permission": "mail.manage"
+          },
+          {
+            "path": "/inboxes/:id/webhooks/:webhook_id/headers",
+            "method": "GET",
+            "permission": "mail.read"
+          },
+          {
+            "path": "/inboxes/:id/webhooks/:webhook_id/headers",
+            "method": "PATCH",
+            "permission": "mail.manage"
+          },
+          {
+            "path": "/lists/:scope/:scope_id/:direction/:list_type",
+            "method": "GET",
+            "permission": "mail.read"
+          },
+          {
+            "path": "/lists/:scope/:scope_id/:direction/:list_type",
+            "method": "POST",
+            "permission": "mail.manage"
+          },
+          {
+            "path": "/lists/:scope/:scope_id/:direction/:list_type/:entry",
+            "method": "GET",
+            "permission": "mail.read"
+          },
+          {
+            "path": "/lists/:scope/:scope_id/:direction/:list_type/:entry",
+            "method": "DELETE",
+            "permission": "mail.manage"
+          },
+          {
+            "path": "/pods",
+            "method": "GET",
+            "permission": "mail.read"
+          },
+          {
+            "path": "/pods",
+            "method": "POST",
+            "permission": "mail.manage"
+          },
+          {
+            "path": "/pods/:id",
+            "method": "GET",
+            "permission": "mail.read"
+          },
+          {
+            "path": "/pods/:id",
+            "method": "DELETE",
+            "permission": "mail.manage"
+          },
+          {
+            "path": "/domains",
+            "method": "GET",
+            "permission": "mail.read"
+          },
+          {
+            "path": "/domains",
+            "method": "POST",
+            "permission": "mail.manage"
+          },
+          {
+            "path": "/domains/:id",
+            "method": "GET",
+            "permission": "mail.read"
+          },
+          {
+            "path": "/domains/:id",
+            "method": "PATCH",
+            "permission": "mail.manage"
+          },
+          {
+            "path": "/domains/:id",
+            "method": "DELETE",
+            "permission": "mail.manage"
+          },
+          {
+            "path": "/events",
+            "method": "GET",
+            "permission": "mail.read"
+          },
+          {
+            "path": "/inboxes/:id/events",
+            "method": "GET",
+            "permission": "mail.read"
+          },
+          {
+            "path": "/inboxes/:id/metrics/events",
+            "method": "GET",
+            "permission": "mail.read"
+          },
+          {
+            "path": "/inboxes/:id/metrics/usage",
+            "method": "GET",
+            "permission": "mail.read"
+          },
+          { "path": "/inbound/:id", "auth": "public" },
+          { "path": "/track/:id", "auth": "public" }
         ]
       }
     }
@@ -110,17 +382,17 @@
     {
       "id": "mail.read",
       "label": "Can read",
-      "description": "List agent inboxes and read the messages in them."
+      "description": "List inboxes, messages, threads, attachments, drafts, webhooks, and delivery events."
     },
     {
       "id": "mail.send",
       "label": "Can send",
-      "description": "Compose and send mail from an agent inbox, which leaves this node and reaches real recipients. Grant this level separately from read access."
+      "description": "Compose, reply, forward, schedule, and send mail from an agent inbox, which leaves this node and reaches real recipients. Grant this level separately from read access."
     },
     {
       "id": "mail.manage",
-      "label": "Can manage inboxes",
-      "description": "Create and remove agent inboxes, which decides what addresses agents can be reached at. Grant send access separately."
+      "label": "Can manage mail",
+      "description": "Create and configure inboxes, drafts, webhooks, labels, lists, pods, and domains. Grant send access separately."
     }
   ],
   "companion": {

@@ -74,7 +74,10 @@ import { openExternal } from "@/lib/tauri-bridge.ts";
 import { cn } from "@/lib/utils.ts";
 import { AgentAutoRoutingEditor } from "@/src/components/agents/AgentAutoRoutingEditor.tsx";
 import { CreateAgentDialog } from "@/src/components/agents/CreateAgentDialog.tsx";
-import { GatewayDialog } from "@/src/components/gateway/GatewayDialog.tsx";
+import {
+	GatewayDialog,
+	preloadGatewayDialog,
+} from "@/src/components/gateway/LazyGatewayDialog.tsx";
 import { useSystemStatusContext } from "@/src/contexts/SystemStatusContext.tsx";
 import {
 	type CapabilityLayerEntry,
@@ -4040,6 +4043,8 @@ export function NodeSelector({ mode }: NodeSelectorProps) {
 						onClick={() =>
 							openGateway(simpleInterface ? "computer" : undefined)
 						}
+						onFocus={preloadGatewayDialog}
+						onPointerEnter={preloadGatewayDialog}
 					>
 						<HugeiconsIcon icon={Settings01Icon} size={12} />
 						<span className="flex-1">

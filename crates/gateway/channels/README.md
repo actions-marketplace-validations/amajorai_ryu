@@ -14,6 +14,12 @@ The transport adapters that let a bot register once at the Gateway and converse 
 - **WhatsApp Business** (`whatsapp`) — Meta Cloud API inbound webhook.
 - **`status`** — per-channel health/status reporting.
 
+The `voice_call` module contains the provider-neutral duplex-call contract and
+the Twilio Media Streams wire codec. It is intentionally transport-only: public
+listener wiring, provider credentials, call admission, Core session bridging,
+consent, and billing remain Gateway-owned work. Existing `ChannelCaps::voice`
+continues to mean voice-note/audio-attachment delivery.
+
 Every adapter shares one inbound path: `handle_message` runs the allowlist gate, builds the request
 body (`build_request_body`), invokes the pipeline through the host seam, and extracts the reply
 (`extract_reply`) for delivery back to the originating chat. `GroupReplyMode` (`Mentions` / `All`)

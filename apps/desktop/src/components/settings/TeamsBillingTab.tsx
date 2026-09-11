@@ -1,8 +1,8 @@
 import { Robot01Icon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import {
-	businessMonthlyPriceUsd,
 	hostedAgentIncludedCreditUsd,
+	hostedAgentMonthlyPriceUsd,
 	TEAMS_AGENT_STANDARD_USD,
 	TEAMS_MAX_SEATS,
 	TEAMS_MIN_SEATS,
@@ -62,6 +62,7 @@ const PLAN_LABELS: Record<string, string> = {
 	max: "Max Plan",
 	pro: "Pro Plan",
 	teams: "Teams",
+	"teams-lite": "Teams Lite",
 	business: "Business",
 };
 
@@ -193,19 +194,25 @@ function TeamsBillingTabForOrg({
 	const organizationPlanId: OrganizationPlanId | null =
 		subQuery.data?.plan === "business"
 			? "business"
-			: subQuery.data?.plan === "teams"
-				? "teams"
-				: null;
+			: subQuery.data?.plan === "teams-lite"
+				? "teams-lite"
+				: subQuery.data?.plan === "teams"
+					? "teams"
+					: null;
 	const isOrganizationPlan = organizationPlanId !== null;
 	const seatMinimum = seatStatus?.minRequired ?? TEAMS_MIN_SEATS;
 	const previewSeatCount = normalizeTeamsSeatCount(seatText, seatMinimum);
-	const previewMonthlyPrice =
-		organizationPlanId === "business"
-			? businessMonthlyPriceUsd(previewSeatCount)
-			: TEAMS_AGENT_STANDARD_USD * previewSeatCount;
+	const previewMonthlyPrice = hostedAgentMonthlyPriceUsd(
+		organizationPlanId ?? "teams",
+		previewSeatCount
+	);
 	const previewCreditPool = hostedAgentIncludedCreditUsd(
 		organizationPlanId ?? "teams",
 		previewSeatCount
+	);
+	const includedCreditBundle = hostedAgentIncludedCreditUsd(
+		organizationPlanId ?? "teams",
+		TEAMS_MIN_SEATS
 	);
 
 	useEffect(() => {
@@ -291,9 +298,7 @@ function TeamsBillingTabForOrg({
 		seatStatus?.billedSeats ?? seatStatus?.minRequired ?? TEAMS_MIN_SEATS;
 	const currentAmount = organizationPlanId
 		? formatMonthlyUsd(
-				organizationPlanId === "business"
-					? businessMonthlyPriceUsd(currentSeats)
-					: TEAMS_AGENT_STANDARD_USD * currentSeats
+				hostedAgentMonthlyPriceUsd(organizationPlanId, currentSeats)
 			)
 		: legacyPlanAmount(subQuery.data?.plan);
 	const currentDetail = isOrganizationPlan
@@ -475,7 +480,7 @@ function TeamsBillingTabForOrg({
 				<SettingsSection title="Seats">
 					<SettingsGroup>
 						<SettingsItem
-							description={`${seatStatus?.memberCount ?? 0} active members and ${seatStatus?.pendingInvitations ?? 0} pending invitations reserve seats. ${seatStatus?.allocatedSeats ?? 0} allocated of ${seatStatus?.includedSeats ?? "—"} capacity (${currentSeats} billed${seatStatus?.bonusSeats ? ` + ${seatStatus.bonusSeats} negotiated` : ""}); the shared pool adds $${organizationPlanId === "business" ? 100 : 50} per five billed seats.`}
+							description={`${seatStatus?.memberCount ?? 0} active members and ${seatStatus?.pendingInvitations ?? 0} pending invitations reserve seats. ${seatStatus?.allocatedSeats ?? 0} allocated of ${seatStatus?.includedSeats ?? "—"} capacity (${currentSeats} billed${seatStatus?.bonusSeats ? ` + ${seatStatus.bonusSeats} negotiated` : ""}); the shared pool adds $${includedCreditBundle} per five billed seats.`}
 							title="Member seats"
 						/>
 					</SettingsGroup>
@@ -550,7 +555,7 @@ function TeamsBillingTabForOrg({
 							label: planLabel(currentPlanId),
 						}}
 						footer={{
-							detail: `Shared AI pool: ${formatMicroUsd(Math.round(previewCreditPool * 1_000_000))}/mo. It adds $${organizationPlanId === "business" ? 100 : 50} per five billed seats. Each additional billed member seat is $${TEAMS_AGENT_STANDARD_USD}/mo.`,
+							detail: `Shared AI pool: ${formatMicroUsd(Math.round(previewCreditPool * 1_000_000))}/mo. It adds $${includedCreditBundle} per five billed seats. Each additional billed member seat is $${TEAMS_AGENT_STANDARD_USD}/mo.`,
 							label: "New allowance",
 							value: `${previewSeatCount} member seats`,
 						}}

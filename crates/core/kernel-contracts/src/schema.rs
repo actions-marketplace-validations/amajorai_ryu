@@ -1737,6 +1737,7 @@ pub fn capability_label(grant: &str) -> String {
         // Spaces + media capabilities (full-page companion apps).
         "spaces:docs" => "Spaces documents".to_string(),
         "storage:kv" => "Local storage".to_string(),
+        "backups:app" => "Backs up and restores its own data".to_string(),
         // Sealing primitive: the app encrypts its OWN data with a key it never
         // holds. Phrased as protection, not as a permission to fear — this grant
         // strictly reduces what a stolen disk yields.

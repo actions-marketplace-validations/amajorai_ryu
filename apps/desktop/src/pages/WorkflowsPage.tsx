@@ -29,7 +29,7 @@ import {
 } from "@ryu/ui/components/empty";
 import { Spinner } from "@ryu/ui/components/spinner";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { useTabsContext } from "@/src/contexts/TabsContext.tsx";
+import { useTabSelector } from "@/src/contexts/TabsContext.tsx";
 import { useTitleBar } from "@/src/contexts/TitleBarContext.tsx";
 import { useActiveNode } from "@/src/hooks/useActiveNode.ts";
 import { useAssistantBuilder } from "@/src/hooks/useAssistantBuilder.ts";
@@ -64,7 +64,7 @@ export default function WorkflowsPage({
 	initialWorkflowId = null,
 }: WorkflowsPageProps) {
 	const { workflows, loading, error, create, reload } = useWorkflows();
-	const { openTab } = useTabsContext();
+	const openTab = useTabSelector((state) => state.openTab);
 	const activeNode = useActiveNode();
 	const target = useMemo(
 		() => ({

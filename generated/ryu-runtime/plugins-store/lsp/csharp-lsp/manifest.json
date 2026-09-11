@@ -13,7 +13,7 @@
   "description": "C# language server (csharp-ls) for the ryu agent: definitions, references, hover, symbols, implementations, call hierarchies and diagnostics after every edit. You install csharp-ls; the plugin ships config.",
   "tagline": "C# code intelligence via csharp-ls",
   "keywords": ["c#", "dotnet", "csharp-ls", "language-server", "developer"],
-  "icon": "code-square-01",
+  "icon": "braces",
   "iconDither": {
     "from": 64,
     "to": "transparent",

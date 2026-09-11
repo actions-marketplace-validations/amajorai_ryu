@@ -9,6 +9,7 @@ export type CheckStatus = "pass" | "warn" | "fail" | "unknown";
 export type ScorecardCategory =
 	| "capabilities"
 	| "configuration"
+	| "design-system"
 	| "hygiene"
 	| "maintenance"
 	| "operations"
@@ -43,7 +44,9 @@ export interface CategoryScore {
 export type ScorecardGrade = "A" | "B" | "C" | "D" | "F";
 export type ScorecardRulesetVersion =
 	| "agent-config-1"
+	| "design-system-1"
 	| "marketplace-plugin-1"
+	| "marketplace-plugin-2"
 	| "marketplace-skill-1";
 
 export interface Scorecard {
@@ -63,6 +66,7 @@ export interface Scorecard {
 
 const CATEGORY_ORDER: ScorecardCategory[] = [
 	"configuration",
+	"design-system",
 	"runtime",
 	"safety",
 	"capabilities",
@@ -77,6 +81,7 @@ const CATEGORY_ORDER: ScorecardCategory[] = [
 export const CATEGORY_LABELS: Record<ScorecardCategory, string> = {
 	capabilities: "Capabilities",
 	configuration: "Configuration",
+	"design-system": "Ryu design system",
 	disclosures: "Disclosures",
 	errors: "Errors",
 	hygiene: "Hygiene",
@@ -90,6 +95,8 @@ export const CATEGORY_LABELS: Record<ScorecardCategory, string> = {
 export const CATEGORY_DESCRIPTIONS: Record<ScorecardCategory, string> = {
 	capabilities: "Whether access, tools, skills, and memory fit the job.",
 	configuration: "Whether the agent has a clear identity and instructions.",
+	"design-system":
+		"Whether rendered UI evidence uses Ryu's shared shell, tokens, controls, and host ownership.",
 	disclosures: "What it tells you about the data and access it wants.",
 	errors: "Problems found while reading the listing itself.",
 	hygiene: "Whether the listing is complete and correctly described.",

@@ -11,6 +11,7 @@
 // Install/uninstall and the active swap run on Core asynchronously; after each
 // mutation we reload so the row reflects live status.
 
+import { useQueryClient } from "@tanstack/react-query";
 import { useCallback, useEffect, useState } from "react";
 import type { ApiTarget } from "@/src/lib/api/client.ts";
 import {
@@ -64,6 +65,7 @@ export interface UseEnginesResult {
 
 export function useEngines(): UseEnginesResult {
 	const activeNode = useActiveNode();
+	const queryClient = useQueryClient();
 	// Derive primitives, not an object: an object literal is a fresh identity every
 	// render, so depending on it would make `reload` (and the effect that calls it)
 	// re-run on every render — an infinite refetch loop that flickers the list.
@@ -141,9 +143,10 @@ export function useEngines(): UseEnginesResult {
 		async (name: string) => {
 			const swap = await apiSetActiveEngine({ url, token, userJwt }, name);
 			await reload();
+			await queryClient.invalidateQueries({ queryKey: ["engine-models", url] });
 			return swap;
 		},
-		[url, token, userJwt, reload]
+		[url, token, userJwt, reload, queryClient]
 	);
 
 	return {

@@ -13,7 +13,7 @@
   "tagline": "Never type \"continue\" again",
   "keywords": ["automation", "continuation", "agent", "loop", "productivity"],
   "category": "Productivity",
-  "icon": "refresh-ccw-02",
+  "icon": "repeat",
   "iconDither": { "from": 198, "to": "transparent", "direction": "down" },
   "surfaces": {
     "gateway": { "support": "none" },

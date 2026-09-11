@@ -13,7 +13,7 @@
   "description": "Detects stalled work with a cheap background judge and moves the next turn up a configured reasoning-effort or model ladder, per agent or globally.",
   "tagline": "Spend more reasoning only when work is stuck",
   "keywords": ["models", "effort", "stuck", "agent", "automation"],
-  "icon": "trending-up-01",
+  "icon": "chart",
   "iconDither": { "from": 104, "to": "transparent", "direction": "down" },
   "surfaces": {
     "gateway": { "support": "none" },

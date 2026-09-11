@@ -510,6 +510,7 @@ export interface SpaceMatchRow {
 }
 
 export interface SpacesDetailProps {
+	backupPanel?: ReactNode;
 	documents: SpaceDocumentRow[];
 	documentsError?: string | null;
 	/** Desktop-owned import workflow. Shared renderers omit it and keep one Content view. */
@@ -777,6 +778,7 @@ function SpaceDetail(props: SpacesDetailProps) {
 
 	return (
 		<div className="flex flex-col gap-6 p-4">
+			{props.backupPanel}
 			{onExportPackage || onImportPackage ? (
 				<Card>
 					<CardHeader>

@@ -16,6 +16,15 @@ export type {
 	AgentRuntimeStatus,
 	AgentSafetyProfile,
 } from "./agent-scorecard-types.ts";
+export {
+	type DesignSystemAuditInput,
+	type DesignSystemEvidence,
+	type DesignSystemFile,
+	type DesignSystemNavigation,
+	type DesignSystemSurface,
+	designSystemChecks,
+	runDesignSystemScorecard,
+} from "./design-system-scorecard.ts";
 export { runScorecard } from "./plugin-scorecard.ts";
 export type {
 	CategoryScore,

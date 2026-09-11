@@ -155,7 +155,11 @@ pub async fn cycle(State(ctx): State<LearningCtx>, Json(body): Json<Value>) -> R
         .get("execute")
         .and_then(Value::as_bool)
         .unwrap_or(false);
-    match engine::run_cycle(&ctx, execute).await {
+    let improvement_run_id = body
+        .get("improvementRunId")
+        .or_else(|| body.get("improvement_run_id"))
+        .and_then(Value::as_str);
+    match engine::run_cycle_with_improvement(&ctx, execute, improvement_run_id).await {
         Ok(plan) => Json(plan).into_response(),
         Err(e) => err(e),
     }

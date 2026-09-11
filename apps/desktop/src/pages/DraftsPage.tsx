@@ -49,7 +49,7 @@ import { Textarea } from "@ryu/ui/components/textarea";
 import { cn } from "@ryu/ui/lib/utils";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useMemo, useState } from "react";
-import { useTabsContext } from "@/src/contexts/TabsContext.tsx";
+import { useTabSelector } from "@/src/contexts/TabsContext.tsx";
 import { useActiveNode } from "@/src/hooks/useActiveNode.ts";
 import { useAgents } from "@/src/hooks/useAgents.ts";
 import { toTarget } from "@/src/lib/api/client.ts";
@@ -332,7 +332,7 @@ function SettingsPanel({
 
 export default function DraftsPage() {
 	const node = useActiveNode();
-	const { openTab } = useTabsContext();
+	const openTab = useTabSelector((state) => state.openTab);
 	const target = toTarget(node);
 	const queryClient = useQueryClient();
 	const [composing, setComposing] = useState("");

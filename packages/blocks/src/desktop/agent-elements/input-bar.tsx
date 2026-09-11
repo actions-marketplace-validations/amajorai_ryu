@@ -14,6 +14,7 @@ import {
 	PopoverTrigger,
 } from "@ryu/ui/components/popover";
 import { Wave } from "@ryu/ui/components/wave";
+import { SPRING_MORPH } from "@ryu/ui/lib/ease";
 import { formatNumber } from "@ryu/ui/lib/number-format.ts";
 import { cn } from "@ryu/ui/lib/utils";
 import type { ChatStatus } from "ai";
@@ -301,6 +302,11 @@ export interface InputBarProps {
 	leftActions?: React.ReactNode;
 	/** Resolved @ mentions used to paint the live composer preview. */
 	mentionItems?: MentionItem[];
+	onAnnotateImage?: (image: {
+		filename?: string;
+		id: string;
+		url: string;
+	}) => void;
 
 	// Attachment support
 	onAttach?: () => void;
@@ -333,6 +339,8 @@ export interface InputBarProps {
 		content: string;
 		followUpMode?: "opposite";
 	}) => void;
+	/** Open the app-owned sketch dialog. */
+	onSketch?: () => void;
 	onStop: () => void;
 	/** Optional host-level keyboard handling for the composer editor. */
 	onTextareaKeyDown?: (e: React.KeyboardEvent<HTMLElement>) => void;
@@ -505,6 +513,8 @@ export const InputBar = memo(function InputBar({
 	placeholderSuggestion,
 	className,
 	onAttach,
+	onAnnotateImage,
+	onSketch,
 	attachedImages = [],
 	attachedFiles = [],
 	changeSummary,
@@ -595,14 +605,7 @@ export const InputBar = memo(function InputBar({
 		textareaRef.current?.focus();
 	}, [markdownComposer]);
 	const reduceMotion = !animationsEnabled || (useReducedMotion() ?? false);
-	const composerTransition = reduceMotion
-		? { duration: 0 }
-		: {
-				damping: 34,
-				mass: 0.75,
-				stiffness: 420,
-				type: "spring" as const,
-			};
+	const composerTransition = reduceMotion ? { duration: 0 } : SPRING_MORPH;
 
 	useEffect(() => {
 		if (!onHeightChange) {
@@ -849,6 +852,7 @@ export const InputBar = memo(function InputBar({
 
 	const infoBarNode = shouldShowInfoBar ? (
 		<div
+			aria-live={isDestructiveInfoBar ? undefined : "polite"}
 			className={cn(
 				"mx-3 flex h-[34px] items-center justify-between gap-3 px-3",
 				"overflow-hidden transition-[max-height,opacity] duration-150 ease-out",
@@ -1428,17 +1432,44 @@ export const InputBar = memo(function InputBar({
 		);
 	}
 
-	// The controls are inline around a single-line compact textarea, then return to
-	// the standard row below as soon as that textarea wraps.
+	// Keep the editor in one stable Motion slot. The toolbar changes its grid/flex
+	// topology around that slot when a compact draft reaches a second visible line,
+	// allowing the shared layout transition to morph the card instead of replacing
+	// the textarea and controls with a new subtree.
+	const composerEditor = (
+		<div
+			className={cn(
+				"w-full",
+				isCompactSingleRow
+					? "flex min-h-8 min-w-0 flex-1 items-center"
+					: isExpanded
+						? "min-h-[320px] pt-4 pr-14 pb-3 pl-5"
+						: "flex min-h-[64px] flex-col justify-center py-2.5 pr-3 pl-3.5"
+			)}
+		>
+			{inputContent}
+		</div>
+	);
+	const shouldRenderToolbar = Boolean(
+		compact ||
+			leftActions ||
+			rightActions ||
+			showAttach ||
+			voice ||
+			voiceMode ||
+			onGenerateImage ||
+			onGenerateVideo ||
+			onSketch ||
+			goalControls ||
+			ghostControls ||
+			pluginControls?.length ||
+			composerMenuGroups?.some((group) => group.items.length > 0) ||
+			contextMeter ||
+			expandComposer
+	);
 	const composerToolbar = (
 		<ComposerToolbar
-			center={
-				isCompactSingleRow ? (
-					<div className="flex min-h-8 min-w-0 flex-1 items-center">
-						{inputContent}
-					</div>
-				) : undefined
-			}
+			center={composerEditor}
 			compact={isCompactSingleRow}
 			contextMeter={contextMeter}
 			contextMeterOnOpen={contextMeterOnOpen}
@@ -1460,6 +1491,7 @@ export const InputBar = memo(function InputBar({
 			isStreaming={isStreaming}
 			isTranscribing={isTranscribing}
 			leftActions={leftActions}
+			motionEnabled={!reduceMotion}
 			onAttach={onAttach}
 			onDirectorySelect={(item) => {
 				const start = plusMenuQueryStart ?? input.length;
@@ -1479,6 +1511,7 @@ export const InputBar = memo(function InputBar({
 					requestAnimationFrame(focusComposer);
 				}
 			}}
+			onSketch={onSketch}
 			onStartVoice={startVoice}
 			onStop={onStop}
 			onStopVoice={stopVoice}
@@ -1553,6 +1586,7 @@ export const InputBar = memo(function InputBar({
 				</>
 			}
 			showAttach={showAttach}
+			transition={composerTransition}
 			voiceDisabled={voice?.disabled}
 			voiceMode={voiceMode}
 		/>
@@ -1584,6 +1618,7 @@ export const InputBar = memo(function InputBar({
 				ghost && "ring-1 ring-violet-500/70"
 			)}
 			initial={false}
+			layout={!reduceMotion}
 			onClick={handleContainerClick}
 			transition={composerTransition}
 		>
@@ -1622,6 +1657,7 @@ export const InputBar = memo(function InputBar({
 						exit={{ opacity: 0, scale: 0.985, y: 6 }}
 						initial={reduceMotion ? false : { opacity: 0, scale: 0.985, y: -8 }}
 						key="composer-input"
+						layout={!reduceMotion}
 						transition={{ duration: reduceMotion ? 0 : 0.2 }}
 					>
 						{/* Composer header (e.g. pending quote preview), above the chips. */}
@@ -1647,6 +1683,7 @@ export const InputBar = memo(function InputBar({
 												id={img.id}
 												isImage
 												key={img.id}
+												onAnnotate={onAnnotateImage}
 												onRemove={
 													onRemoveImage
 														? () => onRemoveImage(img.id)
@@ -1686,42 +1723,7 @@ export const InputBar = memo(function InputBar({
 							</div>
 						)}
 
-						{isCompactSingleRow ? (
-							composerToolbar
-						) : (
-							<>
-								{/* Full layout: textarea above, every control below. Compact
-								    drafts arrive here automatically once they wrap. */}
-								<div
-									className={
-										expanded
-											? "min-h-[320px] pt-4 pr-14 pb-3 pl-5"
-											: "flex min-h-[64px] flex-col justify-center py-2.5 pr-3 pl-3.5"
-									}
-								>
-									{inputContent}
-								</div>
-
-								{/* Controls row, INSIDE the composer box (Codex-style): the
-								    "+", agent selector, voice/image, and send button all share
-								    the textarea's rounded card and background. */}
-								{(compact ||
-									leftActions ||
-									rightActions ||
-									showAttach ||
-									voice ||
-									voiceMode ||
-									onGenerateImage ||
-									onGenerateVideo ||
-									goalControls ||
-									ghostControls ||
-									pluginControls?.length ||
-									composerMenuGroups?.some((group) => group.items.length > 0) ||
-									contextMeter ||
-									expandComposer) &&
-									composerToolbar}
-							</>
-						)}
+						{shouldRenderToolbar ? composerToolbar : composerEditor}
 					</motion.div>
 				)}
 			</AnimatePresence>

@@ -32,6 +32,7 @@ pub struct HookInventoryItem {
     pub hook_key: String,
     pub id: String,
     pub local_overrides: BTreeMap<String, HookPolicyOverride>,
+    pub mode: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub matcher: Option<serde_json::Value>,
     pub owner_id: String,
@@ -80,6 +81,10 @@ pub fn build_hook_inventory(
                 hook_key,
                 id: hook.id.clone(),
                 local_overrides: BTreeMap::new(),
+                mode: match hook.mode.unwrap_or_default() {
+                    crate::plugin_manifest::HookMode::Directive => "directive".to_owned(),
+                    crate::plugin_manifest::HookMode::Middleware => "middleware".to_owned(),
+                },
                 matcher: hook
                     .run_when
                     .as_ref()
@@ -271,6 +276,7 @@ mod tests {
         assert!(!hook.trusted);
         assert!(!hook.effective_enabled);
         assert!(hook.review_required);
+        assert_eq!(hook.mode, "directive");
         assert_eq!(hook.handler.path.as_deref(), Some("hooks/review.js"));
         let serialized = serde_json::to_string(hook).expect("serialize hook inventory");
         assert!(!serialized.contains("return { kind"));

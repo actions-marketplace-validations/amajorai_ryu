@@ -35,7 +35,12 @@ export function IslandI18nProvider({
 	}, []);
 
 	return (
-		<I18nProvider packs={packs}>
+		<I18nProvider
+			initialLocale={
+				typeof navigator === "undefined" ? undefined : navigator.language
+			}
+			packs={packs}
+		>
 			<I18nDirectionProvider>{children}</I18nDirectionProvider>
 		</I18nProvider>
 	);

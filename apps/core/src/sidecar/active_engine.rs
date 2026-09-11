@@ -22,6 +22,9 @@ use crate::sidecar::download_manager::ryu_dir;
 pub const LOCAL_ENGINES: &[&str] = &[
     "llamacpp",
     "ollama",
+    "lemonade",
+    "llama-swap",
+    "freetoken",
     "vllm",
     "sglang",
     "mlx",
@@ -47,6 +50,9 @@ pub fn local_engine_base_url(name: &str) -> Option<String> {
     match name {
         // ollama serves its OpenAI-compat API on 11434.
         "ollama" => Some("http://127.0.0.1:11434".to_owned()),
+        "lemonade" => Some(crate::sidecar::providers::lemonade::BASE_URL.to_owned()),
+        "llama-swap" => Some(crate::sidecar::providers::llama_swap::BASE_URL.to_owned()),
+        "freetoken" => Some(crate::sidecar::providers::freetoken::BASE_URL.to_owned()),
         // llama-server (`--port 8080 --host 127.0.0.1`). Profile-aware: the spawn
         // side (`providers/llamacpp/{process,mod}.rs`) binds the same
         // `profile::port(8080)`, so a dev stack (9080) never collides with release.
@@ -115,6 +121,18 @@ pub fn local_engine_url(name: &str) -> Option<String> {
             crate::profile::port(8080)
         )),
         "ollama" => Some("http://127.0.0.1:11434/v1".to_owned()),
+        "freetoken" => Some(format!(
+            "{}/v1",
+            crate::sidecar::providers::freetoken::BASE_URL
+        )),
+        "llama-swap" => Some(format!(
+            "{}/v1",
+            crate::sidecar::providers::llama_swap::BASE_URL
+        )),
+        "lemonade" => Some(format!(
+            "{}/v1",
+            crate::sidecar::providers::lemonade::BASE_URL
+        )),
         "vllm" => Some("http://127.0.0.1:8000/v1".to_owned()),
         "sglang" => Some("http://127.0.0.1:30000/v1".to_owned()),
         "mlx" => Some(format!(

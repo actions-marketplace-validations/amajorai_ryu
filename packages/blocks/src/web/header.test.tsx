@@ -21,6 +21,16 @@ test("marketing header renders product/resource controls and Marketplace", () =>
 	expect(html).toContain('aria-current="page"');
 });
 
+test("transparent marketing header leaves the landing visual visible", () => {
+	const html = renderToStaticMarkup(
+		createElement(Header, { transparent: true })
+	);
+
+	expect(html).toContain('data-transparent="true"');
+	expect(html).toContain("bg-background/20");
+	expect(html).not.toContain("backdrop-filter:blur(12px)");
+});
+
 test("portal header orders account, organization, and utilities", () => {
 	const html = renderToStaticMarkup(
 		createElement(Header, {

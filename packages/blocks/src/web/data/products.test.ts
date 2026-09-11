@@ -22,6 +22,14 @@ test("the standalone product set includes the direct service APIs", () => {
 		name: "Ryu Hire",
 		standalone: true,
 	});
+	expect(getProduct("compute")).toMatchObject({
+		name: "Ryu Compute",
+		category: "Surfaces",
+	});
+	expect(getProduct("share")).toMatchObject({
+		name: "Ryu Share",
+		category: "Surfaces",
+	});
 });
 
 test("every public product renders its content through the shared page", () => {

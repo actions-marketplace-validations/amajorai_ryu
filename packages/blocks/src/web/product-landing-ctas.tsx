@@ -13,11 +13,7 @@ export default function ProductLandingCtas({
 		<div
 			className={cn("flex flex-col items-center gap-3 sm:flex-row", className)}
 		>
-			<DownloadMenu
-				label="Download"
-				separatorClassName="bg-primary-foreground/10 data-vertical:mx-0"
-				size="default"
-			/>
+			<DownloadMenu label="Download" showSeparator={false} size="default" />
 			<a
 				className={cn(buttonVariants({ variant: "ghost" }), "rounded-full")}
 				href={DEMO_HREF}

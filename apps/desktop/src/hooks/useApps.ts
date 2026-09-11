@@ -6,7 +6,8 @@
 // UI reflects changes without a full refetch.
 
 import { toast } from "@ryu/ui/components/sileo";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useQuery } from "@tanstack/react-query";
+import { useCallback, useMemo, useState } from "react";
 import type { ApiTarget } from "@/src/lib/api/client.ts";
 import {
 	type AppInfo,
@@ -20,10 +21,8 @@ import {
 	describeDependencyError,
 	fetchApps,
 } from "@/src/lib/api/plugins.ts";
-import {
-	triggerGlobalRefresh,
-	useCoreRefresh,
-} from "@/src/lib/core-refresh.ts";
+import { triggerGlobalRefresh } from "@/src/lib/core-refresh.ts";
+import { queryClient } from "@/src/lib/query-client.ts";
 import { useActiveNode } from "./useActiveNode.ts";
 
 export interface UseAppsResult {
@@ -75,6 +74,8 @@ function dependencyErrorOf(e: unknown): DependencyError | null {
 		: null;
 }
 
+const EMPTY_APPS: AppInfo[] = [];
+
 /** Load all Apps and expose enable/disable toggle with optimistic update. */
 export function useApps(): UseAppsResult {
 	const activeNode = useActiveNode();
@@ -85,44 +86,46 @@ export function useApps(): UseAppsResult {
 	};
 	const { url, token, userJwt } = target;
 
-	const [apps, setApps] = useState<AppInfo[]>([]);
-	const [loading, setLoading] = useState(true);
-	const [error, setError] = useState<string | null>(null);
+	const queryKey = useMemo(
+		() => ["desktop-app-roster", url, token, userJwt],
+		[url, token, userJwt]
+	);
+	const query = useQuery(
+		{
+			queryKey,
+			queryFn: () => fetchApps({ url, token, userJwt }),
+			staleTime: 30_000,
+		},
+		queryClient
+	);
+	const apps = query.data ?? EMPTY_APPS;
+	const loading = query.isPending;
+	const error = query.error?.message ?? null;
+	const setApps = useCallback(
+		(update: (apps: AppInfo[]) => AppInfo[]) => {
+			queryClient.setQueryData<AppInfo[]>(queryKey, (current) =>
+				update(current ?? EMPTY_APPS)
+			);
+		},
+		[queryKey]
+	);
 	const [toggleError, setToggleError] = useState<string | null>(null);
 
-	// Latest app list, readable from `toggle`'s catch without making `apps` a
-	// dependency of the callback (which would re-create it on every list update).
-	// Used only to turn dependency-error plugin IDS into display NAMES.
-	const appsRef = useRef<AppInfo[]>([]);
-	useEffect(() => {
-		appsRef.current = apps;
-	}, [apps]);
-
 	const reload = useCallback(async () => {
-		setLoading(true);
-		setError(null);
-		const node: ApiTarget = { url, token, userJwt };
-		try {
-			const list = await fetchApps(node);
-			setApps(list);
-		} catch (e) {
-			setError(e instanceof Error ? e.message : "Failed to load extensions");
-		} finally {
-			setLoading(false);
-		}
-	}, [url, token]);
-
-	useEffect(() => {
-		reload().catch(() => undefined);
-	}, [reload]);
-
-	// Auto-recover when Core reconnects or the user hits "Refresh all".
-	useCoreRefresh(reload);
+		await queryClient.refetchQueries(
+			{ queryKey, exact: true },
+			{ cancelRefetch: false }
+		);
+	}, [queryKey]);
 
 	const toggle = useCallback(
 		async (id: string, enable: boolean) => {
 			setToggleError(null);
 
+			await queryClient.cancelQueries({ queryKey, exact: true });
+			const previousEnabled = queryClient
+				.getQueryData<AppInfo[]>(queryKey)
+				?.find((app) => app.id === id)?.enabled;
 			// Optimistic update: flip enabled locally so the toggle feels instant.
 			setApps((prev) =>
 				prev.map((a) => (a.id === id ? { ...a, enabled: enable } : a))
@@ -152,7 +155,11 @@ export function useApps(): UseAppsResult {
 			} catch (e) {
 				// Roll back the optimistic update on failure.
 				setApps((prev) =>
-					prev.map((a) => (a.id === id ? { ...a, enabled: !enable } : a))
+					prev.map((a) =>
+						a.id === id && previousEnabled !== undefined
+							? { ...a, enabled: previousEnabled }
+							: a
+					)
 				);
 
 				// A dependency refusal (409) is not a generic failure — Core names the
@@ -163,7 +170,9 @@ export function useApps(): UseAppsResult {
 				const depError = dependencyErrorOf(e);
 				if (depError) {
 					const nameOf = (pluginId: string) =>
-						appsRef.current.find((a) => a.id === pluginId)?.name ?? pluginId;
+						queryClient
+							.getQueryData<AppInfo[]>(queryKey)
+							?.find((a) => a.id === pluginId)?.name ?? pluginId;
 					setToggleError(describeDependencyError(depError, nameOf));
 					return;
 				}
@@ -175,7 +184,7 @@ export function useApps(): UseAppsResult {
 				);
 			}
 		},
-		[url, token]
+		[url, token, userJwt, setApps, queryKey]
 	);
 
 	const uninstall = useCallback(
@@ -198,7 +207,9 @@ export function useApps(): UseAppsResult {
 				const depError = dependencyErrorOf(e);
 				if (depError) {
 					const nameOf = (pluginId: string) =>
-						appsRef.current.find((a) => a.id === pluginId)?.name ?? pluginId;
+						queryClient
+							.getQueryData<AppInfo[]>(queryKey)
+							?.find((a) => a.id === pluginId)?.name ?? pluginId;
 					setToggleError(describeDependencyError(depError, nameOf));
 					return;
 				}
@@ -207,7 +218,7 @@ export function useApps(): UseAppsResult {
 				);
 			}
 		},
-		[url, token, reload]
+		[url, token, userJwt, reload, queryKey]
 	);
 
 	const clearToggleError = useCallback(() => setToggleError(null), []);
@@ -226,7 +237,7 @@ export function useApps(): UseAppsResult {
 			);
 			return record;
 		},
-		[url, token]
+		[url, token, userJwt, setApps, queryKey]
 	);
 
 	return {

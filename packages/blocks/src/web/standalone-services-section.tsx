@@ -1,6 +1,9 @@
+"use client";
+
 import { ArrowUpRight } from "lucide-react";
 import type { Route } from "next";
 import Link from "next/link";
+import { useState } from "react";
 import { products } from "./data/products.tsx";
 import { SectionTitle, sectionSubtitleClass } from "./sections.tsx";
 
@@ -14,6 +17,10 @@ const SERVICE_DESCRIPTIONS: Record<string, string> = {
 };
 
 export function StandaloneServicesSection() {
+	const services = products.filter((product) => product.standalone);
+	const [selectedSlug, setSelectedSlug] = useState("gateway");
+	const selected =
+		services.find((product) => product.slug === selectedSlug) ?? services[0];
 	return (
 		<section
 			aria-label="Standalone services"
@@ -21,13 +28,19 @@ export function StandaloneServicesSection() {
 			data-testid="standalone-services"
 			id="standalone-services"
 		>
-			<div className="grid gap-10 md:grid-cols-[minmax(0,0.8fr)_minmax(0,1.2fr)] md:gap-16">
+			<div className="grid gap-10 lg:grid-cols-2 lg:gap-16">
 				<div>
 					<SectionTitle title="Add Ryu to your product" />
 					<p className={sectionSubtitleClass}>
 						Use an individual service through its API. Keep your app and add the
 						capabilities you need.
 					</p>
+					<div
+						className="mt-10 flex min-h-72 items-center justify-center overflow-hidden bg-muted/40 p-6 md:min-h-96 md:p-10 [&>*]:w-full"
+						data-product-visual
+					>
+						{selected?.hero.visual}
+					</div>
 				</div>
 				<div className="space-y-6">
 					{products
@@ -38,6 +51,8 @@ export function StandaloneServicesSection() {
 								data-testid={`standalone-service-${product.slug}`}
 								href={`/products/${product.slug}` as Route}
 								key={product.slug}
+								onFocus={() => setSelectedSlug(product.slug)}
+								onMouseEnter={() => setSelectedSlug(product.slug)}
 							>
 								<div>
 									<h3 className="font-medium group-hover:underline group-hover:underline-offset-4">

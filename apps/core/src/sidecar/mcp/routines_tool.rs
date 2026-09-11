@@ -467,7 +467,7 @@ fn delete(arguments: Value, principal: &ToolPrincipal) -> Result<Value> {
 
 async fn run_now(arguments: Value, principal: &ToolPrincipal) -> Result<Value> {
     let job_id = required_string(&arguments, "job_id")?;
-    let mut job = crate::scheduler::store::load_job(job_id)
+    let job = crate::scheduler::store::load_job(job_id)
         .map_err(|_| anyhow!("routine '{job_id}' not found"))?;
     if !owns_job(principal, &job) {
         return Err(anyhow!(
@@ -484,19 +484,21 @@ async fn run_now(arguments: Value, principal: &ToolPrincipal) -> Result<Value> {
         Ok(id) => (true, id, None),
         Err(error) => (false, None, Some(error)),
     };
-    job.record_execution(crate::scheduler::store::ExecRecord {
-        started_at,
-        finished_at,
-        outcome: if success {
-            crate::scheduler::store::ExecOutcome::Success
-        } else {
-            crate::scheduler::store::ExecOutcome::Failure
+    crate::scheduler::store::append_execution(
+        job_id,
+        crate::scheduler::store::ExecRecord {
+            started_at,
+            finished_at,
+            outcome: if success {
+                crate::scheduler::store::ExecOutcome::Success
+            } else {
+                crate::scheduler::store::ExecOutcome::Failure
+            },
+            run_id: run_id.clone(),
+            error: error.clone(),
         },
-        run_id: run_id.clone(),
-        error: error.clone(),
-    });
-    crate::scheduler::store::save_job(&job)
-        .map_err(|save_error| anyhow!("saving routine history: {save_error}"))?;
+    )
+    .map_err(|save_error| anyhow!("saving routine history: {save_error}"))?;
     Ok(json!({
         "ok": success,
         "success": success,

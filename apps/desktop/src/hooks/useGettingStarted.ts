@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useSyncExternalStore } from "react";
 import { useChatHistoryContext } from "@/src/contexts/ChatHistoryContext.tsx";
-import { useTabsContext } from "@/src/contexts/TabsContext.tsx";
+import { useTabSelector } from "@/src/contexts/TabsContext.tsx";
 import {
 	GETTING_STARTED_QUESTS,
 	type GettingStartedQuest,
@@ -34,7 +34,7 @@ export function useGettingStarted(): GettingStarted {
 		getCompletedSnapshot
 	);
 	const { conversations } = useChatHistoryContext();
-	const { openTab } = useTabsContext();
+	const openTab = useTabSelector((state) => state.openTab);
 
 	// Real signal: once any conversation exists, "send your first message" is done
 	// for good (stamped so deleting every chat never reopens it).

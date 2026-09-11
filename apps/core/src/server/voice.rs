@@ -782,7 +782,7 @@ pub(crate) async fn synth_via_gateway(
     let base = crate::sidecar::gateway::gateway_url();
     let base = base.trim_end_matches('/');
     let url = format!("{base}/v1/audio/speech");
-    let bearer = crate::sidecar::gateway::gateway_bearer()
+    let bearer = crate::sidecar::gateway::required_gateway_core_token()
         .map_err(|e| format!("no gateway credential for audio: {e:#}"))?;
 
     let payload = gateway_tts_payload(&model, voice, speed, text);
@@ -1062,7 +1062,7 @@ pub async fn transcribe(
     match transcribe_wav_detailed(&state.client, bytes, filename, query.engine.as_deref()).await {
         Ok(t) => (
             StatusCode::OK,
-            Json(json!({ "text": t.text, "segments": t.segments })),
+            Json(json!({ "text": t.text, "segments": t.segments, "words": t.words })),
         ),
         Err(e) => (StatusCode::BAD_GATEWAY, Json(json!({ "error": e }))),
     }

@@ -16,8 +16,11 @@ if (
 	input.tab_id !== null &&
 	input.tab_id !== ""
 ) {
-	await callNamed("agentbrowser.agent_browser_tab_switch", {
+	const switched = await callNamed("agentbrowser.agent_browser_tab_switch", {
 		tab: input.tab_id,
 	});
+	if (switched?.isError || switched?.error || switched?.available === false) {
+		return switched;
+	}
 }
 return await callTool({});

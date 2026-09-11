@@ -3,6 +3,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import {
 	HostedAgentPlanCard,
 	MarketplacePassPlanCard,
+	PlusPlanCard,
 	PRO_MONTHLY_USD,
 	PricingBillingToggle,
 	PricingDeploymentToggle,
@@ -55,6 +56,7 @@ test("Major Pass uses the shared palette and whole-dollar annual pricing", () =>
 		/\$<span[^>]*>2<\/span><span[^>]*>0<\/span><span[^>]*>0<\/span>/
 	);
 	expect(yearly).not.toContain("$200.00");
+	expect(yearly).toContain('aria-label="$17"');
 });
 
 test("the public business shelf omits the seat-sizing explainer", () => {
@@ -64,6 +66,8 @@ test("the public business shelf omits the seat-sizing explainer", () => {
 	expect(html).not.toContain("Multiple teams");
 	expect(html).not.toContain("pooled credits");
 	expect(html).toContain("5 seats included");
+	expect(html).not.toContain("Teams Lite");
+	expect(html).not.toContain("Ryu Plus");
 	expect(html).not.toContain("people can share");
 	expect(html).not.toContain("Your organization gets");
 	expect(html).toContain("16% deposit fee ($2.75 minimum)");
@@ -71,6 +75,16 @@ test("the public business shelf omits the seat-sizing explainer", () => {
 	expect(html).toContain("border-border/70 border-b pb-3");
 	expect(html).not.toContain("border-border/70 border-y py-3");
 	expect(html).not.toMatch(/\.\s*<\/(?:span|p)>/);
+});
+
+test("the private Plus offer keeps its lower usage contract", () => {
+	const html = renderToStaticMarkup(<PlusPlanCard isYearly />);
+
+	expect(html).toContain("PLUS");
+	expect(html).toContain("Private offer");
+	expect(html).toContain("$10");
+	expect(html).toContain("$390");
+	expect(html).not.toContain("Ryu Pro");
 });
 
 test("pricing defaults to the organization shelf", () => {
@@ -84,6 +98,7 @@ test("the public individual shelf exposes the local desktop offer", () => {
 	const html = renderToStaticMarkup(<PricingPlanGrid audience="individual" />);
 
 	expect(html).toContain("Local Desktop");
+	expect(html).not.toContain("Ryu Plus");
 	expect(html).toMatch(
 		/\$<span[^>]*>1<\/span><span[^>]*>2<\/span><span[^>]*>9<\/span>/
 	);
@@ -127,14 +142,72 @@ test("the hosted cards use the current included capacity ladder", () => {
 	expect(business).not.toContain("4 vCPU, 8 GB RAM, and 160 GB SSD");
 });
 
-test("annual pricing headlines use whole dollars", () => {
-	const html = renderToStaticMarkup(
+test("yearly individual prices show the discounted monthly equivalent and annual charge", () => {
+	const monthly = renderToStaticMarkup(
+		<PricingPlanGrid audience="individual" />
+	);
+	const yearly = renderToStaticMarkup(
 		<PricingPlanGrid audience="individual" isYearly />
 	);
 
-	expect(html).not.toContain("32.50");
-	expect(html).not.toContain("82.50");
-	expect(html).not.toContain("16.67");
+	expect(monthly).toContain('aria-label="$49"');
+	expect(monthly).toContain('aria-label="$99"');
+	expect(yearly).toContain('aria-label="$41"');
+	expect(yearly).toContain('aria-label="$83"');
+	expect(yearly).toContain('aria-label="$490"');
+	expect(yearly).toContain('aria-label="$990"');
+	expect(yearly).not.toMatch(/aria-label="\$[\d,]+\./);
+});
+
+test("yearly organization prices scale the discounted quote with the seat count", () => {
+	for (const {
+		planId,
+		seats,
+		monthlyPrice,
+		yearlyEquivalent,
+		annualCharge,
+	} of [
+		{
+			planId: "teams",
+			seats: 5,
+			monthlyPrice: "$250",
+			yearlyEquivalent: "$208",
+			annualCharge: "$2,500",
+		},
+		{
+			planId: "teams",
+			seats: 6,
+			monthlyPrice: "$300",
+			yearlyEquivalent: "$250",
+			annualCharge: "$3,000",
+		},
+		{
+			planId: "business",
+			seats: 5,
+			monthlyPrice: "$300",
+			yearlyEquivalent: "$250",
+			annualCharge: "$3,000",
+		},
+		{
+			planId: "business",
+			seats: 6,
+			monthlyPrice: "$350",
+			yearlyEquivalent: "$292",
+			annualCharge: "$3,500",
+		},
+	] as const) {
+		const monthly = renderToStaticMarkup(
+			<HostedAgentPlanCard agentCount={seats} planId={planId} />
+		);
+		const yearly = renderToStaticMarkup(
+			<HostedAgentPlanCard agentCount={seats} isYearly planId={planId} />
+		);
+		expect(monthly).toContain(`aria-label="${monthlyPrice}"`);
+		expect(yearly).toContain(`aria-label="${yearlyEquivalent}"`);
+		expect(yearly).toContain(`aria-label="${annualCharge}"`);
+		expect(yearly).not.toMatch(/aria-label="\$[\d,]+\./);
+		expect(yearly).toContain("per year, two months free");
+	}
 });
 
 test("the active billing option reverses its foreground and background", () => {

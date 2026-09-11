@@ -13,6 +13,7 @@
   "tagline": "Test agent code in a real browser",
   "keywords": ["testing", "browser", "qa", "playwright"],
   "category": "Developer Tools",
+  "icon": "target-02",
   "iconDither": { "from": 16, "to": "transparent", "direction": "down" },
   "surfaces": {
     "gateway": { "support": "none" },

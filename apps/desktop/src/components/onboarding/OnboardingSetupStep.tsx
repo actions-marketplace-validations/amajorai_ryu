@@ -8,7 +8,7 @@ import { Logo as GhostOrb } from "@ryu/ui/components/logo";
 import { PageHeader } from "@ryu/ui/components/page-header";
 import { StaggerReveal } from "@ryu/ui/components/stagger-reveal";
 import { Switch } from "@ryu/ui/components/switch";
-import { AnimatePresence, motion } from "framer-motion";
+import { TextMorph } from "@ryu/ui/components/text-morph";
 import { type ReactNode, useEffect, useMemo, useState } from "react";
 import { AgentSelectionField } from "@/components/agent-elements/input/agent-selection-field.tsx";
 import { ConnectionPermissionDialog } from "@/src/components/marketplace/ConnectionPermissionDialog.tsx";
@@ -901,16 +901,9 @@ function ProfileSetup({
 				className="min-h-14 rounded-lg bg-muted/40 px-3 py-3 text-sm"
 				role="status"
 			>
-				<AnimatePresence mode="wait">
-					<motion.span
-						animate={{ opacity: 1, y: 0 }}
-						exit={{ opacity: 0, y: -5 }}
-						initial={{ opacity: 0, y: 5 }}
-						key={PROFILE_LINES[lineIndex]}
-					>
-						{PROFILE_LINES[lineIndex]}
-					</motion.span>
-				</AnimatePresence>
+				<TextMorph duration={320} numbers={false}>
+					{PROFILE_LINES[lineIndex]}
+				</TextMorph>
 			</div>
 			<p className="text-muted-foreground text-xs">
 				{job.materialized

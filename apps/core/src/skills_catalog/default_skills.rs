@@ -2,8 +2,8 @@
 //!
 //! A fresh Ryu has an empty skills dir, so the Skills surface starts useless
 //! until the user goes shopping. This installs a small, high-utility default set
-//! — Anthropic's document skills plus `frontend-design` — once, in the
-//! background, on first boot.
+//! from the upstream document/design collection once, in the background, on
+//! first boot. Ryu's own PDF skill is compiled into Core and is not fetched here.
 //!
 //! ## It installs *from Anthropic's repo*, and never ships their bytes
 //!
@@ -62,8 +62,9 @@ use super::distribution::{
 /// The repo the default skills come from.
 pub const DEFAULT_SKILL_REPO: &str = "anthropics/skills";
 
-/// The default skill set: Anthropic's four document skills plus frontend-design.
-pub const DEFAULT_SKILLS: &[&str] = &["pdf", "xlsx", "pptx", "docx", "frontend-design"];
+/// The remote default set. Ryu's own `pdf` skill is installed from the Core
+/// bundle, so it must not be fetched from an upstream skill repository.
+pub const DEFAULT_SKILLS: &[&str] = &["xlsx", "pptx", "docx", "frontend-design"];
 
 /// Preference gate. Default ON; set to `false` to skip first-run install.
 pub const INSTALL_DEFAULTS_PREF: &str = "skills.install-defaults";
@@ -498,11 +499,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn default_set_is_the_documented_five() {
-        assert_eq!(
-            DEFAULT_SKILLS,
-            &["pdf", "xlsx", "pptx", "docx", "frontend-design"]
-        );
+    fn default_set_is_the_documented_four() {
+        assert_eq!(DEFAULT_SKILLS, &["xlsx", "pptx", "docx", "frontend-design"]);
     }
 
     #[test]

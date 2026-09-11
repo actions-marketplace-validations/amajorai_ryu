@@ -1,7 +1,5 @@
 use std::sync::{atomic::AtomicI64, Arc, OnceLock, RwLock};
 
-use dashmap::DashMap;
-
 use crate::{
     audit::{AuditLogger, AuditRegistry},
     budget::{BudgetBackend, BudgetRegistry, ExecBudgetEnforcer, SharedBudgetState, WalletState},
@@ -74,7 +72,7 @@ pub struct AppState {
     /// private `ryu_smart_route` request-body field; each distinct config gets one
     /// ephemeral [`SmartRouter`] so its rule-embedding + session caches are reused
     /// across that agent's turns. Empty until an override is first seen.
-    pub per_agent_routers: DashMap<u64, Arc<SmartRouter>>,
+    pub per_agent_routers: crate::router::smart::bounded::BoundedCache<String, Arc<SmartRouter>>,
     /// `RwLock` so `PUT /v1/config` can hot-swap the scanner without a restart.
     /// This is the **node-level** scanner: it still serves the outbound-scan,
     /// error-redaction, and multimodal paths, and it alone owns the process-global
@@ -375,7 +373,7 @@ impl AppState {
             providers,
             router,
             smart_router,
-            per_agent_routers: DashMap::new(),
+            per_agent_routers: crate::router::smart::bounded::BoundedCache::new(64),
             firewall,
             passthrough,
             resolver,
@@ -542,7 +540,20 @@ impl AppState {
 
     /// Replace the `api_keys` list in the live auth config. Called by PUT /v1/config.
     /// The master_key and require_auth flag are unchanged — they are startup-only.
-    pub fn update_auth_config(&self, api_keys: Vec<ApiKeyConfig>) {
+    pub fn update_auth_config(&self, mut api_keys: Vec<ApiKeyConfig>) {
+        // Host-provisioned relays are bootstrap credentials, not user-editable
+        // API keys. Preserve their original authority even if a config patch
+        // omits them or submits the same bearer with trusted_forwarder changed.
+        for managed in self
+            .config
+            .auth
+            .api_keys
+            .iter()
+            .filter(|entry| matches!(entry.name.as_str(), "local-core" | "local-inference"))
+        {
+            api_keys.retain(|entry| entry.key != managed.key && entry.name != managed.name);
+            api_keys.push(managed.clone());
+        }
         if let Ok(mut guard) = self.auth.write() {
             guard.api_keys = api_keys;
         }
@@ -660,7 +671,7 @@ impl AppState {
             providers,
             router,
             smart_router,
-            per_agent_routers: DashMap::new(),
+            per_agent_routers: crate::router::smart::bounded::BoundedCache::new(64),
             firewall,
             passthrough,
             resolver,

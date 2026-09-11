@@ -13,7 +13,7 @@
 // suggestion engine's own context loop. It pauses entirely when `contextRead`
 // is not granted (the main-process hard gate would reject the calls anyway).
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import { useConsent } from "./use-consent.ts";
 
 /** How often the idle pill refreshes the active-app label (ms). */
@@ -40,56 +40,68 @@ export function useActiveContext(): ActiveContext {
 	const { consent } = useConsent();
 	const contextReadAllowed = consent?.contextRead === true;
 	const [context, setContext] = useState<ActiveContext>(DEGRADED);
-	const activeRef = useRef(true);
 
 	useEffect(() => {
-		activeRef.current = true;
+		let alive = true;
+		let pending = false;
 
 		// Consent off (or not yet answered): never touch Shadow, stay degraded.
 		if (!contextReadAllowed) {
 			setContext(DEGRADED);
 			return () => {
-				activeRef.current = false;
+				alive = false;
 			};
 		}
 
 		const poll = async (): Promise<void> => {
-			const result = await window.island.shadow.getCurrentContext();
-			if (!activeRef.current) {
+			if (pending || !alive || document.hidden) {
 				return;
 			}
-			if (!result.available) {
-				setContext(DEGRADED);
-				return;
-			}
-			const { app_name, window_title, capture_active, paused } = result.context;
-			const label = app_name ?? window_title ?? null;
-			const capturing = capture_active && !paused;
-			setContext({
-				appName: label,
-				live: capturing,
-				degraded: !capturing,
-			});
-		};
-
-		poll().catch(() => {
-			if (activeRef.current) {
-				setContext(DEGRADED);
-			}
-		});
-		const timer = setInterval(() => {
-			poll().catch(() => {
-				if (activeRef.current) {
+			pending = true;
+			try {
+				const result = await window.island.shadow.getCurrentContext();
+				if (!alive) {
+					return;
+				}
+				if (!result.available) {
+					setContext(DEGRADED);
+					return;
+				}
+				const { app_name, window_title, capture_active, paused } =
+					result.context;
+				const label = app_name ?? window_title ?? null;
+				const capturing = capture_active && !paused;
+				setContext((previous) =>
+					previous.appName === label &&
+					previous.live === capturing &&
+					previous.degraded === !capturing
+						? previous
+						: {
+								appName: label,
+								live: capturing,
+								degraded: !capturing,
+							}
+				);
+			} catch {
+				if (alive) {
 					setContext(DEGRADED);
 				}
-			});
-		}, CONTEXT_POLL_MS);
+			} finally {
+				pending = false;
+			}
+		};
+
+		const automatic = () => void poll();
+		automatic();
+		const timer = setInterval(automatic, CONTEXT_POLL_MS);
+		document.addEventListener("visibilitychange", automatic);
 
 		return () => {
-			activeRef.current = false;
+			alive = false;
 			clearInterval(timer);
+			document.removeEventListener("visibilitychange", automatic);
 		};
 	}, [contextReadAllowed]);
 
-	return context;
+	return contextReadAllowed ? context : DEGRADED;
 }

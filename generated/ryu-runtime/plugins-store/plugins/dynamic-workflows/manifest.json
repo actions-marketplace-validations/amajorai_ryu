@@ -13,6 +13,7 @@
   "stability": "experimental",
   "version": "0.1.14",
   "description": "Run a validated, bounded fan-out of clean-context delegates.",
+  "icon": "workflow-circle-06",
   "iconDither": {
     "from": 232,
     "to": "transparent",

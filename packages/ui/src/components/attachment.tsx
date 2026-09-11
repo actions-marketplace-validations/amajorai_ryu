@@ -1,5 +1,6 @@
 import { mergeProps } from "@base-ui/react/merge-props";
 import { useRender } from "@base-ui/react/use-render";
+import { useLocalizedText } from "@ryu/i18n/react";
 import { Button } from "@ryu/ui/components/button.tsx";
 import { cn } from "@ryu/ui/lib/utils.ts";
 import { cva, type VariantProps } from "class-variance-authority";
@@ -95,9 +96,11 @@ function AttachmentContent({
 }
 
 function AttachmentTitle({
+	children,
 	className,
 	...props
 }: React.ComponentProps<"span">) {
+	const localizedChildren = useLocalizedText(children, { literal: true });
 	return (
 		<span
 			className={cn(
@@ -106,14 +109,18 @@ function AttachmentTitle({
 			)}
 			data-slot="attachment-title"
 			{...props}
-		/>
+		>
+			{localizedChildren}
+		</span>
 	);
 }
 
 function AttachmentDescription({
+	children,
 	className,
 	...props
 }: React.ComponentProps<"span">) {
+	const localizedChildren = useLocalizedText(children, { literal: true });
 	return (
 		<span
 			className={cn(
@@ -123,7 +130,9 @@ function AttachmentDescription({
 			)}
 			data-slot="attachment-description"
 			{...props}
-		/>
+		>
+			{localizedChildren}
+		</span>
 	);
 }
 

@@ -102,6 +102,7 @@ import {
 } from "@/src/components/gateway/AgentSyncSections.tsx";
 import { ApiSection } from "@/src/components/gateway/ApiSection.tsx";
 import { AutoRetrySection } from "@/src/components/gateway/AutoRetrySection.tsx";
+import { BotRealmDefaultCard } from "@/src/components/gateway/BotRealmDefaultCard.tsx";
 import { BudgetChargeInclusionFields } from "@/src/components/gateway/BudgetRuleFields.tsx";
 import {
 	budgetUsdToMicroUsd,
@@ -5697,47 +5698,59 @@ function CatalogScannerCard({
 	target: ApiTarget;
 	canConfigure: boolean;
 }) {
-	const [agentId, setAgentId] = useState("ryu");
+	const [agentId, setAgentId] = useState("");
 	const [loaded, setLoaded] = useState(false);
+	const [saving, setSaving] = useState(false);
 	const [status, setStatus] = useState<string | null>(null);
 
 	useEffect(() => {
 		let cancelled = false;
 		setLoaded(false);
-		getPreference(target, CATALOG_SCAN_AGENT_PREF).then((value) => {
-			if (cancelled) {
-				return;
-			}
-			setAgentId(value?.trim() || "ryu");
-			setLoaded(true);
-		});
+		getPreference(target, CATALOG_SCAN_AGENT_PREF)
+			.then((value) => {
+				if (cancelled) {
+					return;
+				}
+				setAgentId(value?.trim() || "");
+				setLoaded(true);
+			})
+			.catch(() => {
+				if (!cancelled) {
+					setStatus(
+						"Could not load the audit agent. Reopen settings to retry."
+					);
+				}
+			});
 		return () => {
 			cancelled = true;
 		};
 	}, [target]);
 
 	const updateAgent = async (next: string) => {
-		const trimmed = next.trim();
-		if (!trimmed) {
+		if (saving) {
 			return;
 		}
+		const trimmed = next.trim();
 		const previous = agentId;
+		setSaving(true);
 		setAgentId(trimmed);
 		setStatus(null);
-		const ok = await setPreference(target, CATALOG_SCAN_AGENT_PREF, trimmed);
-		if (ok) {
+		try {
+			await setPreference(target, CATALOG_SCAN_AGENT_PREF, trimmed);
 			setStatus("Saved for this node.");
-		} else {
+		} catch {
 			setAgentId(previous);
-			setStatus("Could not save the scanning agent.");
+			setStatus("Could not save the audit agent. Try again.");
+		} finally {
+			setSaving(false);
 		}
 	};
 
 	return (
 		<div data-testid="catalog-scanner-settings">
 			<SettingsSection
-				caption="Choose the registered agent that reviews Skills, Apps, and Plugins after their deterministic scorecard runs. The review is bounded and read-only: listing text is untrusted evidence, and the agent cannot install, edit, or change settings."
-				title="Catalog scanner"
+				caption="On-demand audits run the health audit skill with your default chat agent. Optionally choose a reviewer for Marketplace, agent health, and Doctor. Normal runtime permissions and approvals apply; static checks remain the default."
+				title="Health audit agent"
 			>
 				<div className="flex flex-col gap-3">
 					<SettingsGroup>
@@ -5746,21 +5759,29 @@ function CatalogScannerCard({
 								<AgentModelPickerField
 									ariaLabel="Catalog scanning agent"
 									className="min-w-[220px]"
-									disabled={!(canConfigure && loaded)}
+									disabled={!(canConfigure && loaded) || saving}
 									mode="agent"
 									onChange={(next) => {
 										void updateAgent(next);
 									}}
-									placeholder="Select a scanning agent"
+									placeholder="Use default agent"
 									target={target}
 									value={agentId}
 								/>
 							}
-							description="Used by every catalog Scan button and the Security Scanner catalog review."
+							description="Used by Audit with agent across all Health views. Leave unset to follow the default chat agent."
 							settingsId="catalog-scan-agent"
 							title="Scanning agent"
 						/>
 					</SettingsGroup>
+					<Button
+						disabled={!(canConfigure && loaded && agentId) || saving}
+						onClick={() => void updateAgent("")}
+						size="sm"
+						variant="ghost"
+					>
+						Use default agent
+					</Button>
 					{status ? (
 						<p className="px-3 text-muted-foreground text-sm">{status}</p>
 					) : null}
@@ -6293,13 +6314,17 @@ const LOCAL_MODEL_IDLE_OPTIONS = [
 	{ value: "3600", label: "1 hour" },
 ];
 
-function DefaultsSection({ target }: { target: ApiTarget }) {
-	const [localSelection, setLocalSelection] = useState<AgentSelection>(
-		EMPTY_AGENT_SELECTION
-	);
-	const [cloudSelection, setCloudSelection] = useState<AgentSelection>(
-		EMPTY_AGENT_SELECTION
-	);
+function DefaultsSection({
+	canConfigure,
+	managed,
+	target,
+}: {
+	canConfigure: boolean;
+	managed: boolean;
+	target: ApiTarget;
+}) {
+	const [localSelection, setLocalSelection] = useState(EMPTY_AGENT_SELECTION);
+	const [cloudSelection, setCloudSelection] = useState(EMPTY_AGENT_SELECTION);
 	const [loaded, setLoaded] = useState(false);
 	const [idleSeconds, setIdleSeconds] = useState("300");
 	const [idleLoaded, setIdleLoaded] = useState(false);
@@ -6393,6 +6418,7 @@ function DefaultsSection({ target }: { target: ApiTarget }) {
 						<AgentSelectionField
 							allowedProviderIds={["local"]}
 							ariaLabel="Default local agent or model"
+							disabled={!canConfigure}
 							onChange={(next) => {
 								save("local", next).catch(() => undefined);
 							}}
@@ -6411,32 +6437,23 @@ function DefaultsSection({ target }: { target: ApiTarget }) {
 				</div>
 			</SettingsCard>
 
-			<SettingsCard className="space-y-4">
-				<div className="flex flex-col gap-1.5">
-					<Label className="text-muted-foreground text-xs">
-						Default cloud agent
-					</Label>
-					{loaded ? (
-						<AgentSelectionField
-							ariaLabel="Default cloud agent or model"
-							onChange={(next) => {
-								save("cloud", next).catch(() => undefined);
-							}}
-							placeholder="No cloud default — use local"
-							preserveRyuRoute
-							target={target}
-							value={cloudSelection}
-						/>
-					) : (
-						<Skeleton className="h-8 w-full" />
-					)}
-					<p className="text-muted-foreground text-xs">
-						Normal interactive chats use this lane when set. Paid onboarding
-						starts with Ryu on managed OpenRouter; free users can choose a
-						configured BYOK provider or leave this unset.
-					</p>
-				</div>
-			</SettingsCard>
+			<BotRealmDefaultCard
+				canConfigure={canConfigure}
+				loaded={loaded}
+				managed={managed}
+				onChange={(next) => {
+					save("cloud", next).catch(() => undefined);
+				}}
+				target={target}
+				value={cloudSelection}
+			/>
+
+			{canConfigure ? null : (
+				<p className="px-1 text-muted-foreground text-xs">
+					Only organization owners and admins can change the local or Bot realm
+					default.
+				</p>
+			)}
 
 			<SettingsCard className="space-y-4">
 				<div className="flex flex-col gap-1.5">
@@ -7223,7 +7240,13 @@ export function GatewayDialog({
 					/>
 				) : null}
 				{section === "workspace" ? <WorkspaceSection /> : null}
-				{section === "defaults" ? <DefaultsSection target={target} /> : null}
+				{section === "defaults" ? (
+					<DefaultsSection
+						canConfigure={canConfigure}
+						managed={managed}
+						target={target}
+					/>
+				) : null}
 				{/* LLM Providers. Provider *selection* (which model/keys/routing the
 				    local Pi agent uses) is strictly Core — "what runs" — NOT account/org
 				    data, so it lives here on the node/infra Gateway surface, next to

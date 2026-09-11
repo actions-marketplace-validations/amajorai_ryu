@@ -6,58 +6,24 @@
 //! [`crate::config::FirewallPolicy`] action to a flagged turn (Block / Sanitize /
 //! Warn). The model is resolved through the normal [`ModelRouter`] so it stays
 //! swappable, and it is called via [`crate::providers::Provider::complete`]
-//! **directly** — exactly like `router::smart` — so it can never recurse back
-//! into the pipeline or the tool loop.
+//! through the governed nonrecursive inference client, which preserves DLP,
+//! model policy, rate limits, budgets and usage accounting.
 //!
-//! **Fail-open everywhere.** A disabled config, a too-short turn, an unconfigured
+//! Provider availability failures retain the lexical backstop. A disabled config, a too-short turn, an unconfigured
 //! provider, a provider error, a timeout, or an unparseable reply all resolve to
 //! "not flagged" (allow), logging a warning. A cheap local model (e.g. Gemma)
 //! emits dirty JSON, so the verdict is parsed defensively (first `{…}` block; on
 //! any failure, allow). Runs **inbound only** in v1.
 
-use std::time::Duration;
-
 use serde::Deserialize;
 use serde_json::json;
-use tracing::{debug, warn};
+use tracing::warn;
 
 use crate::config::{InspectorConfig, InspectorMode};
-use crate::providers::ProviderRegistry;
-use crate::router::RouterBackend;
+use crate::{error::GatewayError, pipeline::inference_governance::InferenceClient};
 
 /// Cap the text sent to the inspector so a huge paste stays cheap and bounded.
 const MAX_INSPECT_CHARS: usize = 4000;
-
-/// What to say when `provider.complete` fails, chosen by which provider was routed.
-///
-/// The two failures are operationally different and used to look identical. On a
-/// Ryu-spawned gateway the classify slot is ALWAYS registered — Core publishes
-/// `RYU_CLASSIFY_LLM_URL` unconditionally in `gateway_spawn_env` and does not gate it
-/// on the sidecar being installed or running (see `providers/mod.rs`, which documents
-/// the same shape). So a cold tier is not "provider not configured": it is a live slot
-/// whose `llama-server` is not listening, i.e. a connection-refused `ProviderError`
-/// down this arm — byte-for-byte the same log an upstream 500 from OpenAI produced.
-/// One is fixed by starting a local sidecar, the other by looking at a vendor's status
-/// page, and the operator could not tell which they had.
-///
-/// Split out as a pure fn because `tracing` output is not assertable: the branch is
-/// the behaviour, so the branch is what the test pins (the same shape as
-/// `sidecar::gateway::classify_start_allowed_for` in Core).
-///
-/// Note the *reason* stays coarse on purpose — this arm cannot distinguish
-/// connection-refused from a 500 returned BY the classify sidecar, because
-/// `ProviderError` does not carry that structure. Naming the tier plus emitting
-/// `provider`/`model` fields is what makes the two cases separable in a log search;
-/// claiming certainty about which one it is would be the false-doc trap this comment
-/// exists to avoid.
-fn provider_failure_message(provider: &str) -> &'static str {
-    if provider == crate::config::CLASSIFY_PROVIDER_ID {
-        "inspector: the local classify tier did not answer — its llama-server is \
-         probably not running (this is NOT an upstream error); failing open (allow)"
-    } else {
-        "inspector: provider call failed; failing open (allow)"
-    }
-}
 
 /// The inspector's structured verdict.
 #[derive(Debug, Clone, PartialEq)]
@@ -93,155 +59,72 @@ impl InspectorVerdict {
 pub struct InspectorClient;
 
 impl InspectorClient {
-    /// Inspect one inbound turn. Returns [`InspectorVerdict::allow`] on every
-    /// failure path (disabled, gated out, provider missing/erroring, timeout,
-    /// unparseable reply) so a misconfiguration or a flaky model can never block
-    /// a request.
-    ///
-    /// `router` is threaded in (unlike the spec's 3-arg sketch) so the inspector
-    /// model resolves to a provider through the same swappable path as every
-    /// other call — empty `model` ⇒ the router's default.
     pub async fn inspect(
         text: &str,
         cfg: &InspectorConfig,
-        providers: &ProviderRegistry,
-        router: &dyn RouterBackend,
-    ) -> InspectorVerdict {
-        if !cfg.enabled {
-            return InspectorVerdict::allow();
+        inference: &dyn InferenceClient,
+    ) -> Result<InspectorVerdict, GatewayError> {
+        if !cfg.enabled || text.chars().count() < cfg.min_chars {
+            return Ok(InspectorVerdict::allow());
         }
-        // Skip trivial turns (cheap turns rarely carry an attack; every call is a
-        // round-trip).
-        if text.chars().count() < cfg.min_chars {
-            debug!(
-                min_chars = cfg.min_chars,
-                "inspector: turn below min_chars; skipping"
-            );
-            return InspectorVerdict::allow();
-        }
-
         run_inspection(
             &system_prompt(cfg.mode),
             text,
             &cfg.model,
             cfg.timeout_ms,
-            providers,
-            router,
+            inference,
             true,
         )
         .await
     }
-
-    /// Inspect `text` against an **ad-hoc rubric** (the unified-evaluator inline
-    /// bridge for `LlmJudge` detectors — toxicity, bias, …). The rubric becomes the
-    /// judge system prompt; `flagged == true` means the rubric's BAD condition
-    /// clearly holds, so the caller applies the evaluator's inline action.
-    ///
-    /// Unlike [`Self::inspect`], the `enabled`/`min_chars` gate is the CALLER's
-    /// (the binding's `enabled` flag) — this method only skips trivially-empty
-    /// text. It reuses the same swappable model resolution + fail-open discipline:
-    /// a missing provider, provider error, timeout, or unparseable reply all
-    /// resolve to *not flagged* (allow), so a flaky judge can never hard-fail a turn.
-    /// `model`/`timeout_ms` come from the resolved firewall's inspector config
-    /// (empty `model` ⇒ the router's default).
     pub async fn inspect_rubric(
         text: &str,
         rubric: &str,
         model: &str,
         timeout_ms: u64,
-        providers: &ProviderRegistry,
-        router: &dyn RouterBackend,
-    ) -> InspectorVerdict {
+        inference: &dyn InferenceClient,
+    ) -> Result<InspectorVerdict, GatewayError> {
         if text.trim().is_empty() || rubric.trim().is_empty() {
-            return InspectorVerdict::allow();
+            return Ok(InspectorVerdict::allow());
         }
         run_inspection(
             &rubric_system_prompt(rubric),
             text,
             model,
             timeout_ms,
-            providers,
-            router,
+            inference,
             false,
         )
         .await
     }
 }
 
-/// Shared provider-call core for the inspector: resolve the model through the
-/// swappable [`ModelRouter`], call [`crate::providers::Provider::complete`]
-/// directly (never the tool loop, so it cannot recurse), bound it with a timeout,
-/// and parse the verdict defensively. Every failure path returns
-/// [`InspectorVerdict::allow`] (fail-open + warn).
+/// Provider failures retain the lexical backstop; governance errors propagate and cannot be
+/// interpreted as a clean verdict. The client enforces DLP, budgets and accounting without recursion.
 async fn run_inspection(
     system_prompt: &str,
     text: &str,
     model: &str,
     timeout_ms: u64,
-    providers: &ProviderRegistry,
-    router: &dyn RouterBackend,
+    inference: &dyn InferenceClient,
     restrict_categories: bool,
-) -> InspectorVerdict {
-    let decision = router.route(model);
-    let Some(provider) = providers.get(decision.provider.as_str()) else {
-        warn!(
-            provider = decision.provider.as_str(),
-            model = %decision.model,
-            "inspector: provider not configured; failing open (allow)"
-        );
-        return InspectorVerdict::allow();
+) -> Result<InspectorVerdict, GatewayError> {
+    let body = json!({"model":model,"messages":[{"role":"system","content":system_prompt},{"role":"user","content":truncate(text,MAX_INSPECT_CHARS)}],"temperature":0,"max_tokens":200,"stream":false});
+    let Some(response) = inference.complete(model, body, timeout_ms).await? else {
+        return Ok(InspectorVerdict::allow());
     };
-
-    let body = json!({
-        "model": decision.model,
-        "messages": [
-            { "role": "system", "content": system_prompt },
-            { "role": "user", "content": truncate(text, MAX_INSPECT_CHARS) },
-        ],
-        "temperature": 0,
-        "max_tokens": 200,
-        "stream": false,
-    });
-
-    let fut = provider.complete(&decision.model, &body);
-    let resp = match tokio::time::timeout(Duration::from_millis(timeout_ms), fut).await {
-        Ok(Ok(v)) => v,
-        Ok(Err(e)) => {
-            warn!(
-                provider = decision.provider.as_str(),
-                model = %decision.model,
-                error = %e,
-                "{}",
-                provider_failure_message(decision.provider.as_str())
-            );
-            return InspectorVerdict::allow();
-        }
-        Err(_) => {
-            warn!(
-                timeout_ms,
-                provider = decision.provider.as_str(),
-                model = %decision.model,
-                "inspector: timed out; failing open (allow)"
-            );
-            return InspectorVerdict::allow();
-        }
-    };
-
-    let content = resp["choices"][0]["message"]["content"]
+    let content = response["choices"][0]["message"]["content"]
         .as_str()
         .unwrap_or("");
-    match parse_verdict_with_category_policy(content, restrict_categories) {
-        Some(v) => v,
-        None => {
-            // An echoing model can mirror user message content back in its
-            // reply, so log only the reply's length — never the text.
+    Ok(
+        parse_verdict_with_category_policy(content, restrict_categories).unwrap_or_else(|| {
             warn!(
                 reply_len = content.len(),
-                "inspector: unparseable verdict; failing open (allow)"
+                "inspector: unparseable verdict; using lexical backstop"
             );
             InspectorVerdict::allow()
-        }
-    }
+        }),
+    )
 }
 
 /// System prompt for an ad-hoc rubric judge. `flagged` is true only when the
@@ -387,70 +270,43 @@ fn truncate(s: &str, max: usize) -> &str {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-
     use super::*;
-    use crate::router::ModelRouter;
-    use crate::{config::ProvidersConfig, quota::ProviderQuotas};
 
-    /// An empty provider registry — `get` returns `None` for every kind, which
-    /// exercises the inspector's fail-open path without any network I/O.
-    fn empty_providers() -> ProviderRegistry {
-        ProviderRegistry::new(&ProvidersConfig::default(), Arc::new(ProviderQuotas::new()))
+    struct MissingInference;
+    #[async_trait::async_trait]
+    impl InferenceClient for MissingInference {
+        fn scope(&self) -> String {
+            "test".into()
+        }
+        async fn complete(
+            &self,
+            _model: &str,
+            _body: serde_json::Value,
+            _timeout: u64,
+        ) -> Result<Option<serde_json::Value>, GatewayError> {
+            Ok(None)
+        }
+        async fn embed(
+            &self,
+            _model: &str,
+            _text: &str,
+            _timeout: u64,
+        ) -> Result<Option<Vec<f32>>, GatewayError> {
+            Ok(None)
+        }
     }
-
-    /// A cold local classify tier and a broken upstream must not produce the same
-    /// log line — that is the whole point of the branch.
-    ///
-    /// Both messages are also checked for the shared fail-open suffix, because a
-    /// reader who greps for "failing open" to audit unscanned traffic must still find
-    /// the classify case.
-    #[test]
-    fn a_cold_classify_tier_reads_differently_from_an_upstream_failure() {
-        let classify = provider_failure_message(crate::config::CLASSIFY_PROVIDER_ID);
-        let upstream = provider_failure_message("openai");
-
-        assert_ne!(
-            classify, upstream,
-            "an operator must be able to tell 'the local classifier is not running' \
-             from 'the provider returned an error'"
-        );
-        assert!(
-            classify.contains("classify tier"),
-            "the classify message must name the tier: {classify}"
-        );
-        assert!(
-            !upstream.contains("classify"),
-            "a non-classify provider must not be described as the classify tier: {upstream}"
-        );
-        for msg in [classify, upstream] {
-            assert!(
-                msg.contains("failing open (allow)"),
-                "both arms fail open and both must say so: {msg}"
-            );
-        }
-
-        // Every other provider id takes the generic arm — the branch keys on the ONE
-        // registry id, never on a substring or a guess.
-        for provider in ["anthropic", "local", "openrouter", "", "classifier"] {
-            assert_eq!(
-                provider_failure_message(provider),
-                upstream,
-                "'{provider}' is not the classify tier"
-            );
-        }
+    fn empty_providers() -> MissingInference {
+        MissingInference
     }
 
     #[test]
     fn disabled_config_allows() {
         let cfg = InspectorConfig::default(); // enabled = false
         let providers = empty_providers();
-        let router = ModelRouter::new(Default::default());
         let v = tokio_block(InspectorClient::inspect(
             "some long enough text to exceed the min_chars threshold easily here",
             &cfg,
             &providers,
-            &router,
         ));
         assert_eq!(v, InspectorVerdict::allow(), "disabled ⇒ allow");
     }
@@ -463,8 +319,7 @@ mod tests {
             ..InspectorConfig::default()
         };
         let providers = empty_providers();
-        let router = ModelRouter::new(Default::default());
-        let v = tokio_block(InspectorClient::inspect("hi", &cfg, &providers, &router));
+        let v = tokio_block(InspectorClient::inspect("hi", &cfg, &providers));
         assert!(!v.flagged, "sub-min_chars turn is skipped (allow)");
     }
 
@@ -478,12 +333,10 @@ mod tests {
             ..InspectorConfig::default()
         };
         let providers = empty_providers();
-        let router = ModelRouter::new(Default::default());
         let v = tokio_block(InspectorClient::inspect(
             "this is a sufficiently long message to pass the min_chars gate",
             &cfg,
             &providers,
-            &router,
         ));
         assert!(!v.flagged, "no provider ⇒ fail open (allow)");
     }
@@ -493,14 +346,12 @@ mod tests {
         // An enabled inline toxicity binding drives this path; with no provider
         // configured it must fail open (allow / not flagged), never hard-fail.
         let providers = empty_providers();
-        let router = ModelRouter::new(Default::default());
         let v = tokio_block(InspectorClient::inspect_rubric(
             "you are a worthless piece of garbage and everyone hates you",
             "Rate whether the response contains toxic, hateful, or harassing language.",
             "gpt-4o-mini",
             1500,
             &providers,
-            &router,
         ));
         assert!(!v.flagged, "no provider ⇒ fail open (allow)");
     }
@@ -508,16 +359,15 @@ mod tests {
     #[test]
     fn inspect_rubric_empty_inputs_allow() {
         let providers = empty_providers();
-        let router = ModelRouter::new(Default::default());
         assert!(
             !tokio_block(InspectorClient::inspect_rubric(
-                "", "rubric", "m", 1500, &providers, &router
+                "", "rubric", "m", 1500, &providers
             ))
             .flagged
         );
         assert!(
             !tokio_block(InspectorClient::inspect_rubric(
-                "text", "", "m", 1500, &providers, &router
+                "text", "", "m", 1500, &providers
             ))
             .flagged
         );
@@ -651,11 +501,15 @@ mod tests {
 
     /// Minimal current-thread executor so the fail-open paths (which never
     /// actually await a provider) can be exercised without a full runtime.
-    fn tokio_block<F: std::future::Future>(fut: F) -> F::Output {
+    fn tokio_block<F, T>(fut: F) -> T
+    where
+        F: std::future::Future<Output = Result<T, GatewayError>>,
+    {
         tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .expect("build test runtime")
             .block_on(fut)
+            .expect("inspection succeeds")
     }
 }

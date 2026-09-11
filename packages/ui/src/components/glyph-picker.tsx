@@ -76,6 +76,8 @@ import {
 } from "lucide-react";
 import type { ReactNode } from "react";
 import { useCallback, useEffect, useRef, useState } from "react";
+import type { GhostAvatarAppearance } from "./ghost-avatar.ts";
+import { GhostAvatarControls } from "./ghost-avatar-controls.tsx";
 
 interface Dimensions {
 	height: number;
@@ -373,6 +375,9 @@ export function GlyphPicker({
 	const [diceStyle, setDiceStyle] = useState<string>(DEFAULT_DICEBEAR_STYLE);
 	const [diceSeed, setDiceSeed] = useState(() => randomDicebearSeed());
 
+	const [ghostAppearance, setGhostAppearance] = useState<GhostAvatarAppearance>(
+		{ variant: "3d", bodyStyle: "orb", behavior: "custom" }
+	);
 	// Expressive ghost avatar
 	const [expressiveSelection, setExpressiveSelection] =
 		useState<Extract<GlyphValue, { kind: "expressive" }>["expression"]>(
@@ -414,9 +419,15 @@ export function GlyphPicker({
 			setDiceSeed(randomDicebearSeed());
 		}
 		if (value?.kind === "expressive") {
+			setGhostAppearance({ ...value });
 			setExpressiveSelection(value.expression);
 			setExpressiveAnimationSelection(value.animation ?? "random");
 		} else {
+			setGhostAppearance({
+				variant: "3d",
+				bodyStyle: "orb",
+				behavior: "custom",
+			});
 			setExpressiveSelection("random");
 			setExpressiveAnimationSelection("random");
 		}
@@ -535,12 +546,14 @@ export function GlyphPicker({
 
 	const applyExpressive = useCallback(() => {
 		onChange({
+			...ghostAppearance,
 			animation: expressiveAnimationSelection,
 			kind: "expressive",
 			expression: expressiveSelection,
 		});
 		setIsDialogOpen(false);
 	}, [
+		ghostAppearance,
 		expressiveAnimationSelection,
 		expressiveSelection,
 		onChange,
@@ -553,7 +566,7 @@ export function GlyphPicker({
 
 	const dialog = (
 		<Dialog onOpenChange={setIsDialogOpen} open={isDialogOpen}>
-			<DialogContent className="gap-0 overflow-hidden p-0 sm:max-w-140 *:[button]:hidden">
+			<DialogContent className="flex max-h-[90dvh] flex-col gap-0 overflow-hidden p-0 sm:max-w-140 *:[button]:hidden">
 				<DialogDescription className="sr-only">
 					{description ?? title}
 				</DialogDescription>
@@ -569,7 +582,7 @@ export function GlyphPicker({
 				</DialogHeader>
 
 				<Tabs
-					className="px-4 pt-3"
+					className="min-h-0 overflow-y-auto px-4 pt-3"
 					onValueChange={(v) => setTab(v as GlyphKind)}
 					value={tab}
 				>
@@ -829,17 +842,25 @@ export function GlyphPicker({
 										className="text-foreground"
 										size={96}
 										value={{
+											...ghostAppearance,
 											animation: expressiveAnimationSelection,
 											kind: "expressive",
 											expression: expressiveSelection,
 										}}
 									/>
 								</div>
+								<GhostAvatarControls
+									onChange={setGhostAppearance}
+									value={ghostAppearance}
+								/>
 								<p className="text-muted-foreground text-xs">
-									Choose a mood and animation for Ryu's ghost. Random cycles
-									through the full state timeline with seamless morphs.
+									Choose a mood and animation, or use Random to cycle. The live
+									preview uses your selected appearance.
 								</p>
-								<div className="h-72 overflow-hidden rounded-lg border border-border">
+								<div
+									className="h-72 overflow-hidden rounded-lg border border-border"
+									hidden={ghostAppearance.behavior === "conversation"}
+								>
 									<ScrollArea className="h-full">
 										<div className="space-y-3 p-2">
 											<div>
@@ -1036,7 +1057,7 @@ export function GlyphPicker({
 					) : null}
 				</Tabs>
 
-				<DialogFooter className="border-t px-4 py-3">
+				<DialogFooter className="shrink-0 border-t px-4 py-3">
 					{clearable && value ? (
 						<Button
 							className="mr-auto"
@@ -1072,7 +1093,7 @@ export function GlyphPicker({
 					) : null}
 					{tab === "expressive" ? (
 						<Button onClick={applyExpressive} type="button">
-							Use expression
+							Use ghost avatar
 						</Button>
 					) : null}
 					{tab === "dither" ? (

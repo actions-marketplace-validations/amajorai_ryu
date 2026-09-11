@@ -455,6 +455,19 @@ div[data-tauri-decorum-tb] .decorum-tb-btn {
 	opacity: 0.12;
 }
 
+/* Split panes settle into their new geometry after a drag-to-split or swap. The
+ * gutter temporarily overrides this duration while it is being resized so the
+ * pointer stays exact instead of trailing behind an interpolation. */
+:root {
+	--ryu-split-pane-transition-duration: 220ms;
+}
+
+@media (prefers-reduced-motion: reduce) {
+	:root {
+		--ryu-split-pane-transition-duration: 0.001ms;
+	}
+}
+
 /*
  * Gooey tap — a springy "jelly" press shared by the sidebar-footer action
  * buttons (inbox, downloads, settings) so they read consistently with the "+"

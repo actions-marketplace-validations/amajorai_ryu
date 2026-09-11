@@ -24,6 +24,7 @@ import { HugeiconsIcon } from "@hugeicons/react";
 import { Badge } from "@ryu/ui/components/badge";
 import { Button } from "@ryu/ui/components/button";
 import { Checkbox } from "@ryu/ui/components/checkbox";
+import { ColorPickerPopover } from "@ryu/ui/components/color-picker";
 import { Input } from "@ryu/ui/components/input";
 import { Label } from "@ryu/ui/components/label";
 import {
@@ -587,19 +588,17 @@ function FieldForm({
 									}
 									value={option.label}
 								/>
-								<Input
-									aria-label={`Option ${option.label} colour`}
-									className="h-9 w-14 p-1"
-									onChange={(event) =>
+								<ColorPickerPopover
+									onValueChange={(value) =>
 										setOptions((current) =>
 											current.map((o) =>
-												o.id === option.id
-													? { ...o, color: event.target.value }
-													: o
+												o.id === option.id ? { ...o, color: value } : o
 											)
 										)
 									}
-									type="color"
+									triggerAriaLabel={`Option ${option.label} colour`}
+									triggerClassName="h-9 w-14 shrink-0 p-1"
+									triggerShowValue={false}
 									value={option.color ?? "#888888"}
 								/>
 								{fieldType === "status" && (

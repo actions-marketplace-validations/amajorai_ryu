@@ -62,7 +62,7 @@ const POLAR_FIXED_USD = TOPUP_POLAR_PROCESSING_FIXED_USD;
  * drift.
  *
  * NOT one number any more. The free node is sized by PLAN, and for Teams by SEAT
- * COUNT — Pro runs `cx23`, Max `cx33`, Teams `cx43`, and Business `cx53`.
+ * COUNT — Plus and Pro run `cx23`, Max `cx33`, Teams `cx43`, and Business `cx53`.
  * Teams uses one `cx43` through 49 seats and two at 50. Charging every plan a
  * flat `cx23` would understate the cost of the larger tiers, so the margin guard
  * resolves the node from the same plan/seat ladder as provisioning.
@@ -127,7 +127,9 @@ describe("included credit pool", () => {
 describe("regional included node profiles", () => {
 	it("keeps the EU defaults while selecting Singapore's available shapes", () => {
 		expect(baseNodeTypeForPlanAtLocation("pro", "nbg1")).toBe("cx23");
+		expect(baseNodeTypeForPlanAtLocation("plus", "nbg1")).toBe("cx23");
 		expect(baseNodeTypeForPlanAtLocation("pro", "sin")).toBeNull();
+		expect(baseNodeTypeForPlanAtLocation("plus", "sin")).toBeNull();
 		expect(baseNodeTypeForPlanAtLocation("max", "sin")).toBeNull();
 		expect(baseNodeTypeForPlanAtLocation("teams", "sin", 20)).toBe("cpx22");
 		expect(baseNodeTypeForPlanAtLocation("business", "sin", 20)).toBe("cpx32");
@@ -307,12 +309,24 @@ describe("current pricing worksheet", () => {
 	const cases = [
 		["marketplace-membership", 1, false, 4.2, 0.21],
 		["marketplace-membership", 1, true, 46.5, 0.2325],
+		["plus", 1, false, 13.165, 0.3376],
+		["plus", 1, true, 90.55, 0.2322],
 		["pro", 1, false, 17.49, 0.3569],
 		["pro", 1, true, 123.75, 0.2526],
 		["max", 1, false, 44.415, 0.4486],
 		["max", 1, true, 353.35, 0.3569],
 		["teams", 5, false, 150.5, 0.602],
 		["teams", 5, true, 1344, 0.5376],
+		["teams-lite", 5, false, 88.65, 0.591],
+		["teams-lite", 5, true, 788.8, 0.5259],
+		["teams-lite", 6, false, 114.3, 0.5715],
+		["teams-lite", 6, true, 1003.1, 0.5016],
+		["teams-lite", 10, false, 301.3, 0.7533],
+		["teams-lite", 10, true, 2873.1, 0.7183],
+		["teams-lite", 25, false, 939.25, 0.8167],
+		["teams-lite", 25, true, 9126, 0.7936],
+		["teams-lite", 50, false, 1972.5, 0.8219],
+		["teams-lite", 50, true, 19_187.5, 0.7995],
 		["business", 5, false, 119.5, 0.3983],
 		["business", 5, true, 878.5, 0.2928],
 		["business", 25, false, 632.5, 0.4865],
@@ -465,7 +479,14 @@ describe("deposit fee", () => {
 		// it can never use. Asserted because the docs advertised a Lifetime
 		// deposit rate for months, which promised a purchase the API rejects.
 		expect(PLANS["desktop-license"].managedInference).toBe(false);
-		for (const id of ["pro", "max", "teams", "business"] as PlanId[]) {
+		for (const id of [
+			"pro",
+			"plus",
+			"max",
+			"teams",
+			"teams-lite",
+			"business",
+		] as PlanId[]) {
 			expect(PLANS[id].managedInference).toBe(true);
 		}
 	});

@@ -20,7 +20,7 @@ import {
 	AgentImageField,
 } from "@/src/components/agents/AgentImageField.tsx";
 import { AgentSetupComposer } from "@/src/components/agents/AgentSetupComposer.tsx";
-import { useTabsContext } from "@/src/contexts/TabsContext.tsx";
+import { useTabSelector } from "@/src/contexts/TabsContext.tsx";
 import { useActiveNode } from "@/src/hooks/useActiveNode.ts";
 import { useAgents } from "@/src/hooks/useAgents.ts";
 import { ALL_MCP_TOOLS } from "@/src/lib/agent-capabilities.ts";
@@ -58,7 +58,7 @@ const TITLE_MAX_LENGTH = 48;
 // props and no entry point has to thread callbacks through.
 export function CreateAgentDialog() {
 	const { open, setOpen } = useCreateAgentDialog();
-	const { openTab } = useTabsContext();
+	const openTab = useTabSelector((state) => state.openTab);
 	const { resolvedTheme } = useTheme();
 	const { agents, create } = useAgents();
 	const { openChannelSetup } = useChannelSetupDialog();

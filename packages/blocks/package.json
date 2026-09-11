@@ -6,6 +6,7 @@
   "exports": {
     "./composer/composer-directory": "./src/composer/composer-directory.ts",
     "./desktop/agent-elements/agent-chat": "./src/desktop/agent-elements/agent-chat.tsx",
+    "./desktop/agent-availability": "./src/desktop/agent-availability.tsx",
     "./desktop/agent-elements/input-bar": "./src/desktop/agent-elements/input-bar.tsx",
     "./desktop/agent-elements/input/composer-menu": "./src/desktop/agent-elements/input/composer-menu.tsx",
     "./desktop/agent-elements/types": "./src/desktop/agent-elements/types.ts",

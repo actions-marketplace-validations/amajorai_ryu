@@ -132,7 +132,9 @@ export function ListingHero({
 	iconId,
 	iconName,
 	iconPadding,
+	iconAppearance,
 	iconUrl,
+	iconUrlDark,
 	seedId,
 	banner,
 	dither,
@@ -212,8 +214,10 @@ export function ListingHero({
 	iconName?: string | null;
 	/** The listing's declared inset for its logo (manifest `iconPadding`). */
 	iconPadding?: string | null;
+	iconAppearance?: "bare" | "monochrome";
 	/** Raster logo URL — the manifest's `iconUrl`, straight through. */
 	iconUrl?: string | null;
+	iconUrlDark?: string | null;
 	/** Stable seed for the generative tile: ALWAYS the item's unique id, so the
 	 *  hero and the card tile the same app identically. */
 	seedId?: string | null;
@@ -260,10 +264,12 @@ export function ListingHero({
 					className="size-16 sm:size-20"
 					dither={dither}
 					fallback={icon}
+					iconAppearance={iconAppearance}
 					iconBackground={iconBackground}
 					iconId={iconId}
 					iconPadding={iconPadding}
 					iconUrl={iconUrl}
+					iconUrlDark={iconUrlDark}
 					name={iconName}
 					seedId={seedId}
 					size={34}

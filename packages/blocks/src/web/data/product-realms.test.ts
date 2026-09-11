@@ -11,6 +11,8 @@ test("the product realm keeps the public product names and destinations together
 		"mail",
 		"notify",
 		"hire",
+		"compute",
+		"share",
 	]);
 	expect(PRODUCT_REALMS.map((realm) => realm.label)).toEqual([
 		"Ryu OS",
@@ -21,6 +23,8 @@ test("the product realm keeps the public product names and destinations together
 		"Ryu Mail",
 		"Ryu Notify",
 		"Ryu Hire",
+		"Ryu Compute",
+		"Ryu Share",
 	]);
 	for (const realm of PRODUCT_REALMS) {
 		expect(realm.href.startsWith("/")).toBe(true);

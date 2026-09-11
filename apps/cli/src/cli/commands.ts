@@ -912,13 +912,58 @@ const catalogCommand: Command = {
 /** `ryu add <id>` / `ryu install <id>` — the shadcn-style install command. Takes
  *  the id of an app OR a plugin: `POST /api/plugins/:id/install` is the single
  *  lifecycle route for both, so there is nothing to branch on here. */
+async function runLifecyclePreview(
+	ctx: CliContext,
+	id: string,
+	action: "install" | "enable" | "disable" | "uninstall" | "update",
+	options: { cascade?: boolean; force?: boolean } = {}
+): Promise<number> {
+	if (!ctx.api.previewAppLifecycle) {
+		throw new Error(
+			`Core does not expose a dry-run planner for '${action}'. Run the live command without --dry-run only after reviewing its effects.`
+		);
+	}
+	const plan = await ctx.api.previewAppLifecycle(
+		ctx.target,
+		id,
+		action,
+		options
+	);
+	if (ctx.flags.json) {
+		ctx.io.out(`${JSON.stringify(plan, null, 2)}\n`);
+		return 0;
+	}
+	const record =
+		plan && typeof plan === "object" && !Array.isArray(plan)
+			? (plan as Record<string, unknown>)
+			: {};
+	const list = (key: string): string[] =>
+		Array.isArray(record[key])
+			? record[key].filter(
+					(value): value is string => typeof value === "string"
+				)
+			: [];
+	const affected =
+		list("wouldEnable").length > 0
+			? list("wouldEnable")
+			: list("wouldDisable").length > 0
+				? list("wouldDisable")
+				: list("installedDependencies");
+	const suffix = affected.length > 0 ? `\n  ${affected.join(" → ")}` : "";
+	ctx.io.out(`Dry run · ${action} ${id} (nothing changed).${suffix}\n`);
+	return 0;
+}
+
 const addCommand: Command = {
 	name: "add",
 	aliases: ["install"],
 	summary: "Install an app or plugin from the catalog",
-	usage: "ryu add <id> [--json]",
+	usage: "ryu add <id> [--dry-run] [--json]",
 	run: async (ctx) => {
 		const id = requireArg(ctx, "app or plugin id", "ryu add <id>");
+		if (ctx.flags.dryRun) {
+			return runLifecyclePreview(ctx, id, "install");
+		}
 		const record = await ctx.api.installApp(ctx.target, id);
 		if (ctx.flags.json) {
 			ctx.io.out(`${JSON.stringify(record, null, 2)}\n`);
@@ -935,9 +980,12 @@ const addCommand: Command = {
 const enableCommand: Command = {
 	name: "enable",
 	summary: "Enable an installed app or plugin",
-	usage: "ryu enable <id> [--json]",
+	usage: "ryu enable <id> [--dry-run] [--json]",
 	run: async (ctx) => {
 		const id = requireArg(ctx, "app or plugin id", "ryu enable <id>");
+		if (ctx.flags.dryRun) {
+			return runLifecyclePreview(ctx, id, "enable");
+		}
 		const record = await ctx.api.enableApp(ctx.target, id);
 		if (ctx.flags.json) {
 			ctx.io.out(`${JSON.stringify(record, null, 2)}\n`);
@@ -952,9 +1000,15 @@ const enableCommand: Command = {
 const disableCommand: Command = {
 	name: "disable",
 	summary: "Disable an app or plugin",
-	usage: "ryu disable <id> [--cascade] [--json]",
+	usage: "ryu disable <id> [--cascade] [--dry-run] [--json]",
 	run: async (ctx) => {
 		const id = requireArg(ctx, "app or plugin id", "ryu disable <id>");
+		if (ctx.flags.dryRun) {
+			return runLifecyclePreview(ctx, id, "disable", {
+				cascade: ctx.flags.cascade,
+				force: ctx.flags.force,
+			});
+		}
 		const record = await ctx.api.disableApp(ctx.target, id, {
 			cascade: ctx.flags.cascade,
 		});
@@ -972,9 +1026,14 @@ const uninstallCommand: Command = {
 	name: "uninstall",
 	aliases: ["rm"],
 	summary: "Uninstall an app or plugin",
-	usage: "ryu uninstall <id> [--cascade] [--json]",
+	usage: "ryu uninstall <id> [--cascade] [--dry-run] [--json]",
 	run: async (ctx) => {
 		const id = requireArg(ctx, "app or plugin id", "ryu uninstall <id>");
+		if (ctx.flags.dryRun) {
+			return runLifecyclePreview(ctx, id, "uninstall", {
+				cascade: ctx.flags.cascade,
+			});
+		}
 		const result = await ctx.api.uninstallApp(ctx.target, id, {
 			cascade: ctx.flags.cascade,
 		});
@@ -1143,6 +1202,81 @@ const versionCommand: Command = {
 	},
 };
 
+function mailJsonArg(ctx: CliContext, index: number, usage: string): unknown {
+	const raw = packageArg(ctx, index, usage);
+	try {
+		return JSON.parse(raw) as unknown;
+	} catch {
+		throw new UsageError(`Expected valid JSON for ${usage}`);
+	}
+}
+
+/** Agent Mail's scriptable resource client. Bodies are JSON so the same command
+ * works for local sidecars and the hosted gateway-key plane. */
+const mailCommand: Command = {
+	name: "mail",
+	summary: "Manage agent inboxes, messages, threads, drafts, and webhooks",
+	usage:
+		"ryu mail <status|inboxes|messages|threads|drafts|webhooks|events|send> …",
+	run: async (ctx) => {
+		const action = ctx.args[0] ?? "inboxes";
+		const id = ctx.args[1];
+		const usage =
+			"ryu mail <status|inboxes|messages|threads|drafts|webhooks|events|send> …";
+		let path: string;
+		let method = "GET";
+		let body: unknown;
+		if (action === "status") {
+			path = "/api/mail/status";
+		} else if (action === "inboxes") {
+			path = "/api/mail/inboxes";
+		} else if (["messages", "threads", "drafts"].includes(action)) {
+			if (!id) {
+				throw new UsageError(`Usage: ${usage} ${action} <inbox-id>`);
+			}
+			path = `/api/mail/inboxes/${encodeURIComponent(id)}/${action}`;
+		} else if (action === "webhooks") {
+			path = "/api/mail/webhooks";
+		} else if (action === "events") {
+			path = id
+				? `/api/mail/inboxes/${encodeURIComponent(id)}/events`
+				: "/api/mail/events";
+		} else if (action === "send") {
+			if (!id) {
+				throw new UsageError(`Usage: ${usage} send <inbox-id> <json-body>`);
+			}
+			path = `/api/mail/inboxes/${encodeURIComponent(id)}/send`;
+			method = "POST";
+			body = mailJsonArg(ctx, 2, `${usage} send <inbox-id> <json-body>`);
+		} else if (
+			[
+				"create-inbox",
+				"create-webhook",
+				"create-pod",
+				"create-domain",
+			].includes(action)
+		) {
+			const route = {
+				"create-inbox": "/api/mail/inboxes",
+				"create-webhook": "/api/mail/webhooks",
+				"create-pod": "/api/mail/pods",
+				"create-domain": "/api/mail/domains",
+			}[action];
+			if (!route) {
+				throw new UsageError(`Usage: ${usage}`);
+			}
+			path = route;
+			method = "POST";
+			body = mailJsonArg(ctx, 1, `${usage} ${action} <json-body>`);
+		} else {
+			throw new UsageError(`Usage: ${usage}`);
+		}
+		const result = await callCore(ctx, path, { method, body });
+		ctx.io.out(`${JSON.stringify(result, null, 2)}\n`);
+		return 0;
+	},
+};
+
 /** All built-in commands, in help-display order. `help` is appended below so its
  *  handler can close over this same list. */
 const BASE_COMMANDS: Command[] = [
@@ -1180,6 +1314,7 @@ const BASE_COMMANDS: Command[] = [
 	uninstallCommand,
 	initCommand,
 	chatCommand,
+	mailCommand,
 	nodeCommand,
 	versionCommand,
 ];
@@ -1217,7 +1352,7 @@ export function renderHelp(): string {
 		"  --force         Override a refused operation where supported",
 		"  --cascade       Include dependents on disable/uninstall",
 		"  --fix           Apply safe fixes for commands that support them",
-		"  --dry-run       Preview safe fixes without writing changes",
+		"  --dry-run       Preview supported mutating commands without writing changes",
 		"  --include-secrets  Include an encrypted local secrets envelope when exporting",
 		"  -h, --help      Show this help",
 		"  --version       Print the version",

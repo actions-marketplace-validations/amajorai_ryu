@@ -3,18 +3,21 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { DOCS_URL } from "./data/resources.tsx";
 import RealmsHero from "./realms-hero.tsx";
 
-test("homepage preserves the approved headline, download, docs, and interactive workflow", () => {
+test("homepage preserves the approved headline and uses the full-viewport hero window", () => {
 	const html = renderToStaticMarkup(<RealmsHero />);
+	const heroMarkup = html.slice(0, html.indexOf("</section>"));
 	expect(html).toContain("We deploy and run AI agents<br/>");
 	expect(html).toContain("safely in the");
 	expect(html).toContain("cloud");
 	expect(html).toContain(`href="${DOCS_URL}"`);
 	expect(html).toContain('aria-label="More download options"');
-	expect(html).toContain('data-testid="hero-workflow-stage"');
-	expect(html).toContain("After a call");
-	expect(html.indexOf("We deploy and run AI agents<br/>")).toBeLessThan(
-		html.indexOf('data-testid="hero-workflow-stage"')
-	);
+	expect(html).not.toContain('data-slot="button-group-separator"');
+	expect(html).toContain("border-r-0");
+	expect(html).toContain('data-testid="hero-viewport"');
+	expect(html).toContain("min-h-svh");
+	expect(html).not.toContain("/background.png");
+	expect(html).toContain('data-testid="product-bento-grid"');
+	expect(heroMarkup).not.toContain('data-testid="hero-workflow-stage"');
 	expect(html.match(/<h1[\s>]/g)).toHaveLength(1);
 });
 

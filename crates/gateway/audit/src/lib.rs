@@ -300,6 +300,13 @@ fn api_key_storage_key(key: &str) -> String {
     hex::encode(digest.finalize())
 }
 
+/// Correlate operational events without exposing any bearer bytes or prefix.
+pub fn credential_log_id(key: &str) -> String {
+    let mut digest = Sha256::new();
+    digest.update(key.as_bytes());
+    format!("key_{}", hex::encode(digest.finalize()))
+}
+
 /// Migrate pre-hash audit rows in place. The display prefix preserves the UI's
 /// existing redacted view while the original credential is removed from disk.
 fn migrate_api_key_storage(conn: &Connection) -> anyhow::Result<()> {

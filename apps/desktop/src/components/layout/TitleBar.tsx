@@ -12,6 +12,7 @@ import {
 	Chat01Icon,
 	CheckmarkBadge02Icon,
 	Copy01Icon,
+	CpuIcon,
 	Delete02Icon,
 	DeliverySecure01Icon,
 	Download01Icon,
@@ -33,6 +34,7 @@ import {
 	RowDeleteIcon,
 	ServerStack01Icon,
 	Settings01Icon,
+	Share01Icon,
 	ShieldKeyIcon,
 	SidebarRightIcon,
 	SidebarTopIcon,
@@ -151,7 +153,7 @@ function DropIndicator({ side }: { side: "left" | "right" }) {
 		<span
 			aria-hidden
 			className={cn(
-				"reorder-drop-indicator pointer-events-none absolute inset-y-1 z-20 w-0.5 bg-primary",
+				"reorder-drop-indicator pointer-events-none absolute inset-y-1 z-20 w-0.5 rounded-full bg-primary shadow-[0_0_8px_color-mix(in_oklab,var(--primary)_55%,transparent)] transition-[opacity,transform] duration-150 ease-[cubic-bezier(0.23,1,0.32,1)]",
 				side === "left" ? "-left-1" : "-right-1"
 			)}
 		/>
@@ -253,6 +255,7 @@ const PATH_ICONS: Record<string, IconSvgElement> = {
 	// consults before this map. A path key here would go stale the moment the app
 	// moved itself.
 	"/chat": Chat01Icon,
+	"/compute": CpuIcon,
 	// Bare `/agents` is a Library route now (TabsContext's `LIBRARY_ALIAS_PATHS`),
 	// so this row is read only for the agent routes UNDER it: the explicit
 	// agent-edit branch in `pathIcon`, plus any other `/agents/*` deep link that
@@ -276,6 +279,7 @@ const PATH_ICONS: Record<string, IconSvgElement> = {
 	"/downloads": Download01Icon,
 	"/project": GitBranchIcon,
 	"/settings": Settings01Icon,
+	"/share": Share01Icon,
 	"/vault": ShieldKeyIcon,
 };
 
@@ -796,7 +800,8 @@ function PinnedTab({ tab, isActive }: { tab: Tab; isActive: boolean }) {
 														: "hover:bg-background/40"
 												),
 										tab.unloaded && "opacity-50",
-										isDragging && "opacity-40"
+										isDragging &&
+											"scale-[0.97] opacity-40 shadow-lg transition-[opacity,transform,box-shadow] duration-150 ease-[cubic-bezier(0.23,1,0.32,1)] motion-reduce:transform-none"
 									)}
 									data-active={isActive}
 									onClick={() => activateTab(tab.id)}
@@ -1005,7 +1010,8 @@ function RegularTab({
 									isActive ? "text-foreground" : "hover:bg-background/40"
 								),
 						tab.unloaded && "opacity-60",
-						isDragging && "opacity-40"
+						isDragging &&
+							"scale-[0.97] opacity-40 shadow-lg transition-[opacity,transform,box-shadow] duration-150 ease-[cubic-bezier(0.23,1,0.32,1)] motion-reduce:transform-none"
 					)}
 					data-active={isActive}
 					data-tab-appearance={floatingTabs ? "floating" : "morphing"}

@@ -325,6 +325,9 @@ function nodeSourceFor(
 	if (
 		normalized === "local" ||
 		normalized === "ollama" ||
+		normalized === "lemonade" ||
+		normalized === "llama-swap" ||
+		normalized === "freetoken" ||
 		normalized === "llamacpp" ||
 		normalized === "lmstudio" ||
 		normalized === "vllm"

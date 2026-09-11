@@ -5,6 +5,7 @@ import {
 	Shield01Icon,
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
+import { AgentAuditPanel } from "@ryu/marketplace/catalog/detail/agent-audit-panel";
 import { Badge } from "@ryu/ui/components/badge.tsx";
 import { Button } from "@ryu/ui/components/button.tsx";
 import { RangeSlider } from "@ryu/ui/components/motion/range-slider";
@@ -12,11 +13,13 @@ import { toast } from "@ryu/ui/components/sileo.tsx";
 import { Spinner } from "@ryu/ui/components/spinner.tsx";
 import { Switch } from "@ryu/ui/components/switch.tsx";
 import { formatCount } from "@ryu/ui/lib/number-format.ts";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useContext, useEffect, useMemo, useState } from "react";
 import {
 	SettingsItem,
 	SettingsSection,
 } from "@/src/components/settings/shared/settings-items.tsx";
+import { TabsContext } from "@/src/contexts/TabsContext.tsx";
+import { runCatalogScan } from "@/src/lib/api/catalog-scan.ts";
 import type { ApiTarget } from "@/src/lib/api/client.ts";
 import type {
 	GatewayDoctorFinding,
@@ -40,6 +43,7 @@ interface GatewayPostureCardProps {
 	canConfigure?: boolean;
 	compact?: boolean;
 	onContinue?: () => void;
+	onOpenAuditConversation?: (id: string) => void;
 	reachable: boolean;
 	target: ApiTarget;
 }
@@ -160,7 +164,9 @@ export function GatewayPostureCard({
 	reachable,
 	compact = true,
 	onContinue,
+	onOpenAuditConversation,
 }: GatewayPostureCardProps) {
+	const tabsHost = useContext(TabsContext);
 	const [snapshot, setSnapshot] = useState<GatewayPostureSnapshot | null>(null);
 	const [coverage, setCoverage] = useState<GatewayCoverageSnapshot | null>(
 		null
@@ -504,6 +510,29 @@ export function GatewayPostureCard({
 						</Button>
 					) : null}
 				</div>
+				{doctor && reachable && !loading ? (
+					<div className="px-3 pt-3">
+						<AgentAuditPanel
+							key={JSON.stringify([target.url, doctor])}
+							onOpenConversation={
+								onOpenAuditConversation ??
+								(tabsHost
+									? (conversationId) =>
+											tabsHost.openTab("/chat", { conversationId })
+									: undefined)
+							}
+							runAudit={() =>
+								runCatalogScan(requestTarget, {
+									kind: "gateway",
+									id: "gateway",
+									name: "Gateway health doctor",
+									metadata: { doctor },
+									scorecard: null,
+								})
+							}
+						/>
+					</div>
+				) : null}
 				{doctorFix?.dryRun && doctorFix.plannedFixes.length > 0 ? (
 					<div className="mx-3 mt-3 space-y-3 rounded-lg border border-primary/30 bg-primary/5 px-3 py-3">
 						<div>

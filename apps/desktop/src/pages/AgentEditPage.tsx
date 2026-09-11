@@ -61,7 +61,7 @@ import {
 	SettingsSection,
 } from "@/src/components/settings/shared/settings-items.tsx";
 import { useEntitlementContext } from "@/src/contexts/entitlement-context.tsx";
-import { useTabsContext } from "@/src/contexts/TabsContext.tsx";
+import { useTabSelector } from "@/src/contexts/TabsContext.tsx";
 import { useTitleBar } from "@/src/contexts/TitleBarContext.tsx";
 import { useActiveNode } from "@/src/hooks/useActiveNode.ts";
 import { useAgents } from "@/src/hooks/useAgents.ts";
@@ -102,6 +102,7 @@ import {
 	fetchAgentTools,
 	updateAgentPosture,
 } from "@/src/lib/api/agents.ts";
+import { runCatalogScan } from "@/src/lib/api/catalog-scan.ts";
 import type { ApiTarget } from "@/src/lib/api/client.ts";
 import {
 	deleteTriggerSubscription,
@@ -418,7 +419,7 @@ export default function AgentEditPage({
 	const { agentId: routeAgentId } = useParams<{ agentId: string }>();
 	const agentId = agentIdProp ?? routeAgentId;
 	const navigate = useNavigate();
-	const { openTab } = useTabsContext();
+	const openTab = useTabSelector((state) => state.openTab);
 	const openAgentsCatalog = useCallback(() => {
 		openTab("/store/agents", { title: "Customize" });
 	}, [openTab]);
@@ -1747,6 +1748,16 @@ export default function AgentEditPage({
 					healthBadge={<ScorecardBadge scorecard={agentHealthScorecard} />}
 					healthPanel={
 						<ScorecardPanel
+							agentScan={() =>
+								runCatalogScan(target, {
+									kind: "agent",
+									id: agentId || "draft",
+									name: name.trim() || "Untitled agent",
+									description,
+									metadata: { configuration: agentHealthInput },
+									scorecard: agentHealthScorecard,
+								})
+							}
 							dataTestId="agent-health-scorecard"
 							disclaimer={
 								<p className="text-muted-foreground text-xs leading-relaxed">
@@ -1754,6 +1765,10 @@ export default function AgentEditPage({
 									configuration only; they do not run the agent or replace Core
 									and Gateway authorization.
 								</p>
+							}
+							key={JSON.stringify([target.url, agentId, agentHealthInput])}
+							onOpenConversation={(conversationId) =>
+								openTab("/chat", { conversationId })
 							}
 							rulesetLabel="Agent ruleset"
 							scorecard={agentHealthScorecard}

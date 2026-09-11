@@ -12,6 +12,7 @@ import {
 	asDisplayModeArg,
 	asMediaImageArg,
 	asMediaTtsArg,
+	asMediaVideoArg,
 	asOpenExternalArg,
 	asPromptArg,
 	asRouteClaim,
@@ -111,10 +112,18 @@ describe("asShellOpenTabArg", () => {
 
 describe("asMediaImageArg — numeric bound on count", () => {
 	test("accepts a non-negative finite count and optional strings", () => {
-		expect(asMediaImageArg({ prompt: "cat", count: 4, size: "1024" })).toEqual({
+		expect(
+			asMediaImageArg({
+				prompt: "cat",
+				count: 4,
+				size: "1024",
+				request_id: "generation-1",
+			})
+		).toEqual({
 			prompt: "cat",
 			count: 4,
 			size: "1024",
+			request_id: "generation-1",
 		});
 		// count is optional; zero is allowed (>= 0).
 		expect(asMediaImageArg({ prompt: "cat", count: 0 })).toEqual({
@@ -142,8 +151,20 @@ describe("asMediaImageArg — numeric bound on count", () => {
 describe("asMediaTtsArg — numeric bound on speed", () => {
 	test("accepts text with optional engine/voice/language/speed", () => {
 		expect(
-			asMediaTtsArg({ text: "hello", engine: "e", voice: "v", speed: 1.5 })
-		).toEqual({ text: "hello", engine: "e", voice: "v", speed: 1.5 });
+			asMediaTtsArg({
+				text: "hello",
+				engine: "e",
+				voice: "v",
+				speed: 1.5,
+				request_id: "generation-2",
+			})
+		).toEqual({
+			text: "hello",
+			engine: "e",
+			voice: "v",
+			speed: 1.5,
+			request_id: "generation-2",
+		});
 	});
 
 	test("rejects empty text and out-of-range speed", () => {
@@ -151,6 +172,17 @@ describe("asMediaTtsArg — numeric bound on speed", () => {
 		expect(asMediaTtsArg({ text: "hi", speed: -0.5 })).toBeNull();
 		expect(asMediaTtsArg({ text: "hi", speed: Number.NaN })).toBeNull();
 		expect(asMediaTtsArg({ text: "hi", voice: 9 })).toBeNull();
+	});
+});
+
+describe("asMediaVideoArg — request correlation", () => {
+	test("preserves a bounded request id while rejecting non-string ids", () => {
+		expect(
+			asMediaVideoArg({ prompt: "a slow dolly", request_id: "generation-3" })
+		).toEqual({ prompt: "a slow dolly", request_id: "generation-3" });
+		expect(
+			asMediaVideoArg({ prompt: "a slow dolly", request_id: 3 })
+		).toBeNull();
 	});
 });
 

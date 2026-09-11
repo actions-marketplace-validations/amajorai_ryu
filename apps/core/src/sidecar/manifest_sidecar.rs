@@ -992,7 +992,11 @@ impl ManifestSidecar {
 /// name itself on the host-API callback (`RYU_EXT_PLUGIN_ID`). Layered over the
 /// manifest-declared env (the manifest cannot override these reserved keys — they are
 /// applied last).
-fn inject_ext_env(env: &mut BTreeMap<String, String>, plugin_id: &str, token: &str) {
+fn inject_ext_env(
+    env: &mut BTreeMap<String, String>,
+    plugin_id: &str,
+    token: &str,
+) -> anyhow::Result<()> {
     env.insert(
         crate::sidecar::ext_proxy::ENV_EXT_TOKEN.to_owned(),
         token.to_owned(),
@@ -1000,6 +1004,14 @@ fn inject_ext_env(env: &mut BTreeMap<String, String>, plugin_id: &str, token: &s
     env.insert(
         crate::sidecar::ext_proxy::ENV_EXT_PLUGIN_ID.to_owned(),
         plugin_id.to_owned(),
+    );
+    env.insert(
+        "RYU_GATEWAY_URL".to_owned(),
+        crate::sidecar::gateway::gateway_url(),
+    );
+    env.insert(
+        "RYU_GATEWAY_TOKEN".to_owned(),
+        crate::sidecar::gateway::gateway_bearer()?,
     );
     // Co-location guarantee: pass Core's data dir so a sidecar that persists state
     // (e.g. ryu-mail's mail.db) lands under the SAME `RYU_DIR` Core uses, honoring
@@ -1016,6 +1028,7 @@ fn inject_ext_env(env: &mut BTreeMap<String, String>, plugin_id: &str, token: &s
     // keeps the shim path from overriding it.
     env.entry(crate::sidecar::cli_shims::ENV_CORE_PORT.to_owned())
         .or_insert_with(crate::sidecar::cli_shims::core_port_string);
+    Ok(())
 }
 
 /// Inject the Shadow API bearer (`SHADOW_API_TOKEN`) so a sidecar that dials the
@@ -2175,7 +2188,7 @@ impl Sidecar for ManifestSidecar {
                     // Layer the reserved ext-loader env over the manifest's own env
                     // (applied last so a manifest can't override the injected secret).
                     let mut env = bin.env.clone();
-                    inject_ext_env(&mut env, &plugin_id, &ext_token);
+                    inject_ext_env(&mut env, &plugin_id, &ext_token)?;
                     inject_shadow_env(&mut env);
                     inject_cap_shims(&mut env, &plugin_id, &plugin_dir).await;
                     spawn(&handle, &exe.to_string_lossy(), &bin.args, &env).await?;
@@ -2221,7 +2234,7 @@ impl Sidecar for ManifestSidecar {
                             crate::profile::port(spec.port).to_string(),
                         );
                     }
-                    inject_ext_env(&mut env, &plugin_id, &ext_token);
+                    inject_ext_env(&mut env, &plugin_id, &ext_token)?;
                     inject_shadow_env(&mut env);
                     inject_cap_shims(&mut env, &plugin_id, &plugin_dir).await;
                     spawn(&handle, &program, &local.args, &env).await?;
@@ -2253,7 +2266,7 @@ impl Sidecar for ManifestSidecar {
                             crate::profile::port(spec.port).to_string(),
                         );
                     }
-                    inject_ext_env(&mut env, &plugin_id, &ext_token);
+                    inject_ext_env(&mut env, &plugin_id, &ext_token)?;
                     inject_shadow_env(&mut env);
                     inject_cap_shims(&mut env, &plugin_id, &plugin_dir).await;
                     spawn(&handle, &python.to_string_lossy(), &args, &env).await?;
@@ -2283,7 +2296,7 @@ impl Sidecar for ManifestSidecar {
                     // Env: reserved ext-loader vars + cap shims (which set RYU_CORE_PORT
                     // for the host-RPC callback) + the host bootstrap contract.
                     let mut env: BTreeMap<String, String> = BTreeMap::new();
-                    inject_ext_env(&mut env, &plugin_id, &ext_token);
+                    inject_ext_env(&mut env, &plugin_id, &ext_token)?;
                     inject_cap_shims(&mut env, &plugin_id, &plugin_dir).await;
                     env.insert(
                         "RYU_HOST_ENTRY".to_owned(),

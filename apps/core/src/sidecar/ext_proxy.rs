@@ -1294,7 +1294,7 @@ pub fn host_routes() -> Router<ServerState> {
             "/api/host/model/stream",
             post(crate::server::model_stream::host_model_stream),
         )
-        .route("/api/host/rpc", post(host_rpc))
+        .route("/api/host/rpc", post(host_rpc).layer(axum::extract::DefaultBodyLimit::max(crate::backups::MAX_APP_BYTES + 64 * 1024)))
         .route("/api/host/capability/:cap", post(host_capability))
 }
 
@@ -1459,7 +1459,8 @@ async fn host_rpc(
         Err((status, msg)) => return (status, Json(json!({ "error": msg }))).into_response(),
     };
 
-    let bridge = crate::plugin_host::PluginHookBridge::new(plugin_id, grants, state);
+    let caller = crate::server::verified_caller_from_headers(&headers).await;
+    let bridge = crate::plugin_host::PluginHookBridge::new_for_request(plugin_id, grants, state, caller, None);
     use crate::tool_exec::{InvokeOutcome, SandboxBridge};
     match bridge.handle(bridge_path.to_owned(), body.args).await {
         InvokeOutcome::Result(r) if r.is_error => {

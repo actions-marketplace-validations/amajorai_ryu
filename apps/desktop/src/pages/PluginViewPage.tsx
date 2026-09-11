@@ -42,7 +42,7 @@ import {
 	DeclarativeView,
 	type ViewSourceFetcher,
 } from "@/src/components/views/DeclarativeView.tsx";
-import { useTabsContext } from "@/src/contexts/TabsContext.tsx";
+import { useTabSelector } from "@/src/contexts/TabsContext.tsx";
 import { useActiveNode } from "@/src/hooks/useActiveNode.ts";
 import { usePluginContributions } from "@/src/hooks/usePluginContributions.ts";
 import { apiUrl, requestHeaders, toTarget } from "@/src/lib/api/client.ts";
@@ -58,7 +58,7 @@ export default function PluginViewPage({
 	const { confirm, confirmationDialog } = useConfirmDialog();
 
 	const { views } = usePluginContributions();
-	const { openTab } = useTabsContext();
+	const openTab = useTabSelector((state) => state.openTab);
 	const node = useActiveNode();
 	const queryClient = useQueryClient();
 	const [reloadToken, setReloadToken] = useState(0);

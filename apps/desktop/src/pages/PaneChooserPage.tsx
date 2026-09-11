@@ -21,7 +21,7 @@ import { HugeiconsIcon } from "@hugeicons/react";
 import {
 	findSplit,
 	useCurrentTabId,
-	useTabsContext,
+	useTabSelector,
 } from "@/src/contexts/TabsContext.tsx";
 import { DASHBOARD_DEFAULT_PATH } from "@/src/lib/dashboards/app.ts";
 import { PANE_CHOOSER_PATH } from "@/src/lib/splitPresets.ts";
@@ -45,7 +45,10 @@ const PANE_ROUTES: PaneRoute[] = [
 
 export function PaneChooserPage() {
 	const tabId = useCurrentTabId();
-	const { tabs, splits, setTabRoute, replacePaneTab } = useTabsContext();
+	const tabs = useTabSelector((state) => state.tabs);
+	const splits = useTabSelector((state) => state.splits);
+	const setTabRoute = useTabSelector((state) => state.setTabRoute);
+	const replacePaneTab = useTabSelector((state) => state.replacePaneTab);
 	const split = findSplit(tabs, splits, tabId);
 	// Movable tabs: anything that isn't this pane, isn't pinned, and isn't
 	// another empty pane of this same split (moving one hole into another is a

@@ -297,6 +297,7 @@ export function ReferralsTab({
 							holder={holderName}
 							joined={credits?.referrals.length ?? null}
 							metalTheme={metalTheme}
+							referralUrl={data.referralLink}
 						/>
 					</div>
 

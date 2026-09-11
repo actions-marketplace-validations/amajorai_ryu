@@ -84,7 +84,7 @@ impl RateLimiter {
             .or_insert_with(|| Bucket::new(max_rps));
         let allowed = bucket.try_consume(1.0, max_rps, max_rps);
         if !allowed {
-            warn!(key, rps = max_rps, "bot detection: burst rate exceeded");
+            warn!(key_id = %crate::audit::credential_log_id(key), rps = max_rps, "bot detection: burst rate exceeded");
         }
         allowed
     }
@@ -603,5 +603,39 @@ mod tests {
         // The fleet backend has rpm 1 — one request then deny, proving the swap.
         assert!(reg.check_request_for_key("k", None));
         assert!(!reg.check_request_for_key("k", None));
+    }
+    #[test]
+    fn burst_rejection_logs_no_bearer_bytes() {
+        use std::io::Write;
+        use std::sync::Mutex;
+        #[derive(Clone)]
+        struct Buffer(Arc<Mutex<Vec<u8>>>);
+        impl Write for Buffer {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let output = Arc::new(Mutex::new(Vec::new()));
+        let writer = Buffer(output.clone());
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_writer(move || writer.clone())
+            .finish();
+        let token = "sk-private-log-regression-92bd645a";
+        tracing::subscriber::with_default(subscriber, || {
+            let limiter = RateLimiter::new(cfg(true, Some(10), None, 1));
+            assert!(limiter.check_burst(token));
+            assert!(!limiter.check_burst(token));
+        });
+        let logged = String::from_utf8(output.lock().unwrap().clone()).unwrap();
+        assert!(logged.contains("burst rate exceeded"));
+        assert!(logged.contains(&crate::audit::credential_log_id(token)));
+        assert!(!logged.contains(token));
+        assert!(!logged.contains("sk-private"));
     }
 }

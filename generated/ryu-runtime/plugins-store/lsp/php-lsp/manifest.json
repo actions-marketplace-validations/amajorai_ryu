@@ -13,7 +13,7 @@
   "description": "PHP language server (Intelephense) for the ryu agent: definitions, references, hover, symbols, implementations, call hierarchies and diagnostics after every edit. You install intelephense; the plugin ships config.",
   "tagline": "PHP code intelligence via Intelephense",
   "keywords": ["php", "intelephense", "language-server", "developer"],
-  "icon": "code-circle-02",
+  "icon": "braces",
   "iconDither": {
     "from": 224,
     "to": "transparent",

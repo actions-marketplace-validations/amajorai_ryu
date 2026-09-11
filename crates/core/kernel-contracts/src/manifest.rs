@@ -3316,6 +3316,26 @@ fn default_widget_display_mode() -> String {
     "inline".to_owned()
 }
 
+/// How Core composes a contributed hook.
+///
+/// The historical `directive` mode runs each hook independently and preserves
+/// the existing first-writer-wins behavior at each phase. `middleware` mode
+/// composes hooks as an onion: the hook receives a `next(ctx)` continuation and
+/// may short-circuit, rewrite the context passed downstream, or inspect the
+/// downstream directive before returning its own result.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum HookMode {
+    Directive,
+    Middleware,
+}
+
+impl Default for HookMode {
+    fn default() -> Self {
+        Self::Directive
+    }
+}
+
 /// A server-side chat turn hook contributed by a plugin. The `code` is a JS body
 /// run in the plugin sandbox with `ctx` (the turn context) and `host` (the
 /// capability bridge: `host.sideModel`, `host.storage`, `host.log`) in scope; it
@@ -3334,6 +3354,10 @@ pub struct TurnHookContribution {
     pub id: String,
     /// The turn boundary this hook fires on. Today only `"post_assistant_turn"`.
     pub on: String,
+    /// Optional composition mode. Omitted means the backwards-compatible
+    /// independent directive hook. `middleware` enables the `next(ctx)` chain.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<HookMode>,
     /// Higher-priority hooks run first within a phase. Ties are resolved by
     /// plugin id and hook id, which makes first-writer-wins directives stable.
     #[serde(default)]

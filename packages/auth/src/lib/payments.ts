@@ -1,12 +1,19 @@
-import { Polar } from "@polar-sh/sdk";
+import { HTTPClient, Polar } from "@polar-sh/sdk";
 import {
 	WebhookVerificationError as PolarWebhookVerificationError,
 	validateEvent as polarValidateEvent,
 } from "@polar-sh/sdk/webhooks";
 import { env } from "@ryu/env/server";
+import { POLAR_API_VERSION } from "./polar-api.ts";
+
+const polarHttpClient = new HTTPClient();
+polarHttpClient.addHook("beforeRequest", (request) => {
+	request.headers.set("Polar-Version", POLAR_API_VERSION);
+});
 
 export const polarClient = new Polar({
 	accessToken: env.POLAR_ACCESS_TOKEN,
+	httpClient: polarHttpClient,
 	server: env.POLAR_SERVER,
 });
 

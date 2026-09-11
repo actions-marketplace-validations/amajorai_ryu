@@ -11,7 +11,7 @@
   "stability": "experimental",
   "description": "An interactive Linux virtual desktop for Ryu nodes. The app sidecar owns stable per-Bot screens on the shared node device and exposes them through Core's authenticated WebSocket proxy with mouse and keyboard input. Files and installed applications remain shared.",
   "keywords": ["desktop", "devices", "vnc", "stream", "remote", "computer-use"],
-  "icon": "monitor-02",
+  "icon": "computer",
   "iconDither": { "from": 210, "to": "transparent", "direction": "down" },
   "tagline": "A live, interactive desktop for the node — watch and drive it",
   "category": "Developer Tools",

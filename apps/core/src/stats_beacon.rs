@@ -183,6 +183,8 @@ struct IngestPayload {
     instance_id: String,
     session_id: String,
     requests: u64,
+    api_calls_protected: u64,
+    malicious_calls_blocked: u64,
     input_tokens: u64,
     output_tokens: u64,
     tokens_saved: u64,
@@ -291,10 +293,15 @@ pub fn spawn_stats_beacon(prefs: crate::server::preferences::PreferencesStore) {
             };
 
             let read_u64 = |key: &str| savings.get(key).and_then(|v| v.as_u64()).unwrap_or(0);
+            let requests = read_u64("requests");
             let payload = IngestPayload {
                 instance_id,
                 session_id: session_id.clone(),
-                requests: read_u64("requests"),
+                requests,
+                // Fall back to the existing request counter so an older
+                // Gateway remains compatible with the richer beacon schema.
+                api_calls_protected: read_u64("api_calls_protected").max(requests),
+                malicious_calls_blocked: read_u64("malicious_calls_blocked"),
                 input_tokens: read_u64("input_tokens"),
                 output_tokens: read_u64("output_tokens"),
                 tokens_saved: read_u64("tokens_saved"),
@@ -355,6 +362,8 @@ mod tests {
             instance_id: "instance".to_owned(),
             session_id: "session".to_owned(),
             requests: 0,
+            api_calls_protected: 0,
+            malicious_calls_blocked: 0,
             input_tokens: 0,
             output_tokens: 0,
             tokens_saved: 0,
@@ -373,6 +382,8 @@ mod tests {
         let value = serde_json::to_value(payload).expect("payload should serialize");
         assert_eq!(value["marketplaceStats"][0]["downloads"], 1);
         assert_eq!(value["marketplaceStats"][0]["runs"], 2);
+        assert_eq!(value["apiCallsProtected"], 0);
+        assert_eq!(value["maliciousCallsBlocked"], 0);
         assert!(value.get("userId").is_none());
         assert!(value.get("hostname").is_none());
     }

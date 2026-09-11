@@ -6,6 +6,7 @@ import {
 	ArrowUpRight01Icon,
 	Cancel01Icon,
 	ConnectIcon,
+	CpuIcon,
 	DatabaseIcon,
 	Delete01Icon,
 	DeliverySecure01Icon,
@@ -34,6 +35,7 @@ import {
 	Search01Icon,
 	ServerStack01Icon,
 	Settings03Icon,
+	Share01Icon,
 	SlidersHorizontalIcon,
 	Tick02Icon,
 	Tv01Icon,
@@ -526,6 +528,8 @@ type BuiltinChromeKey =
 	| "new-chat"
 	| "search"
 	| "library"
+	| "compute"
+	| "share"
 	| "memory"
 	| "store"
 	| "marketplace"
@@ -569,6 +573,8 @@ const CHROME_ORDER: ChromeKey[] = [
 	"new-chat",
 	"search",
 	"library",
+	"compute",
+	"share",
 	// "memory" is represented by the owning app's Apps-shelf tile.
 	"store",
 	"inbox",
@@ -585,6 +591,8 @@ const CHROME_LABELS: Record<BuiltinChromeKey, string> = {
 	"new-chat": "New chat",
 	search: "Search",
 	library: "Library",
+	compute: "Compute",
+	share: "Share",
 	memory: "Memory",
 	store: "Customize",
 	marketplace: "Marketplace",
@@ -624,6 +632,8 @@ const FOOTER_CHROME: ReadonlySet<ChromeKey> = new Set([
 const HEADER_BUTTON_CHROME: ChromeKey[] = [
 	// "home" is represented by the owning app's Apps-shelf tile.
 	"new-chat",
+	"compute",
+	"share",
 	"store",
 	"library",
 	// "memory" is represented by the owning app's Apps-shelf tile.
@@ -9134,6 +9144,26 @@ export function SidebarPanelContent({
 						label={t("sidebar.chrome.library", {}, "Library")}
 						menu={chromeMenu}
 						path="/library"
+					/>
+				);
+			case "compute":
+				return (
+					<NavTabButton
+						chromeKey="compute"
+						icon={CpuIcon}
+						label="Compute"
+						menu={chromeMenu}
+						path="/compute"
+					/>
+				);
+			case "share":
+				return (
+					<NavTabButton
+						chromeKey="share"
+						icon={Share01Icon}
+						label="Share"
+						menu={chromeMenu}
+						path="/share"
 					/>
 				);
 			// "memory" is represented by the owning app's Apps-shelf tile. The key stays

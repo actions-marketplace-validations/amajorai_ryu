@@ -3,13 +3,17 @@ import type { GlyphValue } from "@ryu/ui/components/glyph.ts";
 import type { ReactNode } from "react";
 import {
 	createContext,
+	use,
 	useCallback,
 	useContext,
 	useEffect,
+	useLayoutEffect,
 	useMemo,
 	useRef,
 	useState,
+	useSyncExternalStore,
 } from "react";
+import { createStore, type StoreApi } from "zustand/vanilla";
 import type { AttachedImage } from "@/components/agent-elements/input-bar.tsx";
 import { useEntitlementContext } from "@/src/contexts/entitlement-context.tsx";
 import {
@@ -428,6 +432,51 @@ interface TabsContextValue {
  *  test; app code must go through {@link useTabsContext}, which fails loudly
  *  outside a real {@link TabsProvider}. */
 export const TabsContext = createContext<TabsContextValue | null>(null);
+
+const TabsSelectionContext = createContext<StoreApi<TabsContextValue> | null>(
+	null
+);
+
+/** Keep action-only and per-tab subscribers off unrelated navigation updates. */
+function TabsStateProvider({
+	value,
+	children,
+}: {
+	value: TabsContextValue;
+	children: ReactNode;
+}) {
+	const [store] = useState(() => createStore<TabsContextValue>(() => value));
+	useLayoutEffect(() => {
+		store.setState(value, true);
+	}, [store, value]);
+	return (
+		<TabsSelectionContext.Provider value={store}>
+			<TabsContext.Provider value={value}>{children}</TabsContext.Provider>
+		</TabsSelectionContext.Provider>
+	);
+}
+
+const subscribeWithoutProvider = () => () => undefined;
+
+/** Select an existing object, action, or primitive; do not allocate a snapshot. */
+export function useTabSelector<T>(selector: (state: TabsContextValue) => T): T {
+	const store = useContext(TabsSelectionContext);
+	// Direct context providers remain supported by embedded hosts and stories.
+	const fallback = store ? null : use(TabsContext);
+	const getSnapshot = () => {
+		const state = store?.getState() ?? fallback;
+		if (!state) {
+			throw new Error("useTabSelector must be inside TabsProvider");
+		}
+		return selector(state);
+	};
+	return useSyncExternalStore(
+		store?.subscribe ?? subscribeWithoutProvider,
+		getSnapshot,
+		getSnapshot
+	);
+}
+
 const IsActiveTabContext = createContext<boolean>(true);
 
 // The id of the tab a subtree is rendered under. Undefined when rendered
@@ -487,6 +536,7 @@ export function useTabsContext(): TabsContextValue {
 const PATH_TITLES: Record<string, string> = {
 	[DASHBOARD_DEFAULT_PATH]: "Home",
 	"/chat": "New chat",
+	"/compute": "Compute",
 	[PANE_CHOOSER_PATH]: "Empty pane",
 	"/identities/new": "New identity",
 	"/vault": "Vault",
@@ -501,6 +551,7 @@ const PATH_TITLES: Record<string, string> = {
 	"/inbox": "Inbox",
 	"/downloads": "Downloads",
 	"/settings": "Settings",
+	"/share": "Share",
 };
 
 /** The two multi-section shells in the app: LibraryPage and StorePage. */
@@ -1721,7 +1772,13 @@ export function TabsProvider({
 	}, [markActive, syncNav]);
 
 	const updateTabTitle = useCallback((id: string, title: string) => {
-		setTabs((prev) => prev.map((t) => (t.id === id ? { ...t, title } : t)));
+		setTabs((prev) => {
+			const tab = prev.find((item) => item.id === id);
+			if (!tab || tab.title === title) {
+				return prev;
+			}
+			return prev.map((item) => (item.id === id ? { ...item, title } : item));
+		});
 	}, []);
 
 	const updateTabWorkspaceSession = useCallback(
@@ -2793,15 +2850,38 @@ export function TabsProvider({
 	// previous tabs" startup behavior can reopen them next launch. Tear-off
 	// windows (which carry an `initialTab`) never own the session snapshot — they
 	// share localStorage, so letting them write would clobber the main window's.
+	const pendingSession = useRef<(() => void) | null>(null);
+	const flushSession = useCallback(() => {
+		pendingSession.current?.();
+		pendingSession.current = null;
+	}, []);
 	useEffect(() => {
 		if (initialTab) {
 			return;
 		}
-		persistSession(tabs, activeTabId, splits);
-	}, [tabs, activeTabId, splits, initialTab]);
+		// Coalesce rapid navigation and let the selected page paint before
+		// serializing the whole session into synchronous browser storage.
+		pendingSession.current = () => persistSession(tabs, activeTabId, splits);
+		const timer = window.setTimeout(flushSession, 150);
+		return () => window.clearTimeout(timer);
+	}, [tabs, activeTabId, splits, initialTab, flushSession]);
+	useEffect(() => {
+		const onVisibilityChange = () => {
+			if (document.visibilityState === "hidden") {
+				flushSession();
+			}
+		};
+		window.addEventListener("pagehide", flushSession);
+		document.addEventListener("visibilitychange", onVisibilityChange);
+		return () => {
+			window.removeEventListener("pagehide", flushSession);
+			document.removeEventListener("visibilitychange", onVisibilityChange);
+			flushSession();
+		};
+	}, [flushSession]);
 
 	return (
-		<TabsContext.Provider
+		<TabsStateProvider
 			value={{
 				tabs,
 				groups,
@@ -2856,6 +2936,6 @@ export function TabsProvider({
 			}}
 		>
 			{children}
-		</TabsContext.Provider>
+		</TabsStateProvider>
 	);
 }

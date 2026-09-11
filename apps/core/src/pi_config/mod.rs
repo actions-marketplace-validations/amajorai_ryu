@@ -65,6 +65,19 @@ pub const MANAGED_OPENROUTER_ID: &str = "managed-openrouter";
 pub const MANAGED_CLOUDFLARE_ID: &str = "managed-cloudflare";
 pub const MANAGED_BEDROCK_ID: &str = "managed-bedrock";
 
+/// Native ChatGPT-account provider backed by the Login with ChatGPT session
+/// flow. This is deliberately distinct from [`openai-codex`], whose Pi runtime
+/// owns the Codex client path.
+pub const CHATGPT_PROVIDER_ID: &str = "chatgpt";
+pub const CHATGPT_AUTH_KEY: &str = "openai-chatgpt";
+const CHATGPT_SUGGESTED_MODELS: &[&str] = &["gpt-5.5", "gpt-5.4", "gpt-5.4-mini"];
+// `@earendil-works/pi-ai` extracts an account id from the Codex adapter's
+// `apiKey` before it sends a request. The actual ChatGPT bearer is intentionally
+// resolved inside Core, so this non-secret JWT-shaped sentinel satisfies that
+// adapter precondition while Core authenticates the loopback request with the
+// separate node-token header below.
+const CHATGPT_PROXY_API_KEY: &str = "eyJhbGciOiJub25lIiwidHlwIjoiSldUIn0.eyJodHRwczovL2FwaS5vcGVuYWkuY29tL2F1dGgiOnsiY2hhdGdwdF9hY2NvdW50X2lkIjoicnl1LWxvY2FsIn19.";
+
 /// OpenRouter's general-purpose model router. The zero-decision default for
 /// managed users.
 const OPENROUTER_AUTO_MODEL_ID: &str = "openrouter/auto";
@@ -350,6 +363,71 @@ fn gateway_openai_patch(model: Option<&str>) -> Map<String, Value> {
     gateway_openai_patch_for(model, false)
 }
 
+/// Build the managed Pi entry for the native ChatGPT provider.
+///
+/// Pi's Codex API adapter emits the Responses wire format. The base URL is a
+/// loopback Core route rather than `chatgpt.com` so Core can refresh the
+/// selected ChatGPT session and add the account id on every request without
+/// materializing a bearer token into `models.json`.
+fn chatgpt_provider_patch(model: Option<&str>) -> Map<String, Value> {
+    let mut patch = Map::new();
+    patch.insert(
+        "baseUrl".to_owned(),
+        Value::String(format!(
+            "{}/api/pi-config/chatgpt",
+            crate::sidecar::gateway::core_self_url().trim_end_matches('/')
+        )),
+    );
+    patch.insert(
+        "api".to_owned(),
+        Value::String("openai-codex-responses".to_owned()),
+    );
+    patch.insert(
+        "apiKey".to_owned(),
+        Value::String(CHATGPT_PROXY_API_KEY.to_owned()),
+    );
+    let mut headers = Map::new();
+    headers.insert(
+        "x-ryu-node-token".to_owned(),
+        Value::String(
+            crate::node_token::active_token().unwrap_or_else(|| "ryu-local".to_owned()),
+        ),
+    );
+    patch.insert("headers".to_owned(), Value::Object(headers));
+
+    let mut entries: Vec<Value> = read_models()["providers"]
+        .get(CHATGPT_PROVIDER_ID)
+        .and_then(|provider| provider.get("models"))
+        .and_then(Value::as_array)
+        .map(|models| {
+            models
+                .iter()
+                .filter_map(|entry| {
+                    entry
+                        .get("id")
+                        .and_then(Value::as_str)
+                        .map(|id| json!({ "id": id }))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    for candidate in CHATGPT_SUGGESTED_MODELS
+        .iter()
+        .copied()
+        .chain(model.into_iter())
+    {
+        if !entries
+            .iter()
+            .any(|entry| entry.get("id").and_then(Value::as_str) == Some(candidate))
+        {
+            entries.push(json!({ "id": candidate }));
+        }
+    }
+    patch.insert("models".to_owned(), Value::Array(entries));
+    patch
+}
+
 /// As [`gateway_openai_patch`], but routes the MANAGED provider at the hosted
 /// gateway fleet when this node has managed coordinates.
 ///
@@ -370,11 +448,14 @@ fn gateway_openai_patch_for(model: Option<&str>, managed: bool) -> Map<String, V
     } else {
         None
     };
+    // Pi resolves this template from the process environment (verified against
+    // its native resolve-config-value implementation). A shared models.json must
+    // never overwrite the per-agent signed bearer installed at ACP spawn.
     let (base, token) = match fleet {
         Some((url, token)) => (url, token),
         None => (
             crate::sidecar::gateway::gateway_url(),
-            crate::sidecar::gateway::gateway_token().unwrap_or_else(|| "ryu-local".to_owned()),
+            "${OPENAI_API_KEY}".to_owned(),
         ),
     };
     let v1 = format!("{}/v1", base.trim_end_matches('/'));
@@ -559,6 +640,20 @@ pub fn ensure_gateway_models_json() -> Result<()> {
     Ok(())
 }
 
+/// Keep the native ChatGPT provider's loopback route and node bearer current
+/// after a token rotation or profile-port change. The user OAuth credential is
+/// intentionally resolved at request time by the Core proxy, not written here.
+pub fn ensure_chatgpt_models_json() -> Result<()> {
+    if active_provider_id_from(&read_settings()).as_deref() == Some(CHATGPT_PROVIDER_ID) {
+        let model = read_settings().default_model;
+        upsert_provider(
+            CHATGPT_PROVIDER_ID,
+            chatgpt_provider_patch(model.as_deref()),
+        )?;
+    }
+    Ok(())
+}
+
 /// Value written to Pi's `settings.json` `skills` array to ask Pi not to
 /// auto-discover skills (`!` = exclude pattern, `**` = everything). Pi
 /// auto-loads `~/.agents/skills` (a hard-coded home path, independent of
@@ -677,6 +772,7 @@ pub fn ensure_managed_defaults() -> Result<()> {
         write_settings(&settings)?;
     }
     ensure_gateway_models_json()?;
+    ensure_chatgpt_models_json()?;
     // The three extensions that CANNOT become plugins. Each `ensure_pi_*` fn's own
     // doc says why in full; in one line each:
     //
@@ -1821,6 +1917,17 @@ const OAUTH_PROVIDERS: &[OAuthProvider] = &[
         token_url_env: "RYU_PI_OAUTH_OPENAI_TOKEN_URL",
         client_id_env: "RYU_PI_OAUTH_OPENAI_CLIENT_ID",
     },
+    // Native ChatGPT provider — it uses the same public OAuth client, but keeps
+    // its account and refresh-token slot separate from the Codex provider so
+    // provider selection and usage reporting cannot silently cross lanes.
+    OAuthProvider {
+        auth_key: CHATGPT_AUTH_KEY,
+        token_url: "https://auth.openai.com/oauth/token",
+        client_id: "app_EMoamEEZ73f0CkXaXp7hrann",
+        scope: "openid profile email offline_access",
+        token_url_env: "RYU_PI_OAUTH_OPENAI_TOKEN_URL",
+        client_id_env: "RYU_PI_OAUTH_OPENAI_CLIENT_ID",
+    },
     OAuthProvider {
         auth_key: "openai",
         token_url: "https://auth.openai.com/oauth/token",
@@ -2078,8 +2185,8 @@ fn remove_models_provider(id: &str) -> Result<()> {
 pub struct ProviderMeta {
     pub id: &'static str,
     pub label: &'static str,
-    /// Pi `api` type: openai-completions / openai-responses / anthropic-messages /
-    /// google-generative-ai.
+    /// Pi `api` type: openai-completions / openai-responses /
+    /// openai-codex-responses / anthropic-messages / google-generative-ai.
     pub api: &'static str,
     /// `auth.json` key for an api-key credential.
     pub auth_key: &'static str,
@@ -2235,6 +2342,17 @@ pub const PROVIDERS: &[ProviderMeta] = &[
         credit_pool: "",
         suggested_models: &[],
         models_url: "",
+    },
+    ProviderMeta {
+        id: CHATGPT_PROVIDER_ID,
+        label: "ChatGPT (native · login)",
+        api: "openai-codex-responses",
+        auth_key: CHATGPT_AUTH_KEY,
+        auth_env: "",
+        auth_kind: "subscription",
+        credit_pool: "",
+        suggested_models: CHATGPT_SUGGESTED_MODELS,
+        models_url: "https://chatgpt.com/backend-api/codex/models",
     },
     ProviderMeta {
         id: "claude-pro-max",
@@ -2610,6 +2728,24 @@ pub fn subscription_account_credential(
         return Ok(None);
     }
     vault.credential(&scope, account_id)
+}
+
+/// Read the currently selected OAuth credential for a native subscription
+/// provider. The value is consumed only by Core's provider proxy; it is never
+/// serialized into a response or handed to the desktop.
+pub fn subscription_active_credential(provider_id: &str) -> Result<Option<Value>> {
+    let meta = provider_meta(provider_id)
+        .ok_or_else(|| anyhow::anyhow!("unknown provider '{provider_id}'"))?;
+    if meta.auth_kind != "subscription" || meta.auth_key.is_empty() {
+        anyhow::bail!("provider '{provider_id}' is not a subscription provider");
+    }
+    let scope = accounts::provider_scope(meta.auth_key);
+    if let Some(vault) = accounts::global() {
+        if let Some((_account_id, credential)) = vault.active_credential(&scope)? {
+            return Ok(Some(credential));
+        }
+    }
+    Ok(read_auth().get(meta.auth_key).cloned())
 }
 
 /// Mark one saved account as the selected Gateway account after the Gateway has
@@ -3068,6 +3204,7 @@ pub fn catalog() -> Value {
         "apiTypes": [
             "openai-completions",
             "openai-responses",
+            "openai-codex-responses",
             "anthropic-messages",
             "google-generative-ai",
         ],
@@ -3146,7 +3283,7 @@ pub fn apply(input: PiConfigInput) -> Result<PiConfigView> {
     // that row's first suggestion; for a pool row it has to be an id that routes
     // to THAT pool, or the turn silently bills a different supply than the one the
     // user picked. This also matches the desktop, which sends `models[0].id`.
-    let effective_model = if managed && model.is_none() {
+    let effective_model = if (managed || provider == CHATGPT_PROVIDER_ID) && model.is_none() {
         provider_meta(&provider)
             .and_then(|m| m.suggested_models.first())
             .map(|s| (*s).to_owned())
@@ -3203,6 +3340,18 @@ pub fn apply(input: PiConfigInput) -> Result<PiConfigView> {
         upsert_provider(
             "openai",
             gateway_openai_patch_for(effective_model.as_deref(), managed),
+        )?;
+        return Ok(current());
+    }
+
+    if provider == CHATGPT_PROVIDER_ID {
+        // The ChatGPT provider is a native Core proxy: Pi sends the Responses
+        // wire format to Core, and Core resolves/refreshed the selected ChatGPT
+        // session immediately before forwarding it upstream. No user bearer is
+        // persisted in models.json.
+        upsert_provider(
+            CHATGPT_PROVIDER_ID,
+            chatgpt_provider_patch(effective_model.as_deref()),
         )?;
         return Ok(current());
     }
@@ -3443,6 +3592,9 @@ pub struct DiscoverInput {
 /// How a discovery request authenticates to the upstream `GET /models`.
 enum DiscoveryAuth {
     Bearer(String),
+    /// ChatGPT/Codex model discovery requires the bearer plus the account id
+    /// that the Login with ChatGPT session is bound to.
+    ChatGpt { access: String, account_id: String },
     /// Anthropic uses `x-api-key` + `anthropic-version` rather than a bearer token.
     Anthropic(String),
     None,
@@ -3623,8 +3775,30 @@ fn resolve_provider_discovery(
         let base = crate::sidecar::gateway::gateway_url();
         let url = format!("{}/v1/models", base.trim_end_matches('/'));
         let token =
-            crate::sidecar::gateway::gateway_token().unwrap_or_else(|| "ryu-local".to_owned());
+            crate::sidecar::gateway::gateway_token().unwrap_or_default();
         return Some((url, DiscoveryAuth::Bearer(token)));
+    }
+
+    if id == CHATGPT_PROVIDER_ID {
+        let credential = subscription_active_credential(id).ok().flatten()?;
+        let access = credential
+            .get("access")
+            .or_else(|| credential.get("access_token"))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())?
+            .to_owned();
+        let account_id = credential
+            .get("accountId")
+            .or_else(|| credential.get("account_id"))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())?
+            .to_owned();
+        return Some((
+            "https://chatgpt.com/backend-api/codex/models?client_version=0.144.1".to_owned(),
+            DiscoveryAuth::ChatGpt { access, account_id },
+        ));
     }
 
     if let Some(meta) = provider_meta(id) {
@@ -3686,6 +3860,12 @@ async fn fetch_models(
     let mut req = client.get(parsed);
     match auth {
         DiscoveryAuth::Bearer(token) => req = req.bearer_auth(token),
+        DiscoveryAuth::ChatGpt { access, account_id } => {
+            req = req
+                .bearer_auth(access)
+                .header("ChatGPT-Account-ID", account_id)
+                .header("originator", "codex_cli_rs");
+        }
         DiscoveryAuth::Anthropic(key) => {
             req = req
                 .header("x-api-key", key)
@@ -3699,17 +3879,27 @@ async fn fetch_models(
     }
     let body: Value = resp.json().await.context("parse discovery response")?;
     // OpenAI + Anthropic both use `{ data: [ { id, ... } ] }`; OpenRouter too.
-    let items = body
+    let mut items = body
         .get("data")
         .and_then(Value::as_array)
         .or_else(|| body.get("models").and_then(Value::as_array))
+        .or_else(|| body.get("items").and_then(Value::as_array))
         .cloned()
         .unwrap_or_default();
+    if let Some(models) = body.get("models").and_then(Value::as_object) {
+        items.extend(
+            models
+                .iter()
+                .map(|(id, entry)| json!({ "id": id, "name": entry.get("name") })),
+        );
+    }
     let models: Vec<Value> = items
         .into_iter()
         .filter_map(|m| {
             let id = m
-                .get("id")
+                .get("slug")
+                .or_else(|| m.get("id"))
+                .or_else(|| m.get("model"))
                 .or_else(|| m.get("name"))
                 .and_then(Value::as_str)?
                 .to_owned();
@@ -4504,6 +4694,7 @@ mod tests {
 
                 // BYOK keeps the local gateway even while managed is configured.
                 let local = gateway_openai_patch_for(Some("gpt-4o"), false);
+                assert_eq!(local.get("apiKey").and_then(Value::as_str), Some("${OPENAI_API_KEY}"), "shared Pi configuration must preserve the process-scoped bearer");
                 let base = local.get("baseUrl").and_then(Value::as_str).unwrap();
                 assert!(
                     base.contains("127.0.0.1"),
@@ -4585,6 +4776,38 @@ mod tests {
             assert_eq!(entry["api"], "openai-completions");
             assert_eq!(entry["models"][0]["id"], "llama3.1:8b");
             assert!(!is_gateway_routing());
+        });
+    }
+
+    #[test]
+    fn apply_chatgpt_provider_writes_native_core_proxy_config() {
+        with_temp_dir(|| {
+            let view = apply(PiConfigInput {
+                provider: CHATGPT_PROVIDER_ID.to_owned(),
+                model: Some("gpt-5.4".to_owned()),
+                thinking_level: None,
+                api_key: None,
+                base_url: None,
+                api: None,
+            })
+            .expect("activate native ChatGPT provider");
+
+            assert_eq!(view.provider, CHATGPT_PROVIDER_ID);
+            let entry = &read_models()["providers"][CHATGPT_PROVIDER_ID];
+            assert_eq!(entry["api"], "openai-codex-responses");
+            assert_eq!(entry["apiKey"], CHATGPT_PROXY_API_KEY);
+            assert!(entry["headers"]["x-ryu-node-token"].is_string());
+            assert_eq!(entry["models"][0]["id"], "gpt-5.5");
+            assert!(entry["models"].as_array().unwrap().iter().any(|model| {
+                model.get("id").and_then(Value::as_str) == Some("gpt-5.4")
+            }));
+            assert!(
+                entry["baseUrl"]
+                    .as_str()
+                    .is_some_and(|url| url.ends_with("/api/pi-config/chatgpt")),
+                "native provider must point at Core's credential-resolving proxy"
+            );
+            assert_eq!(read_settings().default_provider.as_deref(), Some(CHATGPT_PROVIDER_ID));
         });
     }
 

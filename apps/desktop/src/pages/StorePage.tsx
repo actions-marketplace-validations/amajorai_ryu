@@ -52,7 +52,7 @@ import {
 	type StoreToolbarConfig,
 	StoreToolbarProvider,
 } from "@/src/components/store/storeToolbar.tsx";
-import { useTabsContext } from "@/src/contexts/TabsContext.tsx";
+import { useTabSelector } from "@/src/contexts/TabsContext.tsx";
 import {
 	contributedTabForSection,
 	resolveStoreSection,
@@ -149,7 +149,7 @@ export default function StorePage({
 	/** One-shot Marketplace listing to open after the Browse tab mounts. */
 	initialMarketplaceItem?: { id: string; kind: string };
 }) {
-	const { openTab } = useTabsContext();
+	const openTab = useTabSelector((state) => state.openTab);
 	// App-registered sections. These arrive asynchronously (Core's contributions
 	// endpoint), so `initialSection` is resolved against them in an effect below
 	// rather than once at mount — a deep link to `/store/workflows` must land on the

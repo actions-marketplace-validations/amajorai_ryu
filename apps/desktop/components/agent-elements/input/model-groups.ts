@@ -17,6 +17,7 @@ const PI_PROVIDER_LABELS: Record<string, string> = {
 	openrouter: "OpenRouter",
 	gateway: "Ryu Gateway",
 	"openai-codex": "ChatGPT (Plus/Pro)",
+	chatgpt: "ChatGPT (native)",
 	"claude-pro-max": "Claude (Pro/Max)",
 	"github-copilot": "GitHub Copilot",
 	"ryu-openrouter": "Ryu (managed)",

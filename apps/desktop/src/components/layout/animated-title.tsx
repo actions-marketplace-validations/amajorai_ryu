@@ -1,52 +1,18 @@
 import { useChatDisplayPrefs } from "@ryu/blocks/desktop/agent-elements/chat-display-prefs.tsx";
-import { motion } from "framer-motion";
-import { type ReactNode, useLayoutEffect, useRef, useState } from "react";
+import { TextMorph } from "@ryu/ui/components/text-morph";
+import { EASE_OUT_CSS } from "@ryu/ui/lib/ease";
+import { useLayoutEffect, useRef, useState } from "react";
 import { cn } from "@/lib/utils.ts";
 import { usePrefersReducedMotion } from "@/src/hooks/usePrefersReducedMotion.ts";
 
-const ENTER_DURATION = 0.38;
-const EXIT_DURATION = 0.34;
-const CHARACTER_DELAY = 0.024;
-const MAX_CHARACTER_DELAY = 0.26;
-const TRANSITION_MS = 760;
-
-interface TitleTransition {
-	from: string;
-	id: number;
-}
-
-function characterDelay(index: number): number {
-	return Math.min(index * CHARACTER_DELAY, MAX_CHARACTER_DELAY);
-}
-
-function renderCharacters(
-	text: string,
-	phase: "enter" | "exit",
-	transitionId: number
-): ReactNode[] {
-	return Array.from(text).map((character, index) => (
-		<motion.span
-			animate={phase === "enter" ? { opacity: 1, y: 0 } : { opacity: 0, y: -1 }}
-			aria-hidden
-			className="inline-block"
-			initial={phase === "enter" ? { opacity: 0, y: 2 } : { opacity: 1, y: 0 }}
-			key={`${transitionId}-${phase}-${index}`}
-			transition={{
-				delay: characterDelay(index),
-				duration: phase === "enter" ? ENTER_DURATION : EXIT_DURATION,
-				ease: "easeOut",
-			}}
-		>
-			{character === " " ? "\u00a0" : character}
-		</motion.span>
-	));
-}
+const MORPH_DURATION_MS = 380;
+const TRANSITION_STATE_MS = 760;
 
 /**
- * Desktop title transition inspired by Motion-Primitives' per-character text
- * effect. The current text owns the layout width; the previous text is layered
- * over it so a rename reads as one title consuming the other instead of a
- * replacement that makes the row jump.
+ * Desktop title transition backed by Torph's per-character text morph. The
+ * component keeps the app-level animation preference separate from Torph's OS
+ * reduced-motion preference and retains the settled/transitioning state used by
+ * browser proof and title consumers.
  */
 export function AnimatedTitle({
 	className,
@@ -59,8 +25,7 @@ export function AnimatedTitle({
 	const prefersReducedMotion = usePrefersReducedMotion();
 	const motionEnabled = animationsEnabled && !prefersReducedMotion;
 	const previousTextRef = useRef(text);
-	const transitionIdRef = useRef(0);
-	const [transition, setTransition] = useState<TitleTransition | null>(null);
+	const [transitioning, setTransitioning] = useState(false);
 
 	useLayoutEffect(() => {
 		const previous = previousTextRef.current;
@@ -70,21 +35,17 @@ export function AnimatedTitle({
 		previousTextRef.current = text;
 
 		if (!motionEnabled) {
-			setTransition(null);
+			setTransitioning(false);
 			return;
 		}
 
-		transitionIdRef.current += 1;
-		const id = transitionIdRef.current;
-		setTransition({ from: previous, id });
+		setTransitioning(true);
 		const timeout = window.setTimeout(() => {
-			setTransition((current) => (current?.id === id ? null : current));
-		}, TRANSITION_MS);
+			setTransitioning(false);
+		}, TRANSITION_STATE_MS);
 
 		return () => window.clearTimeout(timeout);
 	}, [motionEnabled, text]);
-
-	const activeTransition = motionEnabled ? transition : null;
 
 	return (
 		<span
@@ -93,36 +54,17 @@ export function AnimatedTitle({
 				className
 			)}
 			data-animated-title
-			data-animated-title-state={activeTransition ? "transitioning" : "settled"}
+			data-animated-title-state={transitioning ? "transitioning" : "settled"}
 		>
-			{activeTransition ? (
-				<>
-					{/* The current text is the sole layout contributor, so old/new titles can
-					    overlap without changing the tab or sidebar row width mid-animation. */}
-					<span aria-hidden className="invisible whitespace-pre">
-						{text}
-					</span>
-					<span
-						aria-hidden
-						className="pointer-events-none absolute inset-0 whitespace-pre"
-					>
-						{renderCharacters(
-							activeTransition.from,
-							"exit",
-							activeTransition.id
-						)}
-					</span>
-					<span
-						aria-hidden
-						className="pointer-events-none absolute inset-0 whitespace-pre"
-					>
-						{renderCharacters(text, "enter", activeTransition.id)}
-					</span>
-					<span className="sr-only">{text}</span>
-				</>
-			) : (
-				<span className="whitespace-pre">{text}</span>
-			)}
+			<TextMorph
+				className="whitespace-pre"
+				disabled={!motionEnabled}
+				duration={MORPH_DURATION_MS}
+				ease={EASE_OUT_CSS}
+				numbers={false}
+			>
+				{text}
+			</TextMorph>
 		</span>
 	);
 }

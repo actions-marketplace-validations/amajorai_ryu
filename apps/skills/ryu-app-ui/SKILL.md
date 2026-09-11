@@ -82,3 +82,7 @@ theme implementation in the satellite.
 The implementation is in `packages/ui/src/styles/app-ui.css` and
 `packages/blocks/src/companion/app-ui.tsx`. Do not copy the token block into an app. If a pattern
 is missing, add it to the shared contract once and migrate all consumers to it.
+
+## App identity
+
+When creating or refreshing an app, load `ryu-app-icon` when available. Author filled, layered artwork and render it with Icon Composer. The host displays completed icons directly. Keep any separately declared Companion glyph consistent and inspect light/dark catalog and detail views.

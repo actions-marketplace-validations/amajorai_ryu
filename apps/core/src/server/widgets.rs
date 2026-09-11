@@ -482,7 +482,7 @@ async fn send_exec_tool(
 ) -> Result<Value, (&'static str, StatusCode, String)> {
     let base = crate::sidecar::gateway::gateway_url();
     let endpoint = format!("{}/v1/exec/tool", base.trim_end_matches('/'));
-    let token = crate::sidecar::gateway::gateway_token();
+    let token = crate::sidecar::gateway::gateway_core_token();
 
     let mut payload = json!({
         "kind": "tool",

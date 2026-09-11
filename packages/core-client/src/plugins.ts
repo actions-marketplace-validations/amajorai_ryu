@@ -486,7 +486,7 @@ async function parseLifecycleError(
 
 // ── Public API ────────────────────────────────────────────────────────────────
 
-type AppLifecycleAction =
+export type AppLifecycleAction =
 	| "install"
 	| "enable"
 	| "disable"
@@ -497,6 +497,67 @@ type AppLifecycleAction =
  *  the route parameter must be encoded once before it is joined to the path. */
 function appLifecyclePath(id: string, action: AppLifecycleAction): string {
 	return `/api/plugins/${encodeURIComponent(id)}/${action}`;
+}
+
+export interface AppLifecyclePreview {
+	action: AppLifecycleAction;
+	dryRun: true;
+	success: boolean;
+	[key: string]: unknown;
+}
+
+export interface AppLifecyclePreviewOptions {
+	cascade?: boolean;
+	channel?: string;
+	force?: boolean;
+	version?: string;
+}
+
+/** Run the lifecycle's server-side validation and dependency planner without
+ * changing plugin state. The response is intentionally kept as a plan payload
+ * rather than being coerced into an {@link AppRecord}; dry runs are not installs,
+ * enables, disables, uninstalls, or updates. */
+export async function previewAppLifecycle(
+	target: ApiTarget,
+	id: string,
+	action: AppLifecycleAction,
+	options: AppLifecyclePreviewOptions = {}
+): Promise<AppLifecyclePreview> {
+	const endpoint = appLifecyclePath(id, action);
+	const query = new URLSearchParams();
+	const isQueryAction = action === "disable" || action === "uninstall";
+	if (isQueryAction) {
+		query.set("dryRun", "true");
+		if (options.cascade) {
+			query.set("cascade", "true");
+		}
+		if (options.force) {
+			query.set("force", "true");
+		}
+	} else {
+		query.delete("dryRun");
+	}
+	const queryString = query.toString();
+	const path = queryString ? `${endpoint}?${queryString}` : endpoint;
+	const body =
+		action === "update"
+			? {
+					channel: options.channel,
+					dryRun: true,
+					force: options.force ?? false,
+					version: options.version,
+				}
+			: { dryRun: true };
+	const resp = await fetchForTarget(target)(apiUrl(target, path), {
+		method: "POST",
+		headers: makeHeaders(target.token, target.userJwt),
+		body: isQueryAction ? undefined : JSON.stringify(body),
+	});
+	if (!resp.ok) {
+		const err = await parseLifecycleError(resp, path);
+		throw Object.assign(new Error(err.message), err);
+	}
+	return (await resp.json()) as AppLifecyclePreview;
 }
 
 /** `GET /api/plugins` — list all app manifests merged with their lifecycle state. */
@@ -869,6 +930,38 @@ export async function installSidecar(
 	if (!resp.ok) {
 		throw new Error(`/api/setup/${name}/install failed: ${resp.status}`);
 	}
+}
+
+export interface SidecarLifecyclePreview {
+	action: "install" | "uninstall";
+	dryRun: true;
+	name: string;
+	success: boolean;
+	[key: string]: unknown;
+}
+
+export function previewSidecarInstall(
+	target: ApiTarget,
+	name: string
+): Promise<SidecarLifecyclePreview> {
+	return request<SidecarLifecyclePreview>(
+		target,
+		`/api/setup/${encodeURIComponent(name)}/install?dryRun=true`,
+		{ method: "POST" }
+	);
+}
+
+export function previewSidecarUninstall(
+	target: ApiTarget,
+	name: string,
+	withData = false
+): Promise<SidecarLifecyclePreview> {
+	const route = withData ? "uninstall-with-data" : "uninstall";
+	return request<SidecarLifecyclePreview>(
+		target,
+		`/api/setup/${encodeURIComponent(name)}/${route}?dryRun=true`,
+		{ method: "POST" }
+	);
 }
 
 /** `POST /api/sidecar/:name/start` — start a sidecar process. */

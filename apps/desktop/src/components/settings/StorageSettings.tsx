@@ -45,6 +45,7 @@ import {
 } from "@/src/lib/api/documents.ts";
 import { formatBytes, NODE_UPLOAD_MAX_BYTES } from "@/src/lib/api/spaces.ts";
 import { listenWhenReady } from "@/src/lib/tauri-ready.ts";
+import { NodeBackupSettings } from "./BackupSettings.tsx";
 
 /** Profiles a copy can target.
  *
@@ -566,6 +567,7 @@ export function StorageSettings() {
 				</>
 			) : null}
 
+			<NodeBackupSettings />
 			<UploadCeilingSection />
 
 			<AlertDialog

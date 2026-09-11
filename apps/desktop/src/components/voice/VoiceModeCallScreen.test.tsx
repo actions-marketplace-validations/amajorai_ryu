@@ -1,4 +1,6 @@
 import { expect, test } from "bun:test";
+import { CallDisabled02Icon } from "@hugeicons/core-free-icons";
+import { HugeiconsIcon } from "@hugeicons/react";
 import { renderToStaticMarkup } from "react-dom/server";
 import type { VoiceMode } from "@/src/hooks/useVoiceMode.ts";
 import { VoiceModeCallScreen } from "./VoiceModeCallScreen.tsx";
@@ -44,6 +46,16 @@ test("renders the compact call identity, timer, transcript, and controls", () =>
 	expect(markup).toContain('aria-label="Mute microphone"');
 	expect(markup).toContain('aria-label="Interrupt response"');
 	expect(markup).toContain('aria-label="End call"');
+	expect(markup).toContain(
+		renderToStaticMarkup(
+			<HugeiconsIcon
+				aria-hidden="true"
+				className="size-4"
+				icon={CallDisabled02Icon}
+			/>
+		)
+	);
+	expect(markup).not.toContain("lucide-phone-off");
 });
 
 test("keeps errors visible when the transcript is hidden", () => {

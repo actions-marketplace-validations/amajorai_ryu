@@ -111,6 +111,7 @@ import {
 import { STORAGE_KEYS } from "@/src/lib/themes/presets.ts";
 import { useNodeStore } from "@/src/store/useNodeStore.ts";
 import { useWorkspaceStore } from "@/src/store/useWorkspaceStore.ts";
+import { AvailabilitySettings } from "./AvailabilitySettings.tsx";
 import { LanguageSettings } from "./LanguageSettings.tsx";
 import { OpenSourceLicensesSettings } from "./OpenSourceLicensesSettings.tsx";
 import { SafeModeSettings } from "./SafeModeSettings.tsx";
@@ -885,6 +886,7 @@ export function GeneralTab() {
 
 	const chatsPage = (
 		<>
+			<AvailabilitySettings />
 			<SettingsSection
 				caption="How Ryu shows your agents' own chat history."
 				title="Chats"

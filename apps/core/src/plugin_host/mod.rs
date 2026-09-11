@@ -52,6 +52,8 @@ pub use bridge::{dispatch_path_for, PluginHookBridge};
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 
 use crate::server::ServerState;
@@ -299,6 +301,8 @@ pub struct HookPlugin {
     /// The turn boundary this fires on (`"post_assistant_turn"` or
     /// `"pre_user_turn"`).
     pub on: String,
+    /// How this hook composes with other hooks in the same phase.
+    pub mode: crate::plugin_manifest::HookMode,
     /// Higher-priority hooks run first; ties are deterministic.
     pub priority: i32,
     /// The JS hook body.
@@ -743,6 +747,7 @@ pub async fn collect_enabled_hooks(state: &ServerState) -> Vec<HookPlugin> {
                 plugin_id: manifest.id.clone(),
                 hook_id: hook.id.clone(),
                 on: hook.on.clone(),
+                mode: hook.mode.unwrap_or_default(),
                 priority: hook.priority,
                 code: hook.code.clone(),
                 grants: grants.clone(),
@@ -817,8 +822,20 @@ pub async fn dispatch_tool_result_phase(
     let hooks = collect_enabled_hooks(state).await;
     let mut current = ctx.tool_output.clone()?;
     let mut transformed = false;
+
+    let mut middleware_ctx = ctx.clone();
+    middleware_ctx.tool_output = Some(current.clone());
+    if let HookDirective::Transform { output } =
+        run_middleware_chain(state, &hooks, ON_TOOL_RESULT, &middleware_ctx).await
+    {
+        current = output;
+        transformed = true;
+    }
+
     for hook in hooks {
-        if !phase_matches(&hook.on, ON_TOOL_RESULT) {
+        if hook.mode != crate::plugin_manifest::HookMode::Directive
+            || !phase_matches(&hook.on, ON_TOOL_RESULT)
+        {
             continue;
         }
         let mut hook_ctx = ctx.clone();
@@ -889,6 +906,180 @@ pub async fn dispatch_global_tool_result(ctx: HookContext) -> Option<serde_json:
     }
 }
 
+/// The continuation exposed to a middleware hook. It stays inside Core: the
+/// sandbox can ask to continue, but it never receives another plugin's bridge or
+/// source code.
+type MiddlewareNext =
+    Arc<dyn Fn(HookContext) -> Pin<Box<dyn Future<Output = HookDirective> + Send>> + Send + Sync>;
+
+/// Request-owned fields that a middleware hook may observe but must not rewrite
+/// for the next plugin. In particular, `caller_user_id` is the tenant boundary
+/// used by the host bridge's namespaced storage.
+#[derive(Clone)]
+struct MiddlewareIdentity {
+    agent_id: Option<String>,
+    caller_user_id: Option<String>,
+    conversation_id: Option<String>,
+    flags: std::collections::HashMap<String, bool>,
+}
+
+impl From<&HookContext> for MiddlewareIdentity {
+    fn from(ctx: &HookContext) -> Self {
+        Self {
+            agent_id: ctx.agent_id.clone(),
+            caller_user_id: ctx.caller_user_id.clone(),
+            conversation_id: ctx.conversation_id.clone(),
+            flags: ctx.flags.clone(),
+        }
+    }
+}
+
+fn preserve_middleware_identity(
+    identity: &MiddlewareIdentity,
+    mut ctx: HookContext,
+) -> HookContext {
+    ctx.agent_id = identity.agent_id.clone();
+    ctx.caller_user_id = identity.caller_user_id.clone();
+    ctx.conversation_id = identity.conversation_id.clone();
+    ctx.flags = identity.flags.clone();
+    ctx
+}
+
+enum MiddlewareRun {
+    Returned(HookDirective),
+    Failed,
+}
+
+/// Run the middleware hooks for one phase as an onion. The first hook in the
+/// deterministic priority order is the outermost layer. A skipped gate and a
+/// failed hook route around that layer; an explicit return without `next` owns
+/// the result, matching the Koa-style semantics the function-hook pattern is
+/// designed for.
+async fn run_middleware_chain(
+    state: &ServerState,
+    hooks: &[HookPlugin],
+    phase: &str,
+    ctx: &HookContext,
+) -> HookDirective {
+    if !hooks.iter().any(|hook| {
+        hook.mode == crate::plugin_manifest::HookMode::Middleware && phase_matches(&hook.on, phase)
+    }) {
+        return HookDirective::None;
+    }
+    let hooks = Arc::new(hooks.to_vec());
+    run_middleware_at(
+        state.clone(),
+        hooks,
+        phase.to_owned(),
+        0,
+        Arc::new(MiddlewareIdentity::from(ctx)),
+        ctx.clone(),
+    )
+    .await
+}
+
+fn run_middleware_at(
+    state: ServerState,
+    hooks: Arc<Vec<HookPlugin>>,
+    phase: String,
+    start: usize,
+    identity: Arc<MiddlewareIdentity>,
+    ctx: HookContext,
+) -> Pin<Box<dyn Future<Output = HookDirective> + Send>> {
+    Box::pin(async move {
+        let Some(index) = (start..hooks.len()).find(|index| {
+            let hook = &hooks[*index];
+            hook.mode == crate::plugin_manifest::HookMode::Middleware
+                && phase_matches(&hook.on, &phase)
+        }) else {
+            return HookDirective::None;
+        };
+        let hook = hooks[index].clone();
+        if !hook_should_run(&state, &hook, &ctx).await {
+            return run_middleware_at(state, hooks, phase, index + 1, identity, ctx).await;
+        }
+
+        let next_state = state.clone();
+        let next_hooks = hooks.clone();
+        let next_phase = phase.clone();
+        let next_identity = identity.clone();
+        let next: MiddlewareNext = Arc::new(move |next_ctx| {
+            let next_ctx = preserve_middleware_identity(&next_identity, next_ctx);
+            run_middleware_at(
+                next_state.clone(),
+                next_hooks.clone(),
+                next_phase.clone(),
+                index + 1,
+                next_identity.clone(),
+                next_ctx,
+            )
+        });
+
+        match run_middleware_hook(&state, &hook, &ctx, next).await {
+            MiddlewareRun::Returned(directive) => directive,
+            // A broken middleware link must not silence the hooks below it. This is
+            // the fail-open equivalent of the normal directive-hook runner.
+            MiddlewareRun::Failed => {
+                run_middleware_at(state, hooks, phase, index + 1, identity, ctx).await
+            }
+        }
+    })
+}
+
+async fn run_middleware_hook(
+    state: &ServerState,
+    hook: &HookPlugin,
+    ctx: &HookContext,
+    next: MiddlewareNext,
+) -> MiddlewareRun {
+    let Some(_runtime_lease) = state.plugin_runtime.acquire(&hook.plugin_id).await else {
+        return MiddlewareRun::Failed;
+    };
+    let program = build_middleware_hook_program(ctx, &hook.code);
+    let bridge = Arc::new(
+        PluginHookBridge::new_with_tenant(
+            hook.plugin_id.clone(),
+            hook.grants.clone(),
+            state.clone(),
+            ctx.caller_user_id.clone(),
+        )
+        .with_middleware_next(next),
+    );
+    let invoker = Arc::new(SandboxToolInvoker::bridge(bridge));
+    let agent_id = ctx
+        .agent_id
+        .clone()
+        .unwrap_or_else(|| "plugin-host".to_string());
+
+    match tool_exec::run_sandboxed(program, invoker, &agent_id).await {
+        ExecOutcome::Completed {
+            result: _,
+            is_error,
+            error,
+            ..
+        } if is_error => {
+            tracing::warn!(
+                "plugin_host: middleware hook {}::{} errored: {}",
+                hook.plugin_id,
+                hook.hook_id,
+                error.unwrap_or_default()
+            );
+            MiddlewareRun::Failed
+        }
+        ExecOutcome::Completed { result, .. } => {
+            MiddlewareRun::Returned(parse_directive(result.as_ref()))
+        }
+        ExecOutcome::Paused { .. } => {
+            tracing::warn!(
+                "plugin_host: middleware hook {}::{} paused (unsupported for hooks); ignoring",
+                hook.plugin_id,
+                hook.hook_id
+            );
+            MiddlewareRun::Failed
+        }
+    }
+}
+
 /// Run a pre-collected set of hooks for one phase against `ctx`. Lets the
 /// chat-path wrapper collect hooks once (cheap gate) and reuse the set across the
 /// pre-turn transform and the post-turn continue loop. `phase` is one of
@@ -901,8 +1092,14 @@ pub async fn run_hooks(
     phase: &str,
 ) -> Vec<HookDirective> {
     let mut directives = Vec::new();
+    let middleware = run_middleware_chain(state, hooks, phase, ctx).await;
+    if !matches!(middleware, HookDirective::None) {
+        directives.push(middleware);
+    }
     for hook in hooks {
-        if !phase_matches(&hook.on, phase) {
+        if hook.mode != crate::plugin_manifest::HookMode::Directive
+            || !phase_matches(&hook.on, phase)
+        {
             continue;
         }
         // Cheap pre-gate: skip the sandbox spawn when the hook provably can't act
@@ -924,7 +1121,7 @@ pub async fn run_hooks(
 /// prefix on the last user turn, or existing per-conversation plugin state each
 /// wake the hook. Fail-open: any lookup error resolves to "run" so a gate glitch
 /// never silently disables a feature.
-async fn hook_should_run(state: &ServerState, hook: &HookPlugin, ctx: &HookContext) -> bool {
+async fn hook_should_run(_state: &ServerState, hook: &HookPlugin, ctx: &HookContext) -> bool {
     let Some(m) = &hook.run_when else {
         return true;
     };
@@ -1025,6 +1222,14 @@ fn glob_match(pattern: &str, name: &str) -> bool {
 /// missing, hook threw, unparseable result, a Pause we don't support) degrades to
 /// [`HookDirective::None`].
 pub async fn run_hook(state: &ServerState, hook: &HookPlugin, ctx: &HookContext) -> HookDirective {
+    if hook.mode == crate::plugin_manifest::HookMode::Middleware {
+        let next: MiddlewareNext = Arc::new(|_ctx| Box::pin(async { HookDirective::None }));
+        return match run_middleware_hook(state, hook, ctx, next).await {
+            MiddlewareRun::Returned(directive) => directive,
+            MiddlewareRun::Failed => HookDirective::None,
+        };
+    }
+
     // Hold the plugin's read lease across the sandbox call. A concurrent disable
     // waits for this work before unregistering the plugin's contributions; a
     // hook collected before disable but not started yet is refused instead of
@@ -1088,9 +1293,35 @@ fn parse_directive(value: Option<&serde_json::Value>) -> HookDirective {
 /// directive). The body runs inside the substrate's async IIFE, so a bare
 /// `return` reports the directive as the program's final value.
 fn build_hook_program(ctx: &HookContext, entry_code: &str) -> String {
+    build_hook_program_inner(ctx, entry_code, false)
+}
+
+/// Build a middleware hook program. The user function receives a Core-mediated
+/// `next` continuation; the continuation calls back into the bridge, which owns
+/// the remaining hook chain and its per-plugin capability boundaries.
+fn build_middleware_hook_program(ctx: &HookContext, entry_code: &str) -> String {
+    let entry = format!(
+        "const __ryu_function_hook = async (ctx, host, next) => {{ {entry_code} }};\nreturn await __ryu_function_hook(ctx, host, (nextCtx) => tools.host.next({{ context: nextCtx ?? ctx }}));"
+    );
+    build_hook_program_inner(ctx, &entry, true)
+}
+
+fn build_hook_program_inner(ctx: &HookContext, entry_code: &str, freeze_context: bool) -> String {
     let ctx_json = serde_json::to_string(ctx).unwrap_or_else(|_| "{}".to_string());
+    let ctx_expression = if freeze_context {
+        format!("__ryu_deep_freeze({ctx_json})")
+    } else {
+        ctx_json
+    };
     format!(
-        r#"const ctx = {ctx};
+        r#"const __ryu_deep_freeze = (value) => {{
+  if (value && typeof value === "object" && !Object.isFrozen(value)) {{
+    for (const child of Object.values(value)) __ryu_deep_freeze(child);
+    Object.freeze(value);
+  }}
+  return value;
+}};
+const ctx = {ctx};
 const host = {{
   sideModel: (a) => tools.host.sideModel(a ?? {{}}),
   runAgent: (a) => tools.host.runAgent(a ?? {{}}),
@@ -1127,7 +1358,7 @@ const host = {{
 }};
 {entry}
 "#,
-        ctx = ctx_json,
+        ctx = ctx_expression,
         entry = entry_code,
     )
 }
@@ -1357,6 +1588,45 @@ mod tests {
     }
 
     #[test]
+    fn middleware_program_injects_a_core_owned_next_continuation() {
+        let program = build_middleware_hook_program(
+            &HookContext::default(),
+            "return await next({ ...ctx, event: { forwarded: true } });",
+        );
+        assert!(program.contains("__ryu_function_hook"));
+        assert!(program.contains("__ryu_deep_freeze"));
+        assert!(program.contains("(ctx, host, next)"));
+        assert!(program.contains("tools.host.next"));
+        assert!(program.contains("event: { forwarded: true }"));
+    }
+
+    #[test]
+    fn middleware_next_preserves_request_identity_and_plugin_flags() {
+        let root = HookContext {
+            agent_id: Some("agent-a".into()),
+            caller_user_id: Some("user-a".into()),
+            conversation_id: Some("conversation-a".into()),
+            flags: std::iter::once(("plugin-a".to_owned(), true)).collect(),
+            ..Default::default()
+        };
+        let identity = MiddlewareIdentity::from(&root);
+        let candidate = HookContext {
+            agent_id: Some("agent-b".into()),
+            caller_user_id: Some("user-b".into()),
+            conversation_id: Some("conversation-b".into()),
+            flags: std::iter::once(("plugin-b".to_owned(), true)).collect(),
+            event: Some(json!({ "rewritten": true })),
+            ..Default::default()
+        };
+        let forwarded = preserve_middleware_identity(&identity, candidate);
+        assert_eq!(forwarded.agent_id.as_deref(), Some("agent-a"));
+        assert_eq!(forwarded.caller_user_id.as_deref(), Some("user-a"));
+        assert_eq!(forwarded.conversation_id.as_deref(), Some("conversation-a"));
+        assert_eq!(forwarded.flags.get("plugin-a"), Some(&true));
+        assert_eq!(forwarded.event, Some(json!({ "rewritten": true })));
+    }
+
+    #[test]
     fn delegation_lifecycle_is_an_exact_match_phase() {
         assert!(phase_matches(
             ON_DELEGATION_LIFECYCLE,
@@ -1576,6 +1846,10 @@ mod tests {
                         self.store.lock().unwrap().remove(&key);
                         serde_json::json!(true)
                     }
+                    "next" => serde_json::json!({
+                        "kind": "note",
+                        "text": "downstream"
+                    }),
                     _ => serde_json::Value::Null,
                 };
                 InvokeOutcome::Result(ToolInvokeResult {
@@ -1665,6 +1939,27 @@ mod tests {
         }
     }
 
+    async fn run_middleware_code(code: &str, ctx: HookContext) -> HookDirective {
+        let program = build_middleware_hook_program(&ctx, code);
+        let bridge = std::sync::Arc::new(TestBridge {
+            side_value: serde_json::Value::Null,
+            store: std::sync::Mutex::new(std::collections::HashMap::new()),
+        });
+        let invoker = std::sync::Arc::new(SandboxToolInvoker::bridge(bridge));
+        match tool_exec::run_sandboxed(program, invoker, "ryu").await {
+            ExecOutcome::Completed {
+                result,
+                is_error,
+                error,
+                ..
+            } => {
+                assert!(!is_error, "middleware hook errored: {error:?}");
+                parse_directive(result.as_ref())
+            }
+            ExecOutcome::Paused { .. } => panic!("unexpected pause"),
+        }
+    }
+
     async fn run_fixture(
         plugin_id: &str,
         ctx: HookContext,
@@ -1705,6 +2000,25 @@ mod tests {
             directive,
             HookDirective::Note {
                 text: "Wrong: 2+2 is 4.".into()
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn live_function_hook_can_inspect_the_downstream_directive() {
+        if !tool_exec::is_available() {
+            eprintln!("skipping live deno test: deno not on PATH");
+            return;
+        }
+        let directive = run_middleware_code(
+            "const result = await next({ ...ctx, event: { forwarded: true } });\nreturn { kind: 'note', text: result.text + ':wrapped' };",
+            HookContext::default(),
+        )
+        .await;
+        assert_eq!(
+            directive,
+            HookDirective::Note {
+                text: "downstream:wrapped".into()
             }
         );
     }

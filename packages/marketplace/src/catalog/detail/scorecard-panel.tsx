@@ -20,10 +20,8 @@ import {
 import type { IconSvgElement } from "@hugeicons/react";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { Badge } from "@ryu/ui/components/badge.tsx";
-import { Button } from "@ryu/ui/components/button.tsx";
 import { cn } from "@ryu/ui/lib/utils.ts";
 import type { ReactNode } from "react";
-import { useState } from "react";
 import type { CatalogScanResult } from "../host.tsx";
 import {
 	CATEGORY_DESCRIPTIONS,
@@ -33,6 +31,7 @@ import {
 	type ScorecardCheck,
 	type ScorecardGrade,
 } from "../scorecard.ts";
+import { AgentAuditPanel } from "./agent-audit-panel.tsx";
 
 /** Per-status presentation. Kept as one table so the badge, the rows, and the
  *  category headers can never drift into disagreeing about what a status looks
@@ -151,6 +150,7 @@ function CheckRow({ check }: { check: ScorecardCheck }) {
 /** The Health tab: the score, then every check grouped by family. */
 export function ScorecardPanel({
 	agentScan,
+	onOpenConversation,
 	disclaimer,
 	dataTestId,
 	developerDoctor,
@@ -160,6 +160,7 @@ export function ScorecardPanel({
 	title = "Automated checks",
 }: {
 	agentScan?: () => Promise<CatalogScanResult>;
+	onOpenConversation?: (id: string) => void;
 	disclaimer?: ReactNode;
 	dataTestId?: string;
 	developerCommand?: string;
@@ -169,27 +170,6 @@ export function ScorecardPanel({
 	title?: string;
 }) {
 	const unknownCount = scorecard.checks.length - scorecard.evaluated;
-	const [scanError, setScanError] = useState<string | null>(null);
-	const [scanResult, setScanResult] = useState<CatalogScanResult | null>(null);
-	const [scanning, setScanning] = useState(false);
-
-	const runAgentScan = async () => {
-		if (!agentScan || scanning) {
-			return;
-		}
-		setScanError(null);
-		setScanning(true);
-		try {
-			setScanResult(await agentScan());
-		} catch (error) {
-			setScanResult(null);
-			setScanError(
-				error instanceof Error ? error.message : "The agent scan failed."
-			);
-		} finally {
-			setScanning(false);
-		}
-	};
 
 	return (
 		<div className="flex flex-col gap-6" data-testid={dataTestId}>
@@ -210,20 +190,6 @@ export function ScorecardPanel({
 				<div className="min-w-0 flex-1">
 					<div className="flex flex-wrap items-center justify-between gap-2">
 						<h3 className="font-medium text-sm">{title}</h3>
-						{agentScan ? (
-							<Button
-								data-testid="catalog-scan-button"
-								disabled={scanning}
-								loading={scanning}
-								onClick={() => {
-									void runAgentScan();
-								}}
-								size="sm"
-								variant="outline"
-							>
-								{scanning ? "Scanning…" : "Scan with agent"}
-							</Button>
-						) : null}
 					</div>
 					<p className="text-muted-foreground text-sm leading-relaxed">
 						{scorecard.summary}
@@ -244,38 +210,12 @@ export function ScorecardPanel({
 				</div>
 			</section>
 
-			{scanError ? (
-				<section
-					className="rounded-lg border border-destructive/30 bg-destructive/5 p-4 text-sm text-status-destructive"
-					data-testid="catalog-scan-error"
-				>
-					Agent scan failed: {scanError}
-				</section>
-			) : null}
-			{scanResult ? (
-				<section
-					className="flex flex-col gap-2 rounded-lg border border-primary/25 bg-primary/5 p-4"
-					data-testid="catalog-scan-result"
-				>
-					<div className="flex flex-wrap items-center justify-between gap-2">
-						<h3 className="font-medium text-sm">Agent review</h3>
-						<Badge
-							variant={
-								scanResult.status === "complete" ? "secondary" : "outline"
-							}
-						>
-							{scanResult.status === "complete" ? "Complete" : "Partial"}
-						</Badge>
-					</div>
-					<p className="text-muted-foreground text-xs">
-						Reviewed by{" "}
-						<span className="font-medium">{scanResult.agentId}</span>. The
-						deterministic score above remains the source of the grade.
-					</p>
-					<p className="whitespace-pre-wrap text-sm leading-relaxed">
-						{scanResult.report || "The agent returned no narrative report."}
-					</p>
-				</section>
+			{agentScan ? (
+				<AgentAuditPanel
+					key={JSON.stringify(scorecard)}
+					onOpenConversation={onOpenConversation}
+					runAudit={agentScan}
+				/>
 			) : null}
 
 			{scorecard.categories.map((category) => {
@@ -283,7 +223,11 @@ export function ScorecardPanel({
 					(c) => c.category === category.category
 				);
 				return (
-					<section className="flex flex-col gap-2" key={category.category}>
+					<section
+						className="flex flex-col gap-2"
+						data-scorecard-category={category.category}
+						key={category.category}
+					>
 						<div className="flex items-baseline justify-between gap-3">
 							<h3 className="font-medium text-sm">
 								{CATEGORY_LABELS[category.category]}

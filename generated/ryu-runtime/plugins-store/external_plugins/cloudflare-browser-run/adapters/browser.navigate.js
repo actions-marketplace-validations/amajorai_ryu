@@ -8,10 +8,16 @@ if (!url) {
 }
 
 const raw = await callTool({ url });
+if (!raw || raw.isError || raw.error || raw.available === false) {
+	return { raw };
+}
 const text = raw?.content?.find((item) => item?.type === "text")?.text;
+if (!text && !raw.structuredContent) {
+	return { raw };
+}
 let snapshot;
 try {
-	snapshot = text ? JSON.parse(text) : raw;
+	snapshot = raw.structuredContent ?? JSON.parse(text);
 } catch {
 	snapshot = { content: text ?? "" };
 }

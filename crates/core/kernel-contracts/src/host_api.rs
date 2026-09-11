@@ -52,7 +52,7 @@ use serde::Serialize;
 /// `1.y` (y ≥ x) kernel unchanged. The `ryu-plugin-ready` handshake carries this
 /// value as `hostApiVersion`; the host accepts a missing value (legacy) this
 /// major and only annotates it (no rejection).
-pub const HOST_API_VERSION: &str = "1.11.0";
+pub const HOST_API_VERSION: &str = "1.14.0";
 
 /// One method in the host↔plugin RPC surface — the row type of the single-sourced
 /// `method → capability → grant` table.
@@ -95,9 +95,17 @@ const fn m(
 }
 
 /// The canonical host-API method table. The union of the TS app host's
-/// `METHOD_CAPABILITY` (141 methods) and the Rust bridge's `view.action`
+/// `METHOD_CAPABILITY` (142 methods) and the Rust bridge's `view.action`
 /// (Rust-only). Serialised to `schemas/host-api.json` for the TS host to consume.
 pub const HOST_API_METHODS: &[HostApiMethod] = &[
+    // Verified current caller only; no caller-chosen identity or roster lookup.
+    m("identity.current", "identity.read", Some("identity:read"), false, false),
+    m("security.check", "security.check", Some("security:check"), false, false),
+    m("backups.destinations", "backups.app", Some("backups:app"), false, true),
+    m("backups.create", "backups.app", Some("backups:app"), false, true),
+    m("backups.list", "backups.app", Some("backups:app"), false, true),
+    m("backups.get", "backups.app", Some("backups:app"), false, true),
+    m("backups.restore", "backups.app", Some("backups:app"), false, true),
     // Local browser/native host capabilities. These rows are intentionally
     // grant-free; the host decides whether the concrete surface can provide
     // them, while the contract still keeps the method vocabulary closed.
@@ -423,6 +431,25 @@ pub const HOST_API_METHODS: &[HostApiMethod] = &[
         false,
         false,
     ),
+    // Read the Gateway-owned live charged-spend counters and configured caps.
+    // Rust-bridge-only: Core keeps the Gateway admin credential out of app and
+    // Companion processes and returns only the redacted budget snapshot.
+    m(
+        "gateway.budgetSpend",
+        "gateway.budgetSpend",
+        Some("usage:read"),
+        false,
+        false,
+    ),
+    // Read redacted Gateway audit rows for provider receipts and usage review.
+    // Rust-bridge-only: Core keeps the Gateway admin credential out of apps.
+    m(
+        "gateway.audit",
+        "gateway.audit",
+        Some("usage:read"),
+        false,
+        false,
+    ),
     // Record a thumbs vote on an assistant turn — the `message_actions` seam's
     // dispatch verb for the Learning app's rating toggle. Wraps Core's
     // `apply_message_feedback` (learning reward + RAG-memory sinks). Rust-bridge-only.
@@ -575,6 +602,13 @@ pub const HOST_API_METHODS: &[HostApiMethod] = &[
     ),
     m(
         "assets.searchGifs",
+        "core.listAgents",
+        Some("core:list_agents"),
+        false,
+        true,
+    ),
+    m(
+        "assets.searchImages",
         "core.listAgents",
         Some("core:list_agents"),
         false,
@@ -1110,6 +1144,7 @@ pub const HOST_API_METHODS: &[HostApiMethod] = &[
         false,
         true,
     ),
+    m("mail.request", "mail.crud", Some("mail:crud"), false, true),
     m(
         "calendar.jobs",
         "calendar.crud",

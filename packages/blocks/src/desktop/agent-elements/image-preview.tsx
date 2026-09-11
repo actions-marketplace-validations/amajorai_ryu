@@ -1,6 +1,7 @@
 import { cn } from "@ryu/ui/lib/utils";
 import type { ImgHTMLAttributes } from "react";
 import { useRef, useState } from "react";
+import type { LightboxImage } from "./image-lightbox.tsx";
 import { ImageLightbox } from "./image-lightbox.tsx";
 
 export function InlineImagePreview({
@@ -8,11 +9,13 @@ export function InlineImagePreview({
 	className,
 	filename,
 	imageClassName,
+	onAnnotate,
 	src,
 	...props
 }: Omit<ImgHTMLAttributes<HTMLImageElement>, "src"> & {
 	filename?: string;
 	imageClassName?: string;
+	onAnnotate?: (image: LightboxImage) => void;
 	src: string;
 }) {
 	const [open, setOpen] = useState(false);
@@ -43,6 +46,7 @@ export function InlineImagePreview({
 			</button>
 			<ImageLightbox
 				images={[{ filename: label, id: `inline-image-${label}`, url: src }]}
+				onAnnotate={onAnnotate}
 				onClose={() => setOpen(false)}
 				open={open}
 				originRef={originRef}

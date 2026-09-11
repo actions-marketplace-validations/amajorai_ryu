@@ -90,7 +90,7 @@ test.describe("clipped title edge fade — real components in isolation", () => 
 			.toBe(0);
 	});
 
-	test("a rename overlaps per-character enter and left-to-right exit layers", async ({
+	test("a rename uses Torph's accessible morph root and active segments", async ({
 		page,
 	}, testInfo) => {
 		const title = page.getByTestId("animated-title");
@@ -109,13 +109,19 @@ test.describe("clipped title edge fade — real components in isolation", () => 
 		await page.screenshot({
 			path: testInfo.outputPath("title-rename-overlap-proof.png"),
 		});
-		await expect(animated.locator("span.absolute")).toHaveCount(2);
-		await expect(
-			animated.locator("span.absolute").first().locator("span.inline-block")
-		).toHaveCount(9);
-		await expect(
-			animated.locator("span.absolute").last().locator("span.inline-block")
-		).toHaveCount(9);
+		const morph = animated.locator("[torph-root]");
+		await expect(morph).toHaveCount(1);
+		await expect(morph.locator("[torph-sr]")).toHaveText("New title");
+		await expect
+			.poll(() =>
+				morph.evaluate(
+					(element) => element.getAnimations({ subtree: true }).length
+				)
+			)
+			.toBeGreaterThan(0);
+		await expect
+			.poll(() => morph.locator("[torph-item]").count())
+			.toBeGreaterThan(0);
 
 		await expect(animated).toHaveAttribute(
 			"data-animated-title-state",

@@ -578,6 +578,52 @@ export function CloudVisual() {
 	);
 }
 
+/** Early-access exchange visual shared by the Compute and Share product pages. */
+export function ComputeExchangeVisual({
+	mode = "compute",
+}: {
+	mode?: "compute" | "share";
+}) {
+	const compute = mode === "compute";
+	return (
+		<MinimalCard>
+			<div className="space-y-3">
+				<div className="flex items-center justify-between">
+					<span className="font-medium text-foreground text-sm">
+						Ryu {compute ? "Compute" : "Share"}
+					</span>
+					<span className="font-mono text-[10px] text-muted-foreground">
+						early access
+					</span>
+				</div>
+				<div className="flex items-center gap-2">
+					<Node emphasis>{compute ? "Workcell" : "Your node"}</Node>
+					<Wire className="flex-1" delays={[0.2, 0.7]} />
+					<Node>{compute ? "GPU lane" : "Idle window"}</Node>
+				</div>
+				<div className="grid grid-cols-3 gap-2">
+					{(compute
+						? ["15 min", "1 hour", "4 hours"]
+						: ["Compute", "Agent", "Payout"]
+					).map((label, index) => (
+						<div
+							className={cn(
+								"rounded-md border px-2 py-2 text-center font-mono text-[10px]",
+								index === 0
+									? "border-foreground/30 bg-foreground/[0.04] text-foreground"
+									: "border-border bg-muted/30 text-muted-foreground"
+							)}
+							key={label}
+						>
+							{label}
+						</div>
+					))}
+				</div>
+			</div>
+		</MinimalCard>
+	);
+}
+
 export function RedTeamVisual() {
 	const rows = [
 		{ name: "prompt-injection", verdict: "BLOCKED" },

@@ -37,7 +37,7 @@ impl SttHost for CoreSttHost {
     }
 
     fn gateway_bearer(&self) -> Result<String, String> {
-        crate::sidecar::gateway::gateway_bearer().map_err(|e| e.to_string())
+        crate::sidecar::gateway::required_gateway_core_token().map_err(|e| e.to_string())
     }
 
     fn parakeet_model_dir(&self) -> PathBuf {

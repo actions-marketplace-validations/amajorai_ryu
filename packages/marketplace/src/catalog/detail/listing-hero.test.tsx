@@ -1,21 +1,5 @@
-// Render tests for the detail hero: the ONE icon tile it paints, and the banner
-// tiers behind it. Static markup, no DOM — the same idiom as
-// apps-catalog-render.test.tsx.
-//
-// Two regressions are pinned here, and both are invisible to a props-level test.
-//
-// 1. THE HERO TILE IS A VARIANT, NOT THE CARD TREATMENT. The hero square fixes its
-//    glyph white because it sits on the listing's own author-supplied wash rather
-//    than a theme surface — and it can only do that because it forces that wash
-//    OPAQUE first. Painting the card treatment there (theme-following glyph, wash
-//    as declared) loses the glyph on the light end of the standard dissolving
-//    ramp every packaged manifest ships. So the assertion is on the resolved
-//    classes: hero → `text-white`, card → `text-foreground`, for the SAME spec.
-//
-// 2. ONE TILE, NOT TWO. The hero used to take its art as an opaque ReactNode and
-//    paint its own square around it, so a caller handing it an `<AppIcon>` stacked
-//    two tiles — which two Installed-tab heroes shipped. The escape hatch still
-//    exists, so the count is asserted rather than assumed.
+// Card and hero share icon identity and material. The detail hero adds elevation,
+// never a second icon tile. Banner behavior is independent of icon material.
 
 import { describe, expect, test } from "bun:test";
 import { resolveAnimatedGradient } from "@ryu/ui/components/motion/animated-gradient.tsx";
@@ -33,59 +17,42 @@ function occurrences(haystack: string, needle: string): number {
 	return haystack.split(needle).length - 1;
 }
 
-describe("AppIcon — hero vs card treatment", () => {
-	test("the card follows the theme over a dissolving wash", () => {
-		const html = renderToStaticMarkup(
-			<AppIcon dither={DISSOLVING} iconId="bulb" seedId="@ryu/advisor" />
+describe("native layered icon identity", () => {
+	test("card and hero display the same completed light and dark artwork", () => {
+		const card = renderToStaticMarkup(
+			<AppIcon iconId="bulb" seedId="@ryu/advisor" />
 		);
-		expect(html).toContain("text-foreground");
-		expect(html).not.toContain("text-white");
-		expect(html).toContain("rounded-lg");
-	});
-
-	test("the hero fixes the glyph white — the card colour there is the bug", () => {
-		const html = renderToStaticMarkup(
-			<AppIcon
-				dither={DISSOLVING}
-				iconId="bulb"
-				seedId="@ryu/advisor"
-				variant="hero"
-			/>
-		);
-		expect(html).toContain("text-white");
-		expect(html).not.toContain("text-foreground");
-	});
-
-	test("the hero tile is the ring/shadow/rounded-2xl square, not the card one", () => {
-		const html = renderToStaticMarkup(
+		const hero = renderToStaticMarkup(
 			<AppIcon iconId="bulb" seedId="@ryu/advisor" variant="hero" />
 		);
-		expect(html).toContain("rounded-2xl");
-		expect(html).toContain("ring-white/25");
-		expect(html).toContain("shadow-lg");
-	});
-
-	test("each variant drops to its own plate when the item declares no wash", () => {
-		const card = renderToStaticMarkup(<AppIcon iconId="bulb" />);
-		expect(card).toContain("bg-muted");
-		const hero = renderToStaticMarkup(<AppIcon iconId="bulb" variant="hero" />);
-		// Translucent, so the hero's own band still reads through the square.
-		expect(hero).toContain("bg-background/20");
-		expect(hero).not.toContain("bg-muted");
-	});
-
-	test("a flat iconBackground replaces the plate in both variants", () => {
-		for (const variant of ["card", "hero"] as const) {
-			const html = renderToStaticMarkup(
-				<AppIcon iconBackground="#123456" iconId="bulb" variant={variant} />
-			);
-			expect(html).toContain("background:#123456");
+		const sources = (html: string) =>
+			[...html.matchAll(/src="([^"]+)"/g)].map((match) => match[1]);
+		expect(sources(card)).toHaveLength(2);
+		expect(sources(hero)).toEqual(sources(card));
+		for (const html of [card, hero]) {
+			expect(html).toContain('data-app-icon="layered"');
+			expect(html).not.toContain("mask-image");
+			expect(html).not.toContain("background-image");
+			expect(html).not.toContain("ring-white");
 		}
+	});
+	test("supplied complete artwork has no extra icon frame", () => {
+		const html = renderToStaticMarkup(
+			<AppIcon iconPadding="none" iconUrl="https://example.com/native.png" />
+		);
+		expect(html).toContain('data-app-icon="image"');
+		expect(html).not.toMatch(/rounded-|bg-muted|background-image/);
+	});
+	test("custom flat backgrounds remain supported for unregistered icons", () => {
+		const html = renderToStaticMarkup(
+			<AppIcon iconBackground="#123456" iconId="bulb" seedId="@custom/test" />
+		);
+		expect(html).toContain("background:#123456");
 	});
 });
 
-describe("ListingHero — one tile", () => {
-	test("renders the listing's art itself from the icon DATA", () => {
+describe("ListingHero", () => {
+	test("uses one complete native tile for a shipped app", () => {
 		const html = renderToStaticMarkup(
 			<ListingHero
 				dither={DISSOLVING}
@@ -95,33 +62,21 @@ describe("ListingHero — one tile", () => {
 				seedId="@ryu/advisor"
 			/>
 		);
-		expect(occurrences(html, "rounded-2xl")).toBe(1);
-		expect(html).toContain("text-white");
+		expect(occurrences(html, 'data-app-icon="layered"')).toBe(1);
+		expect(html).not.toContain("mask-image");
 	});
-
-	test("the deprecated `icon` node paints INSIDE that tile, not as a second one", () => {
+	test("retains custom fallback content", () => {
 		const html = renderToStaticMarkup(
 			<ListingHero
-				dither={DISSOLVING}
-				icon={<span className="glyph-escape-hatch">E</span>}
-				name="Example App"
+				icon={<span className="custom-mark">E</span>}
+				name="Example"
 			/>
 		);
-		expect(occurrences(html, "rounded-2xl")).toBe(1);
-		expect(html).toContain("glyph-escape-hatch");
+		expect(html).toContain("custom-mark");
 	});
-
-	test("an item with no art at all still gets its own generative tile", () => {
+	test("keeps the banner scrim for a white title", () => {
 		const html = renderToStaticMarkup(
-			<ListingHero iconName="Advisor" name="Advisor" seedId="@ryu/advisor" />
-		);
-		expect(occurrences(html, "rounded-2xl")).toBe(1);
-		expect(html).toContain("canvas");
-	});
-
-	test("the scrim survives — a light banner needs it for the white title", () => {
-		const html = renderToStaticMarkup(
-			<ListingHero banner={{ background: "#ffffff" }} name="Example App" />
+			<ListingHero banner={{ background: "#ffffff" }} name="Example" />
 		);
 		expect(html).toContain("from-black/75");
 	});

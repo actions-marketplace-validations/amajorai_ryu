@@ -1,5 +1,6 @@
 import { Add01Icon, Cancel01Icon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
+import { useChatDisplayPrefs } from "@ryu/blocks/desktop/agent-elements/chat-display-prefs.tsx";
 import {
 	ContextMenu,
 	ContextMenuContent,
@@ -32,6 +33,7 @@ import type {
 	TabGroupColor,
 } from "@/src/contexts/TabsContext.tsx";
 import { useTabsContext } from "@/src/contexts/TabsContext.tsx";
+import { usePrefersReducedMotion } from "@/src/hooks/usePrefersReducedMotion.ts";
 import { setTabLayout, useTabLayout } from "@/src/hooks/useTabLayout.ts";
 import { OverflowTooltip } from "./overflow-tooltip.tsx";
 import { TabGlyph } from "./TitleBar.tsx";
@@ -70,6 +72,7 @@ interface CanvasRegion {
 
 interface TabCanvasNodeData extends Record<string, unknown> {
 	focused: boolean;
+	motionEnabled: boolean;
 	onClose: () => void;
 	onFocus: () => void;
 	persist: () => void;
@@ -234,7 +237,11 @@ function CanvasTabHeader({
 	);
 }
 
-function TabCanvasNodeView({ data, selected }: NodeProps<TabCanvasNode>) {
+function TabCanvasNodeView({
+	data,
+	dragging,
+	selected,
+}: NodeProps<TabCanvasNode>) {
 	return (
 		<>
 			<NodeResizer
@@ -246,7 +253,12 @@ function TabCanvasNodeView({ data, selected }: NodeProps<TabCanvasNode>) {
 				onResizeEnd={data.persist}
 			/>
 			<TabViewPane
-				className="h-full rounded-2xl border border-border/70 shadow-black/5 shadow-lg"
+				className={cn(
+					"h-full rounded-2xl border border-border/70 shadow-black/5 shadow-lg transition-[box-shadow,transform] duration-200 ease-[cubic-bezier(0.23,1,0.32,1)]",
+					dragging &&
+						data.motionEnabled &&
+						"-translate-y-px scale-[1.01] shadow-2xl ring-2 ring-primary/25"
+				)}
 				focused={data.focused}
 				onClose={data.onClose}
 				onFocus={data.onFocus}
@@ -273,6 +285,9 @@ function CanvasInner() {
 	const { activeTabId, closeTab, focusTab, openTab, tabs, groups, splits } =
 		useTabsContext();
 	const tabLayout = useTabLayout();
+	const { animationsEnabled } = useChatDisplayPrefs();
+	const prefersReducedMotion = usePrefersReducedMotion();
+	const motionEnabled = animationsEnabled && !prefersReducedMotion;
 	const regions = useMemo(
 		() => regionList(tabs, groups, splits),
 		[tabs, groups, splits]
@@ -423,6 +438,7 @@ function CanvasInner() {
 						onClose: () => closeTab(tab.id),
 						onFocus: () => focusTab(tab.id),
 						persist: () => persistNode(id),
+						motionEnabled,
 						tab,
 						tabLayout,
 					},
@@ -443,6 +459,7 @@ function CanvasInner() {
 		setNodes,
 		tabLayout,
 		tabs,
+		motionEnabled,
 	]);
 
 	const fitAll = useCallback(() => {

@@ -4862,10 +4862,11 @@ pub fn ryu_pi_acp_cmd_for_agent(
     // its skill manifest instead of answering; QA B1), and the models.json pin
     // that routes Pi's `openai` provider through the Gateway (Pi ignores
     // `OPENAI_BASE_URL`, so the env injection below is not enough on its own).
-    // Best-effort — a write failure is logged, and Pi still launches (it just
-    // won't route / keeps its previous defaults).
+    // Refuse stale configuration: its old literal bearer could override the
+    // per-process identity and silently defeat the selected agent's budget.
     if let Err(e) = crate::pi_config::ensure_managed_defaults() {
-        tracing::warn!(error = %e, "ryu_pi_acp_cmd: could not write managed Pi defaults");
+        tracing::error!(error = %e, "ryu_pi_acp_cmd: refusing stale managed Pi configuration");
+        return None;
     }
     let gateway_v1 = openai_gateway_v1(agent_id);
     // Fail closed on a remote data plane (WS1): a hosted multi-tenant gateway must
@@ -4873,7 +4874,11 @@ pub fn ryu_pi_acp_cmd_for_agent(
     // present it. Only needed when gateway routing is on — otherwise the token is
     // unused (Pi talks straight to its own provider) and no bearer is resolved.
     let token = if gateway {
-        match crate::sidecar::gateway::gateway_bearer() {
+        match crate::sidecar::gateway::gateway_bearer_for_agent(
+            agent_id,
+            None,
+            host_conversation_id,
+        ) {
             Ok(t) => t,
             Err(e) => {
                 tracing::error!(error = %e, "ryu_pi_acp_cmd: no gateway bearer, refusing to route Pi through the gateway");
@@ -4944,51 +4949,52 @@ fn codex_acp_cmd() -> String {
     codex_acp_cmd_for_agent(None)
 }
 
-#[cfg(target_os = "windows")]
 fn codex_acp_cmd_for_agent(agent_id: Option<&str>) -> String {
-    let gateway_v1 = openai_gateway_v1(agent_id);
-    // On a remote data plane (WS1) the shared "ryu-local" literal is rejected by
-    // the hosted multi-tenant gateway; log + degrade here (this is the rarely-used
-    // Codex API-key path, and the call site is a registry-entry builder that cannot
-    // propagate a Result) — the fleet's 401 is the fail-closed backstop.
-    let token = crate::sidecar::gateway::gateway_bearer().unwrap_or_else(|e| {
-        tracing::error!(error = %e, "codex_acp_cmd: no gateway bearer on remote data plane; hosted gateway will reject");
-        "ryu-local".to_owned()
-    });
-    // Windows: inject env vars via `cmd /c set VAR=val&& ...` so the AcpAgent
-    // subprocess inherits them. This mirrors pi_acp_cmd()'s approach.
-    let safety_home = crate::codex_config::safety_home();
-    format!(
-        "cmd /c set \"CODEX_HOME={}\"&& set OPENAI_BASE_URL={gateway_v1}&& set OPENAI_API_KEY={token}&& npx -y @agentclientprotocol/codex-acp@latest",
-        safety_home.to_string_lossy()
-    )
+    let token = match crate::sidecar::gateway::gateway_bearer_for_agent(agent_id, None, None) {
+        Ok(token) => token,
+        Err(error) => {
+            tracing::error!(%error, "cannot provision Codex inference credential");
+            return String::new();
+        }
+    };
+    let env = vec![
+        (
+            "CODEX_HOME".to_owned(),
+            crate::codex_config::safety_home()
+                .to_string_lossy()
+                .into_owned(),
+        ),
+        ("OPENAI_BASE_URL".to_owned(), openai_gateway_v1(agent_id)),
+        ("OPENAI_API_KEY".to_owned(), token),
+    ];
+    let (command, args) = if cfg!(target_os = "windows") {
+        (
+            PathBuf::from("cmd"),
+            vec![
+                "/d".to_owned(),
+                "/s".to_owned(),
+                "/c".to_owned(),
+                "npx -y @agentclientprotocol/codex-acp@latest".to_owned(),
+            ],
+        )
+    } else {
+        (
+            PathBuf::from("npx"),
+            vec![
+                "-y".to_owned(),
+                "@agentclientprotocol/codex-acp@latest".to_owned(),
+            ],
+        )
+    };
+    acp_stdio_spawn_json("codex", command, args, env).unwrap_or_else(|error| {
+        tracing::error!(%error, "cannot construct Codex spawn configuration");
+        String::new()
+    })
 }
 
 #[cfg(not(target_os = "windows"))]
 fn codex_acp_cmd() -> String {
     codex_acp_cmd_for_agent(None)
-}
-
-#[cfg(not(target_os = "windows"))]
-fn codex_acp_cmd_for_agent(agent_id: Option<&str>) -> String {
-    let gateway_v1 = openai_gateway_v1(agent_id);
-    // On a remote data plane (WS1) the shared "ryu-local" literal is rejected by
-    // the hosted multi-tenant gateway; log + degrade here (this is the rarely-used
-    // Codex API-key path, and the call site is a registry-entry builder that cannot
-    // propagate a Result) — the fleet's 401 is the fail-closed backstop.
-    let token = crate::sidecar::gateway::gateway_bearer().unwrap_or_else(|e| {
-        tracing::error!(error = %e, "codex_acp_cmd: no gateway bearer on remote data plane; hosted gateway will reject");
-        "ryu-local".to_owned()
-    });
-    // POSIX: prefix the command with inline env var assignments. The safety home
-    // is materialized by `agent_route` immediately before this command is used;
-    // keeping it in the command also prevents an inherited user CODEX_HOME from
-    // silently bypassing Ryu's isolated hook/rules layer.
-    let safety_home = crate::codex_config::safety_home();
-    format!(
-        "CODEX_HOME='{}' OPENAI_BASE_URL={gateway_v1} OPENAI_API_KEY={token} npx -y @agentclientprotocol/codex-acp@latest",
-        safety_home.to_string_lossy().replace('\'', "'\\''")
-    )
 }
 
 /// The environment values the managed Pi's extensions need to reach Core.
@@ -5174,9 +5180,8 @@ pub fn claude_gateway_cmd(spawn_cmd: &str) -> String {
 /// gateway token) because the target is an API-key OpenAI-compatible client, not a
 /// subscription login.
 ///
-/// Mirrors [`claude_gateway_cmd`]'s shell handling: on Windows it re-emits the
-/// command inside a single `cmd /c set VAR=val&& …` (stripping a leading `cmd /c`
-/// so it isn't doubled); on POSIX it prefixes inline `VAR=val` assignments.
+/// Uses the native structured ACP environment so a pre-existing unscoped key
+/// cannot override the issued identity and credentials never become shell code.
 pub fn openai_gateway_cmd(spawn_cmd: &str) -> anyhow::Result<String> {
     openai_gateway_cmd_for_agent(spawn_cmd, None)
 }
@@ -5187,23 +5192,14 @@ pub fn openai_gateway_cmd_for_agent(
     agent_id: Option<&str>,
 ) -> anyhow::Result<String> {
     let gateway_v1 = openai_gateway_v1(agent_id);
-    // Fail closed on a remote data plane (WS1): refuse to point a BYO/registry ACP
-    // agent at a hosted multi-tenant gateway with the shared "ryu-local" bearer.
-    // On the normal local path this still yields the local gateway's dev bearer.
-    let token = crate::sidecar::gateway::gateway_bearer()?;
-    #[cfg(target_os = "windows")]
-    {
-        Ok(format!(
-            "cmd /c set OPENAI_BASE_URL={gateway_v1}&& set OPENAI_API_KEY={token}&& {}",
-            spawn_cmd.trim_start_matches("cmd /c ")
-        ))
-    }
-    #[cfg(not(target_os = "windows"))]
-    {
-        Ok(format!(
-            "OPENAI_BASE_URL={gateway_v1} OPENAI_API_KEY={token} {spawn_cmd}"
-        ))
-    }
+    let token = crate::sidecar::gateway::gateway_bearer_for_agent(agent_id, None, None)?;
+    acp_spawn_with_env(
+        spawn_cmd,
+        vec![
+            ("OPENAI_BASE_URL".to_owned(), gateway_v1),
+            ("OPENAI_API_KEY".to_owned(), token),
+        ],
+    )
 }
 
 /// Return the OpenAI-compatible Gateway base URL, optionally scoped to an
@@ -7667,6 +7663,35 @@ mod tests {
                 .find(|entry| entry.name == "RYU_MCP_HOST_CONVERSATION_ID")
                 .map(|entry| entry.value.as_str()),
             Some("x&whoami>%TEMP%/ryu-pwned&rem")
+        );
+    }
+
+    #[test]
+    fn scoped_gateway_spawn_replaces_embedded_bearer_without_exporting_signer() {
+        let _env_guard = crate::sidecar::gateway::lock_gateway_env();
+        let original = codex_acp_cmd();
+        let scoped = openai_gateway_cmd_for_agent(&original, Some("agent-a")).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&scoped).unwrap();
+        let token = value["env"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|entry| entry["name"] == "OPENAI_API_KEY")
+            .unwrap()["value"]
+            .as_str()
+            .unwrap();
+        let signer = crate::sidecar::gateway::required_gateway_core_token().unwrap();
+        let scope = ryu_gw_credentials::InferenceScope::verify(token, &signer).unwrap();
+        assert_eq!(scope.agent_id, "agent-a");
+        assert!(!scoped.contains(&signer));
+        assert_eq!(
+            value["env"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|entry| entry["name"] == "OPENAI_API_KEY")
+                .count(),
+            1
         );
     }
 

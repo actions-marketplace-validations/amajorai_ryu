@@ -449,6 +449,11 @@ impl SidecarManager {
         if !is_local_engine(name) {
             return Err(anyhow::anyhow!("'{name}' is not a local engine"));
         }
+        // Reject unsupported engines before stopping or replacing the resident.
+        // A stale installation marker from another machine must not bypass this.
+        if !crate::catalog::registry::supported_on_node(name) {
+            return Err(anyhow::anyhow!("'{name}' is not supported on this node"));
+        }
         if !self.sidecars.contains_key(name) {
             return Err(anyhow::anyhow!("unknown sidecar: {name}"));
         }
@@ -1611,6 +1616,20 @@ mod tests {
     use super::*;
     use crate::sidecar::BoxFuture;
     use std::sync::atomic::{AtomicBool, Ordering};
+
+    #[tokio::test]
+    async fn freetoken_unsupported_engine_swap_preserves_resident_selection() {
+        let manager = SidecarManager::new_noop();
+        *manager.active_engine.lock().await = Some("llamacpp".to_owned());
+        let unsupported = if crate::catalog::registry::supported_on_node("freetoken") {
+            "mlx"
+        } else {
+            "freetoken"
+        };
+        let error = manager.set_active_local_engine(unsupported).await.unwrap_err();
+        assert!(error.to_string().contains("not supported on this node"));
+        assert_eq!(manager.active_engine.lock().await.as_deref(), Some("llamacpp"));
+    }
 
     #[tokio::test]
     async fn typed_team_client_never_dials_a_refused_or_stopped_sidecar() {

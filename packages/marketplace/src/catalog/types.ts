@@ -17,6 +17,9 @@ import type {
 	PublisherTrustLevel,
 	PublisherTrustSource,
 } from "@ryuhq/protocol/publisher-trust";
+import type { DesignSystemEvidence } from "./design-system-scorecard.ts";
+
+export type { DesignSystemEvidence } from "./design-system-scorecard.ts";
 
 /**
  * The `?source=` value that browses every marketplace at once — the store's
@@ -863,6 +866,8 @@ export interface PluginCatalogDetail {
 	/** True when the listing is discovery-only: no verified in-store install path,
 	 *  so the CTA links out to the repository instead. */
 	descriptorOnly?: boolean;
+	/** Bounded UI source evidence for the optional Ryu design-system scorecard. */
+	designSystem?: DesignSystemEvidence | null;
 	developer?: string | null;
 	/** True when the source repository is disabled upstream. */
 	disabled?: boolean;

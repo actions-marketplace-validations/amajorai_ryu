@@ -11,6 +11,7 @@
   "stability": "experimental",
   "description": "Worked example for tools/toolsmith — a real, verified inline_deno tool. Not registered with Core and not shipped; it exists so the scaffold → verify pipeline has an end-to-end regression test.",
   "category": "Developer Tools",
+  "icon": "puzzle",
   "iconDither": { "from": 72, "to": "transparent", "direction": "down" },
   "hidden": true,
   "permission_grants": ["tool:execute"],

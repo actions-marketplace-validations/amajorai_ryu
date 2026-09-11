@@ -20,6 +20,8 @@
  *                     Grants desktop access, NO managed inference.
  *  - A Major Pass      $20/month or $200/year for one individual user;
  *                     supported paid Marketplace access and publisher-pool funding.
+ *  - Plus             private $39/mo individual Pro companion; fixed $10 pool
+ *                     with the same CX23 managed capacity and lower usage.
  *  - Pro              $49/mo individual plan; shown on the public individual
  *                     shelf; fixed $15 pool. Existing $39 contracts remain
  *                     grandfathered at their recorded pricing version.
@@ -28,9 +30,12 @@
  *  - Teams            $50/member seat/mo, five-seat minimum ($250 floor),
  *                     organization-owned; pooled credits grow by $50 per five
  *                     billed seats in the current pricing version.
+ *  - Teams Lite       private $150/month five-seat floor ($100 below Teams),
+ *                     then $50 per additional seat; pooled credits grow by $20
+ *                     per five billed seats.
  *  - Business         $300/month for five seats, then $50 per seat; pooled
  *                     credits grow by $100 per completed five-seat bundle.
- *  - Credits top-up   deposit fee 17% base (16.5% Pro, 16% Max/org) + $2.75
+ *  - Credits top-up   deposit fee 17% base (16.5% Plus/Pro, 16% Max/org) + $2.75
  *                     floor; usage debits AT COST (markup 0).
  *
  * The credit pool / markup is captured at DEPOSIT, not per-usage. The wallet is
@@ -49,6 +54,7 @@ import {
 	BUSINESS_SEAT_PRICE_TIERS,
 	type PlanSeatPriceTier,
 	seatPriceMicroUsdForSeats,
+	TEAMS_LITE_SEAT_PRICE_TIERS,
 } from "./plan-seat-pricing.ts";
 
 // One micro-USD is a millionth of a dollar; the unit the credit wallet stores.
@@ -66,15 +72,21 @@ export const LIFETIME_LAUNCH_PRICE_USD = 129;
 export const PLAN_IDS = [
 	"desktop-license",
 	"marketplace-membership",
+	"plus",
 	"pro",
 	"max",
 	"teams",
+	"teams-lite",
 	"business",
 ] as const;
 export type PlanId = (typeof PLAN_IDS)[number];
 
 /** Organization-owned recurring plans that use human member seats. */
-export const ORGANIZATION_PLAN_IDS = ["teams", "business"] as const;
+export const ORGANIZATION_PLAN_IDS = [
+	"teams",
+	"teams-lite",
+	"business",
+] as const;
 export type OrganizationPlanId = (typeof ORGANIZATION_PLAN_IDS)[number];
 
 export const isOrganizationPlanId = (
@@ -154,7 +166,7 @@ export interface Plan {
 	readonly emailEnabled: boolean;
 	/**
 	 * Max number of Agent Inboxes the plan may create (0 when disabled). The free
-	 * baseline allows one inbox; managed plans (pro/max/teams/business) allow
+	 * baseline allows one inbox; managed plans (pro/plus/max/teams/teams-lite/business) allow
 	 * UNLIMITED inboxes ({@link Number.POSITIVE_INFINITY}); the cap is on
 	 * STORAGE ({@link emailStorageLimitGb}), not count. A Major Pass has no mail.
 	 */
@@ -190,7 +202,7 @@ export interface Plan {
 	readonly monthlyCreditPoolMicroUsd: number;
 	/**
 	 * The plan's RECURRING price in micro-USD — per month for single plans, per
-	 * SEAT per month for per-seat plans (Teams and Business). 0 for plans with no recurring
+	 * SEAT per month for per-seat plans (Teams, Teams Lite, and Business). 0 for plans with no recurring
 	 * price (the one-time desktop license). The base the included credit pool is
 	 * derived from; the yearly binding's discounted price is a checkout concern
 	 * and does not change the monthly grant.
@@ -315,15 +327,17 @@ export const topupBreakEvenUsd = (bps: number): number => {
  * practice; it exists so the map is total over `PlanId` and a future policy
  * change has an obvious place to land, not because Lifetime has a rate.
  *
- * Pro pays 16.5%. Max, Teams, and Business pay 16%. All are below the 17% base
+ * Pro and Plus pay 16.5%. Max, Teams, and Business pay 16%. All are below the 17% base
  * rate while remaining above the conservative break-even.
  */
 export const DEPOSIT_FEE_BPS_BY_PLAN: Record<PlanId, number> = {
 	"desktop-license": DEPOSIT_FEE_BPS, // total map; route does not allow this plan to top up
 	"marketplace-membership": DEPOSIT_FEE_BPS,
+	plus: 1650,
 	pro: 1650,
 	max: 1600,
 	teams: 1600,
+	"teams-lite": 1600,
 	business: 1600,
 };
 
@@ -418,7 +432,7 @@ export const includedCreditPoolMicroUsd = (
 
 /**
  * The map keyed by plan → recurring list price (micro-USD): per month for single
- * plans, per SEAT per month for Teams and Business. The one-time desktop license has no
+ * plans, per SEAT per month for Teams, Teams Lite, and Business. The one-time desktop license has no
  * recurring price (0). These are the ONLY plan-price figures in the codebase;
  * the included credit grant is DERIVED from them by
  * {@link includedCreditPoolMicroUsd}, never hand-typed per row.
@@ -426,10 +440,13 @@ export const includedCreditPoolMicroUsd = (
 export const PLAN_MONTHLY_PRICE_MICRO_USD: Record<PlanId, number> = {
 	"desktop-license": 0, // one-time list price; no recurring price
 	"marketplace-membership": usdToMicro(20),
+	plus: usdToMicro(39),
 	pro: usdToMicro(49),
 	max: usdToMicro(99),
 	// Per-seat list price. Five Teams seats therefore start at $250/mo.
 	teams: usdToMicro(50),
+	// Teams Lite charges $30 per seat for the first five seats, so its floor is $150/mo.
+	"teams-lite": usdToMicro(30),
 	// Business's first graduated band is $60/seat for five seats ($300/mo);
 	// subsequent seats use the tiered price recorded below.
 	business: usdToMicro(60),
@@ -538,6 +555,14 @@ export const PLAN_VERSIONS: Record<PlanId, readonly PlanVersion[]> = {
 			monthlyCreditPoolMicroUsd: 0,
 		},
 	],
+	plus: [
+		{
+			version: 1,
+			monthlyPriceMicroUsd: usdToMicro(39),
+			monthlyCreditPoolMicroUsd: usdToMicro(10),
+			creditPoolModel: "fixed",
+		},
+	],
 	pro: [
 		{
 			version: 1,
@@ -632,6 +657,18 @@ export const PLAN_VERSIONS: Record<PlanId, readonly PlanVersion[]> = {
 			creditPoolBundleSize: 5,
 		},
 	],
+	"teams-lite": [
+		{
+			version: 1,
+			monthlyPriceMicroUsd: usdToMicro(30),
+			monthlyCreditPoolMicroUsd: usdToMicro(20),
+			creditPoolModel: "per_bundle",
+			creditPoolBundleSize: 5,
+			seatPriceTiers: TEAMS_LITE_SEAT_PRICE_TIERS,
+			baseMonthlyPriceMicroUsd: usdToMicro(150),
+			additionalSeatPriceMicroUsd: usdToMicro(50),
+		},
+	],
 	business: [
 		{
 			version: 1,
@@ -666,9 +703,11 @@ export const CURRENT_PLAN_VERSION = 5;
 export const CURRENT_PLAN_VERSION_BY_PLAN: Record<PlanId, number> = {
 	"desktop-license": 4,
 	"marketplace-membership": 6,
+	plus: 1,
 	pro: 6,
 	max: 4,
 	teams: 5,
+	"teams-lite": 1,
 	business: 2,
 };
 
@@ -778,7 +817,7 @@ export const monthlyPriceMicroUsdForSeats = (input: {
  * managed plan in a supported/default region: Pro `cx23`, Max `cx33`, Teams
  * `cx43`, and Business `cx53` in the EU default region. Pro and Max do not
  * promise a free regional node in Singapore because those shapes exceed their
- * safe annual cost envelope; Teams and Business use their available regional
+ * safe annual cost envelope; Teams, Teams Lite, and Business use their available regional
  * fallbacks. The server-side location resolver owns that exception. The node's
  * compute cost is absorbed into the plan price; there is no separate Polar
  * product for an included node, so holding a qualifying subscription is what
@@ -797,7 +836,7 @@ export const monthlyPriceMicroUsdForSeats = (input: {
 
 /**
  * The plan catalog. Product id DEFAULTS reference the existing sandbox UUIDs in
- * `constants.ts` where a matching product already exists (pro/max monthly+
+ * `constants.ts` where a matching product already exists (pro/plus/max monthly+
  * yearly, lifetime → reused as the desktop license placeholder). Business,
  * Teams, and desktop license bindings that need NEW Polar products use a
  * clearly-fake
@@ -854,7 +893,7 @@ export const PLANS: Record<PlanId, Plan> = {
 		emailStorageLimitGb: 0,
 		emailBrandingRemovable: false,
 		// A Major Pass is for one individual user. Shared Marketplace access is
-		// not an organization-seat product; teams should use Teams or Business.
+		// not an organization-seat product; teams should use Teams, Teams Lite, or Business.
 		seatModel: { kind: "single" },
 		bindings: {
 			monthly: {
@@ -864,6 +903,37 @@ export const PLANS: Record<PlanId, Plan> = {
 			yearly: {
 				productIdEnv: "POLAR_PRODUCT_MARKETPLACE_MEMBERSHIP_YEARLY",
 				productIdDefault: "polar_product_marketplace_membership_yearly",
+			},
+		},
+		creditPoolModel: "fixed",
+	},
+	plus: {
+		audience: "individual",
+		id: "plus",
+		name: "Ryu Plus",
+		desktopAccess: true,
+		marketplaceApps: true,
+		managedInference: true,
+		// Private lower-usage Pro companion: $39/mo with a fixed $10 pool.
+		// It keeps the same individual CX23 capacity while making the reduced
+		// included usage explicit in its own pricing contract.
+		monthlyPriceMicroUsd: PLAN_MONTHLY_PRICE_MICRO_USD.plus,
+		monthlyCreditPoolMicroUsd: usdToMicro(10),
+		marketplacePublisherPool: false,
+		emailEnabled: true,
+		emailInboxLimit: Number.POSITIVE_INFINITY,
+		emailMonthlySendLimit: 10_000,
+		emailStorageLimitGb: 20,
+		emailBrandingRemovable: true,
+		seatModel: { kind: "single" },
+		bindings: {
+			monthly: {
+				productIdEnv: "POLAR_PRODUCT_PLUS_MONTHLY",
+				productIdDefault: "polar_product_plus_monthly",
+			},
+			yearly: {
+				productIdEnv: "POLAR_PRODUCT_PLUS_YEARLY",
+				productIdDefault: "polar_product_plus_yearly",
 			},
 		},
 		creditPoolModel: "fixed",
@@ -970,6 +1040,40 @@ export const PLANS: Record<PlanId, Plan> = {
 			},
 		},
 	},
+	"teams-lite": {
+		audience: "organization",
+		id: "teams-lite",
+		name: "Ryu Teams Lite",
+		desktopAccess: true,
+		marketplaceApps: true,
+		managedInference: true,
+		// Private lower-usage organization offer: $30/seat for the first five
+		// seats ($150 floor), then the standard $50 marginal seat price.
+		monthlyPriceMicroUsd: PLAN_MONTHLY_PRICE_MICRO_USD["teams-lite"],
+		monthlyCreditPoolMicroUsd: usdToMicro(20),
+		marketplacePublisherPool: false,
+		seatPriceTiers: TEAMS_LITE_SEAT_PRICE_TIERS,
+		baseMonthlyPriceMicroUsd: usdToMicro(150),
+		additionalSeatPriceMicroUsd: usdToMicro(50),
+		emailEnabled: true,
+		emailInboxLimit: Number.POSITIVE_INFINITY,
+		emailMonthlySendLimit: 100_000,
+		emailStorageLimitGb: 20,
+		emailBrandingRemovable: true,
+		seatModel: { kind: "per_seat", minSeats: 5 },
+		creditPoolModel: "per_bundle",
+		creditPoolBundleSize: 5,
+		bindings: {
+			monthly: {
+				productIdEnv: "POLAR_PRODUCT_TEAMS_LITE_MONTHLY",
+				productIdDefault: "polar_product_teams_lite_monthly",
+			},
+			yearly: {
+				productIdEnv: "POLAR_PRODUCT_TEAMS_LITE_YEARLY",
+				productIdDefault: "polar_product_teams_lite_yearly",
+			},
+		},
+	},
 	business: {
 		audience: "organization",
 		id: "business",
@@ -1069,8 +1173,10 @@ export const KERNEL_QUOTAS = {
 		paid: {
 			"desktop-license": 3,
 			pro: 3,
+			plus: 3,
 			max: 3,
 			teams: 8,
+			"teams-lite": 8,
 			business: 8,
 		},
 		unit: "count",
@@ -1097,8 +1203,10 @@ export const KERNEL_QUOTAS = {
 		paid: {
 			"desktop-license": 20,
 			pro: 20,
+			plus: 20,
 			max: 50,
 			teams: 50,
+			"teams-lite": 50,
 			business: 50,
 		},
 		unit: "gigabytes",
@@ -1311,7 +1419,7 @@ export interface Entitlement {
 /**
  * Number of external channel users an entitlement may configure for hosted bots.
  * Only managed-inference plans may use hosted bots. Personal managed plans
- * resolve to one seat; Teams and Business resolve to the billed seat count.
+ * resolve to one seat; Teams, Teams Lite, and Business resolve to the billed seat count.
  * A Major Pass has Marketplace access only and therefore has no allowance.
  */
 export const channelUserLimitForEntitlement = (
@@ -1426,7 +1534,7 @@ export const managedInferenceAvailable = (
  * Desktop trial + paywall gate (epic #496, Unit C1).
  *
  * The desktop is a PAID product ($200 list / $129 launch one-time license or a
- * Pro/Max/Teams/Business subscription),
+ * Plus/Pro/Max/Teams/Teams Lite/Business subscription),
  * but Ryu is open-core: BASIC local/free chat must stay usable forever. So the
  * gate covers only Pro features + managed inference; it never blocks the app
  * shell. A fresh install gets a 7-day trial of full access; after expiry, with
@@ -1474,7 +1582,7 @@ export interface DesktopGateConfig {
  * `proUnlocked: true, managedInference: false`. That is Band 2 and only Band 2:
  * the local power features a one-time **Lifetime Desktop license** unlocks
  * forever. It grants no managed inference, no credits and no cloud node — every
- * one of which is Band 3 and belongs to a Pro/Max SUBSCRIPTION.
+ * one of which is Band 3 and belongs to a Plus/Pro/Max SUBSCRIPTION.
  *
  * Calling it a "Pro trial" therefore oversold it in both directions: it promised
  * credits and a server the trial never grants, and it hid that what the user is
@@ -1559,7 +1667,7 @@ export const capabilityTier = (cap: GatedCapability): CapabilityTier =>
 
 /** Why access is currently granted (or why it is not). */
 export type AccessReason =
-	| "subscription" // an active Pro/Max/Teams/Business subscription
+	| "subscription" // an active Plus/Pro/Max/Teams/Teams Lite/Business subscription
 	| "license" // a valid desktop license key
 	| "beta" // free-during-beta flag is on (no trial clock, no paywall)
 	| "trial" // still inside the 7-day trial window
@@ -1767,7 +1875,7 @@ export const decideDesktopAccess = (
  * Agent Inbox lifecycle (subscription lapse → grace → deactivated → deletable).
  *
  * Agent Inboxes (Ryu Mail) are a hosted feature: the free baseline gets a small
- * allowance, while an active Pro/Max/Teams/Business plan carries the larger
+ * allowance, while an active Plus/Pro/Max/Teams/Teams Lite/Business plan carries the larger
  * `emailEnabled` quota. When hosted mail entitlement LAPSES an inbox must not
  * simply vanish (its address is a real, published identity and its stored mail
  * is the user's data), nor keep costing Ryu SES/storage forever. This is the one
@@ -2013,7 +2121,7 @@ export const updatesCutoffMs = (
  * Whether the lifetime updates window governs this plan at all.
  *
  * Only a desktop-license holder with NO active recurring plan. A lifetime owner
- * who later subscribes to Pro/Max/Teams/Business resolves to that plan
+ * who later subscribes to Plus/Pro/Max/Teams/Teams Lite/Business resolves to that plan
  * ({@link resolveEntitlement} gives a subscription precedence over a license),
  * and an actively-paying subscriber must never be pinned to old builds or
  * upsold a licence they already have.

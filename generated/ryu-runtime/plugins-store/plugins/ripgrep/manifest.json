@@ -11,7 +11,7 @@
   "version": "0.1.14",
   "stability": "experimental",
   "description": "Fast local regular-expression search through ripgrep's `rg` binary, exposed as Ryu command tools. Respects .gitignore, skips hidden and binary files by default, and returns line-aware JSON Lines output. BYO install; no API key.",
-  "icon": "code-browser",
+  "icon": "computer-terminal-02",
   "iconDither": { "from": 188, "to": "transparent", "direction": "down" },
   "tagline": "Fast, ignore-aware code search for agents",
   "keywords": ["search", "code", "regex", "grep", "pattern"],

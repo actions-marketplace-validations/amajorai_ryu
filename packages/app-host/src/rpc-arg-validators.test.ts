@@ -325,6 +325,11 @@ describe("optional-field validators: present kept, wrong-type rejects whole arg,
 			audio: "a",
 			filename: "clip.wav",
 		});
+		expect(asMediaTranscribeArg({ audio: "a", detailed: true })).toEqual({
+			audio: "a",
+			detailed: true,
+		});
+		expect(asMediaTranscribeArg({ audio: "a", detailed: "true" })).toBeNull();
 		expect(asMediaTranscribeArg({ audio: "" })).toBeNull();
 		expect(asMediaTranscribeArg({ audio: "a", filename: 5 })).toBeNull();
 	});

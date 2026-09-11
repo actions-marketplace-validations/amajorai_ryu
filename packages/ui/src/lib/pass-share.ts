@@ -41,6 +41,9 @@ export interface PassShareFacts {
 export function passShareParams(facts: PassShareFacts): URLSearchParams {
 	const params = new URLSearchParams();
 	params.set("name", facts.name);
+	if (facts.ref) {
+		params.set("ref", facts.ref);
+	}
 	if (facts.username) {
 		params.set("username", facts.username);
 	}

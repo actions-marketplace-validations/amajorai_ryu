@@ -27,7 +27,7 @@
     "subscription",
     "fast-mode"
   ],
-  "icon": "gauge-02",
+  "icon": "activity-03",
   "iconDither": { "from": 32, "to": "transparent", "direction": "down" },
   "surfaces": {
     "gateway": { "support": "none" },

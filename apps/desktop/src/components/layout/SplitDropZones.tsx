@@ -216,9 +216,10 @@ export function SplitDropZones({
 			{previewStyle && (
 				<div
 					className={cn(
-						"pointer-events-none absolute rounded-lg bg-primary/15 ring-2 ring-primary/50 ring-inset transition-all duration-150 ease-out",
+						"pointer-events-none absolute rounded-lg bg-primary/15 ring-2 ring-primary/50 ring-inset transition-[background-color,left,opacity,top,width,height] duration-200 ease-[cubic-bezier(0.23,1,0.32,1)] motion-reduce:transition-none",
 						hover?.zone === "center" && "bg-primary/10 ring-primary/40"
 					)}
+					data-drop-preview={hover?.zone}
 					// The overlay's own origin already sits at TITLEBAR_PX, so pull the
 					// container-relative preview coords back up by that offset.
 					style={{

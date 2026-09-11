@@ -1,5 +1,6 @@
 "use client";
 
+import { useLocalizedText } from "@ryu/i18n/react";
 import { useDirection } from "@ryu/ui/components/direction.tsx";
 import { cn } from "@ryu/ui/lib/utils.ts";
 import type * as React from "react";
@@ -12,9 +13,15 @@ function Drawer({
 }
 
 function DrawerTrigger({
+	children,
 	...props
 }: React.ComponentProps<typeof DrawerPrimitive.Trigger>) {
-	return <DrawerPrimitive.Trigger data-slot="drawer-trigger" {...props} />;
+	const localizedChildren = useLocalizedText(children, { literal: true });
+	return (
+		<DrawerPrimitive.Trigger data-slot="drawer-trigger" {...props}>
+			{localizedChildren}
+		</DrawerPrimitive.Trigger>
+	);
 }
 
 function DrawerPortal({
@@ -36,7 +43,7 @@ function DrawerOverlay({
 	return (
 		<DrawerPrimitive.Overlay
 			className={cn(
-				"ryu-dialog-overlay data-open:fade-in-0 data-closed:fade-out-0 fixed inset-0 z-50 rounded-[var(--ryu-window-radius,0px)] data-closed:animate-out data-open:animate-in",
+				"ryu-dialog-overlay corner-squircle data-open:fade-in-0 data-closed:fade-out-0 fixed inset-0 z-50 rounded-[var(--ryu-window-radius,0px)] data-closed:animate-out data-open:animate-in",
 				className
 			)}
 			data-slot="drawer-overlay"
@@ -56,7 +63,7 @@ function DrawerContent({
 			<DrawerOverlay />
 			<DrawerPrimitive.Content
 				className={cn(
-					"group/drawer-content fixed z-50 flex h-auto flex-col bg-transparent p-4 text-sm backdrop-blur-xl before:absolute before:inset-2 before:-z-10 before:rounded-4xl before:bg-popover/90 before:shadow-xl data-[vaul-drawer-direction=bottom]:inset-x-0 data-[vaul-drawer-direction=top]:inset-x-0 data-[vaul-drawer-direction=left]:inset-y-0 data-[vaul-drawer-direction=right]:inset-y-0 data-[vaul-drawer-direction=top]:top-0 data-[vaul-drawer-direction=right]:right-0 data-[vaul-drawer-direction=bottom]:bottom-0 data-[vaul-drawer-direction=left]:left-0 data-[vaul-drawer-direction=bottom]:mt-24 data-[vaul-drawer-direction=top]:mb-24 data-[vaul-drawer-direction=bottom]:max-h-[80vh] data-[vaul-drawer-direction=top]:max-h-[80vh] data-[vaul-drawer-direction=left]:w-3/4 data-[vaul-drawer-direction=right]:w-3/4 data-[vaul-drawer-direction=left]:sm:max-w-sm data-[vaul-drawer-direction=right]:sm:max-w-sm",
+					"group/drawer-content before:corner-squircle fixed z-50 flex h-auto flex-col bg-transparent p-4 text-sm backdrop-blur-xl before:absolute before:inset-2 before:-z-10 before:rounded-4xl before:bg-popover/90 before:shadow-xl data-[vaul-drawer-direction=bottom]:inset-x-0 data-[vaul-drawer-direction=top]:inset-x-0 data-[vaul-drawer-direction=left]:inset-y-0 data-[vaul-drawer-direction=right]:inset-y-0 data-[vaul-drawer-direction=top]:top-0 data-[vaul-drawer-direction=right]:right-0 data-[vaul-drawer-direction=bottom]:bottom-0 data-[vaul-drawer-direction=left]:left-0 data-[vaul-drawer-direction=bottom]:mt-24 data-[vaul-drawer-direction=top]:mb-24 data-[vaul-drawer-direction=bottom]:max-h-[80vh] data-[vaul-drawer-direction=top]:max-h-[80vh] data-[vaul-drawer-direction=left]:w-3/4 data-[vaul-drawer-direction=right]:w-3/4 data-[vaul-drawer-direction=left]:sm:max-w-sm data-[vaul-drawer-direction=right]:sm:max-w-sm",
 					className
 				)}
 				data-slot="drawer-content"
@@ -94,9 +101,11 @@ function DrawerFooter({ className, ...props }: React.ComponentProps<"div">) {
 }
 
 function DrawerTitle({
+	children,
 	className,
 	...props
 }: React.ComponentProps<typeof DrawerPrimitive.Title>) {
+	const localizedChildren = useLocalizedText(children, { literal: true });
 	return (
 		<DrawerPrimitive.Title
 			className={cn(
@@ -105,20 +114,26 @@ function DrawerTitle({
 			)}
 			data-slot="drawer-title"
 			{...props}
-		/>
+		>
+			{localizedChildren}
+		</DrawerPrimitive.Title>
 	);
 }
 
 function DrawerDescription({
+	children,
 	className,
 	...props
 }: React.ComponentProps<typeof DrawerPrimitive.Description>) {
+	const localizedChildren = useLocalizedText(children, { literal: true });
 	return (
 		<DrawerPrimitive.Description
 			className={cn("text-muted-foreground text-sm", className)}
 			data-slot="drawer-description"
 			{...props}
-		/>
+		>
+			{localizedChildren}
+		</DrawerPrimitive.Description>
 	);
 }
 

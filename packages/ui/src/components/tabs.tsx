@@ -1,5 +1,7 @@
 "use client";
 
+import "../styles/tabs.css";
+
 import { Tabs as TabsPrimitive } from "@base-ui/react/tabs";
 import {
 	ArrowLeft01Icon,
@@ -1056,6 +1058,14 @@ const TabsList = forwardRef<HTMLDivElement, TabsListProps>(function TabsList(
 		() => getTabItems(children),
 		[children]
 	);
+	const automaticIndicator =
+		variant !== "text" &&
+		variant !== "stepper" &&
+		!staticChildren.some(
+			(child) => isValidElement(child) && child.type === TabsIndicator
+		) ? (
+			<TabsIndicator />
+		) : null;
 	const isScrollable = manageLayout === false && orientation === "horizontal";
 	const nextItemKeys = items.map((item) => item.key);
 	const itemKeysSignature = nextItemKeys.join("\u0000");
@@ -1381,6 +1391,7 @@ const TabsList = forwardRef<HTMLDivElement, TabsListProps>(function TabsList(
 				{...props}
 			>
 				{children}
+				{automaticIndicator}
 			</TabsPrimitive.List>
 		);
 		if (!isScrollable) {
@@ -1451,6 +1462,7 @@ const TabsList = forwardRef<HTMLDivElement, TabsListProps>(function TabsList(
 				showTrigger={showMoreMenu}
 			/>
 			{staticChildren}
+			{automaticIndicator}
 		</TabsPrimitive.List>
 	);
 });
@@ -1474,6 +1486,7 @@ function TabsTrigger({
 }
 
 const tabsTriggerClassName = cn(
+	"t-tabs-trigger",
 	"relative inline-flex h-[calc(100%-1px)] flex-1 items-center justify-center gap-2 whitespace-nowrap rounded-full border border-transparent! px-3 py-1 font-medium text-foreground/60 text-sm transition-all hover:text-foreground focus-visible:border-ring focus-visible:outline-1 focus-visible:outline-ring focus-visible:ring-[3px] focus-visible:ring-ring/50 disabled:pointer-events-none disabled:opacity-50 has-data-[icon=inline-start]:ps-2 has-data-[icon=inline-end]:pe-2 aria-disabled:pointer-events-none aria-disabled:opacity-50 group-data-vertical/tabs:w-full group-data-vertical/tabs:justify-start group-data-vertical/tabs:rounded-2xl group-data-vertical/tabs:px-3 group-data-vertical/tabs:py-1.5 dark:text-muted-foreground dark:hover:text-foreground [&_svg:not([class*='size-'])]:size-4 [&_svg]:pointer-events-none [&_svg]:shrink-0",
 	"group-data-[variant=line]/tabs-list:bg-transparent group-data-[variant=line]/tabs-list:data-active:bg-transparent dark:group-data-[variant=line]/tabs-list:data-active:border-transparent dark:group-data-[variant=line]/tabs-list:data-active:bg-transparent",
 	// The rule is the trigger's own `::before`, so the label sits under it
@@ -1507,26 +1520,72 @@ const tabsTriggerClassName = cn(
 /**
  * Sliding active-tab indicator (transitions.dev "tabs sliding", 16). Base UI
  * positions it over the active tab via the --active-tab-* CSS vars; the
- * `t-tabs-indicator` class (globals.css) tweens left/top/width/height. Render
- * it as a child of ANY TabsList (`default` · `line` · `pills` · `segmented`) to
- * animate that variant's active marker; the trigger cedes its own active
- * background/underline to this element (see TabsTrigger). Its look adapts per
- * variant: a raised pill for default/segmented, a solid pill for pills, and a
- * bottom bar for line.
+ * `t-tabs-indicator` class (globals.css) tweens transform/width/height.
+ * TabsList includes one automatically except for text and stepper variants.
+ * Supply an explicit child to customize its look. Layout changes snap into
+ * position; selecting a tab slides its marker without moving the labels.
  */
-function TabsIndicator({ className, ...props }: TabsPrimitive.Indicator.Props) {
+function TabsIndicator({
+	className,
+	ref,
+	...props
+}: TabsPrimitive.Indicator.Props) {
+	const indicatorRef = useRef<HTMLSpanElement>(null);
+	const composedRef = useComposedRefs(indicatorRef, ref);
+	const { activeValue } = useTabsContext();
+	const hasSelection = activeValue != null;
+
+	useSafeLayoutEffect(() => {
+		const indicator = indicatorRef.current;
+		const list = indicator?.parentElement;
+		if (!(indicator && list)) {
+			return;
+		}
+		let frame = 0;
+		const snapToLayout = () => {
+			indicator.setAttribute("data-resizing", "");
+			cancelAnimationFrame(frame);
+			frame = requestAnimationFrame(() => {
+				frame = requestAnimationFrame(() => {
+					// Commit Base UI's measured position before restoring transitions.
+					indicator.getBoundingClientRect();
+					indicator.removeAttribute("data-resizing");
+				});
+			});
+		};
+		const observer = new ResizeObserver(snapToLayout);
+		const observeTabs = () => {
+			observer.disconnect();
+			observer.observe(list);
+			for (const trigger of list.querySelectorAll('[role="tab"]')) {
+				observer.observe(trigger);
+			}
+		};
+		observeTabs();
+		const mutations = new MutationObserver(observeTabs);
+		mutations.observe(list, { childList: true, subtree: true });
+		return () => {
+			mutations.disconnect();
+			observer.disconnect();
+			cancelAnimationFrame(frame);
+		};
+	}, [hasSelection]);
+
 	return (
 		<TabsPrimitive.Indicator
+			aria-hidden
 			className={cn(
 				// default + segmented: the raised pill.
 				"t-tabs-indicator z-0 rounded-full bg-background shadow-sm dark:bg-input/30",
 				// pills: a solid black (light) / white (dark) pill, no shadow.
 				"group-data-[variant^=pills]/tabs-list:bg-black group-data-[variant^=pills]/tabs-list:shadow-none dark:group-data-[variant^=pills]/tabs-list:bg-white",
+				"group-data-[variant=muted-pills]/tabs-list:bg-muted group-data-[variant=muted-pills]/tabs-list:shadow-none dark:group-data-[variant=muted-pills]/tabs-list:bg-muted",
 				// line: a bottom bar instead of a filled pill.
 				"group-data-vertical/tabs:group-data-[variant=line]/tabs-list:border-r-2 group-data-horizontal/tabs:group-data-[variant=line]/tabs-list:border-b-2 group-data-[variant=line]/tabs-list:rounded-none group-data-[variant=line]/tabs-list:border-foreground group-data-[variant=line]/tabs-list:bg-transparent group-data-[variant=line]/tabs-list:shadow-none",
 				className
 			)}
 			data-slot="tabs-indicator"
+			ref={composedRef}
 			{...props}
 		/>
 	);

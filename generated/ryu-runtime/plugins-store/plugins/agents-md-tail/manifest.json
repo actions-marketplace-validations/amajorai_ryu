@@ -13,7 +13,7 @@
   "tagline": "Keep project instructions fresh at the end of every turn",
   "keywords": ["agents.md", "context", "instructions", "prompt", "acp"],
   "category": "Developer Tools",
-  "icon": "file-check-02",
+  "icon": "tick-double-01",
   "iconDither": { "from": 214, "to": "transparent", "direction": "down" },
   "surfaces": {
     "gateway": { "support": "none" },

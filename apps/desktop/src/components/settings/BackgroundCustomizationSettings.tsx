@@ -8,12 +8,8 @@ import { HugeiconsIcon } from "@hugeicons/react";
 import { Button } from "@ryu/ui/components/button";
 import {
 	ColorPicker,
-	ColorPickerArea,
 	ColorPickerContent,
-	ColorPickerEyeDropper,
-	ColorPickerFormatSelect,
-	ColorPickerHueSlider,
-	ColorPickerInput,
+	ColorPickerPanel,
 	ColorPickerTrigger,
 } from "@ryu/ui/components/color-picker";
 import { FluidSlider } from "@ryu/ui/components/motion/range-slider-fluid";
@@ -52,8 +48,8 @@ const FIT_OPTIONS: Array<{ value: BackgroundFit; label: string }> = [
 
 const HEX_RE = /^#[0-9a-fA-F]{6}$/;
 
-// Pick black/white text for legibility against the swatch fill — mirrors the
-// theme color pickers in AppearanceTab, which show the hex on the swatch.
+// Pick black/white text for legibility against the trigger fill. The shared
+// picker owns the actual swatch, sliders, formats, and recent-color history.
 function getContrastColor(hex: string): string {
 	if (!HEX_RE.test(hex)) {
 		return "#ffffff";
@@ -84,11 +80,7 @@ function ColorSwatch({
 				{hex}
 			</ColorPickerTrigger>
 			<ColorPickerContent className="z-50">
-				<ColorPickerArea />
-				<ColorPickerHueSlider />
-				<ColorPickerEyeDropper />
-				<ColorPickerFormatSelect />
-				<ColorPickerInput />
+				<ColorPickerPanel />
 			</ColorPickerContent>
 		</ColorPicker>
 	);

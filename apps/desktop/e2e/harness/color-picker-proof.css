@@ -1,0 +1,18 @@
+@import "tailwindcss";
+@import "@ryu/ui/app-ui.css";
+
+@source "./color-picker-proof.tsx";
+@source "../../../../packages/ui/src/components/color-picker.tsx";
+
+html,
+body,
+#root {
+	min-height: 100%;
+	margin: 0;
+}
+
+body {
+	min-width: 320px;
+	color: var(--foreground);
+	background: var(--background);
+}

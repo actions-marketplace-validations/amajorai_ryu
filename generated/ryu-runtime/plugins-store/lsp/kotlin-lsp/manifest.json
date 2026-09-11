@@ -13,7 +13,7 @@
   "description": "Kotlin language server for the ryu agent: definitions, references, hover, symbols, implementations, call hierarchies and diagnostics after every edit. You install kotlin-lsp; the plugin ships config.",
   "tagline": "Kotlin code intelligence via the Kotlin LSP",
   "keywords": ["kotlin", "kotlin-lsp", "jvm", "language-server", "developer"],
-  "icon": "code-square-02",
+  "icon": "braces",
   "iconDither": {
     "from": 160,
     "to": "transparent",

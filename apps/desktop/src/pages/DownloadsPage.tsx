@@ -29,7 +29,7 @@ import { type ReactNode, useCallback, useState } from "react";
 import { useShallow } from "zustand/react/shallow";
 import { AvailableUpdates } from "@/src/components/downloads/AvailableUpdates.tsx";
 import { DownloadRow } from "@/src/components/downloads/DownloadRow.tsx";
-import { useTabsContext } from "@/src/contexts/TabsContext.tsx";
+import { useTabSelector } from "@/src/contexts/TabsContext.tsx";
 import { useActiveNode } from "@/src/hooks/useActiveNode.ts";
 import { useAvailableUpdates } from "@/src/hooks/useAvailableUpdates.ts";
 import {
@@ -70,7 +70,7 @@ function mergeHistory(
 export default function DownloadsPage() {
 	const tasks = useDownloadsStore(useShallow(selectOrderedTasks));
 	const [friendly] = useFriendlyMode();
-	const { openTab } = useTabsContext();
+	const openTab = useTabSelector((state) => state.openTab);
 	const { updates, loading, refresh } = useAvailableUpdates();
 	const node = useActiveNode();
 

@@ -765,12 +765,15 @@ fn do_load(
                 s.id
             ),
         })),
-        Some(s) => Ok(json!({
-            "ok": true,
-            "id": s.id,
-            "name": s.name,
-            "instructions": s.instructions,
-        })),
+        Some(s) => {
+            crate::stats_beacon::record_marketplace_event("skill", &s.id, false);
+            Ok(json!({
+                "ok": true,
+                "id": s.id,
+                "name": s.name,
+                "instructions": s.instructions,
+            }))
+        }
         // Wording is intentionally identical for "does not exist", "disabled" and
         // "outside your allowlist": a distinguishable message would let an agent
         // enumerate skills it is not allowed to see.

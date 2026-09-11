@@ -8,7 +8,13 @@ if (!url) {
 }
 
 const raw = await callTool({ url });
+if (!raw || raw.isError || raw.error || raw.available === false) {
+	return { raw };
+}
 const image = raw?.content?.find((item) => item?.type === "image");
+if (!image) {
+	return { raw };
+}
 return {
 	tab_id: url,
 	url,

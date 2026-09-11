@@ -13,7 +13,7 @@
   "description": "Remember chats that were running when the selected node or network went away, then retry each eligible interrupted turn once when the connection returns.",
   "tagline": "Pick up chats after Wi-Fi or LAN returns",
   "keywords": ["chat", "reconnect", "network", "retry", "reliability"],
-  "icon": "refresh-02",
+  "icon": "repeat",
   "iconDither": { "from": 188, "to": "transparent", "direction": "down" },
   "surfaces": {
     "gateway": { "support": "none" },

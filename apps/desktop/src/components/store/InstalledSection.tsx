@@ -77,10 +77,11 @@ import { StatusBadge } from "@ryu/ui/components/status-badge";
 import { Switch } from "@ryu/ui/components/switch";
 import { formatCount } from "@ryu/ui/lib/number-format.ts";
 import { useQuery } from "@tanstack/react-query";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useContext, useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { OAuthConnections } from "@/src/components/marketplace/ConnectionsTab.tsx";
 import { PluginSettingsFields } from "@/src/components/settings/PluginSettingsFields.tsx";
+import { TabsContext } from "@/src/contexts/TabsContext.tsx";
 import { useActiveNodeGetter } from "@/src/hooks/useActiveNode.ts";
 import { useApps } from "@/src/hooks/useApps.ts";
 import { usePluginSettingsOpener } from "@/src/hooks/usePluginSettingsOpener.ts";
@@ -955,6 +956,7 @@ function InstalledAppTabs({
 		retry: false,
 		staleTime: 5 * 60 * 1000,
 	});
+	const tabsHost = useContext(TabsContext);
 	const scorecard = useMemo(
 		() => (detail ? runScorecard(entry, detail) : null),
 		[detail, entry]
@@ -1011,7 +1013,13 @@ function InstalledAppTabs({
 				/>
 			}
 			entry={entry}
+			key={target.url}
 			Markdown={Markdown}
+			onOpenAuditConversation={
+				tabsHost
+					? (conversationId) => tabsHost.openTab("/chat", { conversationId })
+					: undefined
+			}
 			scorecard={scorecard}
 		/>
 	);

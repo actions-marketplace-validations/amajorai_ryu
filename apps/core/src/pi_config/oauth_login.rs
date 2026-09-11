@@ -375,16 +375,26 @@ fn well_known_runtime(binary: &str) -> Option<std::path::PathBuf> {
     roots.into_iter().find(|p| p.is_file())
 }
 
-/// The pi-ai OAuth provider id backing a Ryu provider id. These coincide by
-/// construction: Ryu's `auth_key` IS the key Pi writes into `auth.json`, and Pi
-/// keys it by the pi-ai provider id (`anthropic`, `openai-codex`,
-/// `github-copilot`). Returns `None` for anything that is not a login provider.
+/// The pi-ai OAuth provider id backing a Ryu provider id. Most Ryu ids coincide
+/// with the key Pi writes into `auth.json`; the native ChatGPT provider is the
+/// intentional exception: it uses the same maintained OpenAI login flow as Pi's
+/// Codex provider, but stores the resulting session under its own Ryu account
+/// scope.
 pub fn oauth_provider_id(ryu_provider_id: &str) -> Option<&'static str> {
     let meta = super::provider_meta(ryu_provider_id)?;
     if meta.auth_kind != "subscription" || meta.auth_key.is_empty() {
         return None;
     }
-    Some(meta.auth_key)
+    if ryu_provider_id == super::CHATGPT_PROVIDER_ID {
+        Some("openai-codex")
+    } else {
+        Some(meta.auth_key)
+    }
+}
+
+fn oauth_auth_key(ryu_provider_id: &str) -> Option<&'static str> {
+    let meta = super::provider_meta(ryu_provider_id)?;
+    (meta.auth_kind == "subscription" && !meta.auth_key.is_empty()).then_some(meta.auth_key)
 }
 
 /// Merge a completed credential into the managed Pi's `auth.json` under
@@ -416,6 +426,8 @@ fn store_credential(auth_key: &str, credential: &Value) -> Result<()> {
 pub async fn start(ryu_provider_id: &str) -> Result<String> {
     let provider = oauth_provider_id(ryu_provider_id)
         .ok_or_else(|| anyhow!("\"{ryu_provider_id}\" is not a subscription login provider"))?;
+    let auth_key = oauth_auth_key(ryu_provider_id)
+        .ok_or_else(|| anyhow!("\"{ryu_provider_id}\" has no OAuth account scope"))?;
     let bridge = ensure_bridge()?;
     let runtime = js_runtime().ok_or_else(|| {
         anyhow!(
@@ -481,7 +493,7 @@ pub async fn start(ryu_provider_id: &str) -> Result<String> {
 
     // Reader: turn the bridge's JSONL into session events, and land the
     // credential when the flow completes.
-    let auth_key = provider.to_owned();
+    let auth_key = auth_key.to_owned();
     let reader_session = Arc::clone(&session);
     tokio::spawn(async move {
         let mut lines = BufReader::new(stdout).lines();
@@ -777,6 +789,7 @@ mod tests {
     fn subscription_providers_map_to_their_auth_keys() {
         assert_eq!(oauth_provider_id("claude-pro-max"), Some("anthropic"));
         assert_eq!(oauth_provider_id("openai-codex"), Some("openai-codex"));
+        assert_eq!(oauth_provider_id("chatgpt"), Some("openai-codex"));
         assert_eq!(oauth_provider_id("github-copilot"), Some("github-copilot"));
         // Not a login provider: an api-key provider has nothing to log into.
         assert_eq!(oauth_provider_id("openai"), None);

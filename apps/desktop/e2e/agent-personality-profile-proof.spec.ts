@@ -30,16 +30,16 @@ test("assigns and saves a personality profile on one agent", async ({
 
 	await page.locator("#agent-personality-profile").click();
 	await expect(
-		page.getByRole("option", { name: "No Hype", exact: true })
+		page.getByRole("option", { name: "Concise", exact: true })
 	).toBeVisible();
-	await page.getByRole("option", { name: "No Hype", exact: true }).click();
+	await page.getByRole("option", { name: "Concise", exact: true }).click();
 	await page.locator("#agent-personality-profile").press("Escape");
 	await expect(page.locator("#agent-personality-profile")).toContainText(
-		"No Hype"
+		"Concise"
 	);
 
 	await page.getByRole("button", { name: "Save changes", exact: true }).click();
-	await expect(page.getByTestId("saved-profile")).toHaveText("No Hype");
+	await expect(page.getByTestId("saved-profile")).toHaveText("Concise");
 	await page
 		.getByRole("heading", { name: "Agent personality profiles" })
 		.click();

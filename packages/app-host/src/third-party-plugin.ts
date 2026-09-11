@@ -265,6 +265,13 @@ ${indentGeneratedScript(I18N_BRIDGE, "          ")},
             stop: function (args) { return call("background.stop", [args || {}]); }
           },
           // Durable per-app KV (needs storage:kv). Values are strings.
+          backups: {
+            destinations: function (args) { return call("backups.destinations", [args || {}]); },
+            create: function (args) { return call("backups.create", [args || {}]); },
+            list: function (args) { return call("backups.list", [args || {}]); },
+            get: function (args) { return call("backups.get", [args || {}]); },
+            restore: function (args) { return call("backups.restore", [args || {}]); },
+          },
           storage: {
             get: function (args) { return call("storage.get", [args || {}]); },
             set: function (args) { return call("storage.set", [args || {}]); },
@@ -330,6 +337,18 @@ ${indentGeneratedScript(I18N_BRIDGE, "          ")},
         },
 ${indentGeneratedScript(I18N_BRIDGE, "        ")},
         listAgents: function () { return call("core.listAgents", []); },
+        // Agent Mail routes are host-authenticated; the frame receives no node
+        // token and the host validates the relative path before fetching.
+        mail: {
+          list: function () { return call("mail.list", []); },
+          messages: function (a) { return call("mail.messages", [a || {}]); },
+          create: function (a) { return call("mail.create", [a || {}]); },
+          delete: function (a) { return call("mail.delete", [a || {}]); },
+          rotateSecret: function (a) { return call("mail.rotateSecret", [a || {}]); },
+          send: function (a) { return call("mail.send", [a || {}]); },
+          inboundUrl: function (a) { return call("mail.inboundUrl", [a || {}]); },
+          request: function (a) { return call("mail.request", [a || {}]); }
+        },
         // Secret-free provider/model/agent/app/hook metadata for shared Ryu pickers.
         catalog: {
           snapshot: function () { return call("catalog.snapshot", []); },
@@ -357,6 +376,13 @@ ${indentGeneratedScript(I18N_BRIDGE, "        ")},
             }
             return h.promise;
           }
+        },
+        backups: {
+          destinations: function (args) { return call("backups.destinations", [args || {}]); },
+          create: function (args) { return call("backups.create", [args || {}]); },
+          list: function (args) { return call("backups.list", [args || {}]); },
+          get: function (args) { return call("backups.get", [args || {}]); },
+          restore: function (args) { return call("backups.restore", [args || {}]); },
         },
         storage: {
           get: function (args) { return call("storage.get", [args || {}]); },
@@ -419,7 +445,9 @@ ${indentGeneratedScript(I18N_BRIDGE, "        ")},
         // Asset picker: GIFs via the host (Core proxy needs the node token). Icons/
         // logos are fetched directly by the app under its per-app CSP allowlist.
         assets: {
-          searchGifs: function (a) { return call("assets.searchGifs", [a || {}]); }
+          searchGifs: function (a) { return call("assets.searchGifs", [a || {}]); },
+        searchImages: function (a) { return call("assets.searchImages", [a || {}]); },
+          searchImages: function (a) { return call("assets.searchImages", [a || {}]); }
         },
         // Fine-tune runs (needs grant finetune:runs). The @ryu/finetune app drives
         // training runs; Core owns the orchestration + durable job store. Live progress
@@ -959,6 +987,18 @@ ${indentGeneratedScript(I18N_BRIDGE, "        ")}
       },
 ${indentGeneratedScript(I18N_BRIDGE, "      ")},
       listAgents: function () { return call("core.listAgents", []); },
+      // Agent Mail routes are host-authenticated; the frame receives no node
+      // token and the host validates the relative path before fetching.
+      mail: {
+        list: function () { return call("mail.list", []); },
+        messages: function (a) { return call("mail.messages", [a || {}]); },
+        create: function (a) { return call("mail.create", [a || {}]); },
+        delete: function (a) { return call("mail.delete", [a || {}]); },
+        rotateSecret: function (a) { return call("mail.rotateSecret", [a || {}]); },
+        send: function (a) { return call("mail.send", [a || {}]); },
+        inboundUrl: function (a) { return call("mail.inboundUrl", [a || {}]); },
+        request: function (a) { return call("mail.request", [a || {}]); }
+      },
       // Secret-free provider/model/agent/app/hook metadata for shared Ryu pickers.
       catalog: {
         snapshot: function () { return call("catalog.snapshot", []); },
@@ -982,6 +1022,13 @@ ${indentGeneratedScript(I18N_BRIDGE, "      ")},
           }
           return h.promise;
         }
+      },
+      backups: {
+        destinations: function (args) { return call("backups.destinations", [args || {}]); },
+        create: function (args) { return call("backups.create", [args || {}]); },
+        list: function (args) { return call("backups.list", [args || {}]); },
+        get: function (args) { return call("backups.get", [args || {}]); },
+        restore: function (args) { return call("backups.restore", [args || {}]); },
       },
       storage: {
         get: function (a) { return call("storage.get", [a || {}]); },

@@ -1,3 +1,4 @@
+import { AgentAvailabilityProvider } from "@ryu/blocks/desktop/agent-availability";
 import { HotkeysProvider, useHotkey } from "@ryu/hotkeys/react";
 import {
 	SidebarInset,
@@ -91,6 +92,7 @@ import {
 	SIDEBAR_WIDTH_KEY,
 } from "@/src/hooks/useThemePreset.ts";
 import { useTitleBarClearsContent } from "@/src/hooks/useTitleBarClearsContent.ts";
+import { useUserAvailability } from "@/src/hooks/useUserAvailability.ts";
 import { setCrashRoute } from "@/src/lib/crash-context.ts";
 import {
 	DASHBOARDS_HOME_BUTTON_ID,
@@ -1101,6 +1103,7 @@ function readInitialTab(): InitialTab | undefined {
 
 export default function Layout() {
 	const { nativeWindowChrome } = useAppSurface();
+	const availability = useUserAvailability();
 	const location = useLocation();
 	const botProduct = useProductMode() === "bot";
 	const appRouteInitialTab =
@@ -1134,43 +1137,45 @@ export default function Layout() {
 	}, []);
 
 	return (
-		<TooltipProvider delay={0}>
-			<ChatDisplayPrefs>
-				<TabsProvider initialTab={initialTabRef.current}>
-					<SkillDistributionProvider>
-						<TitleBarProvider>
-							<SidebarProvider
-								style={
-									{
-										"--sidebar-width": `${sidebarWidth}px`,
-									} as React.CSSProperties
-								}
-							>
-								<ChatHistoryProvider>
-									<SpacesProvider>
-										<SystemStatusProvider>
-											<HotkeysProvider
-												registry={DESKTOP_HOTKEYS}
-												storage={coreKvHotkeyStorage}
-											>
-												<DesktopReportHost>
-													<ProjectDockHost>
-														<LayoutContent
-															nativeWindowChrome={nativeWindowChrome}
-															onSidebarWidthChange={handleSidebarWidthChange}
-															sidebarWidth={sidebarWidth}
-														/>
-													</ProjectDockHost>
-												</DesktopReportHost>
-											</HotkeysProvider>
-										</SystemStatusProvider>
-									</SpacesProvider>
-								</ChatHistoryProvider>
-							</SidebarProvider>
-						</TitleBarProvider>
-					</SkillDistributionProvider>
-				</TabsProvider>
-			</ChatDisplayPrefs>
-		</TooltipProvider>
+		<AgentAvailabilityProvider status={availability.status}>
+			<TooltipProvider delay={0}>
+				<ChatDisplayPrefs>
+					<TabsProvider initialTab={initialTabRef.current}>
+						<SkillDistributionProvider>
+							<TitleBarProvider>
+								<SidebarProvider
+									style={
+										{
+											"--sidebar-width": `${sidebarWidth}px`,
+										} as React.CSSProperties
+									}
+								>
+									<ChatHistoryProvider>
+										<SpacesProvider>
+											<SystemStatusProvider>
+												<HotkeysProvider
+													registry={DESKTOP_HOTKEYS}
+													storage={coreKvHotkeyStorage}
+												>
+													<DesktopReportHost>
+														<ProjectDockHost>
+															<LayoutContent
+																nativeWindowChrome={nativeWindowChrome}
+																onSidebarWidthChange={handleSidebarWidthChange}
+																sidebarWidth={sidebarWidth}
+															/>
+														</ProjectDockHost>
+													</DesktopReportHost>
+												</HotkeysProvider>
+											</SystemStatusProvider>
+										</SpacesProvider>
+									</ChatHistoryProvider>
+								</SidebarProvider>
+							</TitleBarProvider>
+						</SkillDistributionProvider>
+					</TabsProvider>
+				</ChatDisplayPrefs>
+			</TooltipProvider>
+		</AgentAvailabilityProvider>
 	);
 }

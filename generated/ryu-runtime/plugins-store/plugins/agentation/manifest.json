@@ -11,6 +11,7 @@
   "description": "Visual feedback for coding agents. Agentation connects UI annotations from a running web app to an MCP server so agents can read, acknowledge, resolve, dismiss, and reply to feedback without copy-paste.",
   "homepage": "https://www.agentation.com/",
   "tagline": "Visual feedback for coding agents",
+  "icon": "pencil-edit-02",
   "iconDither": { "from": 28, "to": "transparent", "direction": "down" },
   "keywords": ["ui", "feedback", "annotations", "browser"],
   "category": "Developer Tools",

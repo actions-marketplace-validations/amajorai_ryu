@@ -248,6 +248,7 @@ export class PassScene {
 		const env: PassFaceEnv = {
 			avatar: options.avatar,
 			family: options.family,
+			isDark: options.isDark,
 			palette: options.palette,
 			scale,
 		};

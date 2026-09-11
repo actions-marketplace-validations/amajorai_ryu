@@ -61,6 +61,7 @@ fn bridge_path_for(method: &str) -> Option<&'static str> {
         "agent.run" => Some("host.runAgent"),
         "agent.runFanout" => Some("host.runFanout"),
         "storage.get" => Some("host.storage_get"),
+        "backups.destinations" | "backups.create" | "backups.list" | "backups.get" | "backups.restore" => crate::plugin_host::dispatch_path_for(method),
         "storage.set" => Some("host.storage_set"),
         "storage.delete" => Some("host.storage_delete"),
         "storage.keys" => Some("host.storage_keys"),
@@ -69,6 +70,7 @@ fn bridge_path_for(method: &str) -> Option<&'static str> {
         "crypto.open" => Some("host.crypto_open"),
         "crypto.status" => Some("host.crypto_status"),
         "spaces.ensureSpace" => Some("host.spaces_ensure_space"),
+        "spaces.search" => crate::plugin_host::dispatch_path_for(method),
         "spaces.createDoc" => Some("host.spaces_create_doc"),
         "spaces.getDoc" => Some("host.spaces_get_doc"),
         "spaces.updateDoc" => Some("host.spaces_update_doc"),
@@ -85,6 +87,8 @@ fn bridge_path_for(method: &str) -> Option<&'static str> {
         "preferences.get" => Some("host.getPreference"),
         "background.list" => Some("host.background_list"),
         "background.stop" => Some("host.background_stop"),
+        "gateway.budgetSpend" => crate::plugin_host::dispatch_path_for(method),
+        "gateway.audit" => crate::plugin_host::dispatch_path_for(method),
         "learning.recordFeedback" => Some("host.recordFeedback"),
         "learning.synthesizeSkill" => Some("host.synthesizeSkill"),
         "hooks.run" => Some("host.runHook"),
@@ -575,6 +579,8 @@ mod tests {
             bridge_path_for("spaces.createDoc"),
             Some("host.spaces_create_doc")
         );
+        assert_eq!(bridge_path_for("spaces.search"), Some("host.spaces_search"));
+        assert_eq!(required_grant_for("spaces.search"), Some("spaces:docs"));
         assert_eq!(
             bridge_path_for("spaces.getDoc"),
             Some("host.spaces_get_doc")
@@ -618,6 +624,14 @@ mod tests {
         assert_eq!(
             bridge_path_for("background.stop"),
             Some("host.background_stop")
+        );
+        assert_eq!(
+            bridge_path_for("gateway.budgetSpend"),
+            Some("host.gatewayBudgetSpend")
+        );
+        assert_eq!(
+            bridge_path_for("gateway.audit"),
+            Some("host.gatewayAudit")
         );
         // `finetune.stream` is a STREAMING method — it has a required grant but no
         // unary bridge path (it's handled by the stream endpoint, not dispatch).

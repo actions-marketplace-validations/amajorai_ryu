@@ -75,7 +75,7 @@ import { toast } from "@ryu/ui/components/sileo";
 import { Spinner } from "@ryu/ui/components/spinner";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useCallback, useMemo, useState } from "react";
-import { useTabsContext } from "@/src/contexts/TabsContext.tsx";
+import { useTabSelector } from "@/src/contexts/TabsContext.tsx";
 import { useDebouncedValue } from "@/src/hooks/use-debounced-value.ts";
 import { useActiveNode } from "@/src/hooks/useActiveNode.ts";
 import { useApps } from "@/src/hooks/useApps.ts";
@@ -488,7 +488,7 @@ export default function ContributedStoreSection({
 
 	const node = useActiveNode();
 	const queryClient = useQueryClient();
-	const { openTab } = useTabsContext();
+	const openTab = useTabSelector((state) => state.openTab);
 	const spec = tab.spec;
 	const catalog = useContributedStoreCatalog(tab, tab.app_enabled);
 

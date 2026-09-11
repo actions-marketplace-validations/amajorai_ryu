@@ -13,10 +13,11 @@ import type {
 } from "@ryu/blocks/desktop/view-toggle";
 import { BookCard } from "@ryu/ui/components/book-card.tsx";
 import { Button } from "@ryu/ui/components/button.tsx";
-import { useMemo } from "react";
+import { type ReactNode, useMemo } from "react";
 
 export interface SidebarLibraryItem {
 	icon: IconSvgElement;
+	iconNode?: ReactNode;
 	id: string;
 	name: string;
 	onOpen: () => void;
@@ -148,6 +149,7 @@ export default function SidebarLibrarySection({
 				const card: LibraryCardData = {
 					favorited: false,
 					icon: item.icon,
+					iconNode: item.iconNode,
 					key: item.id,
 					name: item.name,
 					subtitle: item.subtitle ?? null,

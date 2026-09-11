@@ -173,7 +173,7 @@ try {
 			method: "POST",
 			headers: opencodeHeaders(key, sessionContext),
 			body: JSON.stringify({
-				model: process.env.OPENCODE_MODEL || "mimo-v2.5",
+				model: process.env.OPENCODE_MODEL || "deepseek-flash",
 				temperature: 0.2,
 				max_tokens: Number(process.env.OPENCODE_MAX_TOKENS || 16_000),
 				messages: [

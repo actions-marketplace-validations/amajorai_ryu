@@ -11,6 +11,7 @@
 // probe. Shadow is a fully cross-platform Core-managed sidecar, so its status is
 // reported the same on every OS and stays per-node correct for remote nodes.
 
+import { replaceEqualDeep } from "@tanstack/react-query";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ApiError, type ApiTarget } from "@/src/lib/api/client.ts";
 import type { MeshStatus } from "@/src/lib/api/mesh.ts";
@@ -34,7 +35,10 @@ const ISLAND_CONTROL_URL = "http://127.0.0.1:7989/control";
  *  be refused when Island isn't running, both → false). */
 async function probeIsland(): Promise<boolean> {
 	try {
-		const resp = await fetch(ISLAND_CONTROL_URL, { method: "GET" });
+		const resp = await fetch(ISLAND_CONTROL_URL, {
+			method: "GET",
+			signal: AbortSignal.timeout(1500),
+		});
 		return resp.ok;
 	} catch {
 		return false;
@@ -243,7 +247,7 @@ export function useSystemStatus(): SystemStatus {
 			setCoreReachable(nodeAnswered);
 			setActiveEngine(null);
 			setEngineRunning(false);
-			setSidecars({});
+			setSidecars((previous) => replaceEqualDeep(previous, {}));
 			setGatewayReachable(false);
 			setShadowReachable(null);
 			setMeshReachable(null);
@@ -267,13 +271,13 @@ export function useSystemStatus(): SystemStatus {
 		setError(null);
 		setActiveEngine(snapshot.activeEngine);
 		setEngineRunning(snapshot.engineRunning);
-		setSidecars(snapshot.sidecars);
+		setSidecars((previous) => replaceEqualDeep(previous, snapshot.sidecars));
 		setGatewayReachable(snapshot.gatewayReachable);
 		// Shadow is opt-in; Core always lists it, so `?? null` only trips on an
 		// older Core that omits the entry (treated as not-relevant, not "down").
 		setShadowReachable(snapshot.sidecars.shadow ?? null);
 		// mesh is null when disabled/absent; when enabled, reachable drives the tone.
-		setMeshStatus(snapshot.mesh);
+		setMeshStatus((previous) => replaceEqualDeep(previous, snapshot.mesh));
 		setMeshReachable(snapshot.mesh === null ? null : snapshot.mesh.reachable);
 		setLoading(false);
 	}, [getActiveNode, setActiveNodeOnline]);

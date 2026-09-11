@@ -203,6 +203,8 @@ struct ImportInput {
 struct ImportThreadInput {
     agent_id: String,
     thread_id: String,
+    #[serde(default)]
+    dry_run: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -967,6 +969,7 @@ async fn import_thread(
         AxumPath(input.agent_id),
         Json(crate::server::ImportThreadBody {
             thread_id: input.thread_id,
+            dry_run: input.dry_run,
         }),
     )
     .await

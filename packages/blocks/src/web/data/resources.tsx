@@ -128,7 +128,7 @@ export const resources: Resource[] = [
 	{
 		category: "Explore",
 		label: "Community stats",
-		description: "Tokens, cost, and compression saved across the community.",
+		description: "Community activity, protection, and savings at a glance.",
 		href: "/community",
 		Icon: Users,
 	},

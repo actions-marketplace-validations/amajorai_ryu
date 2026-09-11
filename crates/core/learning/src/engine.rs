@@ -15,6 +15,7 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use chrono::Timelike;
+use ryu_improvement_contracts::ImprovementRunRef;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
@@ -999,6 +1000,12 @@ pub async fn run_skills_pass(ctx: &LearningCtx, max: usize) -> Result<usize> {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct CyclePlan {
+    /// Optional correlation id for the shared recursive-improvement contract.
+    /// Learning does not own the run store; it carries the validated reference
+    /// so the caller can join the cycle to a Research campaign or another
+    /// owning-surface record.
+    #[serde(rename = "improvementRunId", skip_serializing_if = "Option::is_none")]
+    pub improvement_run_id: Option<String>,
     pub base_model: Option<String>,
     pub swept: usize,
     pub scored: usize,
@@ -1058,8 +1065,25 @@ pub fn build_jsonl(rows: &[Experience]) -> String {
 /// (training needs a GPU and is the opt-in heavy step). `execute` dispatches the
 /// fine-tune through Core's fine-tune path.
 pub async fn run_cycle(ctx: &LearningCtx, execute: bool) -> Result<CyclePlan> {
+    run_cycle_with_improvement(ctx, execute, None).await
+}
+
+/// Run the cycle with an optional shared improvement-run correlation id.
+///
+/// The Learning crate validates the opaque reference but deliberately does not
+/// persist or promote it. Research or the owning app remains responsible for
+/// the improvement record's lifecycle and rollback decision.
+pub async fn run_cycle_with_improvement(
+    ctx: &LearningCtx,
+    execute: bool,
+    improvement_run_id: Option<&str>,
+) -> Result<CyclePlan> {
+    let improvement_run_id = improvement_run_id
+        .map(|id| ImprovementRunRef::new(id.to_owned()).map(|reference| reference.id))
+        .transpose()?;
     if !resolve_enabled(ctx.host()).await {
         return Ok(CyclePlan {
+            improvement_run_id,
             base_model: None,
             swept: 0,
             scored: 0,
@@ -1129,6 +1153,7 @@ pub async fn run_cycle(ctx: &LearningCtx, execute: bool) -> Result<CyclePlan> {
     };
 
     Ok(CyclePlan {
+        improvement_run_id,
         base_model,
         swept,
         scored,
@@ -2010,6 +2035,20 @@ mod flow_tests {
         assert_eq!(plan.sample_count, 0);
         assert!(!plan.dispatched);
         assert!(plan.note.contains("disabled"));
+    }
+
+    #[tokio::test]
+    async fn cycle_carries_and_validates_improvement_run_reference() {
+        let c = ctx(MockHost::new(), store("cycle-improvement-link"));
+        let plan = run_cycle_with_improvement(&c, false, Some("improvement-1"))
+            .await
+            .unwrap();
+        assert_eq!(plan.improvement_run_id.as_deref(), Some("improvement-1"));
+
+        let error = run_cycle_with_improvement(&c, false, Some("../escape"))
+            .await
+            .expect_err("path-like improvement ids must fail closed");
+        assert!(error.to_string().contains("invalid improvement run id"));
     }
 
     #[tokio::test]

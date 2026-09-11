@@ -1,5 +1,9 @@
 ﻿"use client";
 
+import {
+	AvatarConversationProvider,
+	resolveAvatarConversationState,
+} from "@ryu/ui/components/avatar-conversation.tsx";
 import { Button } from "@ryu/ui/components/button";
 import { Skeleton } from "@ryu/ui/components/skeleton.tsx";
 import { cn } from "@ryu/ui/lib/utils";
@@ -12,6 +16,10 @@ import {
 	useRef,
 	useState,
 } from "react";
+import {
+	agentAvailabilityLabel,
+	useAgentAvailability,
+} from "../agent-availability.tsx";
 import {
 	ChatDisplayPrefsProvider,
 	useChatDisplayPrefs,
@@ -64,6 +72,7 @@ export function AgentChat({
 	onUndoFileEdits,
 	onOpenLink,
 	onOpenMention,
+	onAnnotateImage,
 	mentionItems,
 	onWorkflowResume,
 	previewResolvers,
@@ -117,6 +126,8 @@ export function AgentChat({
 }: AgentChatProps) {
 	const rootRef = useRef<HTMLDivElement>(null);
 	const { animationsEnabled } = useChatDisplayPrefs();
+	const availability = useAgentAvailability();
+	const promptsPaused = availability !== "online";
 	const reduceMotion = !animationsEnabled || (useReducedMotion() ?? false);
 	const [draft, setDraft] = useState("");
 	const draftTouchedRef = useRef(false);
@@ -216,12 +227,12 @@ export function AgentChat({
 		markComposerActivity: markQuestionActivity,
 		markComposerIdle: markQuestionIdle,
 		visiblePrompt: visiblePendingQuestion,
-	} = useDeferredComposerPrompt(pendingQuestion);
+	} = useDeferredComposerPrompt(pendingQuestion, undefined, promptsPaused);
 	const {
 		markComposerActivity: markPromptActivity,
 		markComposerIdle: markPromptIdle,
 		visiblePrompt: visibleComposerPrompt,
-	} = useDeferredComposerPrompt(composerPrompt);
+	} = useDeferredComposerPrompt(composerPrompt, undefined, promptsPaused);
 	const handleDraftChange = useCallback(
 		(nextDraft: string) => {
 			setDraftFromUser(nextDraft);
@@ -314,8 +325,23 @@ export function AgentChat({
 			contextMeterOnOpen={onOpenContext}
 			disabled={composerDisabled}
 			draftControls={resolvedDraftControls}
-			infoBar={infoBar}
+			infoBar={
+				infoBar ??
+				(promptsPaused
+					? {
+							description:
+								availability === "away"
+									? "Questions stay in the transcript until you’re back."
+									: "Prompts stay out of the composer until you switch back to Online.",
+							title:
+								availability === "away"
+									? "Away mode"
+									: agentAvailabilityLabel(availability),
+						}
+					: undefined)
+			}
 			isDragOver={attachments?.isDragOver}
+			onAnnotateImage={attachments?.onAnnotateImage}
 			onAttach={attachments?.onAttach}
 			onChange={handleDraftChange}
 			onComposerMenuSelect={onComposerMenuSelect}
@@ -324,6 +350,7 @@ export function AgentChat({
 			onRemoveFile={attachments?.onRemoveFile}
 			onRemoveImage={attachments?.onRemoveImage}
 			onSend={onSend}
+			onSketch={attachments?.onSketch}
 			onStop={onStop}
 			placeholder={isEmpty ? "Send a message" : "Ask a follow up"}
 			placeholderSuggestion={
@@ -410,6 +437,7 @@ export function AgentChat({
 				messageActions={messageActions}
 				messages={listMessages}
 				onAgentUiSubmit={onAgentUiSubmit}
+				onAnnotateImage={onAnnotateImage}
 				onBranch={onBranch}
 				onContributedMessageAction={onContributedMessageAction}
 				onContributedSelectionAction={onContributedSelectionAction}
@@ -532,6 +560,7 @@ export function AgentChat({
 				classNames?.root,
 				className
 			)}
+			data-agent-availability={availability}
 			data-chat-motion={reduceMotion ? "off" : "on"}
 			data-chat-state={isCenteredEmptyState ? "empty" : "active"}
 			ref={rootRef}
@@ -541,10 +570,17 @@ export function AgentChat({
 		</div>
 	);
 	const chatSurface = (
-		<>
+		<AvatarConversationProvider
+			state={resolveAvatarConversationState({
+				status,
+				error,
+				pendingQuestion: Boolean(visiblePendingQuestion),
+				messages,
+			})}
+		>
 			{chatNode}
 			{voiceModeNode}
-		</>
+		</AvatarConversationProvider>
 	);
 
 	return density ? (

@@ -470,7 +470,7 @@ pub const VOICE_PLUGIN_ID: &str = "@ryu/voice";
 
 /// The Media-Generation app's plugin id — the generative-media PRODUCERS
 /// (`/api/images/generate`, `/api/video/generate`, `/api/video/jobs/:id`,
-/// `/api/gifs/search`). Governance-shell leaf: pre-installed, no `requires`. Gate-only,
+/// `/api/gifs/search`, `/api/assets/images/search`). Governance-shell leaf: pre-installed, no `requires`. Gate-only,
 /// so it is NOT behind a cargo feature. The gate covers ONLY the producers; the shared
 /// no-cloud blob store (`/api/media/:file` serve + `/api/media/upload`) stays UNGATED
 /// kernel storage because it also serves TTS audio and legacy media URLs. New user
@@ -561,7 +561,7 @@ pub const TIMELINE_PLUGIN_ID: &str = "@ryu/timeline";
 /// `/skills/new` + `/skills/:id/edit` routes resolve on every fresh install.
 pub const SKILL_EDITOR_PLUGIN_ID: &str = "@ryu/skill-editor";
 
-/// The built-in **personality profiles** (`docs/output-styles.md`): eleven prose files
+/// The built-in **personality profiles** (`docs/output-styles.md`): twelve prose files
 /// an agent can assign to change how it talks.
 ///
 /// Carries no runnable, sidecar, hook or grant — `contributes.output_styles` is inert
@@ -848,6 +848,10 @@ pub const CORE_PLUGINS: &[&str] = &[
     // so its reviewed storage grant can be enabled as a first-party app, but it stays
     // opt-in and does not seed a lifecycle record on a fresh install.
     "@ryu/drawesome",
+    // Convert is a browser-local file conversion Companion. Core-tier makes its
+    // reviewed storage/toast grants and compiled bundle installable, while the
+    // app stays opt-in so a fresh install does not create an unused lifecycle row.
+    "@ryu/convert",
     // The Canvas app — a full-page Companion (`ui_format:"html"`) that owns its Space
     // documents via `spaces:docs` and drives generation nodes through the window.ryu
     // media/agent bridge. Same posture as Whiteboard above: opt-in and absent from a
@@ -1017,7 +1021,7 @@ pub const CORE_PLUGINS: &[&str] = &[
     // hides its New/Edit affordances unless an enabled app answers the editor path, so
     // authoring is opt-in from the Store rather than a dead button. No `requires` edge.
     SKILL_EDITOR_PLUGIN_ID,
-    // The eleven built-in personality profiles (`docs/output-styles.md`). Core-tier AND
+    // The twelve built-in personality profiles (`docs/output-styles.md`). Core-tier AND
     // pre-installed, which for this one is a *reachability* decision rather than a
     // product-taste one: `contributes.output_styles` is served enabled-filtered, so a
     // disabled record means the agent editor offers no reusable profiles and the Store
@@ -1026,7 +1030,7 @@ pub const CORE_PLUGINS: &[&str] = &[
     // to turn itself on.
     //
     // Affordable because the plugin is inert: no runnables, no sidecar, no hooks, no
-    // grants — eleven prose files nothing evaluates. Enabling it changes what is
+    // grants — twelve prose files nothing evaluates. Enabling it changes what is
     // *listable*, never what runs, because agents default to their own voice (§8) and
     // no built-in sets `force-for-plugin`. This is the same argument `exa` makes one
     // block down (seed a provider so the capability is non-empty), minus the caveat
@@ -1462,7 +1466,7 @@ pub const CORE_PREINSTALLED: &[&str] = &[
     // surface the user cannot reach is not a setting; it contributes no runnables,
     // gates no route, and spawns no process, so enabling it costs nothing.
     LAYERS_PLUGIN_ID,
-    // The eleven built-in personality profiles. Same shape as `layers` directly above —
+    // The twelve built-in personality profiles. Same shape as `layers` directly above —
     // a catalog whose options the user cannot reach is not a catalog — and the same
     // zero cost: no runnables, no route gate, no process. `contributes.output_styles`
     // and the Store tab are both served enabled-filtered, so this line is what makes

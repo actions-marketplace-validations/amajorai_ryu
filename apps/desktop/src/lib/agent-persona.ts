@@ -1,6 +1,5 @@
 import { isDitherColor } from "@ryu/ui/components/dither-kit/palette";
-import { isExpressiveExpressionSelection } from "@ryu/ui/components/expressive.ts";
-import { isExpressiveAnimationSelection } from "@ryu/ui/components/expressive-animation.ts";
+import { parseGhostAvatar } from "@ryu/ui/components/ghost-avatar.ts";
 import type { GlyphDitherValue, GlyphValue } from "@ryu/ui/components/glyph.ts";
 import type { AgentPersona } from "@/src/lib/api/agents.ts";
 
@@ -25,16 +24,9 @@ export function personaToGlyphValue(
 	if (persona.avatar_url) {
 		return { kind: "avatar", dataUrl: persona.avatar_url };
 	}
-	const expressive = persona.expressive?.expression;
-	if (expressive && isExpressiveExpressionSelection(expressive)) {
-		const animation = persona.expressive?.animation;
-		return {
-			kind: "expressive",
-			expression: expressive,
-			...(animation && isExpressiveAnimationSelection(animation)
-				? { animation }
-				: {}),
-		};
+	const expressive = parseGhostAvatar(persona.expressive);
+	if (expressive) {
+		return { ...expressive, kind: "expressive" };
 	}
 	const ditherLayer: GlyphDitherValue | undefined =
 		persona.dither && isDitherColor(persona.dither.from)
@@ -100,12 +92,7 @@ export function glyphToPersonaFields(
 	return {
 		avatar_url: glyph?.kind === "avatar" ? glyph.dataUrl : null,
 		expressive:
-			glyph?.kind === "expressive"
-				? {
-						expression: glyph.expression,
-						...(glyph.animation ? { animation: glyph.animation } : {}),
-					}
-				: null,
+			glyph?.kind === "expressive" ? (parseGhostAvatar(glyph) ?? null) : null,
 		emoji: glyph?.kind === "emoji" ? glyph.emoji : null,
 		icon: glyph?.kind === "icon" ? glyph.id : null,
 		icon_color: glyph?.kind === "icon" ? (glyph.color ?? null) : null,

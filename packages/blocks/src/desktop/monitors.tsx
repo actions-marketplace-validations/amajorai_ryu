@@ -578,7 +578,12 @@ function MonitorDetail({
 					<Button onClick={onEdit} size="sm" variant="outline">
 						Edit
 					</Button>
-					<Button onClick={onDelete} size="sm" variant="ghost">
+					<Button
+						aria-label="Delete monitor"
+						onClick={onDelete}
+						size="icon-sm"
+						variant="ghost"
+					>
 						<HugeiconsIcon
 							className="size-4 text-status-destructive"
 							icon={Delete02Icon}

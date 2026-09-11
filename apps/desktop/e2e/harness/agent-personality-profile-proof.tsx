@@ -14,6 +14,10 @@ const AGENT_OWN_VOICE_PROFILE = "__agent_own_voice__";
 const personalityProfiles: SlotOption[] = [
 	{ id: AGENT_OWN_VOICE_PROFILE, label: "Agent's own voice" },
 	{ id: "eli5", label: "ELI5" },
+	{ id: "proactive", label: "Proactive" },
+	{ id: "concise", label: "Concise" },
+	{ id: "explanatory", label: "Explanatory" },
+	{ id: "learning", label: "Learning" },
 	{ id: "plain-technical", label: "Plain Technical" },
 	{ id: "no-ai-slop", label: "No AI slop" },
 	{ id: "no-hype", label: "No Hype" },

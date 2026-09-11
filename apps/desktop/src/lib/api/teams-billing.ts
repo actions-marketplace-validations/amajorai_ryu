@@ -193,7 +193,7 @@ export interface TeamsSeatStatus {
 	plan: string | null;
 }
 
-export type OrganizationPlanId = "teams" | "business";
+export type OrganizationPlanId = "teams" | "teams-lite" | "business";
 
 export interface OrganizationPlanCheckout {
 	monthlyPriceMicroUsd: number;

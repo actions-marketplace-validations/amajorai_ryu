@@ -176,6 +176,11 @@ impl SemanticCache {
 /// edge deferred per the platform-decomposition handoff (§4 Track B); this
 /// inversion is purely the in-process store/backend seam.
 pub trait SemanticCacheBackend: Send + Sync {
+    /// Model metadata for the host's governed embedding dispatcher. The host retains keys,
+    /// admission and accounting; cache backends only select the embedding model.
+    fn embedding_model(&self) -> &str {
+        "text-embedding-3-small"
+    }
     /// Fetch an embedding vector for `text` via this backend's embedder.
     fn get_embedding<'a>(
         &'a self,
@@ -194,6 +199,9 @@ pub trait SemanticCacheBackend: Send + Sync {
 }
 
 impl SemanticCacheBackend for SemanticCache {
+    fn embedding_model(&self) -> &str {
+        &self.config.embedding_model
+    }
     fn get_embedding<'a>(
         &'a self,
         text: &'a str,

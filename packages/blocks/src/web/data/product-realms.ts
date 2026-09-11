@@ -3,9 +3,11 @@ import {
 	Bell,
 	Bot,
 	Box,
+	Cpu,
 	Mail,
 	Monitor,
 	Settings2,
+	Share2,
 	Shield,
 	Zap,
 } from "lucide-react";
@@ -23,7 +25,9 @@ export type ProductRealmId =
 	| "box"
 	| "mail"
 	| "notify"
-	| "hire";
+	| "hire"
+	| "compute"
+	| "share";
 
 export interface ProductRealm {
 	description: string;
@@ -95,7 +99,8 @@ export const PRODUCT_REALMS: readonly ProductRealm[] = [
 		type: "service",
 	},
 	{
-		description: "Durable HTTP events with a tenant-scoped live stream.",
+		description:
+			"Durable events, live activities, and channel delivery over HTTP.",
 		href: "/products/notify",
 		icon: Bell,
 		id: "notify",
@@ -111,6 +116,24 @@ export const PRODUCT_REALMS: readonly ProductRealm[] = [
 		id: "hire",
 		label: "Ryu Hire",
 		shortLabel: "Hire",
+		type: "service",
+	},
+	{
+		description: "Rent governed CPU or GPU capacity for a bounded run.",
+		href: "/products/compute",
+		icon: Cpu,
+		id: "compute",
+		label: "Ryu Compute",
+		shortLabel: "Compute",
+		type: "service",
+	},
+	{
+		description: "Share idle Ryu capacity without giving up your machine.",
+		href: "/products/share",
+		icon: Share2,
+		id: "share",
+		label: "Ryu Share",
+		shortLabel: "Share",
 		type: "service",
 	},
 ];

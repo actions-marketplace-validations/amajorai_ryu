@@ -85,10 +85,8 @@ pub fn token_path() -> std::path::PathBuf {
 /// when neither exists is a fresh one minted.
 ///
 /// Returns `None` only when no token could be established AND none could be
-/// minted (e.g. an unwritable home directory). That is deliberately not fatal:
-/// Core still boots, `require_auth` behaves exactly as it did before this module
-/// existed, and the caller logs it. Refusing to start because a token file could
-/// not be written would turn a hardening improvement into an outage.
+/// minted (e.g. an unwritable data directory). The startup caller treats this
+/// as fatal: credential failure must not start an unauthenticated local API.
 pub fn resolve_and_export() -> Option<ResolvedToken> {
     resolved_state()
         .read()
@@ -142,8 +140,7 @@ fn resolve_uncached() -> Option<ResolvedToken> {
             tracing::warn!(
                 path = %path.display(),
                 error = %e,
-                "could not persist a node auth token; Core will run WITHOUT local API \
-                 authentication (set RYU_TOKEN to force one)"
+                "could not persist a node auth token; Core startup will be refused"
             );
             None
         }

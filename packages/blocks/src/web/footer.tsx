@@ -1,6 +1,8 @@
 "use client";
 
+import { useLocalizedText } from "@ryu/i18n/react";
 import { Logo } from "@ryu/ui/components/logo.tsx";
+import type { ReactNode } from "react";
 
 import Aurora from "./aurora.tsx";
 import BackedBy from "./backed-by.tsx";
@@ -11,11 +13,27 @@ import "./footer.css";
 // Cache Components requires client prerenders to be deterministic.
 const COPYRIGHT_YEAR = 2026;
 
+function LocalizedFooterCopy({ value }: { value: string }) {
+	return <>{useLocalizedText(value, { literal: true })}</>;
+}
+
 export default function Footer({
 	githubStargazersCount,
+	languagePicker,
+	soundToggle,
 }: {
 	githubStargazersCount?: number | null;
+	languagePicker?: ReactNode;
+	soundToggle?: ReactNode;
 }) {
+	const localizedHeroTitle = useLocalizedText(
+		"The universal AI integration layer",
+		{ literal: true }
+	);
+	const localizedHeroDescription = useLocalizedText(
+		"We deploy and keep your agents running for you. Connect the tools it needs and integrate where you want it to run.",
+		{ literal: true }
+	);
 	return (
 		<footer className="relative overflow-x-clip pt-16">
 			{/* Content sits above the Aurora and outline mark and stays on shared surfaces. */}
@@ -23,115 +41,119 @@ export default function Footer({
 				{/* Two column links */}
 				<div className="mb-12 grid grid-cols-1 gap-12 md:grid-cols-2">
 					<div className="space-y-4">
-						<h3 className="font-medium text-2xl">
-							The universal AI integration layer
-						</h3>
+						<h3 className="font-medium text-2xl">{localizedHeroTitle}</h3>
 						<p className="max-w-md text-muted-foreground">
-							We deploy and keep your agents running for you. Connect the tools
-							it needs and integrate where you want it to run.
+							{localizedHeroDescription}
 						</p>
 						<BackedBy className="pt-2" />
 					</div>
 
 					<div className="grid grid-cols-2 gap-x-8 gap-y-8 sm:grid-cols-3 sm:gap-x-12 lg:gap-x-16">
 						<div>
-							<h4 className="mb-4 font-medium">Platform</h4>
+							<h4 className="mb-4 font-medium">
+								<LocalizedFooterCopy value="Platform" />
+							</h4>
 							<div className="space-y-2">
 								<a
 									className="block text-muted-foreground transition-colors hover:text-foreground"
 									href="/products/sdk"
 								>
-									SDK
+									<LocalizedFooterCopy value="SDK" />
 								</a>
 								<a
 									className="block text-muted-foreground transition-colors hover:text-foreground"
 									href="/products/core"
 								>
-									Core
+									<LocalizedFooterCopy value="Core" />
 								</a>
 								<a
 									className="block text-muted-foreground transition-colors hover:text-foreground"
 									href="/products/gateway"
 								>
-									Gateway
+									<LocalizedFooterCopy value="Gateway" />
 								</a>
 								<a
 									className="block text-muted-foreground transition-colors hover:text-foreground"
 									href="/marketplace/apps"
 								>
-									Ryu Apps
+									<LocalizedFooterCopy value="Ryu Apps" />
 								</a>
 								<a
 									className="block text-muted-foreground transition-colors hover:text-foreground"
 									href="/platform#infra"
 								>
-									Ryu Infra
+									<LocalizedFooterCopy value="Ryu Infra" />
 								</a>
 							</div>
 						</div>
 
 						<div>
-							<h4 className="mb-4 font-medium">Learn</h4>
+							<h4 className="mb-4 font-medium">
+								<LocalizedFooterCopy value="Learn" />
+							</h4>
 							<div className="space-y-2">
 								<a
 									className="block text-muted-foreground transition-colors hover:text-foreground"
 									href="/academy"
 								>
-									Academy
+									<LocalizedFooterCopy value="Academy" />
 								</a>
 								<a
 									className="block text-muted-foreground transition-colors hover:text-foreground"
 									href="/certifications"
 								>
-									Certifications
+									<LocalizedFooterCopy value="Certifications" />
 								</a>
 								<a
 									className="block text-muted-foreground transition-colors hover:text-foreground"
 									href="/products/cli"
 								>
-									CLI
+									<LocalizedFooterCopy value="CLI" />
 								</a>
 								<a
 									className="block text-muted-foreground transition-colors hover:text-foreground"
 									href="/products/sdk"
 								>
-									SDK
+									<LocalizedFooterCopy value="SDK" />
 								</a>
 								<a
 									className="block text-muted-foreground transition-colors hover:text-foreground"
 									href="/products/mcp"
 								>
-									MCP
+									<LocalizedFooterCopy value="MCP" />
 								</a>
 							</div>
 						</div>
 
 						<div>
-							<h4 className="mb-4 font-medium">Company</h4>
+							<h4 className="mb-4 font-medium">
+								<LocalizedFooterCopy value="Company" />
+							</h4>
 							<div className="space-y-2">
 								<a
 									className="block text-muted-foreground transition-colors hover:text-foreground"
 									href="/for/agent-operators"
 								>
-									AI operators
+									<LocalizedFooterCopy value="AI operators" />
 								</a>
 								<a
 									className="block text-muted-foreground transition-colors hover:text-foreground"
 									href="/startups"
 								>
-									Programs
+									<LocalizedFooterCopy value="Programs" />
 								</a>
+                                <a className="block text-muted-foreground transition-colors hover:text-foreground" href="/security"><LocalizedFooterCopy value="Security" /></a>
 								<a
 									className="block text-muted-foreground transition-colors hover:text-foreground"
 									href="/partners"
 								>
-									Partners
+									<LocalizedFooterCopy value="Partners" />
 								</a>
 								<a
 									className="block text-muted-foreground transition-colors hover:text-foreground"
 									href="/perks"
 								>
-									Perks
+									<LocalizedFooterCopy value="Perks" />
 								</a>
 							</div>
 						</div>
@@ -141,29 +163,35 @@ export default function Footer({
 				{/* Horizontal links + copyright */}
 				<div className="mt-32 space-y-4 text-center">
 					<FooterBuildInfo githubStargazersCount={githubStargazersCount} />
-					<div className="flex items-center justify-center gap-8 text-muted-foreground text-sm">
+					<div className="flex flex-wrap items-center justify-center gap-x-8 gap-y-3 text-muted-foreground text-sm">
 						<ThemeToggle />
+						{soundToggle}
+						{languagePicker}
 						<a
 							className="transition-colors hover:text-foreground"
 							href="/privacy"
 						>
-							Privacy
+							<LocalizedFooterCopy value="Privacy" />
 						</a>
 						<a
 							className="transition-colors hover:text-foreground"
 							href="/terms"
 						>
-							Terms
+							<LocalizedFooterCopy value="Terms" />
 						</a>
 						<a
 							className="transition-colors hover:text-foreground"
 							href="/contact"
 						>
-							Contact
+							<LocalizedFooterCopy value="Contact" />
 						</a>
 						<a className="transition-colors hover:text-foreground" href="/dpa">
-							<span className="hidden lg:block">Data Processing Agreement</span>
-							<span className="block lg:hidden">DPA</span>
+							<span className="hidden lg:block">
+								<LocalizedFooterCopy value="Data Processing Agreement" />
+							</span>
+							<span className="block lg:hidden">
+								<LocalizedFooterCopy value="DPA" />
+							</span>
 						</a>
 					</div>
 

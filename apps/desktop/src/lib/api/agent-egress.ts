@@ -114,6 +114,9 @@ import {
 const LOCAL_ENGINES: ReadonlySet<string> = new Set([
 	"llamacpp",
 	"ollama",
+	"lemonade",
+	"llama-swap",
+	"freetoken",
 	"vllm",
 	"sglang",
 	"mlx",

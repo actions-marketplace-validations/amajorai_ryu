@@ -49,6 +49,35 @@ test("collapses a long message rail into a compact trigger", async ({
 	}
 });
 
+test("keeps the message navigation rail on the left and opens its popover inward", async ({
+	page,
+}) => {
+	await openStory(page);
+
+	const viewport = page.locator('[data-slot="message-scroller-viewport"]');
+	const trigger = collapsedRail(page);
+	const viewportBox = await viewport.boundingBox();
+	const triggerBox = await trigger.boundingBox();
+	expect(viewportBox).not.toBeNull();
+	expect(triggerBox).not.toBeNull();
+	if (!(viewportBox && triggerBox)) {
+		return;
+	}
+
+	expect(triggerBox.x).toBeGreaterThanOrEqual(viewportBox.x);
+	expect(triggerBox.x + triggerBox.width).toBeLessThan(
+		viewportBox.x + viewportBox.width / 2
+	);
+
+	await trigger.click();
+	const popover = navigationPopover(page);
+	const popoverBox = await popover.boundingBox();
+	expect(popoverBox).not.toBeNull();
+	if (popoverBox) {
+		expect(popoverBox.x).toBeGreaterThan(triggerBox.x + triggerBox.width);
+	}
+});
+
 test("opens every message in one bounded scrollable popover", async ({
 	page,
 }) => {
@@ -95,4 +124,14 @@ test("selecting a popover message closes it and updates the active jump target",
 	if (targetId) {
 		await expect(trigger).toHaveAttribute("data-active-message-id", targetId);
 	}
+});
+
+test("captures the completed left message navigation proof", async ({
+	page,
+}, testInfo) => {
+	await openStory(page);
+	await page.screenshot({
+		fullPage: true,
+		path: testInfo.outputPath("chat-preview-rail-left-proof.png"),
+	});
 });

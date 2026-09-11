@@ -26,13 +26,13 @@ jobs:
           ref: ${{ github.event.repository.default_branch }}
           fetch-depth: 0
 
-      - name: Generate and publish Mimo release notes
+      - name: Generate and publish DeepSeek V4.1 Flash release notes
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
           TAG: ${{ inputs.tag }}
           OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
-          OPENCODE_MODEL: mimo-v2.5
+          OPENCODE_MODEL: deepseek-flash
           OPENCODE_MAX_TOKENS: "8000"
           OPENCODE_SESSION_ID: "ryu-${{ github.repository }}-${{ github.run_id }}"
         shell: bash
@@ -59,4 +59,4 @@ jobs:
             --prev "$previous" --require-ai > ai-notes.md
           cat ai-notes.md >> notes.md
           gh release edit "$TAG" --repo "$REPO" --notes-file notes.md
-          echo "Published Mimo notes for $TAG from $previous."
+          echo "Published DeepSeek V4.1 Flash notes for $TAG from $previous."

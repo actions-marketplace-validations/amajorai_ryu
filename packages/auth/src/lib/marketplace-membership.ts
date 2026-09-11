@@ -52,7 +52,7 @@ export const MARKETPLACE_PRICE_TIERS: readonly MarketplacePriceTier[] = [
 /**
  * True only for a recurring plan whose contract funds the Marketplace publisher
  * pool. Marketplace access and publisher funding are separate plan properties:
- * Pro, Max, Teams, and Business can access supported paid apps without making
+ * Plus, Pro, Max, Teams, Teams Lite, and Business can access supported paid apps without making
  * their managed-inference price carry an unrelated publisher liability.
  */
 export function isRecurringMarketplacePlan(

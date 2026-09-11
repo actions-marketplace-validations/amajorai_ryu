@@ -7,16 +7,10 @@ import {
 	ContextMenuContent,
 	ContextMenuTrigger,
 } from "@ryu/ui/components/context-menu.tsx";
-import {
-	EditorKit,
-	type MyEditor,
-} from "@ryu/ui/components/editor/editor-kit.tsx";
-import { EditorStatic } from "@ryu/ui/components/editor/ui/editor-static.tsx";
 import { ProjectFolder } from "@ryu/ui/components/project-folder.tsx";
 import { Skeleton } from "@ryu/ui/components/skeleton.tsx";
-import { Plate, usePlateEditor } from "platejs/react";
 import type { ReactNode } from "react";
-import { useEffect, useState } from "react";
+import { lazy, Suspense, useEffect, useState } from "react";
 import { useSpacesContext } from "@/src/contexts/SpacesContext.tsx";
 import { useTabsContext } from "@/src/contexts/TabsContext.tsx";
 import type {
@@ -24,6 +18,12 @@ import type {
 	SpaceDocument,
 	SpaceDocumentContent,
 } from "@/src/lib/api/spaces.ts";
+
+const PagePreview = lazy(() =>
+	import("./SpaceDocumentPreview.tsx").then((module) => ({
+		default: module.PagePreview,
+	}))
+);
 
 const previewCache = new Map<string, SpaceDocumentContent>();
 
@@ -35,15 +35,6 @@ type PreviewState =
 	| { status: "error" }
 	| { status: "loading" }
 	| { content: SpaceDocumentContent; status: "ready" };
-type EditorKitPlugin = (typeof EditorKit)[number];
-type MarkdownEditorPlugin = EditorKitPlugin & {
-	api: { markdown: MyEditor["api"]["markdown"] };
-	key: "markdown";
-};
-
-const markdownPlugin = EditorKit.find(
-	(plugin): plugin is MarkdownEditorPlugin => plugin.key === "markdown"
-);
 const editableDocumentRawKinds = new Set(["", "page", "database"]);
 
 function previewCacheKey(spaceId: string, document: SpaceDocument): string {
@@ -89,24 +80,6 @@ export function spaceDocumentPath(
 ): string {
 	const segment = document.kind === "database" ? "db" : "doc";
 	return `/spaces/${spaceId}/${segment}/${document.id}`;
-}
-
-function PagePreview({ source }: { source: string }) {
-	const editor = usePlateEditor({
-		plugins: EditorKit,
-		value: (currentEditor) =>
-			currentEditor.getApi(markdownPlugin).markdown.deserialize(source || ""),
-	});
-
-	return (
-		<Plate editor={editor}>
-			<EditorStatic
-				className="pointer-events-none max-h-44 overflow-hidden px-4 py-3 text-sm [&_.slate-p]:my-0 [&_.slate-p]:leading-5"
-				editor={editor}
-				variant="none"
-			/>
-		</Plate>
-	);
 }
 
 function databaseCounts(
@@ -195,7 +168,11 @@ function DocumentPreview({
 	if (document.kind === "database") {
 		return <DatabasePreview source={state.content.source} />;
 	}
-	return <PagePreview source={state.content.source} />;
+	return (
+		<Suspense fallback={<LoadingPreview document={document} />}>
+			<PagePreview source={state.content.source} />
+		</Suspense>
+	);
 }
 
 export function SpaceProjectFolder({

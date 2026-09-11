@@ -23,10 +23,12 @@ pub mod auto_title;
 pub mod canvas_migrate;
 pub mod catalog_scan;
 pub mod chat_suggestions;
+pub mod chatgpt_api;
 pub mod continuity;
 pub mod conversations;
 pub mod data_admin;
 mod data_path_api;
+mod backups;
 pub mod encryption;
 pub mod gifs;
 pub mod git;
@@ -52,6 +54,8 @@ pub mod model_stream;
 // in-process `healing_api` module or `healing_routes` fn.
 pub mod agent_ui_templates;
 pub mod identity_api;
+pub mod improvement_api;
+pub mod images;
 pub mod language_packs;
 pub mod learning;
 pub mod managed_bot_api;
@@ -322,6 +326,9 @@ pub struct ServerState {
     /// sweeping conversations at cycle time (never on the chat hot path). Read by
     /// the `/api/learn/*` + `/api/experience/*` surface ([`crate::server::learning`]).
     pub experience: ryu_learning::ExperienceStore,
+    /// Core-owned durable recursive-improvement records. Learning and Research
+    /// carry correlation ids into this store; Core owns lifecycle persistence.
+    pub improvements: ryu_improvement::ImprovementStore,
     /// Per-node Agent-UI template library. Templates are validated JSON over
     /// the closed catalog and resource-scoped by the HTTP handlers.
     pub agent_ui_templates: agent_ui_templates::AgentUiTemplateStore,
@@ -1242,12 +1249,29 @@ async fn require_auth_with_token(
     next: middleware::Next,
     expected: Option<String>,
 ) -> Result<axum::response::Response, StatusCode> {
-    let provided = req
-        .headers()
-        .get("authorization")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "))
-        .map(str::to_string);
+    let provided = if req
+        .uri()
+        .path()
+        .starts_with("/api/pi-config/chatgpt/codex/")
+    {
+        req.headers()
+            .get("x-ryu-node-token")
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_string)
+            .or_else(|| {
+                req.headers()
+                    .get("authorization")
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(|v| v.strip_prefix("Bearer "))
+                    .map(str::to_string)
+            })
+    } else {
+        req.headers()
+            .get("authorization")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.strip_prefix("Bearer "))
+            .map(str::to_string)
+    };
     let now = crate::pairing::now_secs();
     let path_agent_id = mcp_path_agent_id(req.uri().path());
     let policy = route_policy(req.method(), req.uri().path());
@@ -2594,7 +2618,7 @@ fn resource_access(
 
 /// Require at least READ access to a resource. Any grant above [`Access::None`]
 /// passes (`resource_access` already turns `None` into a 403).
-fn require_resource_read(
+pub(crate) fn require_resource_read(
     meta: anyhow::Result<Option<crate::identity_verify::ResourceTenancy>>,
     caller: Option<&crate::identity_verify::VerifiedCaller>,
     not_found: &str,
@@ -2617,7 +2641,7 @@ fn require_resource_read_at(
 /// Require WRITE access to a resource. A read-only grant (e.g. an org `Viewer` on
 /// an `org`-visible doc) is refused — mirrors the realtime gateway, which drops a
 /// read-only member's mutating frames.
-fn require_resource_write(
+pub(crate) fn require_resource_write(
     meta: anyhow::Result<Option<crate::identity_verify::ResourceTenancy>>,
     caller: Option<&crate::identity_verify::VerifiedCaller>,
     not_found: &str,
@@ -2630,7 +2654,7 @@ fn require_resource_write(
 /// etc.); coarse `space.write` already gates them, while their NULL owner must
 /// not make every legitimate upload fail the document ACL's legacy-row rule.
 /// Ordinary user Spaces still use the native per-Space tenancy gate.
-async fn require_space_content_write(
+pub(crate) async fn require_space_content_write(
     state: &ServerState,
     caller: &Option<crate::identity_verify::VerifiedCaller>,
     space_id: &str,
@@ -2760,7 +2784,7 @@ pub(crate) fn caller_tenancy(
 /// an UNBOUND node yields the unrestricted filter (byte-identical, one principal);
 /// a BOUND node narrows to the caller's id + org so list/search only surface rows
 /// the caller may read.
-fn caller_doc_filter(
+pub(crate) fn caller_doc_filter(
     caller: &Option<crate::identity_verify::VerifiedCaller>,
 ) -> spaces::DocFilter<'_> {
     match (node_org_id().is_some(), caller.as_ref()) {
@@ -3022,6 +3046,22 @@ mod resource_acl_tests {
     /// boundary by design; see the `resource_access` preamble.)
     const BOUND: Option<&str> = Some("org1");
     const UNBOUND: Option<&str> = None;
+
+    #[tokio::test]
+    async fn app_documents_keep_caller_acl_despite_matching_app_namespace() {
+        let store = super::spaces::SpaceStore::open_in_memory().unwrap();
+        let owner = super::spaces::DocOwner::owned(Some("alice"), Some("org1"));
+        let space = store.create_space("Private footage", None, &owner).await.unwrap();
+        let doc = store.app_create_doc("@test/editor", &space, "Transcript", &owner).await.unwrap();
+        // Namespace ownership alone admits both callers. The shared row gate must
+        // retain Alice's private ownership for all apps using the host bridge.
+        assert!(store.app_get_doc("@test/editor", &doc).await.unwrap().is_some());
+        let bob = caller("bob", Some("org1"), OrgRole::Member);
+        let alice = caller("alice", Some("org1"), OrgRole::Member);
+        assert_eq!(status(require_resource_read_at(super::spaces::doc_access_meta(&store, &doc).await, Some(&bob), BOUND, "nf")), Some(StatusCode::FORBIDDEN));
+        assert_eq!(status(require_resource_write_at(super::spaces::doc_access_meta(&store, &doc).await, Some(&bob), BOUND, "nf")), Some(StatusCode::FORBIDDEN));
+        assert!(require_resource_write_at(super::spaces::doc_access_meta(&store, &doc).await, Some(&alice), BOUND, "nf").is_ok());
+    }
 
     /// A resource owned by `owner`, scoped to `org`, at `visibility`.
     fn scoped(
@@ -3708,6 +3748,7 @@ pub fn create_router(
     bind_addr: &str,
     router_manifests: &[crate::plugin_manifest::PluginManifest],
 ) -> Router {
+    crate::backups::start_scheduler(state.clone());
     // Fail-closed under mesh / remote bind (#478): a node reachable beyond
     // loopback MUST have an auth token, or every protected route is open to the
     // tailnet/LAN. Refuse to build the router (which stops startup) otherwise.
@@ -4212,6 +4253,14 @@ pub fn create_router(
             post(start_pi_provider_login),
         )
         .route(
+            "/api/pi-config/chatgpt/codex/responses",
+            post(chatgpt_api::responses),
+        )
+        .route(
+            "/api/pi-config/chatgpt/codex/models",
+            get(chatgpt_api::models),
+        )
+        .route(
             "/api/pi-config/providers/:id/accounts",
             get(pi_provider_accounts),
         )
@@ -4447,6 +4496,7 @@ pub fn create_router(
         .merge(onboarding_state::routes())
         .merge(onboarding_profile::routes())
         .merge(continuity::router())
+        .merge(backups::router())
         // ── Danger zone: irreversible bulk "delete all X" (settings) ─────────
         .route("/api/data/counts", get(data_admin::data_counts))
         .route("/api/data/clear", post(data_admin::data_clear))
@@ -4704,6 +4754,10 @@ pub fn create_router(
         // sub-router (see `learning_routes`) so the Learning App's enabled bit
         // governs it. Learning `requires` the Skills app (it writes skills).
         .merge(learning_routes(&state.app_store))
+        // ── Recursive-improvement records ──────────────────────────────────
+        // Core owns the durable run and lifecycle; Learning/Research only carry
+        // the optional correlation reference and their own domain state.
+        .merge(improvement_api::routes())
         // ── Self-healing is OUT-OF-PROCESS: the `/api/healing/*` surface is served by
         // the `ryu-healing` sidecar via `public_mount`; Core drives it over loopback
         // (`healing_client`) and keeps only the welded action side. No in-process mount.
@@ -6106,6 +6160,7 @@ fn voice_routes(app_store: &PluginStore) -> Router<ServerState> {
 fn media_routes(app_store: &PluginStore) -> Router<ServerState> {
     Router::new()
         .route("/api/gifs/search", get(gifs::search))
+        .route("/api/assets/images/search", get(images::search))
         .route("/api/images/generate", post(media::generate_image))
         .route("/api/video/generate", post(media::generate_video))
         // Poll a cloud video-generation job (job-based; see media::generate_video).
@@ -6420,7 +6475,25 @@ mod update_check_wire_shape_tests {
     request_body = serde_json::Value,
     responses((status = 200, description = "OK", body = serde_json::Value))
 )]
-async fn schedule_update(Json(body): Json<serde_json::Value>) -> axum::response::Response {
+async fn schedule_update(
+    State(state): State<ServerState>,
+    Extension(caller): Extension<Option<crate::identity_verify::VerifiedCaller>>,
+    Json(body): Json<serde_json::Value>,
+) -> axum::response::Response {
+    if let Err(status) = enforce_permission(
+        &state,
+        &caller,
+        crate::identity_verify::permissions::NODES_MANAGE,
+    )
+    .await
+    {
+        return (
+            status,
+            Json(json!({ "error": "Node management permission is required for updates" })),
+        )
+            .into_response();
+    }
+
     let asset: crate::update::ReleaseAsset =
         match serde_json::from_value(body.get("asset").cloned().unwrap_or(body.clone())) {
             Ok(a) => a,
@@ -6479,7 +6552,24 @@ async fn get_update_schedule() -> axum::response::Response {
     summary = "Cancel a deferred update",
     responses((status = 200, description = "OK", body = serde_json::Value))
 )]
-async fn cancel_update_schedule() -> axum::response::Response {
+async fn cancel_update_schedule(
+    State(state): State<ServerState>,
+    Extension(caller): Extension<Option<crate::identity_verify::VerifiedCaller>>,
+) -> axum::response::Response {
+    if let Err(status) = enforce_permission(
+        &state,
+        &caller,
+        crate::identity_verify::permissions::NODES_MANAGE,
+    )
+    .await
+    {
+        return (
+            status,
+            Json(json!({ "error": "Node management permission is required for updates" })),
+        )
+            .into_response();
+    }
+
     match crate::update::schedule::clear_pending() {
         Ok(()) => (StatusCode::OK, Json(json!({ "ok": true }))).into_response(),
         Err(e) => (
@@ -6502,8 +6592,23 @@ async fn cancel_update_schedule() -> axum::response::Response {
 )]
 async fn update_apply(
     State(state): State<ServerState>,
+    Extension(caller): Extension<Option<crate::identity_verify::VerifiedCaller>>,
     Json(asset): Json<crate::update::ReleaseAsset>,
 ) -> axum::response::Response {
+    if let Err(status) = enforce_permission(
+        &state,
+        &caller,
+        crate::identity_verify::permissions::NODES_MANAGE,
+    )
+    .await
+    {
+        return (
+            status,
+            Json(json!({ "error": "Node management permission is required for updates" })),
+        )
+            .into_response();
+    }
+
     match crate::update::apply::apply_update(&state.downloads, &asset).await {
         Ok(result) => (StatusCode::OK, Json(json!(result))).into_response(),
         Err(e) => (
@@ -18450,14 +18555,16 @@ async fn plugins_isolation_handler(State(state): State<ServerState>) -> axum::re
     post,
     path = "/api/plugins/{id}/install",
     tag = "Plugins",
-    summary = "Install a built-in plugin by id",
+    summary = "Install a built-in plugin by id or preview the install",
     params(("id" = String, Path)),
+    request_body = LifecycleDryRunBody,
     responses((status = 200, description = "OK", body = serde_json::Value))
 )]
 async fn install_app_handler(
     State(state): State<ServerState>,
     Path(id): Path<String>,
     Extension(caller): Extension<Option<crate::identity_verify::VerifiedCaller>>,
+    body: Option<Json<LifecycleDryRunBody>>,
 ) -> axum::response::Response {
     if let Err(response) = enforce_app_lifecycle_permission(
         &state,
@@ -18475,6 +18582,27 @@ async fn install_app_handler(
             format!("no manifest found for app '{id}'; ensure the ryu.json is loaded"),
         );
     };
+    let dry_run = body.is_some_and(|body| body.0.dry_run);
+    if dry_run {
+        let installed = match state.app_store.get(&id).await {
+            Ok(record) => record,
+            Err(error) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()),
+        };
+        return Json(json!({
+            "success": true,
+            "dryRun": true,
+            "action": "install",
+            "app": {
+                "id": manifest.id,
+                "name": manifest.name,
+                "version": manifest.version,
+            },
+            "currentlyInstalled": installed.is_some(),
+            "wouldInstall": installed.is_none(),
+            "enabledAfterInstall": false,
+        }))
+        .into_response();
+    }
 
     // Register the add in the download center, the same way the catalog-resolve
     // path does (`resolve_plugin_from_catalog`), under the SAME `plugin:<id>` row
@@ -18573,16 +18701,18 @@ async fn install_app_handler(
     post,
     path = "/api/plugins/{id}/enable",
     tag = "Plugins",
-    summary = "Enable a plugin (activate its runnables)",
+    summary = "Enable a plugin or preview its activation plan",
     params(("id" = String, Path)),
+    request_body = LifecycleDryRunBody,
     responses((status = 200, description = "OK", body = serde_json::Value))
 )]
 async fn enable_app_handler(
     State(state): State<ServerState>,
     Path(id): Path<String>,
     Extension(caller): Extension<Option<crate::identity_verify::VerifiedCaller>>,
+    body: Option<Json<LifecycleDryRunBody>>,
 ) -> axum::response::Response {
-    use crate::plugins::lifecycle::{enable_app, EnableError};
+    use crate::plugins::lifecycle::{enable_app, plan_enable_app, EnableError};
     use crate::sidecar::gateway::{gateway_token, gateway_url};
 
     if let Err(response) = enforce_app_lifecycle_permission(
@@ -18618,16 +18748,28 @@ async fn enable_app_handler(
     let all_manifests: Vec<crate::plugin_manifest::PluginManifest> =
         state.app_manifests.read().await.clone();
 
-    let outcome = match enable_app(
-        &state.app_store,
-        &manifest,
-        &all_manifests,
-        &gw_url,
-        gw_token.as_deref(),
-        &state.client,
-    )
-    .await
-    {
+    let dry_run = body.is_some_and(|body| body.0.dry_run);
+    let outcome = match if dry_run {
+        plan_enable_app(
+            &state.app_store,
+            &manifest,
+            &all_manifests,
+            &gw_url,
+            gw_token.as_deref(),
+            &state.client,
+        )
+        .await
+    } else {
+        enable_app(
+            &state.app_store,
+            &manifest,
+            &all_manifests,
+            &gw_url,
+            gw_token.as_deref(),
+            &state.client,
+        )
+        .await
+    } {
         Ok(outcome) => outcome,
         Err(EnableError::GrantsDenied { plugin, denied }) => {
             return (
@@ -18690,6 +18832,24 @@ async fn enable_app_handler(
             return json_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string());
         }
     };
+
+    if dry_run {
+        let planned_ids: Vec<String> = outcome
+            .in_enable_order()
+            .map(|record| record.id.clone())
+            .collect();
+        let app = outcome.target.clone();
+        return Json(json!({
+            "success": true,
+            "dryRun": true,
+            "action": "enable",
+            "app": app,
+            "wouldEnable": planned_ids,
+            "enabledDependencies": outcome.dependencies.iter().map(|record| record.id.clone()).collect::<Vec<_>>(),
+            "approvedGrants": outcome.target.approved_grants,
+        }))
+        .into_response();
+    }
 
     // Activate EVERY plugin this call enabled, in enable order (dependencies
     // first, target last). Flipping a dependency's enabled bit without running
@@ -19747,7 +19907,7 @@ async fn plugin_contributions(
     State(state): State<ServerState>,
     headers: axum::http::HeaderMap,
 ) -> axum::response::Response {
-    // Read the store ONCE and derive both views from it. `store_tabs` needs the
+    // Read lifecycle records once and derive both views. `store_tabs` needs the
     // INSTALLED set as well as the enabled one (it is served outside the enabled
     // filter and tags each tab with both bits), so splitting this into two `list()`
     // calls would be a second round-trip for the same rows.
@@ -19759,6 +19919,8 @@ async fn plugin_contributions(
         Ok(records) => records,
         Err(e) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     };
+    // Presence metadata needs ids only, not UI blobs or a query per manifest.
+    let ui_bundle_ids = state.app_store.ids_with_ui_code().await.unwrap_or_default();
     let installed_ids: std::collections::HashSet<String> =
         all_records.iter().map(|r| r.id.clone()).collect();
     let enabled_records: std::collections::HashMap<String, crate::plugins::PluginRecord> =
@@ -20032,11 +20194,7 @@ async fn plugin_contributions(
         let Some(record) = enabled_records.get(&manifest.id) else {
             continue;
         };
-        let has_ui = state
-            .app_store
-            .has_ui_code(&manifest.id)
-            .await
-            .unwrap_or(false);
+        let has_ui = ui_bundle_ids.contains(&manifest.id);
         for entry in &manifest.runnables {
             if entry.kind != crate::runnable::RunnableKind::Companion {
                 continue;
@@ -21168,6 +21326,8 @@ async fn delete_plugin_secret_handler(
                         (reverse-topological order). Default false: a disable that \
                         would break a dependent is refused with 409 and the blockers \
                         named in `dependency_error.dependents`."),
+        ("dryRun" = Option<bool>, Query,
+         description = "Validate and return the disable blast radius without changing state."),
     ),
     responses(
         (status = 200, description = "OK", body = serde_json::Value),
@@ -21181,7 +21341,7 @@ async fn disable_app_handler(
     axum::extract::Query(params): axum::extract::Query<DisableAppParams>,
     Extension(caller): Extension<Option<crate::identity_verify::VerifiedCaller>>,
 ) -> axum::response::Response {
-    use crate::plugins::lifecycle::{disable_app, DisableError};
+    use crate::plugins::lifecycle::{disable_app, plan_disable_app, DisableError};
 
     if let Err(response) = enforce_app_lifecycle_permission(
         &state,
@@ -21196,16 +21356,43 @@ async fn disable_app_handler(
     let all_manifests: Vec<crate::plugin_manifest::PluginManifest> =
         state.app_manifests.read().await.clone();
 
-    match disable_app(
-        &state.app_store,
-        &id,
-        &all_manifests,
-        params.cascade,
-        params.force,
-    )
-    .await
-    {
+    let outcome = if params.dry_run {
+        plan_disable_app(
+            &state.app_store,
+            &id,
+            &all_manifests,
+            params.cascade,
+            params.force,
+        )
+        .await
+    } else {
+        disable_app(
+            &state.app_store,
+            &id,
+            &all_manifests,
+            params.cascade,
+            params.force,
+        )
+        .await
+    };
+    match outcome {
         Ok(outcome) => {
+            if params.dry_run {
+                let disabled_ids: Vec<String> = outcome
+                    .disabled
+                    .iter()
+                    .map(|record| record.id.clone())
+                    .collect();
+                return Json(json!({
+                    "success": true,
+                    "dryRun": true,
+                    "action": "disable",
+                    "app": outcome.target(),
+                    "wouldDisable": disabled_ids,
+                    "cascade": params.cascade,
+                }))
+                .into_response();
+            }
             // Deactivate every plugin this call disabled, in disable order
             // (dependents first, the target last) — so a dependent is never left
             // running for even an instant against a torn-down dependency.
@@ -21404,6 +21591,17 @@ struct DisableAppParams {
     /// it is refused (409, `code: "load_bearing"`) unless explicitly forced.
     #[serde(default)]
     force: bool,
+    /// When `true`, resolve the same dependency and safety checks but do not
+    /// change lifecycle state or tear down runtime contributions.
+    #[serde(rename = "dryRun", default)]
+    dry_run: bool,
+}
+
+#[derive(serde::Deserialize, Default, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+struct LifecycleDryRunBody {
+    #[serde(default)]
+    dry_run: bool,
 }
 
 /// Query params for `POST /api/plugins/:id/uninstall`.
@@ -21415,6 +21613,10 @@ struct UninstallAppParams {
     /// named — the same posture as the disable cascade.
     #[serde(default)]
     cascade: bool,
+    /// When `true`, resolve the uninstall blast radius without removing the
+    /// lifecycle record, scheduler jobs, or plugin files.
+    #[serde(rename = "dryRun", default)]
+    dry_run: bool,
 }
 
 /// `POST /api/plugins/:id/uninstall` — disable the plugin (and, with
@@ -21448,6 +21650,8 @@ struct UninstallAppParams {
          description = "Also disable every enabled plugin that depends on this one \
                         before removing it. Default false: an uninstall blocked by a \
                         dependent is refused with 409."),
+        ("dryRun" = Option<bool>, Query,
+         description = "Validate and return the uninstall blast radius without changing state."),
     ),
     request_body = serde_json::Value,
     responses(
@@ -21463,7 +21667,7 @@ async fn uninstall_app_handler(
     Extension(caller): Extension<Option<crate::identity_verify::VerifiedCaller>>,
     body: Bytes,
 ) -> axum::response::Response {
-    use crate::plugins::lifecycle::{uninstall_app, UninstallError};
+    use crate::plugins::lifecycle::{plan_uninstall_app, uninstall_app, UninstallError};
 
     if let Err(response) = enforce_app_lifecycle_permission(
         &state,
@@ -21491,8 +21695,31 @@ async fn uninstall_app_handler(
     let all_manifests: Vec<crate::plugin_manifest::PluginManifest> =
         state.app_manifests.read().await.clone();
 
-    match uninstall_app(&state.app_store, &id, &all_manifests, params.cascade).await {
+    let outcome = if params.dry_run {
+        plan_uninstall_app(&state.app_store, &id, &all_manifests, params.cascade).await
+    } else {
+        uninstall_app(&state.app_store, &id, &all_manifests, params.cascade).await
+    };
+    match outcome {
         Ok(outcome) => {
+            if params.dry_run {
+                let disabled_ids: Vec<String> = outcome
+                    .disabled
+                    .iter()
+                    .map(|record| record.id.clone())
+                    .collect();
+                return Json(json!({
+                    "success": true,
+                    "dryRun": true,
+                    "action": "uninstall",
+                    "wouldRemove": outcome.removed,
+                    "wouldDisable": disabled_ids,
+                    "cascade": params.cascade,
+                    "cleanup": cleanup,
+                    "cleanupErrors": Vec::<String>::new(),
+                }))
+                .into_response();
+            }
             // Tear down every plugin the uninstall disabled, in disable order
             // (dependents first, target last) — reusing the SAME per-RunnableKind
             // teardown a disable runs. The record was already removed by
@@ -21777,7 +22004,7 @@ async fn deactivate_plugin(
 }
 
 /// Request body for `POST /api/apps/:id/update`.
-#[derive(serde::Deserialize, Default)]
+#[derive(serde::Deserialize, Default, utoipa::ToSchema)]
 struct UpdateAppBody {
     /// When `true`, allow downgrading to an older version.
     #[serde(default)]
@@ -21792,6 +22019,10 @@ struct UpdateAppBody {
     /// Exact historical release tag selected from the Marketplace Versions tab.
     #[serde(default)]
     version: Option<String>,
+    /// Resolve and validate the update without writing the manifest, lifecycle
+    /// row, dependency installs, or channel pin.
+    #[serde(rename = "dryRun", default)]
+    dry_run: bool,
 }
 
 /// `POST /api/apps/:id/update` — update an installed plugin by **re-installing the
@@ -21969,6 +22200,20 @@ async fn update_app_handler(
         body.force || switching_channel || requested_version.is_some(),
     ) {
         Ok(UpdatePlan::NoOp) => {
+            if body.dry_run {
+                return Json(json!({
+                    "success": true,
+                    "dryRun": true,
+                    "action": "update",
+                    "app": record,
+                    "fromVersion": record.version,
+                    "toVersion": manifest.version,
+                    "channel": target_channel,
+                    "channelSwitch": switching_channel,
+                    "installedDependencies": Vec::<String>::new(),
+                }))
+                .into_response();
+            }
             // The version did not move, but the pin still may have: a switch onto a
             // train that currently sits at the same build is a real change to what
             // the NEXT update follows, so persist it before answering.
@@ -22040,10 +22285,25 @@ async fn update_app_handler(
 
     // 4. Resolve + install any NEW dependencies the new version declares.
     let installed_dependencies =
-        match install_new_dependencies_for_update(&state, &manifest, buyer_token).await {
+        match install_new_dependencies_for_update(&state, &manifest, buyer_token, body.dry_run).await {
             Ok(deps) => deps,
             Err((status, msg)) => return json_error(status, msg),
         };
+
+    if body.dry_run {
+        return Json(json!({
+            "success": true,
+            "dryRun": true,
+            "action": "update",
+            "app": record,
+            "fromVersion": record.version,
+            "toVersion": manifest.version,
+            "channel": channel_to_persist.as_deref().unwrap_or(target_channel.as_str()),
+            "channelSwitch": switching_channel,
+            "installedDependencies": installed_dependencies,
+        }))
+        .into_response();
+    }
 
     // 5. Persist: write the new manifest to disk, then the store transition
     //    (version + ui_code, enabled preserved). On a store failure restore the
@@ -22174,6 +22434,7 @@ async fn install_new_dependencies_for_update(
     state: &ServerState,
     manifest: &crate::plugin_manifest::PluginManifest,
     buyer_token: Option<String>,
+    dry_run: bool,
 ) -> Result<Vec<String>, (StatusCode, String)> {
     use crate::plugin_manifest::PluginManifest;
 
@@ -22280,6 +22541,10 @@ async fn install_new_dependencies_for_update(
         };
     if dep_order.is_empty() {
         return Ok(vec![]);
+    }
+
+    if dry_run {
+        return Ok(dep_order.into_iter().map(|plugin| plugin.id).collect());
     }
 
     // ── Install the new-dep closure with rollback (reuses install_closure +
@@ -22422,6 +22687,51 @@ async fn engine_models() -> Json<serde_json::Value> {
             }
         }
     }
+    if crate::sidecar::active_engine::ActiveEngineStore::load()
+        .active
+        .as_deref()
+        == Some("lemonade")
+    {
+        match crate::sidecar::providers::LemonadeManager::new()
+            .chat_models()
+            .await
+        {
+            Ok(discovered) => {
+                models.insert("lemonade".to_owned(), discovered);
+            }
+            Err(error) => tracing::debug!(%error, "Lemonade model discovery unavailable"),
+        }
+    }
+    if crate::sidecar::active_engine::ActiveEngineStore::load()
+        .active
+        .as_deref()
+        == Some("llama-swap")
+    {
+        match crate::sidecar::providers::LlamaSwapManager::new()
+            .chat_models()
+            .await
+        {
+            Ok(discovered) => {
+                models.insert("llama-swap".to_owned(), discovered);
+            }
+            Err(error) => tracing::debug!(%error, "llama-swap model discovery unavailable"),
+        }
+    }
+    if crate::sidecar::active_engine::ActiveEngineStore::load()
+        .active
+        .as_deref()
+        == Some("freetoken")
+    {
+        match crate::sidecar::providers::FreeTokenManager::new()
+            .chat_models()
+            .await
+        {
+            Ok(discovered) => {
+                models.insert("freetoken".to_owned(), discovered);
+            }
+            Err(error) => tracing::debug!(%error, "FreeToken model discovery unavailable"),
+        }
+    }
     Json(json!({ "models": models }))
 }
 
@@ -22433,19 +22743,13 @@ fn persona_avatar_glyph(persona: Option<&crate::agents::PersonaSlot>) -> Option<
     if let Some(url) = persona.avatar_url.as_ref() {
         return Some(json!({ "kind": "avatar", "dataUrl": url }));
     }
-    if let Some(expression) = persona
+    if let Some(spec) = persona
         .expressive
         .as_ref()
-        .and_then(|spec| spec.expression.as_ref())
+        .filter(|spec| spec.expression.is_some())
     {
-        let mut glyph = json!({ "kind": "expressive", "expression": expression });
-        if let Some(animation) = persona
-            .expressive
-            .as_ref()
-            .and_then(|spec| spec.animation.as_ref())
-        {
-            glyph["animation"] = json!(animation);
-        }
+        let mut glyph = serde_json::to_value(spec).ok()?;
+        glyph["kind"] = json!("expressive");
         return Some(glyph);
     }
     if let Some(emoji) = persona.emoji.as_ref() {
@@ -22823,6 +23127,8 @@ async fn resolve_npm_latest_for_agent(package: &str) -> Option<String> {
 #[derive(serde::Deserialize)]
 struct AgentCatalogAction {
     id: String,
+    #[serde(rename = "dryRun", default)]
+    dry_run: bool,
 }
 
 /// Extract the npm package from an `npx -y [--] <pkg> [args]` spawn command,
@@ -23072,7 +23378,7 @@ async fn install_agent_runtime(
     post,
     path = "/api/agents/catalog/install",
     tag = "Agents",
-    summary = "Install an agent from the catalog",
+    summary = "Install an agent or preview the runtime plan",
     request_body = serde_json::Value,
     responses((status = 200, description = "OK", body = serde_json::Value))
 )]
@@ -23102,6 +23408,28 @@ async fn install_agent_handler(
             Json(json!({ "error": format!("unknown agent id: {}", body.id) })),
         );
     };
+    if body.dry_run {
+        let installed = state
+            .agent_store
+            .installed_ids()
+            .await
+            .map(|ids| ids.contains(&body.id))
+            .unwrap_or(false);
+        return (
+            StatusCode::OK,
+            Json(json!({
+                "ok": true,
+                "success": true,
+                "dryRun": true,
+                "action": "install",
+                "id": body.id,
+                "name": entry.name,
+                "alreadyInstalled": installed,
+                "wouldInstall": !installed,
+                "writes": ["agent installed flag", "optional runtime files"],
+            })),
+        );
+    }
     match state.agent_store.set_installed(&body.id, true).await {
         Ok(_) => {
             let downloads = state.downloads.clone();
@@ -23124,7 +23452,7 @@ async fn install_agent_handler(
     post,
     path = "/api/agents/catalog/uninstall",
     tag = "Agents",
-    summary = "Uninstall a catalog agent",
+    summary = "Uninstall a catalog agent or preview the removal",
     request_body = serde_json::Value,
     responses((status = 200, description = "OK", body = serde_json::Value))
 )]
@@ -23146,6 +23474,27 @@ async fn uninstall_agent_handler(
         return (
             StatusCode::NOT_FOUND,
             Json(json!({ "error": format!("unknown agent id: {}", body.id) })),
+        );
+    }
+    if body.dry_run {
+        let installed = state
+            .agent_store
+            .installed_ids()
+            .await
+            .map(|ids| ids.contains(&body.id))
+            .unwrap_or(false);
+        return (
+            StatusCode::OK,
+            Json(json!({
+                "ok": true,
+                "success": true,
+                "dryRun": true,
+                "action": "uninstall",
+                "id": body.id,
+                "alreadyInstalled": installed,
+                "wouldUninstall": installed,
+                "writes": ["agent installed flag"],
+            })),
         );
     }
     match state.agent_store.set_installed(&body.id, false).await {
@@ -23416,7 +23765,10 @@ async fn create_agent_prompt_version(
     path = "/api/agents/{id}/prompt-versions/{version_id}",
     tag = "Agents",
     summary = "Get an agent prompt version",
-    params(("id" = String, Path), ("version_id" = String, Path)),
+    params(
+        ("id" = String, Path),
+        ("version_id" = String, Path),
+    ),
     responses((status = 200, description = "OK", body = serde_json::Value))
 )]
 async fn get_agent_prompt_version(
@@ -25079,6 +25431,10 @@ async fn published_agent_install(
 /// `llamacpp`→`llama-server` and `.exe` handling used by every install-status
 /// endpoint so they all report the same per-engine reality.
 fn binary_installed_on_disk(name: &str) -> bool {
+    if name == "ryutts" {
+        return crate::sidecar::external_runtime::venv_exists(&crate::sidecar::providers::ryutts::sidecar_dir())
+            && crate::sidecar::providers::ryutts::kokoro::is_model_present();
+    }
     // Sidecars without a file-based binary: trust the store.
     if matches!(name, "openclaw" | "vllm") {
         return true;
@@ -27192,7 +27548,7 @@ pub(crate) async fn call_side_model_with_provider(
     if let Some(provider) = provider.filter(|value| !value.trim().is_empty()) {
         req = req.header("x-ryu-slot-chat-provider", provider.trim());
     }
-    if let Some(t) = gateway_token() {
+    if let Some(t) = crate::sidecar::gateway::gateway_core_token() {
         req = req.bearer_auth(t);
     }
     let resp = req
@@ -28128,6 +28484,8 @@ async fn list_agent_threads_handler(
 #[derive(serde::Deserialize)]
 struct ImportThreadBody {
     thread_id: String,
+    #[serde(default)]
+    dry_run: bool,
 }
 
 /// Return the not-yet-imported tail of a native transcript.
@@ -28303,6 +28661,22 @@ mod imported_thread_merge_tests {
         assert_eq!(missing.len(), 1);
         assert_eq!(missing[0].content, "new tail");
     }
+
+    #[test]
+    fn import_thread_body_defaults_to_live_and_accepts_dry_run() {
+        let live: super::ImportThreadBody = serde_json::from_value(serde_json::json!({
+            "thread_id": "thread"
+        }))
+        .unwrap();
+        assert!(!live.dry_run);
+
+        let preview: super::ImportThreadBody = serde_json::from_value(serde_json::json!({
+            "thread_id": "thread",
+            "dry_run": true
+        }))
+        .unwrap();
+        assert!(preview.dry_run);
+    }
 }
 
 /// Import one native thread into a Ryu conversation: read the agent's on-disk
@@ -28369,7 +28743,10 @@ pub(crate) async fn import_agent_thread_for_sync(
         state,
         &None,
         agent_id,
-        ImportThreadBody { thread_id },
+        ImportThreadBody {
+            thread_id,
+            dry_run: false,
+        },
         tenancy,
     )
     .await
@@ -28449,6 +28826,22 @@ async fn import_agent_thread_inner(
                     let missing_messages =
                         missing_imported_message_tail(&existing_messages, &imported.messages);
                     let messages_added = missing_messages.len();
+                    if body.dry_run {
+                        return Json(json!({
+                            "conversation_id": existing,
+                            "agent_id": agent_id,
+                            "engine": engine,
+                            "message_count": imported.messages.len(),
+                            "messages_added": messages_added,
+                            "truncated": imported.truncated,
+                            "title": imported.thread.title,
+                            "cwd": imported.thread.cwd,
+                            "already_imported": true,
+                            "dry_run": true,
+                            "would_create": false,
+                        }))
+                        .into_response();
+                    }
                     for msg in missing_messages {
                         if let Err(e) = state
                             .conversations
@@ -28497,6 +28890,8 @@ async fn import_agent_thread_inner(
                         "title": imported.thread.title,
                         "cwd": imported.thread.cwd,
                         "already_imported": true,
+                        "dry_run": false,
+                        "would_create": false,
                     }))
                     .into_response();
                 }
@@ -28504,6 +28899,23 @@ async fn import_agent_thread_inner(
             Ok(None) => {}
             Err(e) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
         }
+    }
+
+    if body.dry_run {
+        return Json(json!({
+            "conversation_id": Value::Null,
+            "agent_id": agent_id,
+            "engine": engine,
+            "message_count": imported.messages.len(),
+            "messages_added": imported.messages.len(),
+            "truncated": imported.truncated,
+            "title": imported.thread.title,
+            "cwd": imported.thread.cwd,
+            "already_imported": false,
+            "dry_run": true,
+            "would_create": true,
+        }))
+        .into_response();
     }
 
     let conversation_id = format!("conv_{}", uuid::Uuid::new_v4());
@@ -28613,6 +29025,8 @@ async fn import_agent_thread_inner(
         "title": imported.thread.title,
         "cwd": imported.thread.cwd,
         "already_imported": false,
+        "dry_run": false,
+        "would_create": true,
     }))
     .into_response()
 }
@@ -29955,6 +30369,8 @@ struct McpCatalogInstallBody {
     /// failing on a name collision. Preserves the server's enabled state + env.
     #[serde(default)]
     force: bool,
+    #[serde(rename = "dryRun", default)]
+    dry_run: bool,
 }
 
 /// `GET /api/mcp/updates` — installed MCP servers whose recorded catalog version
@@ -30005,7 +30421,7 @@ async fn mcp_updates(State(_state): State<ServerState>) -> Json<serde_json::Valu
     post,
     path = "/api/mcp/catalog/install",
     tag = "MCP",
-    summary = "Install an MCP server from the catalog",
+    summary = "Install an MCP server or preview the config",
     request_body = serde_json::Value,
     responses((status = 200, description = "OK", body = serde_json::Value))
 )]
@@ -30105,6 +30521,26 @@ async fn mcp_catalog_install(
             Some(url.clone()),
         ),
     };
+
+    if body.dry_run {
+        return (
+            StatusCode::OK,
+            Json(json!({
+                "success": true,
+                "dryRun": true,
+                "action": "install",
+                "server": {
+                    "name": plan.server_name,
+                    "command": command,
+                    "args": args,
+                    "url": url,
+                    "description": plan.description,
+                    "enabled": false,
+                },
+                "writes": [],
+            })),
+        );
+    }
 
     match write_mcp_entry(
         &plan.server_name,
@@ -34954,14 +35390,14 @@ async fn ingest_document(
 }
 
 #[derive(serde::Deserialize)]
-struct SearchBody {
-    query: String,
+pub(crate) struct SearchBody {
+    pub(crate) query: String,
     #[serde(default = "default_search_limit")]
-    limit: usize,
+    pub(crate) limit: usize,
     /// Override wiki link-expansion for this search (`None` = server default,
     /// governed by `RYU_SPACES_LINK_EXPANSION`).
     #[serde(default)]
-    link_expansion: Option<bool>,
+    pub(crate) link_expansion: Option<bool>,
 }
 
 fn default_search_limit() -> usize {
@@ -34977,7 +35413,7 @@ fn default_search_limit() -> usize {
     request_body = serde_json::Value,
     responses((status = 200, description = "OK", body = serde_json::Value))
 )]
-async fn search_space(
+pub(crate) async fn search_space(
     State(state): State<ServerState>,
     axum::Extension(caller): axum::Extension<Option<crate::identity_verify::VerifiedCaller>>,
     axum::extract::Path(id): axum::extract::Path<String>,
@@ -37828,6 +38264,8 @@ struct ModelInstallBody {
     /// Drives the single-file-vs-snapshot dispatch on the direct HF path.
     #[serde(default)]
     format: Option<String>,
+    #[serde(rename = "dryRun", default)]
+    dry_run: bool,
 }
 
 /// Header carrying the buyer's CONTROL-PLANE session bearer for a Marketplace
@@ -37876,7 +38314,7 @@ fn buyer_bearer_from_headers(headers: &axum::http::HeaderMap) -> Option<String> 
     post,
     path = "/api/models/catalog/install",
     tag = "Models",
-    summary = "Install a GGUF model file",
+    summary = "Install a model file or preview the download",
     request_body = serde_json::Value,
     responses((status = 200, description = "OK", body = serde_json::Value))
 )]
@@ -37926,7 +38364,7 @@ async fn models_catalog_install(
                 );
             }
         };
-        let Some(file) = descriptor.files.into_iter().next() else {
+        let Some(file) = descriptor.files.first().cloned() else {
             return (
                 StatusCode::BAD_GATEWAY,
                 Json(
@@ -37940,6 +38378,20 @@ async fn models_catalog_install(
             return (
                 StatusCode::BAD_REQUEST,
                 Json(json!({ "success": false, "error": format!("download URL rejected: {e}") })),
+            );
+        }
+        if body.dry_run {
+            return (
+                StatusCode::OK,
+                Json(json!({
+                    "success": true,
+                    "dryRun": true,
+                    "action": "install",
+                    "source": source.id(),
+                    "repoId": descriptor.repo_id,
+                    "files": descriptor.files,
+                    "writes": [],
+                })),
             );
         }
         return match crate::model_catalog::install_from_descriptor(
@@ -37967,6 +38419,35 @@ async fn models_catalog_install(
     let endpoint = active_model_endpoint(&state).await;
     let format =
         crate::model_format::ModelFormat::from_wire(body.format.as_deref().unwrap_or("gguf"));
+
+    if body.dry_run {
+        return match crate::model_catalog::model_detail_json(
+            &state.client,
+            &endpoint,
+            &body.id,
+            format,
+        )
+        .await
+        {
+            Ok(detail) => (
+                StatusCode::OK,
+                Json(json!({
+                    "success": true,
+                    "dryRun": true,
+                    "action": "install",
+                    "id": body.id,
+                    "file": body.file,
+                    "format": body.format.as_deref().unwrap_or("gguf"),
+                    "detail": detail,
+                    "writes": [],
+                })),
+            ),
+            Err(error) => (
+                StatusCode::BAD_GATEWAY,
+                Json(json!({ "success": false, "error": error.to_string() })),
+            ),
+        };
+    }
 
     // Dispatch on format: GGUF is a single verified file; safetensors/MLX are a
     // multi-file repo snapshot. (Ollama is its own CLI pull, never routed here.)
@@ -38010,6 +38491,8 @@ struct ModelUninstallBody {
     id: String,
     /// The GGUF filename to remove (its stem is the on-disk key).
     file: String,
+    #[serde(rename = "dryRun", default)]
+    dry_run: bool,
 }
 
 /// `POST /api/models/catalog/uninstall { id, file }`
@@ -38022,7 +38505,7 @@ struct ModelUninstallBody {
     post,
     path = "/api/models/catalog/uninstall",
     tag = "Models",
-    summary = "Uninstall a model file",
+    summary = "Uninstall a model file or preview the removal",
     request_body = serde_json::Value,
     responses((status = 200, description = "OK", body = serde_json::Value))
 )]
@@ -38039,6 +38522,24 @@ async fn models_catalog_uninstall(
     .await
     {
         return response;
+    }
+    if body.dry_run {
+        return match crate::model_catalog::plan_uninstall_file(&body.id, &body.file) {
+            Ok(plan) => (
+                StatusCode::OK,
+                Json(json!({
+                    "success": true,
+                    "dryRun": true,
+                    "action": "uninstall",
+                    "plan": plan,
+                    "writes": [],
+                })),
+            ),
+            Err(error) => (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "success": false, "error": error.to_string() })),
+            ),
+        };
     }
     match crate::model_catalog::uninstall_file(&body.id, &body.file) {
         Ok(()) => (StatusCode::OK, Json(json!({ "success": true }))),
@@ -40134,6 +40635,8 @@ struct SkillInstallBody {
     target_ids: Option<Vec<String>>,
     #[serde(default)]
     remember_target_ids: bool,
+    #[serde(default)]
+    dry_run: bool,
 }
 
 #[derive(serde::Deserialize)]
@@ -40733,6 +41236,21 @@ async fn skills_catalog_install(
     }
     let distribute_after_install =
         should_distribute_after_install(&parsed_preferences.preferences, &selection_input);
+    if body.dry_run {
+        return (
+            StatusCode::OK,
+            Json(json!({
+                "success": true,
+                "dryRun": true,
+                "action": "install",
+                "id": body.id,
+                "source": source_id,
+                "targetIds": selected_target_ids,
+                "distributeAfterInstall": distribute_after_install,
+                "writes": ["canonical skill registry", "optional agent skill targets"],
+            })),
+        );
+    }
     // Forward the caller's bearer to the marketplace install handoff (#491) so a
     // PAID Ryu-Marketplace skill is denied unless the buyer org holds a license.
     let buyer_token = buyer_bearer_from_headers(&headers);
@@ -40854,6 +41372,8 @@ struct SkillInstallFromSourceBody {
     /// One of the six supported source forms: `owner/repo`, a github/gitlab URL,
     /// a github `/tree/<ref>/<subdir>` URL, a `git@` SSH url, or a local path.
     source: String,
+    #[serde(rename = "dryRun", default)]
+    dry_run: bool,
 }
 
 /// `POST /api/skills/install-from-source { source }` — resolve a source reference
@@ -40895,6 +41415,18 @@ async fn skills_install_from_source(
         return (
             StatusCode::BAD_REQUEST,
             Json(json!({ "success": false, "error": "`source` must not be empty" })),
+        );
+    }
+    if body.dry_run {
+        return (
+            StatusCode::OK,
+            Json(json!({
+                "success": true,
+                "dryRun": true,
+                "action": "install",
+                "source": body.source,
+                "writes": ["canonical skill registry"],
+            })),
         );
     }
     match crate::skills_catalog::from_source::install_from_source(&state.client, &body.source).await
@@ -41358,6 +41890,8 @@ struct InstallSidecarQuery {
     /// companion path so it can launch a fully materialized bundle later.
     #[serde(default)]
     wait: bool,
+    #[serde(rename = "dryRun", default)]
+    dry_run: bool,
 }
 
 #[utoipa::path(
@@ -41370,6 +41904,7 @@ struct InstallSidecarQuery {
         ("force" = Option<bool>, Query, description = "Re-download even when already installed"),
         ("version" = Option<String>, Query, description = "Expected release-train version for Island"),
         ("wait" = Option<bool>, Query, description = "Wait for Island extraction to finish"),
+        ("dryRun" = Option<bool>, Query, description = "Return the install plan without downloading or changing status"),
     ),
     responses((status = 200, description = "Server-Sent Events stream"))
 )]
@@ -41402,6 +41937,20 @@ async fn install_sidecar(
                 std::env::consts::OS,
                 std::env::consts::ARCH
             ),
+        }));
+    }
+
+    if query.dry_run {
+        return Json(json!({
+            "success": true,
+            "dryRun": true,
+            "action": "install",
+            "name": name,
+            "supported": true,
+            "installed": binary_installed_on_disk(&sidecar_name),
+            "force": query.force,
+            "version": query.version,
+            "writes": ["sidecar binary or runtime files", "install status"],
         }));
     }
 
@@ -41648,6 +42197,32 @@ async fn install_sidecar(
                     .await
                     .map(|_| version)
             }
+            "freetoken" => {
+                crate::sidecar::providers::FreeTokenManager::new()
+                    .install()
+                    .await
+            }
+            "llama-swap" => {
+                crate::sidecar::providers::LlamaSwapManager::new()
+                    .install()
+                    .await
+            }
+            "lemonade" => {
+                crate::sidecar::providers::LemonadeManager::new()
+                    .install()
+                    .await
+            }
+            "ryutts" => {
+                match crate::sidecar::providers::ryutts::ensure_kokoro_runtime().await {
+                    Ok(true) => match crate::sidecar::providers::ryutts::kokoro::KokoroDownloader::new()
+                        .ensure_installed(&downloads).await {
+                        Ok(version) => crate::sidecar::download_manager::VersionStore::record_persisted("ryutts", &version, "installed").map(|()| version),
+                        Err(error) => Err(error),
+                    },
+                    Ok(false) => Err(anyhow::anyhow!("A compatible Python runtime is required for Kokoro speech")),
+                    Err(error) => Err(error),
+                }
+            }
             // Docker Model Runner is adopt-only: there is nothing to download.
             // "Installing" means verifying DMR is enabled + reachable on :12434,
             // then recording a version-store marker so the engine survives a Core
@@ -41727,13 +42302,28 @@ async fn install_sidecar(
     path = "/api/setup/{name}/uninstall",
     tag = "Sidecars",
     summary = "Uninstall a sidecar",
-    params(("name" = String, Path)),
+    params(
+        ("name" = String, Path),
+        ("dryRun" = Option<bool>, Query, description = "Return the removal plan without changing files"),
+    ),
     responses((status = 200, description = "OK", body = serde_json::Value))
 )]
 async fn uninstall_sidecar(
     State(state): State<ServerState>,
     axum::extract::Path(name): axum::extract::Path<String>,
+    Query(query): Query<InstallSidecarQuery>,
 ) -> Json<serde_json::Value> {
+    if query.dry_run {
+        return Json(json!({
+            "success": true,
+            "dryRun": true,
+            "action": "uninstall",
+            "name": name,
+            "removeData": false,
+            "installed": binary_installed_on_disk(&name),
+            "writes": ["sidecar binary and runtime files", "install status"],
+        }));
+    }
     // Clear install status
     state.install_status.clear(&name).await;
 
@@ -41756,13 +42346,28 @@ async fn uninstall_sidecar(
     path = "/api/setup/{name}/uninstall-with-data",
     tag = "Sidecars",
     summary = "Uninstall a sidecar and its data",
-    params(("name" = String, Path)),
+    params(
+        ("name" = String, Path),
+        ("dryRun" = Option<bool>, Query, description = "Return the removal plan without changing files"),
+    ),
     responses((status = 200, description = "OK", body = serde_json::Value))
 )]
 async fn uninstall_sidecar_with_data(
     State(state): State<ServerState>,
     axum::extract::Path(name): axum::extract::Path<String>,
+    Query(query): Query<InstallSidecarQuery>,
 ) -> Json<serde_json::Value> {
+    if query.dry_run {
+        return Json(json!({
+            "success": true,
+            "dryRun": true,
+            "action": "uninstall",
+            "name": name,
+            "removeData": true,
+            "installed": binary_installed_on_disk(&name),
+            "writes": ["sidecar binary, runtime, and data files", "install status"],
+        }));
+    }
     // Clear install status
     state.install_status.clear(&name).await;
 
@@ -42552,6 +43157,8 @@ async fn get_sandbox_backend(State(_state): State<ServerState>) -> Json<serde_js
 #[derive(serde::Deserialize)]
 struct SetSandboxBackendBody {
     name: String,
+    #[serde(rename = "dryRun", default)]
+    dry_run: bool,
 }
 
 /// Set the default sandbox backend. Persists to `~/.ryu/sandbox-backend.json`
@@ -42562,7 +43169,7 @@ struct SetSandboxBackendBody {
     post,
     path = "/api/sandbox/backend",
     tag = "Sandboxes",
-    summary = "Set the default sandbox backend",
+    summary = "Set or preview the default sandbox backend",
     request_body = serde_json::Value,
     responses((status = 200, description = "OK", body = serde_json::Value))
 )]
@@ -42582,6 +43189,21 @@ async fn set_sandbox_backend(
                 "error": format!("unknown sandbox backend '{name}'"),
             }));
         }
+    }
+    if body.dry_run {
+        let active = sandbox::configured_backend().as_str().to_owned();
+        return Json(json!({
+            "success": true,
+            "dryRun": true,
+            "action": "set",
+            "active": active,
+            "requested": name,
+            "alreadyActive": active == name,
+            "detected": sandbox::detect_backend(name).await,
+            "supported": crate::catalog::registry::supported_on_node(name),
+            "wouldPersist": true,
+            "writes": ["sandbox-backend.json"]
+        }));
     }
     match SandboxBackendStore::save(Some(name)) {
         Ok(()) => Json(json!({ "success": true, "active": name })),
@@ -42651,6 +43273,8 @@ struct SetActiveModelBody {
     /// derived from the model's format via `pick_engine`.
     #[serde(default)]
     engine: Option<String>,
+    #[serde(rename = "dryRun", default)]
+    dry_run: bool,
 }
 
 /// `POST /api/models/active { id }` — switch the GGUF the local chat engine
@@ -42666,7 +43290,7 @@ struct SetActiveModelBody {
     post,
     path = "/api/models/active",
     tag = "Models",
-    summary = "Switch the active served local chat model",
+    summary = "Switch the active served local chat model or preview the switch",
     request_body = serde_json::Value,
     responses((status = 200, description = "OK", body = serde_json::Value))
 )]
@@ -42692,6 +43316,32 @@ async fn set_active_model(
     if selection.format == crate::model_format::ModelFormat::Gguf
         && crate::model_catalog::capabilities::detect_local_is_diffusion(&selection.r#ref)
     {
+        if body.dry_run {
+            let current = state
+                .preferences
+                .get(installed::ACTIVE_DIFFUSION_MODEL_PREF)
+                .await
+                .ok()
+                .flatten();
+            return (
+                StatusCode::OK,
+                Json(json!({
+                    "success": true,
+                    "dryRun": true,
+                    "action": "switch",
+                    "active": selection.r#ref,
+                    "engine": "sdcpp",
+                    "format": selection.format.as_str(),
+                    "diffusion": true,
+                    "current": current,
+                    "alreadyActive": current.as_deref() == Some(selection.r#ref.as_str()),
+                    "wouldPersist": true,
+                    "wouldRestart": true,
+                    "wouldRefreshGateway": false,
+                    "writes": ["active diffusion model preference", "sdcpp sidecar restart"]
+                })),
+            );
+        }
         if let Err(e) = state
             .preferences
             .set(installed::ACTIVE_DIFFUSION_MODEL_PREF, &selection.r#ref)
@@ -42746,6 +43396,43 @@ async fn set_active_model(
         },
     };
     selection.engine = picked.clone();
+
+    if body.dry_run {
+        let current = state
+            .preferences
+            .get(installed::ACTIVE_MODEL_PREF)
+            .await
+            .ok()
+            .flatten()
+            .and_then(|raw| installed::parse_active_pref(&raw));
+        let already_active = current.as_ref().is_some_and(|active| {
+            active.r#ref == selection.r#ref && active.engine == picked.as_str()
+        });
+        let would_swap = resident.as_deref() != Some(picked.as_str());
+        return (
+            StatusCode::OK,
+            Json(json!({
+                "success": true,
+                "dryRun": true,
+                "action": "switch",
+                "active": selection.r#ref,
+                "engine": picked,
+                "format": selection.format.as_str(),
+                "current": current.as_ref().map(|active| active.r#ref.clone()),
+                "alreadyActive": already_active,
+                "residentEngine": resident,
+                "wouldPersist": true,
+                "wouldSwap": would_swap,
+                "wouldRestart": !would_swap,
+                "wouldRefreshGateway": true,
+                "writes": [
+                    "active model preference",
+                    "local engine selection",
+                    "local gateway provider refresh"
+                ]
+            })),
+        );
+    }
 
     // 3. Persist the structured selection FIRST, so the engine we start in the
     //    next step boots already pointed at the right model (the provider's
@@ -45025,6 +45712,8 @@ async fn get_workflow_template(
 #[derive(serde::Deserialize)]
 struct InstallTemplateBody {
     template_id: String,
+    #[serde(rename = "dryRun", default)]
+    dry_run: bool,
 }
 
 /// `POST /api/workflows/catalog/install` — install a template into the user's
@@ -45035,7 +45724,7 @@ struct InstallTemplateBody {
     post,
     path = "/api/workflows/catalog/install",
     tag = "Workflows",
-    summary = "Install a workflow template",
+    summary = "Install a workflow template or preview the new workflows",
     request_body = serde_json::Value,
     responses((status = 200, description = "OK", body = serde_json::Value))
 )]
@@ -45052,6 +45741,27 @@ async fn install_workflow_template(
     .await
     {
         return response;
+    }
+    if body.dry_run {
+        let Some(template) = crate::workflow::templates::find(&body.template_id) else {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({ "success": false, "error": "template not found" })),
+            );
+        };
+        return (
+            StatusCode::OK,
+            Json(json!({
+                "success": true,
+                "dryRun": true,
+                "action": "install",
+                "templateId": body.template_id,
+                "primary": template.meta,
+                "bodyCount": template.bodies.len(),
+                "wouldCreate": template.bodies.len() + 1,
+                "writes": ["workflow definitions", "workflow trigger schedules"],
+            })),
+        );
     }
     match crate::workflow::templates::install(&body.template_id).await {
         Ok(workflow_id) => {
@@ -45307,11 +46017,16 @@ async fn get_workflow_version(
     path = "/workflows/{id}/versions/{version_id}/restore",
     tag = "Workflows",
     summary = "Restore a workflow version",
-    params(("id" = String, Path), ("version_id" = String, Path)),
+    params(
+        ("id" = String, Path),
+        ("version_id" = String, Path),
+        ("dryRun" = Option<bool>, Query, description = "Preview the restore without changing the workflow or triggers"),
+    ),
     responses((status = 200, description = "OK", body = serde_json::Value))
 )]
 async fn restore_workflow_version(
     axum::extract::Path((id, version_id)): axum::extract::Path<(String, String)>,
+    Query(query): Query<WorkflowDryRunQuery>,
 ) -> (StatusCode, Json<serde_json::Value>) {
     // Load the target version first — fail fast if it is gone.
     let version = match crate::workflow::store::load_workflow_version(&id, &version_id) {
@@ -45329,6 +46044,22 @@ async fn restore_workflow_version(
             );
         }
     };
+    if query.dry_run {
+        let current_exists = crate::workflow::store::load_workflow(&id).is_ok();
+        return (
+            StatusCode::OK,
+            Json(json!({
+                "success": true,
+                "dryRun": true,
+                "action": "restore",
+                "workflowId": id,
+                "versionId": version_id,
+                "currentExists": current_exists,
+                "target": version.workflow,
+                "writes": ["workflow definition", "workflow triggers", "undo checkpoint"],
+            })),
+        );
+    }
     // Snapshot the current definition so the restore can be undone (best-effort:
     // a brand-new workflow with no on-disk file simply has nothing to snapshot).
     if let Ok(current) = crate::workflow::store::load_workflow(&id) {
@@ -45353,6 +46084,12 @@ async fn restore_workflow_version(
             (status, Json(json!({ "success": false, "error": e })))
         }
     }
+}
+
+#[derive(serde::Deserialize, Default)]
+struct WorkflowDryRunQuery {
+    #[serde(rename = "dryRun", default)]
+    dry_run: bool,
 }
 
 #[derive(serde::Deserialize, Default, utoipa::ToSchema)]
@@ -46362,7 +47099,7 @@ async fn run_job_now(
             "insufficient permissions: agent.edit".to_owned(),
         );
     }
-    let Ok(mut job) = crate::scheduler::store::load_job(&id) else {
+    let Ok(job) = crate::scheduler::store::load_job(&id) else {
         return json_error(StatusCode::NOT_FOUND, "job not found".to_owned());
     };
     if !scheduled_job_visible(&job, &caller) {
@@ -46406,8 +47143,7 @@ async fn run_job_now(
         }
     };
 
-    job.record_execution(record);
-    if let Err(e) = crate::scheduler::store::save_job(&job) {
+    if let Err(e) = crate::scheduler::store::append_execution(&job.id, record) {
         tracing::error!("failed to persist job '{}' after a manual run: {e}", job.id);
     }
     (status, body).into_response()
@@ -50843,7 +51579,7 @@ async fn enforce_node_acl_management(
 /// can read, so every document gate resolves the parent from the store instead.
 /// A missing document yields `None`, which callers surface as 404 — never as
 /// permitted.
-async fn document_parent_space(state: &ServerState, doc_id: &str) -> Option<String> {
+pub(crate) async fn document_parent_space(state: &ServerState, doc_id: &str) -> Option<String> {
     state.spaces.document_space_id(doc_id).await.ok().flatten()
 }
 

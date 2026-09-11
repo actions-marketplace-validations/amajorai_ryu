@@ -9,9 +9,11 @@ import { cn } from "@ryu/ui/lib/utils.ts";
  */
 export type PlanTier =
 	| "marketplace-membership"
+	| "plus"
 	| "pro"
 	| "max"
 	| "teams"
+	| "teams-lite"
 	| "business"
 	| "enterprise"
 	| "desktop-license";
@@ -41,6 +43,12 @@ const TIER_STYLES: Record<PlanTier, TierStyle> = {
 		gradient:
 			"linear-gradient(15deg,#9effef 0,#d1ffd6 17%,#fff8ad 34%,#a3edff 51%,#bdbdff 68%,#ffb8eb 85%,#ffdda3 100%)",
 	},
+	plus: {
+		label: "Plus",
+		ink: "#0b0b14",
+		gradient:
+			"linear-gradient(15deg,#b9f3ff 0%,#9cc8ff 42%,#c3a4ff 72%,#f2b6e8 100%)",
+	},
 	// Max sits above Pro: a hotter, jewel-toned sweep (amber → magenta →
 	// violet → azure). Deep enough mid-tones to carry light ink.
 	max: {
@@ -55,11 +63,16 @@ const TIER_STYLES: Record<PlanTier, TierStyle> = {
 		ink: "#ffffff",
 		gradient: "linear-gradient(15deg,#4f46e5 0%,#22d3ee 100%)",
 	},
+	"teams-lite": {
+		label: "Teams Lite",
+		ink: "#ffffff",
+		gradient: "linear-gradient(15deg,#4f46e5 0%,#22d3ee 100%)",
+	},
 	business: {
 		label: "Business",
 		ink: "#ffffff",
 		gradient:
-			"linear-gradient(15deg,#6d28d9 0,#7c3aed 35%,#db2777 72%,#f59e0b 100%)",
+			"linear-gradient(15deg,#5dffe4 0,#8dff9a 8%,#fff36a 16%,#60dfff 24%,#7b7cff 32%,#ff77d8 40%,#ffc45f 48%,#5dffe4 56%,#8dff9a 64%,#fff36a 72%,#60dfff 80%,#7b7cff 88%,#ff77d8 96%,#ffc45f 100%)",
 	},
 	// Enterprise uses the original green sweep for managed rollouts and
 	// governance-heavy deployments.
@@ -86,14 +99,18 @@ export function planTierGradient(plan: PlanTier): string {
 	return TIER_STYLES[plan].gradient;
 }
 
+/** Text color for an opaque tier gradient, such as a badge or social image. */
+export function planTierOpaqueInk(plan: PlanTier): string {
+	return TIER_STYLES[plan].ink;
+}
+
 /**
  * The tier's short name ("Pro", "Max", …), for surfaces that print the tier as
  * type rather than as a badge — the tier pass sets it as the card's hero.
  *
- * Only the label and the raw stops are exposed. `TIER_STYLES.ink` deliberately
- * is NOT: it is calibrated for AA contrast against an OPAQUE gradient plinth,
- * and every other surface lays these colours down as a texture under existing
- * foreground tokens, where `pro`'s near-black ink would vanish.
+ * Opaque gradients may pair these colors with `planTierOpaqueInk`. Textured
+ * surfaces should keep their own foreground tokens because badge ink assumes
+ * a fully opaque background.
  */
 export function planTierLabel(plan: PlanTier): string {
 	return TIER_STYLES[plan].label;
@@ -117,9 +134,26 @@ const TIER_BORDER_COLORS: Record<PlanTier, readonly string[]> = {
 		"#ffb8eb",
 		"#ffdda3",
 	],
+	plus: ["#b9f3ff", "#9cc8ff", "#c3a4ff", "#f2b6e8"],
 	max: ["#c679c4", "#fa3d1d", "#ffb005", "#e1e1fe", "#0358f7"],
 	teams: ["#4f46e5", "#22d3ee"],
-	business: ["#6d28d9", "#7c3aed", "#db2777", "#f59e0b"],
+	"teams-lite": ["#4f46e5", "#22d3ee"],
+	business: [
+		"#5dffe4",
+		"#8dff9a",
+		"#fff36a",
+		"#60dfff",
+		"#7b7cff",
+		"#ff77d8",
+		"#ffc45f",
+		"#5dffe4",
+		"#8dff9a",
+		"#fff36a",
+		"#60dfff",
+		"#7b7cff",
+		"#ff77d8",
+		"#ffc45f",
+	],
 	enterprise: ["#0f766e", "#059669", "#84cc16", "#f59e0b"],
 	"desktop-license": ["#eef1f5", "#cdd5e0", "#9aa6b8"],
 };
@@ -170,8 +204,10 @@ export interface PlanBadgeProps {
 const TIER_TITLES: Record<PlanTier, string> = {
 	"marketplace-membership": "Ryu A Major Pass",
 	pro: "Ryu Pro",
+	plus: "Ryu Plus",
 	max: "Ryu Max",
 	teams: "Ryu Teams",
+	"teams-lite": "Ryu Teams Lite",
 	business: "Ryu Business",
 	enterprise: "Ryu Enterprise",
 	"desktop-license": "Ryu Desktop",
@@ -211,6 +247,7 @@ export function PlanBadge({
 					"relative inline-flex items-center justify-center overflow-hidden rounded-[5px]",
 					"shadow-[0_1px_2px_rgba(0,0,0,0.18)] ring-1 ring-white/25 ring-inset",
 					"-skew-x-12",
+					plan === "business" && "t-plan-badge-business",
 					SIZE_STYLES[size]
 				)}
 				style={{ backgroundImage: style.gradient, color: style.ink }}

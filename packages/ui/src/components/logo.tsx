@@ -1,8 +1,15 @@
 "use client";
 
 import type React from "react";
-import { useCallback, useEffect, useId, useRef, useState } from "react";
-
+import {
+	lazy,
+	Suspense,
+	useCallback,
+	useEffect,
+	useId,
+	useRef,
+	useState,
+} from "react";
 import { cn } from "../lib/utils.ts";
 import {
 	blendExpressiveFrames,
@@ -16,6 +23,9 @@ import {
 	expressiveAnimationPreviewTime,
 	sampleExpressiveAnimation,
 } from "./expressive-animation.ts";
+import { LOGO_DEFAULT_COLORS, type LogoColors } from "./logo-colors.ts";
+
+const Logo3D = lazy(() => import("./logo-3d.tsx"));
 
 interface LogoProps {
 	/** Disable gaze, blinking, and random expression changes. */
@@ -23,13 +33,10 @@ interface LogoProps {
 	/** Expressive ghost animation, or random for the full reference-style cycle. */
 	animation?: ExpressiveAnimationSelection;
 	animationDuration?: number;
+	/** Material treatment for the 3D body. */
+	bodyStyle?: "solid" | "orb";
 	className?: string;
-	colors?: {
-		bg?: string;
-		c1?: string;
-		c2?: string;
-		c3?: string;
-	};
+	colors?: LogoColors;
 	/** Named expressive face, or random for a changing face. */
 	expression?: ExpressiveExpressionSelection;
 	/** Scale the expressive ghost's eyes without changing its body size. */
@@ -38,6 +45,7 @@ interface LogoProps {
 	showEyes?: boolean;
 	size?: string;
 	variant?:
+		| "3d"
 		| "default"
 		| "filled"
 		| "outline"
@@ -577,11 +585,49 @@ const ExpressiveVariant: React.FC<ExpressiveVariantProps> = ({
 								0.1
 							);
 							const cx = eyeCenters[index] ?? centerX;
+							const key = index === 0 ? "left" : "right";
+							const transform = `translate(${cx + gazePosition.x} ${eyeY}) rotate(${frame.gaze.roll + eye.tilt})`;
+							if (eye.shape === "x") {
+								const crossSize = Math.max(height, 1.4);
+								const crossStrokeWidth = Math.max(
+									Math.min(width * 0.2, 2.2),
+									1.25
+								);
+								return (
+									<g
+										data-expressive-eye-shape={eye.shape}
+										key={key}
+										transform={transform}
+									>
+										<line
+											stroke="currentColor"
+											strokeLinecap="round"
+											strokeWidth={crossStrokeWidth}
+											vectorEffect="non-scaling-stroke"
+											x1={-crossSize / 2}
+											x2={crossSize / 2}
+											y1={-crossSize / 2}
+											y2={crossSize / 2}
+										/>
+										<line
+											stroke="currentColor"
+											strokeLinecap="round"
+											strokeWidth={crossStrokeWidth}
+											vectorEffect="non-scaling-stroke"
+											x1={crossSize / 2}
+											x2={-crossSize / 2}
+											y1={-crossSize / 2}
+											y2={crossSize / 2}
+										/>
+									</g>
+								);
+							}
 							return (
 								<rect
+									data-expressive-eye-shape={eye.shape}
 									fill={outlineOnly ? "none" : "currentColor"}
 									height={height}
-									key={index === 0 ? "left" : "right"}
+									key={key}
 									opacity={sampled.eyeAlpha}
 									rx={Math.min(width, height) / 2}
 									stroke={outlineOnly ? "currentColor" : undefined}
@@ -637,14 +683,7 @@ const AnimatedLogo: React.FC<LogoProps> = ({
 				: expressionSelection
 	);
 
-	const defaultColors = {
-		bg: "oklch(95% 0.02 264)",
-		c1: "oklch(75% 0.18 300)", // violet-pink
-		c2: "oklch(70% 0.20 264)", // brand purple
-		c3: "oklch(78% 0.15 230)", // blue-purple
-	};
-
-	const finalColors = { ...defaultColors, ...colors };
+	const finalColors = { ...LOGO_DEFAULT_COLORS, ...colors };
 
 	const sizeValue = Number.parseInt(size.replace("px", ""), 10);
 
@@ -1464,6 +1503,21 @@ const AnimatedLogo: React.FC<LogoProps> = ({
 // blink interval and no global mousemove listener; animated and expressive
 // variants stay inside the hook-owning `AnimatedLogo`.
 const Logo: React.FC<LogoProps> = (props) => {
+	if (props.variant === "3d") {
+		const fallback = (
+			<div
+				className={props.className}
+				style={{ width: props.size ?? "192px", height: props.size ?? "192px" }}
+			>
+				<OutlineStatic size="100%" />
+			</div>
+		);
+		return (
+			<Suspense fallback={fallback}>
+				<Logo3D {...props} fallback={fallback} />
+			</Suspense>
+		);
+	}
 	if (props.variant === "outline-static") {
 		return <OutlineStatic className={props.className} size={props.size} />;
 	}

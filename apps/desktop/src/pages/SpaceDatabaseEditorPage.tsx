@@ -33,7 +33,7 @@ import { ViewBar } from "@/src/components/spaces/views/ViewBar.tsx";
 import { useSpacesContext } from "@/src/contexts/SpacesContext.tsx";
 import {
 	useCurrentTabId,
-	useTabsContext,
+	useTabSelector,
 } from "@/src/contexts/TabsContext.tsx";
 import { useActiveNode } from "@/src/hooks/useActiveNode.ts";
 import {
@@ -128,7 +128,8 @@ export default function SpaceDatabaseEditorPage({
 	databaseId: string;
 }) {
 	const { getDocument, saveDocument } = useSpacesContext();
-	const { updateTabTitle, openTab } = useTabsContext();
+	const updateTabTitle = useTabSelector((state) => state.updateTabTitle);
+	const openTab = useTabSelector((state) => state.openTab);
 	const tabId = useCurrentTabId();
 	const node = useActiveNode();
 

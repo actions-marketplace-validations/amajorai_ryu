@@ -17,6 +17,12 @@ describe("organization billing context", () => {
 		).toBe("teams");
 		expect(
 			planTierForOrg(
+				{ organizationId: "org-a", plan: "teams-lite", scope: "org" },
+				"org-a"
+			)
+		).toBe("teams-lite");
+		expect(
+			planTierForOrg(
 				{ organizationId: "org-a", plan: "teams", scope: "org" },
 				"org-b"
 			)

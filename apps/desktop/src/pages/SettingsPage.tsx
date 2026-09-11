@@ -24,14 +24,14 @@ import { TtsEngineSettings } from "@/src/components/settings/TtsEngineSettings.t
 import { UpdatesSettings } from "@/src/components/settings/UpdatesSettings.tsx";
 import { VoiceInputSettings } from "@/src/components/settings/VoiceInputSettings.tsx";
 import { VoiceReadbackSettings } from "@/src/components/settings/VoiceReadbackSettings.tsx";
-import { useTabsContext } from "@/src/contexts/TabsContext.tsx";
+import { useTabSelector } from "@/src/contexts/TabsContext.tsx";
 import { useDeveloperMode } from "@/src/hooks/useDeveloperMode.ts";
 import { useSettingsDialog } from "@/src/store/useSettingsDialog.ts";
 
 export default function SettingsPage() {
 	const { t } = useI18n();
 	const [developerMode, setDeveloperMode] = useDeveloperMode();
-	const { openTab } = useTabsContext();
+	const openTab = useTabSelector((state) => state.openTab);
 	const openSettings = useSettingsDialog((s) => s.openSettings);
 	const translateLink = useCallback(
 		(value: string, field: "description" | "label") =>

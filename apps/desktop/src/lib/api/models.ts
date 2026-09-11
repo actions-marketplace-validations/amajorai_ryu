@@ -374,6 +374,20 @@ export interface InstallResult {
 	repoId: string;
 }
 
+export interface ModelInstallPreview {
+	action: "install";
+	dryRun: true;
+	success: boolean;
+	[key: string]: unknown;
+}
+
+export interface ModelUninstallPreview {
+	action: "uninstall";
+	dryRun: true;
+	success: boolean;
+	[key: string]: unknown;
+}
+
 /** On-demand llmfit hardware fit + tok/s estimate for one model. `installed`
  *  gates the feature; `matched` says llmfit's catalog recognised the model. */
 export interface LlmFitEstimate {
@@ -499,6 +513,40 @@ export async function uninstallModelFile(
 	if (json.success === false) {
 		throw new Error(json.error ?? `Failed to uninstall ${file}`);
 	}
+}
+
+/** Resolve model metadata and return the download plan without writing weights. */
+export function previewModelInstall(
+	target: ApiTarget,
+	id: string,
+	options: { file?: string; format?: ModelFormat } = {}
+): Promise<ModelInstallPreview> {
+	return request<ModelInstallPreview>(target, "/api/models/catalog/install", {
+		method: "POST",
+		body: {
+			dryRun: true,
+			id,
+			...(options.file ? { file: options.file } : {}),
+			...(options.format ? { format: options.format } : {}),
+		},
+		headers: buyerTokenHeader(target),
+	});
+}
+
+/** Validate and project model removal without deleting the weight or adapter. */
+export function previewModelUninstall(
+	target: ApiTarget,
+	id: string,
+	file: string
+): Promise<ModelUninstallPreview> {
+	return request<ModelUninstallPreview>(
+		target,
+		"/api/models/catalog/uninstall",
+		{
+			method: "POST",
+			body: { dryRun: true, file, id },
+		}
+	);
 }
 
 // ── Active served model (switch which installed GGUF the engine loads) ───────
@@ -633,6 +681,25 @@ export interface SetActiveModelResult {
 	gatewayRefreshed: boolean;
 	restarted: boolean;
 	swapped: boolean;
+}
+
+export interface ActiveModelPreview {
+	action: "switch";
+	dryRun: true;
+	success: boolean;
+	[key: string]: unknown;
+}
+
+/** Resolve an installed model and report the engine/gateway changes without switching it. */
+export function previewActiveModel(
+	target: ApiTarget,
+	id: string,
+	engine?: string
+): Promise<ActiveModelPreview> {
+	return request<ActiveModelPreview>(target, "/api/models/active", {
+		method: "POST",
+		body: engine ? { dryRun: true, id, engine } : { dryRun: true, id },
+	});
 }
 
 /**

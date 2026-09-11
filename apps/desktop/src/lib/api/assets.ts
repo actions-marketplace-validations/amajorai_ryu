@@ -6,6 +6,8 @@
 //   200k+ icons across 150+ sets INCLUDING Lucide and Hugeicons in one API, so a
 //   single integration covers every icon set.
 // - Logos  → SVGL API (api.svgl.app): free, no key, CORS-open brand/product SVGs.
+// - Images → Core `/api/assets/images/search` proxy (Openverse is keyless; Unsplash
+//   uses an optional node-configured access key).
 // - GIFs   → Core `/api/gifs/search` proxy (a free provider key lives on the node,
 //   never in this bundle — see apps/core/src/server/gifs.rs). No provider is truly
 //   keyless, so GIFs need a key configured; icons + logos work with zero setup.
@@ -53,9 +55,45 @@ export interface GifSearchResponse {
 	results: GifHit[];
 }
 
+export type ImageProvider = "openverse" | "unsplash";
+
+export interface ImageHit {
+	attribution: string;
+	height: number;
+	/** Stable provider identifier. */
+	id: string;
+	license_url?: string | null;
+	/** Host-inlined preview URL returned by the companion bridge. */
+	preview_url: string;
+	rights: string;
+	source_url: string;
+	/** Human-readable title/description. */
+	title: string;
+	/** Host-inlined full image URL returned by the companion bridge. */
+	url: string;
+	width: number;
+}
+
+export interface ImageSearchResponse {
+	configured: boolean;
+	error?: string;
+	provider: ImageProvider;
+	results: ImageHit[];
+}
+
 /** What the picker returns to its host when the user picks an asset. */
 export type AssetSelection =
 	| { kind: "svg"; svg: string; name: string }
+	| {
+			kind: "image";
+			dataUrl: string;
+			name: string;
+			width?: number;
+			height?: number;
+			attribution?: string;
+			sourceUrl?: string;
+			rights?: string;
+	  }
 	| { kind: "gif"; url: string; name: string; width?: number; height?: number };
 
 /** Encode SVG markup as a base64 data URL (base64 handles any unicode content). */
@@ -182,5 +220,23 @@ export async function searchGifs(
 	return await request<GifSearchResponse>(
 		target,
 		`/api/gifs/search?q=${q}&limit=${limit}`
+	);
+}
+
+/** Search node-proxied Openverse or Unsplash image catalogs. */
+export async function searchImages(
+	target: ApiTarget,
+	provider: ImageProvider,
+	query: string,
+	limit = 16
+): Promise<ImageSearchResponse> {
+	const params = new URLSearchParams({
+		provider,
+		q: query.trim(),
+		limit: String(limit),
+	});
+	return await request<ImageSearchResponse>(
+		target,
+		`/api/assets/images/search?${params.toString()}`
 	);
 }

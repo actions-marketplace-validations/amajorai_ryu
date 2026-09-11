@@ -67,6 +67,7 @@ pub struct TranscriptSegment {
 pub struct Transcription {
     pub text: String,
     pub segments: Vec<TranscriptSegment>,
+    pub words: Vec<TranscriptSegment>,
 }
 
 /// Parse OpenAI/whisper `verbose_json` `segments` (each with `start`/`end` in
@@ -95,6 +96,24 @@ fn parse_verbose_segments(body: &Value) -> Vec<TranscriptSegment> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+/// Retain provider word alignment only when explicit, finite timestamps exist.
+fn parse_verbose_words(body: &Value) -> Vec<TranscriptSegment> {
+    let rows: Vec<&Value> = if let Some(words) = body.get("words").and_then(Value::as_array) {
+        words.iter().collect()
+    } else {
+        body.get("segments").and_then(Value::as_array).into_iter().flatten()
+            .filter_map(|segment| segment.get("words").and_then(Value::as_array))
+            .flatten().collect()
+    };
+    rows.into_iter().take(50_000).filter_map(|word| {
+        let start = word.get("start")?.as_f64()?;
+        let end = word.get("end")?.as_f64()?;
+        let text = word.get("word").or_else(|| word.get("text"))?.as_str()?.trim();
+        if !start.is_finite() || !end.is_finite() || start < 0.0 || end <= start || end > 7200.0 || text.is_empty() || text.len() > 2000 { return None; }
+        Some(TranscriptSegment {start_ms:(start*1000.0).round() as u64,end_ms:(end*1000.0).round() as u64,text:text.to_owned()})
+    }).collect()
 }
 
 /// The cross-surface default STT engine, resolved as a swappable default (never
@@ -184,6 +203,7 @@ pub async fn transcribe_wav_detailed(
             .map(|text| Transcription {
                 text,
                 segments: Vec::new(),
+                words: Vec::new(),
             })
             .map_err(|e| format!("parakeet transcription failed: {e:#}"));
     }
@@ -244,7 +264,7 @@ pub async fn transcribe_wav_detailed(
         .trim()
         .to_string();
     let segments = parse_verbose_segments(&value);
-    Ok(Transcription { text, segments })
+    Ok(Transcription { text, segments, words: parse_verbose_words(&value) })
 }
 
 /// Parse audio.cpp segment timings. Current responses may provide both seconds
@@ -339,7 +359,7 @@ async fn transcribe_via_audio_cpp(
         .trim()
         .to_string();
     let segments = parse_audio_cpp_segments(&value);
-    Ok(Transcription { text, segments })
+    Ok(Transcription { text, segments, words: parse_verbose_words(&value) })
 }
 
 /// Transcribe audio through the Gateway's `/v1/audio/transcriptions`, the
@@ -413,12 +433,24 @@ async fn transcribe_via_gateway(
         .trim()
         .to_string();
     let segments = parse_verbose_segments(&value);
-    Ok(Transcription { text, segments })
+    Ok(Transcription { text, segments, words: parse_verbose_words(&value) })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn measured_words_are_normalized_without_guessing_timing() {
+        let body = serde_json::json!({"segments":[{"words":[{"word":" Hello ","start":0.1,"end":0.42},{"word":"invalid","start":1.0,"end":0.5},{"word":"untimed"}]}]});
+        let words = parse_verbose_words(&body);
+        assert_eq!(words.len(),1);
+        assert_eq!(words[0].text,"Hello");
+        assert_eq!((words[0].start_ms,words[0].end_ms),(100,420));
+        assert!(parse_verbose_words(&serde_json::json!({"text":"Hello"})).is_empty());
+        let top = parse_verbose_words(&serde_json::json!({"words":[{"word":"world","start":0.5,"end":0.8}]}));
+        assert_eq!(top[0].text,"world");
+    }
+
 
     #[test]
     fn parses_verbose_segments_seconds_to_ms() {

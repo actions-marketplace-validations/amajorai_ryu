@@ -13,7 +13,7 @@
   "description": "Lua language server (lua-language-server) for the ryu agent: definitions, references, hover, symbols, implementations, call hierarchies and diagnostics after every edit. You install lua-language-server; the plugin ships config.",
   "tagline": "Lua code intelligence via lua-language-server",
   "keywords": ["lua", "lua-language-server", "language-server", "developer"],
-  "icon": "code-circle-01",
+  "icon": "binary-code",
   "iconDither": {
     "from": 192,
     "to": "transparent",

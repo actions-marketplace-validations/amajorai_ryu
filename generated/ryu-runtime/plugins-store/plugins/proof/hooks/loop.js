@@ -63,6 +63,7 @@ const task =
 	goal.condition +
 	"\n\nWhat the other agent said it did (claims only \u2014 verify, do not trust):\n" +
 	transcript +
+	"\n\nIf the workspace contains Ryu's formal verification lane (`formal/verification.json` and `tools/verify-lean.mjs`), run `node tools/verify-lean.mjs` when it is relevant to the goal. Treat a certificate with `status: \\\"proved\\\"` as formal-model evidence only; include its theorem, axiom, and snapshot-binding details in your report. A missing Lean toolchain, timeout, failed status, or unbound runtime snapshot is not proof.\n\n" +
 	"\n\nInvestigate the real state: read the actual files, run the tests or commands, and check the outputs that would exist ONLY IF the goal were truly done. Gather specific evidence (file contents, command output, test results). Then decide.\n\nEnd your reply with a single final line, exactly one of:\nVERIFIED: yes - <the concrete evidence that proves it>\nVERIFIED: no - <what is missing or wrong, with the evidence you found>";
 const verdict = await host.runAgent({
 	task: task,

@@ -105,6 +105,10 @@ import {
 import { CouncilInputBar } from "@/src/components/chat/CouncilInputBar.tsx";
 import { DiffReviewPane } from "@/src/components/chat/DiffReviewPane.tsx";
 import {
+	type DrawesomeSketchAttachment,
+	DrawesomeSketchDialog,
+} from "@/src/components/chat/DrawesomeSketchDialog.tsx";
+import {
 	type ForkDestination,
 	ForkDialog,
 } from "@/src/components/chat/ForkDialog.tsx";
@@ -141,7 +145,7 @@ import { useSystemStatusContext } from "@/src/contexts/SystemStatusContext.tsx";
 import {
 	useCurrentTabId,
 	useIsActiveTab,
-	useTabsContext,
+	useTabSelector,
 } from "@/src/contexts/TabsContext.tsx";
 import { useTitleBar } from "@/src/contexts/TitleBarContext.tsx";
 import { AppWidget } from "@/src/contributions/host/AppWidget.tsx";
@@ -254,7 +258,7 @@ import {
 	saveTemporaryChat,
 	TEMPORARY_CONTEXT_FLAG,
 } from "@/src/lib/api/temporary-chat.ts";
-import { stageImageUpload } from "@/src/lib/api/uploads.ts";
+import { fileToDataUrl, stageImageUpload } from "@/src/lib/api/uploads.ts";
 import { generateVideo } from "@/src/lib/api/video.ts";
 import { speakText, transcribeAudio } from "@/src/lib/api/voice.ts";
 import {
@@ -541,6 +545,9 @@ export default function ChatPage({
 	const interfaceLevel = useInterfaceLevel();
 	const [chatPickerPlacement] = useChatPickerPlacement();
 	const pluginContributions = usePluginContributions();
+	const drawesomeCompanion = pluginContributions.companions.find(
+		(companion) => companion.pluginId === "@ryu/drawesome" && companion.hasUi
+	);
 	const {
 		isError: pluginContributionsFailed,
 		isSuccess: pluginContributionsLoaded,
@@ -629,6 +636,11 @@ export default function ChatPage({
 		}
 	}, [showBottomPanelToggle]);
 	const [shareDialogOpen, setShareDialogOpen] = useState(false);
+	const [drawesomeDialogOpen, setDrawesomeDialogOpen] = useState(false);
+	const [drawesomeSourceImage, setDrawesomeSourceImage] = useState<{
+		filename: string;
+		url: string;
+	} | null>(null);
 	// User's intent for the "Pinned summary" sidebar (project ▸ branch ▸
 	// worktree + git changes + commit&push). It docks as its own column stacked
 	// with the right panel (both can be open at once); WorkspacePanels
@@ -811,18 +823,22 @@ export default function ChatPage({
 	// Remember the last picked agent so a new chat opens with it preselected. The
 	// agent itself is owned by Core (CRUD via U6); this is only the local "last
 	// used" hint, not agent storage.
-	const {
-		openTab,
-		updateTabBusy,
-		updateTabWorktreeMode,
-		bindTabConversation,
-		tabs,
-		clearScrollToMessage,
-	} = useTabsContext();
+	const openTab = useTabSelector((state) => state.openTab);
+	const updateTabBusy = useTabSelector((state) => state.updateTabBusy);
+	const updateTabWorktreeMode = useTabSelector(
+		(state) => state.updateTabWorktreeMode
+	);
+	const bindTabConversation = useTabSelector(
+		(state) => state.bindTabConversation
+	);
+	const clearScrollToMessage = useTabSelector(
+		(state) => state.clearScrollToMessage
+	);
 	const currentTabId = useCurrentTabId();
-	const scrollToMessageId = currentTabId
-		? tabs.find((t) => t.id === currentTabId)?.scrollToMessageId
-		: undefined;
+	const scrollToMessageId = useTabSelector(
+		(state) =>
+			state.tabs.find((tab) => tab.id === currentTabId)?.scrollToMessageId
+	);
 
 	// Model options follow the active agent's engine binding. The effective
 	// value prefers the explicit in-session pick, then the persisted per-agent
@@ -4114,6 +4130,70 @@ export default function ChatPage({
 		setAttachedImages((prev) => prev.filter((img) => img.id !== id));
 	}, []);
 
+	const handleOpenDrawesome = useCallback(() => {
+		if (drawesomeCompanion) {
+			setDrawesomeSourceImage(null);
+			setDrawesomeDialogOpen(true);
+		}
+	}, [drawesomeCompanion]);
+
+	const handleAnnotateImage = useCallback(
+		async (image: { filename?: string; id: string; url: string }) => {
+			if (!drawesomeCompanion) {
+				return;
+			}
+			const filename = image.filename?.trim() || "image.png";
+			try {
+				let dataUrl = image.url;
+				if (!dataUrl.startsWith("data:")) {
+					const response = await fetch(dataUrl, { credentials: "include" });
+					if (!response.ok) {
+						throw new Error(`Image request failed (${response.status})`);
+					}
+					const blob = await response.blob();
+					dataUrl = await fileToDataUrl(
+						new File([blob], filename, {
+							type: blob.type || "image/png",
+						})
+					);
+				}
+				setDrawesomeSourceImage({ filename, url: dataUrl });
+				setDrawesomeDialogOpen(true);
+			} catch {
+				toast.error("Could not open this image for annotation", {
+					description: "The image could not be read by Drawesome.",
+				});
+			}
+		},
+		[drawesomeCompanion]
+	);
+
+	const handleDrawesomeDialogOpenChange = useCallback((open: boolean) => {
+		setDrawesomeDialogOpen(open);
+		if (!open) {
+			setDrawesomeSourceImage(null);
+		}
+	}, []);
+
+	const handleAttachSketch = useCallback(
+		(attachment: DrawesomeSketchAttachment) => {
+			setAttachedImages((previous) => [
+				...previous,
+				{
+					id: `sketch-${Date.now()}`,
+					filename: attachment.filename,
+					url: attachment.dataUrl,
+					mimeType: attachment.mimeType,
+					size: attachment.size,
+				},
+			]);
+			toast.success("Sketch attached", {
+				description: "It will be included with your next message in this chat.",
+			});
+		},
+		[]
+	);
+
 	const handlePaste = useCallback(
 		(e: React.ClipboardEvent) => {
 			const pastedText = e.clipboardData.getData("text/plain");
@@ -6933,6 +7013,13 @@ export default function ChatPage({
 					title={conversationTitle}
 				/>
 			) : null}
+			<DrawesomeSketchDialog
+				companion={drawesomeCompanion}
+				onAttach={handleAttachSketch}
+				onOpenChange={handleDrawesomeDialogOpenChange}
+				open={drawesomeDialogOpen}
+				sourceImage={drawesomeSourceImage ?? undefined}
+			/>
 			<WorkspaceRequiredDialog
 				onFolderSelected={handleWorkspaceFolderSelected}
 				onOpenChange={(open) => {
@@ -7018,6 +7105,12 @@ export default function ChatPage({
 								attachments={{
 									images: attachedImages,
 									onAttach: handleAttach,
+									onSketch: drawesomeCompanion
+										? handleOpenDrawesome
+										: undefined,
+									onAnnotateImage: drawesomeCompanion
+										? handleAnnotateImage
+										: undefined,
 									onRemoveImage: handleRemoveImage,
 									onPaste: handlePaste,
 									isDragOver,

@@ -19,13 +19,15 @@
 //! writes `user`. A slug with no entry defaults to `user` (never auto-removed),
 //! which is also what keeps skills the user had before Ryu ever ran safe.
 //!
-//! ## Why it never vendors bytes
+//! ## Source boundaries
 //!
-//! The bundled skills are installed **from their upstream repos at sync time**
-//! (the `npx skills` CLI, falling back to Core's own fetcher) — exactly like the
-//! document defaults, and for the same reason: several (`anthropics/skills`)
-//! carry proprietary per-skill licenses that forbid redistribution. Never copy
-//! them into this tree or mirror them from a Ryu-controlled host.
+//! Ryu-authored skills under `apps/skills` are embedded by `ryu-skills` and
+//! installed offline. Third-party catalog packs are different: they are
+//! installed from their upstream repos at sync time (the `npx skills` CLI,
+//! falling back to Core's own fetcher). Several upstream packs carry
+//! proprietary per-skill licenses that forbid redistribution, so never copy
+//! those third-party bytes into this tree or mirror them from a Ryu-controlled
+//! host.
 
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -107,10 +109,9 @@ pub const SYNC_ENABLED_PREF: &str = "skills.sync-system";
 pub const SYNCED_VERSION_PREF: &str = "skills.synced-bundle-version";
 
 /// The pinned single-skill defaults the bundle installs (besides the repo packs
-/// in [`packs::BUILTIN_PACKS`]): Anthropic's four document skills plus
-/// frontend-design, fetched from `anthropics/skills` exactly like the old
-/// defaults. Kept for parity — they are a well-known, license-restricted set
-/// that predates the pack catalog.
+/// in [`packs::BUILTIN_PACKS`]): the remote document/design defaults, fetched
+/// from `anthropics/skills` exactly like the old defaults. Ryu's `pdf` skill is
+/// compiled into Core and is deliberately not part of this remote set.
 ///
 /// Single source of truth is [`super::default_skills`] (the run-once installer
 /// that shells out to `npx skills add`); this module re-exports the constants so

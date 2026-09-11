@@ -1,3 +1,5 @@
+import { CallDisabled02Icon } from "@hugeicons/core-free-icons";
+import { HugeiconsIcon } from "@hugeicons/react";
 import {
 	Collapsible,
 	CollapsibleContent,
@@ -5,7 +7,7 @@ import {
 } from "@ryu/ui/components/collapsible.tsx";
 import { VoiceActivityBeam } from "@ryu/ui/components/voice-activity-beam.tsx";
 import { cn } from "@ryu/ui/lib/utils.ts";
-import { ChevronDown, Mic, MicOff, PhoneOff, Square, X } from "lucide-react";
+import { ChevronDown, Mic, MicOff, Square, X } from "lucide-react";
 import { useTheme } from "next-themes";
 import type { ReactNode } from "react";
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -334,7 +336,11 @@ export function VoiceModeCallScreen({
 						onClick={voice.stop}
 						type="button"
 					>
-						<PhoneOff className="size-4" />
+						<HugeiconsIcon
+							aria-hidden="true"
+							className="size-4"
+							icon={CallDisabled02Icon}
+						/>
 						<span>End call</span>
 					</button>
 				</footer>

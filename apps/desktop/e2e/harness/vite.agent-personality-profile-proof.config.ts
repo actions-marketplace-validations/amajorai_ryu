@@ -16,8 +16,11 @@ export default defineConfig({
 	root: harnessDir,
 	clearScreen: false,
 	resolve: {
+		dedupe: ["react", "react-dom"],
 		alias: {
 			"@": desktopRoot,
+			react: path.resolve(desktopRoot, "node_modules/react"),
+			"react-dom": path.resolve(desktopRoot, "node_modules/react-dom"),
 		},
 	},
 	server: {

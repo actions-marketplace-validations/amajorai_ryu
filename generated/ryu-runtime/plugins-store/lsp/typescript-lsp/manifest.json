@@ -27,7 +27,7 @@
     "language-server",
     "developer"
   ],
-  "icon": "file-code-01",
+  "icon": "computer-terminal-01",
   "iconDither": {
     "from": 384,
     "to": "transparent",

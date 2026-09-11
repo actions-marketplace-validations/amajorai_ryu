@@ -24,7 +24,7 @@ const start = await callTool({
 // a site problem, so pass the envelope through the way the declarative mapper
 // does and let the caller see what actually happened.
 const id = start && start.id;
-if (!id) {
+if (!id || start.success === false || start.error || start.available === false) {
 	return { raw: start };
 }
 const one = (v) => (Array.isArray(v) && v.length === 1 ? v[0] : v);
@@ -50,6 +50,12 @@ let delay = 750;
 for (;;) {
 	const st = await callNamed("firecrawl.crawl_status", { id });
 	const status = st && st.status;
+	// A rejected status call is not an empty or still-running crawl.
+	if (!st || st.success === false || st.error || st.available === false ||
+		!["scraping", "completed", "failed", "cancelled"].includes(status) ||
+		(st.data !== undefined && !Array.isArray(st.data))) {
+		return { raw: st };
+	}
 	if (status === "completed") return shape(st, true);
 	if (status === "failed" || status === "cancelled") return shape(st, false);
 	if (Date.now() - started > BUDGET_MS) return shape(st, false);

@@ -263,6 +263,21 @@ pub struct ExpressiveSpec {
     pub expression: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub animation: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub variant: Option<String>,
+    #[serde(rename = "bodyStyle", skip_serializing_if = "Option::is_none")]
+    pub body_style: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub behavior: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub colors: Option<std::collections::BTreeMap<String, String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub animated: Option<bool>,
+    #[serde(rename = "eyeScale", skip_serializing_if = "Option::is_none")]
+    pub eye_scale: Option<f64>,
+    #[serde(rename = "animationDuration", skip_serializing_if = "Option::is_none")]
+    pub animation_duration: Option<f64>,
+
 }
 
 /// Persona slot: name, avatar, and tone instructions.
@@ -3992,6 +4007,7 @@ mod tests {
             expressive: Some(ExpressiveSpec {
                 expression: Some("laughing".to_owned()),
                 animation: Some("orbit".to_owned()),
+                ..Default::default()
             }),
             ..Default::default()
         };
@@ -4004,6 +4020,44 @@ mod tests {
         // An empty persona serializes without any of the optional keys.
         let empty = serde_json::to_string(&PersonaSlot::default()).unwrap();
         assert_eq!(empty, "{}");
+    }
+
+    #[tokio::test]
+    async fn expressive_avatar_settings_roundtrip_store() {
+        let store = store();
+        let persona: PersonaSlot = serde_json::from_value(serde_json::json!({
+            "expressive": {"expression":"random", "animation":"random", "variant":"3d",
+            "bodyStyle":"orb", "behavior":"conversation", "animated":true,
+            "eyeScale":1.25, "animationDuration":12, "colors":{"c1":"#ff6688","bg":"#ffffff"}}
+        }))
+        .unwrap();
+        let created = store
+            .create(CreateAgent {
+                name: "Reactive avatar".into(),
+                persona: Some(persona.clone()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let loaded = store.get(&created.id).await.unwrap().unwrap();
+        assert_eq!(loaded.persona, Some(persona.clone()));
+        let updated = store
+            .update(
+                &created.id,
+                UpdateAgent {
+                    name: Some("Renamed avatar".into()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(updated.persona, Some(persona));
+        let json = serde_json::to_value(updated.persona.unwrap()).unwrap();
+        assert_eq!(json["expressive"]["variant"], "3d");
+        assert_eq!(json["expressive"]["bodyStyle"], "orb");
+        assert_eq!(json["expressive"]["behavior"], "conversation");
+        assert_eq!(json["expressive"]["colors"]["c1"], "#ff6688");
     }
 
     #[tokio::test]

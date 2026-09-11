@@ -21,6 +21,7 @@ import {
 	managedInferenceAvailable,
 	monthlyCreditPoolMicroUsdForSeats,
 	monthlyPriceMicroUsdForSeats,
+	PLAN_IDS,
 	PLANS,
 	type PlanLimitField,
 	type PolarBinding,
@@ -96,6 +97,24 @@ describe("current Pro pricing", () => {
 	});
 });
 
+describe("current Plus pricing", () => {
+	it("uses the private lower-usage $39/$390 ladder", () => {
+		expect(PLAN_IDS.indexOf("plus")).toBeLessThan(PLAN_IDS.indexOf("pro"));
+		expect(PLANS.plus.monthlyPriceMicroUsd).toBe(usdToMicro(39));
+		expect(PLANS.plus.monthlyCreditPoolMicroUsd).toBe(usdToMicro(10));
+		expect(PLANS.plus.audience).toBe("individual");
+		expect(PLANS.plus.seatModel).toEqual({ kind: "single" });
+		expect(currentPlanVersionFor("plus")).toBe(1);
+		expect(planVersionFor("plus", currentPlanVersionFor("plus"))).toMatchObject(
+			{
+				monthlyPriceMicroUsd: usdToMicro(39),
+				monthlyCreditPoolMicroUsd: usdToMicro(10),
+				version: 1,
+			}
+		);
+	});
+});
+
 describe("emailQuotaForPlan (Agent Inboxes)", () => {
 	it("gives the free baseline a small branded growth-loop allowance", () => {
 		expect(emailQuotaForPlan(null)).toEqual(EMAIL_QUOTA_FREE);
@@ -114,7 +133,14 @@ describe("emailQuotaForPlan (Agent Inboxes)", () => {
 	});
 
 	it("enables email on every paid subscription plan", () => {
-		for (const plan of ["pro", "max", "teams", "business"] as const) {
+		for (const plan of [
+			"pro",
+			"plus",
+			"max",
+			"teams",
+			"teams-lite",
+			"business",
+		] as const) {
 			const q = emailQuotaForPlan(plan);
 			expect(q.enabled).toBe(true);
 			expect(q.inboxLimit).toBeGreaterThan(0);
@@ -159,7 +185,14 @@ describe("resolveEntitlement — subscriptions", () => {
 		expect(PLANS.max.marketplaceApps).toBe(true);
 		expect(PLANS.teams.marketplaceApps).toBe(true);
 		expect(PLANS["marketplace-membership"].marketplacePublisherPool).toBe(true);
-		for (const id of ["pro", "max", "teams", "business"] as const) {
+		for (const id of [
+			"pro",
+			"plus",
+			"max",
+			"teams",
+			"teams-lite",
+			"business",
+		] as const) {
 			expect(PLANS[id].marketplacePublisherPool).toBe(false);
 		}
 		expect(PLANS["desktop-license"].marketplaceApps).toBe(false);
@@ -268,10 +301,18 @@ describe("resolveEntitlement — subscriptions", () => {
 });
 
 describe("plan audience — personal versus organization ownership", () => {
-	it("keeps Pro and Max personal while Teams and Business own the shared boundary", () => {
+	it("keeps Pro, Plus, and Max personal while organization plans own the shared boundary", () => {
 		expect(PLANS.pro.audience).toBe("individual");
+		expect(PLANS.plus.audience).toBe("individual");
 		expect(PLANS.max.audience).toBe("individual");
 		expect(PLANS.teams.audience).toBe("organization");
+		expect(PLANS["teams-lite"].audience).toBe("organization");
+		expect(PLANS["teams-lite"].seatModel).toEqual({
+			kind: "per_seat",
+			minSeats: 5,
+		});
+		expect(PLANS["teams-lite"].monthlyCreditPoolMicroUsd).toBe(usdToMicro(20));
+		expect(currentPlanVersionFor("teams-lite")).toBe(1);
 		expect(PLANS.business.audience).toBe("organization");
 		expect(PLANS.business.seatModel).toEqual({
 			kind: "per_seat",
@@ -305,6 +346,57 @@ describe("plan audience — personal versus organization ownership", () => {
 				version: planVersionFor("business"),
 			})
 		).toBe(usdToMicro(350));
+	});
+
+	it("resolves the private Teams Lite price and lower usage pool", () => {
+		const binding = requireBinding(
+			PLANS["teams-lite"].bindings.monthly,
+			"teams-lite.monthly"
+		);
+		const productId = resolveProductId(binding, defaultsOnly);
+		const entitlement = resolveEntitlement(
+			{ productId, status: "active", seats: 5 },
+			null,
+			defaultsOnly
+		);
+		expect(planByProductId(defaultsOnly).get(productId)?.plan.id).toBe(
+			"teams-lite"
+		);
+		expect(entitlement.plan).toBe("teams-lite");
+		expect(entitlement.seats).toBe(5);
+		expect(entitlement.monthlyCreditPoolMicroUsd).toBe(usdToMicro(20));
+		expect(
+			monthlyPriceMicroUsdForSeats({
+				plan: PLANS["teams-lite"],
+				seats: 5,
+				version: planVersionFor("teams-lite"),
+			})
+		).toBe(usdToMicro(150));
+		expect(
+			monthlyPriceMicroUsdForSeats({
+				plan: PLANS["teams-lite"],
+				seats: 6,
+				version: planVersionFor("teams-lite"),
+			})
+		).toBe(usdToMicro(200));
+	});
+
+	it("resolves the private Plus price and lower usage pool", () => {
+		const binding = requireBinding(PLANS.plus.bindings.monthly, "plus.monthly");
+		const productId = resolveProductId(binding, defaultsOnly);
+		const entitlement = resolveEntitlement(
+			{ productId, status: "active" },
+			null,
+			defaultsOnly
+		);
+		expect(planByProductId(defaultsOnly).get(productId)?.plan.id).toBe("plus");
+		expect(entitlement.plan).toBe("plus");
+		expect(entitlement.seats).toBe(1);
+		expect(entitlement.monthlyCreditPoolMicroUsd).toBe(usdToMicro(10));
+		expect(PLANS.plus.bindings.yearly).toEqual({
+			productIdEnv: "POLAR_PRODUCT_PLUS_YEARLY",
+			productIdDefault: "polar_product_plus_yearly",
+		});
 	});
 
 	it("keeps the Business pool stable until a complete five-seat bundle", () => {
@@ -799,8 +891,10 @@ describe("planLimit — numeric caps (free baseline vs paid rows)", () => {
 		for (const plan of [
 			"desktop-license",
 			"pro",
+			"plus",
 			"max",
 			"teams",
+			"teams-lite",
 			"business",
 		] as const) {
 			expect(planLimit(plan, "maxAgents")).toBe(Number.POSITIVE_INFINITY);
@@ -812,14 +906,18 @@ describe("planLimit — numeric caps (free baseline vs paid rows)", () => {
 	it("keeps the two real-cost levers finite per plan", () => {
 		expect(planLimit("desktop-license", "maxConcurrentRuns")).toBe(3);
 		expect(planLimit("pro", "maxConcurrentRuns")).toBe(3);
+		expect(planLimit("plus", "maxConcurrentRuns")).toBe(3);
 		expect(planLimit("max", "maxConcurrentRuns")).toBe(3);
 		expect(planLimit("teams", "maxConcurrentRuns")).toBe(8);
+		expect(planLimit("teams-lite", "maxConcurrentRuns")).toBe(8);
 		expect(planLimit("business", "maxConcurrentRuns")).toBe(8);
 
 		expect(planLimit("desktop-license", "spaceStorageLimitGb")).toBe(20);
 		expect(planLimit("pro", "spaceStorageLimitGb")).toBe(20);
+		expect(planLimit("plus", "spaceStorageLimitGb")).toBe(20);
 		expect(planLimit("max", "spaceStorageLimitGb")).toBe(50);
 		expect(planLimit("teams", "spaceStorageLimitGb")).toBe(50);
+		expect(planLimit("teams-lite", "spaceStorageLimitGb")).toBe(50);
 		expect(planLimit("business", "spaceStorageLimitGb")).toBe(50);
 	});
 
@@ -837,34 +935,38 @@ describe("planLimit — numeric caps (free baseline vs paid rows)", () => {
 				free: number,
 				license: number,
 				pro: number,
+				plus: number,
 				max: number,
 				teams: number,
+				teamsLite: number,
 				business: number,
 			]
 		> = {
-			maxAgents: [3, INF, INF, INF, INF, INF],
-			maxConcurrentRuns: [1, 3, 3, 3, 8, 8],
-			maxEvalRunsMonthly: [10, INF, INF, INF, INF, INF],
-			maxOpenTabs: [3, INF, INF, INF, INF, INF],
-			maxRemoteNodes: [1, INF, INF, INF, INF, INF],
-			maxSpaces: [1, INF, INF, INF, INF, INF],
-			spaceStorageLimitGb: [1, 20, 20, 50, 50, 50],
+			maxAgents: [3, INF, INF, INF, INF, INF, INF, INF],
+			maxConcurrentRuns: [1, 3, 3, 3, 3, 8, 8, 8],
+			maxEvalRunsMonthly: [10, INF, INF, INF, INF, INF, INF, INF],
+			maxOpenTabs: [3, INF, INF, INF, INF, INF, INF, INF],
+			maxRemoteNodes: [1, INF, INF, INF, INF, INF, INF, INF],
+			maxSpaces: [1, INF, INF, INF, INF, INF, INF, INF],
+			spaceStorageLimitGb: [1, 20, 20, 20, 50, 50, 50, 50],
 		};
 		// Every declared key is in the matrix, and vice versa: a new quota that
 		// forgot its numbers fails here rather than shipping a silent Infinity.
 		expect(Object.keys(matrix).sort()).toEqual(Object.keys(QUOTAS).sort());
 		for (const [
 			field,
-			[free, license, pro, max, teams, business],
+			[free, license, pro, plus, max, teams, teamsLite, business],
 		] of Object.entries(matrix) as [
 			PlanLimitField,
-			[number, number, number, number, number, number],
+			[number, number, number, number, number, number, number, number],
 		][]) {
 			expect(planLimit(null, field)).toBe(free);
 			expect(planLimit("desktop-license", field)).toBe(license);
 			expect(planLimit("pro", field)).toBe(pro);
+			expect(planLimit("plus", field)).toBe(plus);
 			expect(planLimit("max", field)).toBe(max);
 			expect(planLimit("teams", field)).toBe(teams);
+			expect(planLimit("teams-lite", field)).toBe(teamsLite);
 			expect(planLimit("business", field)).toBe(business);
 		}
 	});

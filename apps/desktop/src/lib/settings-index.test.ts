@@ -37,7 +37,11 @@ const GATEWAY_DIALOG = join(
 const SECTION_SOURCES: Record<string, string[]> = {
 	// The Tabs settings, plus the pane-layout preset manager rendered beside
 	// them from its own file (same pattern as Voice's sub-panels).
-	general: ["GeneralTab.tsx", "SplitPresetSettings.tsx"],
+	general: [
+		"GeneralTab.tsx",
+		"AvailabilitySettings.tsx",
+		"SplitPresetSettings.tsx",
+	],
 	appearance: ["AppearanceTab.tsx", "../../lib/appearance-settings.ts"],
 	developer: ["DeveloperTab.tsx", "DevMetricsPanel.tsx"],
 	account: ["AccountTab.tsx"],
@@ -51,7 +55,7 @@ const SECTION_SOURCES: Record<string, string[]> = {
 		"TtsEngineSettings.tsx",
 	],
 	privacy: ["PrivacySettings.tsx"],
-	storage: ["StorageSettings.tsx"],
+	storage: ["StorageSettings.tsx", "BackupSettings.tsx"],
 	encryption: ["EncryptionSettings.tsx"],
 	danger: ["DangerZoneSettings.tsx"],
 	network: ["NetworkSettings.tsx"],

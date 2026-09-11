@@ -20,7 +20,7 @@ import {
 	EmptyMedia,
 	EmptyTitle,
 } from "@ryu/ui/components/empty";
-import { useTabsContext } from "@/src/contexts/TabsContext.tsx";
+import { useTabSelector } from "@/src/contexts/TabsContext.tsx";
 import { PluginHostPanel } from "@/src/contributions/host/PluginHostPanel.tsx";
 import { usePluginContributions } from "@/src/hooks/usePluginContributions.ts";
 
@@ -34,7 +34,7 @@ export default function SpaceAppDocPage({
 	documentId: string;
 }) {
 	const { companions } = usePluginContributions();
-	const { openTab } = useTabsContext();
+	const openTab = useTabSelector((state) => state.openTab);
 	// The owning app's companion (its UI bundle carries the editor). Resolve by the
 	// plugin id baked in the route; the companion id is `app__<runnable>`, so match on
 	// the manifest pluginId, not the companion id.

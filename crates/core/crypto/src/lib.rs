@@ -325,6 +325,15 @@ pub fn global_cipher() -> Result<FieldCipher> {
     Ok(cipher)
 }
 
+/// Seal the active master key into an encrypted disaster-recovery archive.
+/// This is host-only: never expose it through plugin crypto, HTTP or logs.
+/// The wrapping cipher must use the operator's separate backup recovery key.
+pub fn seal_backup_master_key(wrapping_cipher: &FieldCipher) -> Result<String> {
+    let _ = global_cipher()?;
+    let key = GLOBAL_KEY.get().context("master key not recorded")?;
+    wrapping_cipher.seal(&base64::engine::general_purpose::STANDARD.encode(key))
+}
+
 // ── Per-plugin subkeys (the opt-in sealing primitive) ─────────────────────────
 
 /// A cipher bound to ONE plugin, derived from the master key and usable only by

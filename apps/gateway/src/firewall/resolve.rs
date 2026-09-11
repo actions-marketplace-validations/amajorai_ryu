@@ -681,8 +681,8 @@ mod tests {
     }
 
     /// A node base with the default lock set removed, for tests exercising
-    /// unlocked-field precedence (the default locks `enabled`/`scan_inbound`/
-    /// `policy` so overlays cannot loosen them).
+    /// unlocked-field precedence (default inbound and egress protection locks
+    /// otherwise prevent narrower scopes from disabling these fields).
     fn unlocked_base() -> FirewallConfig {
         FirewallConfig {
             locked_fields: Vec::new(),
@@ -818,7 +818,17 @@ mod tests {
         assert_eq!(cfg.policy, FirewallPolicy::Block);
         assert!(cfg.custom_patterns.is_empty());
         // The default lock set survives resolution (already sorted).
-        assert_eq!(cfg.locked_fields, vec!["enabled", "policy", "scan_inbound"]);
+        assert_eq!(
+            cfg.locked_fields,
+            vec![
+                "enabled",
+                "policy",
+                "redact_pii",
+                "redact_secrets",
+                "scan_inbound",
+                "scan_outbound"
+            ]
+        );
     }
 
     #[test]
@@ -1228,7 +1238,7 @@ mod tests {
         let bundle = PolicyBundle {
             firewall: Some(FirewallOverlay {
                 policy: Some(FirewallPolicy::Block),
-                scan_outbound: Some(false), // unlocked by default: may loosen
+                log_detections: Some(false), // explicit unlocked notification setting
                 ..Default::default()
             }),
             agent_overlays: HashMap::new(),
@@ -1240,7 +1250,7 @@ mod tests {
             "a locked field may still be tightened"
         );
         assert!(
-            !cfg.scan_outbound,
+            !cfg.log_detections,
             "an unlocked field is still freely overridable"
         );
     }
@@ -1304,10 +1314,10 @@ mod tests {
 
     #[test]
     fn different_configs_get_different_scanners() {
-        let r = FirewallResolver::new(base());
+        let r = FirewallResolver::new(unlocked_base());
         let s1 = r.scanner_for(None, None, None);
-        // `redact_pii` is unlocked by default, so this overlay genuinely changes
-        // the resolved config (a locked field's no-op would dedupe the scanner).
+        // Explicitly unlock this fixture so the redaction overlay changes the
+        // resolved config rather than testing a correctly rejected loosening.
         let bundle = PolicyBundle {
             firewall: Some(FirewallOverlay {
                 redact_pii: Some(false),
@@ -1630,5 +1640,93 @@ mod tests {
 
         let ov: FirewallOverlay = serde_json::from_str("{}").expect("overlay deserializes");
         assert!(ov.evaluators.is_none(), "missing field → None");
+    }
+    fn disable_egress() -> FirewallOverlay {
+        FirewallOverlay {
+            scan_outbound: Some(false),
+            redact_pii: Some(false),
+            redact_secrets: Some(false),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn inherited_default_egress_locks_reject_org_and_agent_loosening() {
+        let resolver = FirewallResolver::new(base());
+        resolver.set_org_overlay("org".into(), disable_egress());
+        resolver.set_agent_overlay("agent".into(), disable_egress());
+        for (org, agent) in [
+            (Some("org"), None),
+            (None, Some("agent")),
+            (Some("org"), Some("agent")),
+        ] {
+            let config = resolver.resolve(org, agent, None);
+            assert!(config.scan_outbound && config.redact_pii && config.redact_secrets);
+        }
+        let bundle = PolicyBundle {
+            firewall: Some(disable_egress()),
+            agent_overlays: HashMap::from([("agent".into(), disable_egress())]),
+        };
+        let config = resolver.resolve(Some("org"), Some("agent"), Some(&bundle));
+        assert!(config.scan_outbound && config.redact_pii && config.redact_secrets);
+    }
+
+    #[test]
+    fn partial_node_config_inherits_egress_locks_and_allows_tightening() {
+        let partial: crate::config::GatewayConfig = toml::from_str(
+            r#"[firewall]
+policy = "sanitize"
+"#,
+        )
+        .unwrap();
+        let resolver = FirewallResolver::new(partial.firewall);
+        resolver.set_agent_overlay("agent".into(), disable_egress());
+        let config = resolver.resolve(None, Some("agent"), None);
+        assert_eq!(config.policy, FirewallPolicy::Sanitize);
+        assert!(config.scan_outbound && config.redact_pii && config.redact_secrets);
+
+        let authored: crate::config::GatewayConfig = toml::from_str(
+            r#"[firewall]
+scan_outbound = false
+redact_pii = false
+redact_secrets = false
+"#,
+        )
+        .unwrap();
+        let resolver = FirewallResolver::new(authored.firewall);
+        let config = resolver.resolve(None, None, None);
+        assert!(
+            !config.scan_outbound && !config.redact_pii && !config.redact_secrets,
+            "node-authored values remain authoritative"
+        );
+        resolver.set_agent_overlay(
+            "agent".into(),
+            FirewallOverlay {
+                scan_outbound: Some(true),
+                redact_pii: Some(true),
+                redact_secrets: Some(true),
+                ..Default::default()
+            },
+        );
+        let tightened = resolver.resolve(None, Some("agent"), None);
+        assert!(tightened.scan_outbound && tightened.redact_pii && tightened.redact_secrets);
+    }
+
+    #[test]
+    fn explicit_custom_node_locks_preserve_operator_choice() {
+        for locks in ["[]", "[\"enabled\"]"] {
+            let config: crate::config::GatewayConfig =
+                toml::from_str(&format!("[firewall]\nlocked_fields = {locks}\n")).unwrap();
+            assert!(!config
+                .firewall
+                .locked_fields
+                .iter()
+                .any(|field| field == "scan_outbound"));
+            let resolver = FirewallResolver::new(config.firewall);
+            resolver.set_agent_overlay("agent".into(), disable_egress());
+            let config = resolver.resolve(None, Some("agent"), None);
+            assert!(!config.scan_outbound && !config.redact_pii && !config.redact_secrets);
+            assert!(config.enabled);
+        }
     }
 }

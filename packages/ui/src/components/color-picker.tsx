@@ -29,12 +29,15 @@ import {
 	type ChangeEvent,
 	type ComponentProps,
 	type ComponentRef,
+	type CSSProperties,
 	createContext,
 	type JSX,
+	type KeyboardEvent,
 	type PointerEvent,
 	type ReactNode,
 	useCallback,
 	useContext,
+	useEffect,
 	useMemo,
 	useRef,
 	useState,
@@ -74,7 +77,7 @@ const EYE_DROPPER_NAME = "ColorPickerEyeDropper";
 const FORMAT_SELECT_NAME = "ColorPickerFormatSelect";
 const INPUT_NAME = "ColorPickerInput";
 
-const colorFormats = ["hex", "rgb", "hsl", "hsb"] as const;
+const colorFormats = ["hex", "rgb", "hsl", "oklch"] as const;
 
 // Base UI's <SelectValue /> renders the raw value unless the Root is given an
 // `items` map of value -> label, so provide one to keep the uppercase labels.
@@ -122,24 +125,155 @@ interface HSVColorValue {
 	v: number;
 }
 
+interface OklchColorValue {
+	a: number;
+	c: number;
+	h: number;
+	l: number;
+}
+
+export interface ParsedColor {
+	alpha: number;
+	hex: string;
+	hsl: { h: number; l: number; s: number };
+	oklch: OklchColorValue;
+	rgb: ColorValue;
+}
+
+const EMPTY_COLOR: ColorValue = { a: 1, b: 0, g: 0, r: 0 };
+
+function clamp(value: number, min: number, max: number): number {
+	return Math.min(max, Math.max(min, value));
+}
+
+function parseAlpha(value: string | undefined): number {
+	if (!value) {
+		return 1;
+	}
+	const parsed = value.trim().endsWith("%")
+		? Number.parseFloat(value) / 100
+		: Number.parseFloat(value);
+	return Number.isFinite(parsed) ? clamp(parsed, 0, 1) : 1;
+}
+
 function hexToRgb(hex: string, alpha?: number): ColorValue {
-	const result = /^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i.exec(hex);
+	const normalized = hex.trim().replace(/^#/, "");
+	const expanded =
+		normalized.length === 3 || normalized.length === 4
+			? normalized
+					.split("")
+					.map((channel) => `${channel}${channel}`)
+					.join("")
+			: normalized;
+	const result = /^([a-f\d]{6})([a-f\d]{2})?$/i.exec(expanded);
 	return result
 		? {
-				r: Number.parseInt(result[1] ?? "0", 16),
-				g: Number.parseInt(result[2] ?? "0", 16),
-				b: Number.parseInt(result[3] ?? "0", 16),
-				a: alpha ?? 1,
+				r: Number.parseInt(result[1]?.slice(0, 2) ?? "0", 16),
+				g: Number.parseInt(result[1]?.slice(2, 4) ?? "0", 16),
+				b: Number.parseInt(result[1]?.slice(4, 6) ?? "0", 16),
+				a: alpha ?? (result[2] ? Number.parseInt(result[2], 16) / 255 : 1),
 			}
-		: { r: 0, g: 0, b: 0, a: alpha ?? 1 };
+		: { ...EMPTY_COLOR, a: alpha ?? 1 };
 }
 
 function rgbToHex(color: ColorValue): string {
 	const toHex = (n: number) => {
-		const hex = Math.round(n).toString(16);
+		const hex = Math.round(clamp(n, 0, 255)).toString(16);
 		return hex.length === 1 ? `0${hex}` : hex;
 	};
-	return `#${toHex(color.r)}${toHex(color.g)}${toHex(color.b)}`;
+	return `#${toHex(color.r)}${toHex(color.g)}${toHex(color.b)}`.toUpperCase();
+}
+
+function srgbToLinear(value: number): number {
+	return value <= 0.040_45 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2.4;
+}
+
+function linearToSrgb(value: number): number {
+	const sign = value < 0 ? -1 : 1;
+	const magnitude = Math.abs(value);
+	return (
+		sign *
+		(magnitude <= 0.003_130_8
+			? magnitude * 12.92
+			: 1.055 * magnitude ** (1 / 2.4) - 0.055)
+	);
+}
+
+function rgbToOklch(color: ColorValue): OklchColorValue {
+	const r = srgbToLinear(color.r / 255);
+	const g = srgbToLinear(color.g / 255);
+	const b = srgbToLinear(color.b / 255);
+
+	const l = 0.412_221_470_8 * r + 0.536_332_536_3 * g + 0.051_445_992_9 * b;
+	const m = 0.211_903_498_2 * r + 0.680_699_545_1 * g + 0.107_396_956_6 * b;
+	const s = 0.088_302_461_9 * r + 0.281_718_837_6 * g + 0.629_978_700_5 * b;
+	const lRoot = Math.cbrt(l);
+	const mRoot = Math.cbrt(m);
+	const sRoot = Math.cbrt(s);
+	const lightness =
+		0.210_454_255_3 * lRoot + 0.793_617_785 * mRoot - 0.004_072_046_8 * sRoot;
+	const a =
+		1.977_998_495_1 * lRoot - 2.428_592_205 * mRoot + 0.450_593_709_9 * sRoot;
+	const bComponent =
+		0.025_904_037_1 * lRoot + 0.782_771_766_2 * mRoot - 0.808_675_766 * sRoot;
+	const chroma = Math.hypot(a, bComponent);
+	const hue =
+		chroma < 0.000_001
+			? 0
+			: ((Math.atan2(bComponent, a) * 180) / Math.PI + 360) % 360;
+
+	return {
+		a: color.a,
+		c: chroma,
+		h: hue,
+		l: clamp(lightness, 0, 1),
+	};
+}
+
+function oklchToRgb(oklch: OklchColorValue): ColorValue {
+	const hue = (oklch.h * Math.PI) / 180;
+	const a = oklch.c * Math.cos(hue);
+	const b = oklch.c * Math.sin(hue);
+	const l = oklch.l + 0.396_337_777_4 * a + 0.215_803_757_3 * b;
+	const m = oklch.l - 0.105_561_345_8 * a - 0.063_854_172_8 * b;
+	const s = oklch.l - 0.089_484_177_5 * a - 1.291_485_548 * b;
+	const lCubed = l ** 3;
+	const mCubed = m ** 3;
+	const sCubed = s ** 3;
+
+	return {
+		a: clamp(oklch.a, 0, 1),
+		b:
+			clamp(
+				linearToSrgb(
+					-0.004_196_086_3 * lCubed -
+						0.703_418_614_7 * mCubed +
+						1.707_614_701 * sCubed
+				),
+				0,
+				1
+			) * 255,
+		g:
+			clamp(
+				linearToSrgb(
+					-1.268_438_004_6 * lCubed +
+						2.609_757_401_1 * mCubed -
+						0.341_319_396_5 * sCubed
+				),
+				0,
+				1
+			) * 255,
+		r:
+			clamp(
+				linearToSrgb(
+					4.076_741_662_1 * lCubed -
+						3.307_711_591_3 * mCubed +
+						0.230_969_929_2 * sCubed
+				),
+				0,
+				1
+			) * 255,
+	};
 }
 
 function rgbToHsv(color: ColorValue): HSVColorValue {
@@ -251,26 +385,38 @@ function hsvToRgb(hsv: HSVColorValue): ColorValue {
 function colorToString(color: ColorValue, format: ColorFormat = "hex"): string {
 	switch (format) {
 		case "hex":
-			return rgbToHex(color);
+			return rgbToHex(color).toUpperCase();
 		case "rgb":
 			return color.a < 1
-				? `rgba(${color.r}, ${color.g}, ${color.b}, ${color.a})`
+				? `rgba(${Math.round(color.r)}, ${Math.round(color.g)}, ${Math.round(color.b)}, ${roundAlpha(color.a)})`
 				: `rgb(${color.r}, ${color.g}, ${color.b})`;
 		case "hsl": {
 			const hsl = rgbToHsl(color);
 			return color.a < 1
-				? `hsla(${hsl.h}, ${hsl.s}%, ${hsl.l}%, ${color.a})`
+				? `hsla(${hsl.h}, ${hsl.s}%, ${hsl.l}%, ${roundAlpha(color.a)})`
 				: `hsl(${hsl.h}, ${hsl.s}%, ${hsl.l}%)`;
 		}
-		case "hsb": {
-			const hsv = rgbToHsv(color);
+		case "oklch": {
+			const oklch = rgbToOklch(color);
 			return color.a < 1
-				? `hsba(${hsv.h}, ${hsv.s}%, ${hsv.v}%, ${color.a})`
-				: `hsb(${hsv.h}, ${hsv.s}%, ${hsv.v}%)`;
+				? `oklch(${roundPercent(oklch.l)}% ${roundNumber(oklch.c)} ${roundNumber(oklch.h)} / ${roundAlpha(color.a)})`
+				: `oklch(${roundPercent(oklch.l)}% ${roundNumber(oklch.c)} ${roundNumber(oklch.h)})`;
 		}
 		default:
 			return rgbToHex(color);
 	}
+}
+
+function roundAlpha(value: number): string {
+	return value.toFixed(2).replace(/0+$/, "").replace(/\.$/, "");
+}
+
+function roundNumber(value: number): string {
+	return value.toFixed(3).replace(/0+$/, "").replace(/\.$/, "");
+}
+
+function roundPercent(value: number): string {
+	return (value * 100).toFixed(1).replace(/0+$/, "").replace(/\.$/, "");
 }
 
 function rgbToHsl(color: ColorValue) {
@@ -312,7 +458,7 @@ function hslToRgb(
 	hsl: { h: number; s: number; l: number },
 	alpha = 1
 ): ColorValue {
-	const h = hsl.h / 360;
+	const h = (((hsl.h % 360) + 360) % 360) / 360;
 	const s = hsl.s / 100;
 	const l = hsl.l / 100;
 
@@ -363,95 +509,190 @@ function parseColorString(value: string): ColorValue | null {
 
 	// Parse hex colors
 	if (trimmed.startsWith("#")) {
-		const hexMatch = trimmed.match(/^#([a-fA-F0-9]{3}|[a-fA-F0-9]{6})$/);
-		if (hexMatch) {
+		if (/^#[a-fA-F0-9]{3,4}$/.test(trimmed)) {
+			return hexToRgb(trimmed);
+		}
+		if (/^#[a-fA-F0-9]{6}([a-fA-F0-9]{2})?$/.test(trimmed)) {
 			return hexToRgb(trimmed);
 		}
 	}
 
-	// Parse rgb/rgba colors
+	// Parse legacy comma-separated and modern space-separated rgb/rgba colors.
 	const rgbMatch = trimmed.match(
-		/^rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*(?:,\s*([\d.]+))?\s*\)$/
+		/^rgba?\(\s*([\d.]+%?)\s*(?:,|\s)\s*([\d.]+%?)\s*(?:,|\s)\s*([\d.]+%?)(?:\s*(?:,|\/)\s*([\d.]+%?))?\s*\)$/i
 	);
 	if (rgbMatch) {
 		return {
-			r: Number.parseInt(rgbMatch[1] ?? "0", 10),
-			g: Number.parseInt(rgbMatch[2] ?? "0", 10),
-			b: Number.parseInt(rgbMatch[3] ?? "0", 10),
-			a: rgbMatch[4] ? Number.parseFloat(rgbMatch[4]) : 1,
+			r: channelValue(rgbMatch[1]),
+			g: channelValue(rgbMatch[2]),
+			b: channelValue(rgbMatch[3]),
+			a: parseAlpha(rgbMatch[4]),
 		};
 	}
 
-	// Parse hsl/hsla colors
+	// Parse legacy comma-separated and modern space-separated hsl/hsla colors.
 	const hslMatch = trimmed.match(
-		/^hsla?\(\s*(\d+)\s*,\s*(\d+)%\s*,\s*(\d+)%\s*(?:,\s*([\d.]+))?\s*\)$/
+		/^hsla?\(\s*([\d.]+)(?:deg)?\s*(?:,|\s)\s*([\d.]+)%\s*(?:,|\s)\s*([\d.]+)%(?:\s*(?:,|\/)\s*([\d.]+%?))?\s*\)$/i
 	);
 	if (hslMatch) {
-		const h = Number.parseInt(hslMatch[1] ?? "0", 10);
-		const s = Number.parseInt(hslMatch[2] ?? "0", 10) / 100;
-		const l = Number.parseInt(hslMatch[3] ?? "0", 10) / 100;
-		const a = hslMatch[4] ? Number.parseFloat(hslMatch[4]) : 1;
-
-		// Convert HSL to RGB
-		const c = (1 - Math.abs(2 * l - 1)) * s;
-		const x = c * (1 - Math.abs(((h / 60) % 2) - 1));
-		const m = l - c / 2;
-
-		let r = 0;
-		let g = 0;
-		let b = 0;
-
-		if (h >= 0 && h < 60) {
-			r = c;
-			g = x;
-			b = 0;
-		} else if (h >= 60 && h < 120) {
-			r = x;
-			g = c;
-			b = 0;
-		} else if (h >= 120 && h < 180) {
-			r = 0;
-			g = c;
-			b = x;
-		} else if (h >= 180 && h < 240) {
-			r = 0;
-			g = x;
-			b = c;
-		} else if (h >= 240 && h < 300) {
-			r = x;
-			g = 0;
-			b = c;
-		} else if (h >= 300 && h < 360) {
-			r = c;
-			g = 0;
-			b = x;
-		}
-
-		return {
-			r: Math.round((r + m) * 255),
-			g: Math.round((g + m) * 255),
-			b: Math.round((b + m) * 255),
-			a,
-		};
+		return hslToRgb(
+			{
+				h: Number(hslMatch[1] ?? 0),
+				l: Number(hslMatch[3] ?? 0),
+				s: Number(hslMatch[2] ?? 0),
+			},
+			parseAlpha(hslMatch[4])
+		);
 	}
 
-	// Parse hsb/hsba colors
-	const hsbMatch = trimmed.match(
-		/^hsba?\(\s*(\d+)\s*,\s*(\d+)%\s*,\s*(\d+)%\s*(?:,\s*([\d.]+))?\s*\)$/
+	// Parse OKLCH colors. Lightness accepts either a percentage or a 0–1 value;
+	// alpha accepts either a percentage or a 0–1 value.
+	const oklchMatch = trimmed.match(
+		/^oklch\(\s*([\d.]+%?)\s+([\d.]+)\s+([\d.]+)(?:deg)?(?:\s*(?:\/|,)\s*([\d.]+%?))?\s*\)$/i
 	);
-	if (hsbMatch) {
-		const h = Number.parseInt(hsbMatch[1] ?? "0", 10);
-		const s = Number.parseInt(hsbMatch[2] ?? "0", 10);
-		const v = Number.parseInt(hsbMatch[3] ?? "0", 10);
-		const a = hsbMatch[4] ? Number.parseFloat(hsbMatch[4]) : 1;
-
-		return hsvToRgb({ h, s, v, a });
+	if (oklchMatch) {
+		const lightness = Number.parseFloat(oklchMatch[1] ?? "0");
+		return oklchToRgb({
+			a: parseAlpha(oklchMatch[4]),
+			c: Math.max(0, Number.parseFloat(oklchMatch[2] ?? "0")),
+			h: ((Number.parseFloat(oklchMatch[3] ?? "0") % 360) + 360) % 360,
+			l: clamp(
+				oklchMatch[1]?.endsWith("%") ? lightness / 100 : lightness,
+				0,
+				1
+			),
+		});
 	}
 
 	return null;
 }
 
+function channelValue(value: string | undefined): number {
+	const parsed = Number.parseFloat(value ?? "0");
+	return clamp(value?.endsWith("%") ? parsed * 2.55 : parsed, 0, 255);
+}
+
+function serializeColor(color: ColorValue): string {
+	return color.a < 1
+		? colorToString(color, "rgb")
+		: rgbToHex(color).toUpperCase();
+}
+
+function toParsedColor(color: ColorValue): ParsedColor {
+	return {
+		alpha: color.a,
+		hex: rgbToHex(color).toUpperCase(),
+		hsl: rgbToHsl(color),
+		oklch: rgbToOklch(color),
+		rgb: color,
+	};
+}
+
 type Direction = "ltr" | "rtl";
+
+const RECENT_COLORS_STORAGE_KEY = "ryu:color-picker:recent-colors";
+const MAX_RECENT_COLORS = 8;
+const EMPTY_RECENT_COLORS: string[] = [];
+let recentColorsState: string[] = EMPTY_RECENT_COLORS;
+let recentColorsLoaded = false;
+const recentColorsListeners = new Set<() => void>();
+
+function loadRecentColors(): void {
+	if (recentColorsLoaded || typeof window === "undefined") {
+		return;
+	}
+	recentColorsLoaded = true;
+	try {
+		const stored = JSON.parse(
+			window.localStorage.getItem(RECENT_COLORS_STORAGE_KEY) ?? "[]"
+		);
+		if (!Array.isArray(stored)) {
+			return;
+		}
+		const parsed = stored
+			.map((value) =>
+				typeof value === "string" ? parseColorString(value) : null
+			)
+			.filter((value): value is ColorValue => value !== null)
+			.map(serializeColor)
+			.filter((value, index, values) => values.indexOf(value) === index)
+			.slice(0, MAX_RECENT_COLORS);
+		recentColorsState = parsed;
+	} catch {
+		// Recent colors are a convenience. A blocked or malformed browser store
+		// must never prevent the picker from rendering.
+	}
+}
+
+function writeRecentColors(): void {
+	if (typeof window === "undefined") {
+		return;
+	}
+	try {
+		window.localStorage.setItem(
+			RECENT_COLORS_STORAGE_KEY,
+			JSON.stringify(recentColorsState)
+		);
+	} catch {
+		// Private browsing and embedded documents may deny localStorage writes.
+	}
+}
+
+function notifyRecentColors(): void {
+	for (const listener of recentColorsListeners) {
+		listener();
+	}
+}
+
+function subscribeRecentColors(listener: () => void): () => void {
+	loadRecentColors();
+	recentColorsListeners.add(listener);
+	const onStorage = (event: StorageEvent) => {
+		if (event.key !== RECENT_COLORS_STORAGE_KEY) {
+			return;
+		}
+		recentColorsLoaded = false;
+		loadRecentColors();
+		notifyRecentColors();
+	};
+	window.addEventListener("storage", onStorage);
+	return () => {
+		recentColorsListeners.delete(listener);
+		window.removeEventListener("storage", onStorage);
+	};
+}
+
+function getRecentColorsSnapshot(): string[] {
+	loadRecentColors();
+	return recentColorsState;
+}
+
+function recordRecentColor(value: string): void {
+	loadRecentColors();
+	const color = parseColorString(value);
+	if (!color) {
+		return;
+	}
+	const normalized = serializeColor(color);
+	const next = [
+		normalized,
+		...recentColorsState.filter((recent) => recent !== normalized),
+	].slice(0, MAX_RECENT_COLORS);
+	if (next.every((recent, index) => recent === recentColorsState[index])) {
+		return;
+	}
+	recentColorsState = next;
+	writeRecentColors();
+	notifyRecentColors();
+}
+
+function useRecentColors(): string[] {
+	return useSyncExternalStore(
+		subscribeRecentColors,
+		getRecentColorsSnapshot,
+		() => EMPTY_RECENT_COLORS
+	);
+}
 
 interface StoreState {
 	color: ColorValue;
@@ -464,6 +705,7 @@ interface Store {
 	getState: () => StoreState;
 	notify: () => void;
 	setColor: (value: ColorValue) => void;
+	setColorAndHsv: (color: ColorValue, hsv: HSVColorValue) => void;
 	setFormat: (value: ColorFormat) => void;
 	setHsv: (value: HSVColorValue) => void;
 	setOpen: (value: boolean) => void;
@@ -498,6 +740,8 @@ interface ColorPickerContextValue {
 	inline?: boolean;
 	readOnly?: boolean;
 	required?: boolean;
+	showRecentColors: boolean;
+	swatches: string[];
 }
 
 const ColorPickerContext = createContext<ColorPickerContextValue | null>(null);
@@ -525,9 +769,13 @@ interface ColorPickerProps
 	// Decoupled from Base UI's `(open, eventDetails) => void` so the color picker
 	// exposes the simpler single-arg callback its store dispatches internally.
 	onOpenChange?: (open: boolean) => void;
-	onValueChange?: (value: string) => void;
+	onValueChange?: (value: string, parsed?: ParsedColor) => void;
 	readOnly?: boolean;
 	required?: boolean;
+	/** Keep the shared recent-color history visible in the panel. */
+	showRecentColors?: boolean;
+	/** Optional preset colors shown in the built-in swatch strip. */
+	swatches?: string[];
 	value?: string;
 }
 
@@ -547,13 +795,15 @@ function ColorPicker(props: ColorPickerProps) {
 		inline,
 		readOnly,
 		required,
+		showRecentColors = true,
+		swatches = [],
 		...rootProps
 	} = props;
 
 	const listenersRef = useLazyRef(() => new Set<() => void>());
 	const stateRef = useLazyRef<StoreState>(() => {
 		const colorString = valueProp ?? defaultValue;
-		const color = hexToRgb(colorString);
+		const color = parseColorString(colorString) ?? { ...EMPTY_COLOR };
 
 		return {
 			color,
@@ -586,7 +836,22 @@ function ColorPicker(props: ColorPickerProps) {
 
 				if (propsRef.current.onValueChange) {
 					const colorString = colorToString(value, prevState.format);
-					propsRef.current.onValueChange(colorString);
+					propsRef.current.onValueChange(colorString, toParsedColor(value));
+				}
+
+				store.notify();
+			},
+			setColorAndHsv: (color: ColorValue, hsv: HSVColorValue) => {
+				const prevState = { ...stateRef.current };
+				stateRef.current.color = color;
+				stateRef.current.hsv = hsv;
+
+				if (
+					!Object.is(prevState.color, color) &&
+					propsRef.current.onValueChange
+				) {
+					const colorString = colorToString(color, prevState.format);
+					propsRef.current.onValueChange(colorString, toParsedColor(color));
 				}
 
 				store.notify();
@@ -602,7 +867,10 @@ function ColorPicker(props: ColorPickerProps) {
 				if (propsRef.current.onValueChange) {
 					const colorValue = hsvToRgb(value);
 					const colorString = colorToString(colorValue, prevState.format);
-					propsRef.current.onValueChange(colorString);
+					propsRef.current.onValueChange(
+						colorString,
+						toParsedColor(colorValue)
+					);
 				}
 
 				store.notify();
@@ -662,6 +930,8 @@ function ColorPicker(props: ColorPickerProps) {
 				open={openProp}
 				readOnly={readOnly}
 				required={required}
+				showRecentColors={showRecentColors}
+				swatches={swatches}
 				value={valueProp}
 			/>
 		</StoreContext.Provider>
@@ -693,6 +963,8 @@ function ColorPickerImpl(props: ColorPickerImplProps) {
 		modal,
 		readOnly,
 		required,
+		showRecentColors = true,
+		swatches = [],
 		...rootProps
 	} = props;
 
@@ -712,17 +984,22 @@ function ColorPickerImpl(props: ColorPickerImplProps) {
 			return;
 		}
 		const currentState = store.getState();
+		const color = parseColorString(valueProp);
+		if (!color) {
+			return;
+		}
 		// Skip when the incoming value already matches internal state, so an
 		// external prop that equals the current color doesn't trigger a re-sync.
 		if (
-			rgbToHex(currentState.color).toLowerCase() === valueProp.toLowerCase()
+			rgbToHex(currentState.color).toLowerCase() ===
+				rgbToHex(color).toLowerCase() &&
+			Math.abs(currentState.color.a - color.a) < 0.005
 		) {
 			return;
 		}
-		const color = hexToRgb(valueProp, currentState.color.a);
 		const hsv = rgbToHsv(color);
 		store.syncFromValue(color, hsv);
-	}, [valueProp]);
+	}, [store, valueProp]);
 
 	useIsomorphicLayoutEffect(() => {
 		if (openProp !== undefined) {
@@ -737,11 +1014,25 @@ function ColorPickerImpl(props: ColorPickerImplProps) {
 			inline,
 			readOnly,
 			required,
+			showRecentColors,
+			swatches,
 		}),
-		[dir, disabled, inline, readOnly, required]
+		[dir, disabled, inline, readOnly, required, showRecentColors, swatches]
 	);
 
-	const value = useStore((state) => rgbToHex(state.color));
+	const color = useStore((state) => state.color);
+	const recentColor = useMemo(() => serializeColor(color), [color]);
+	const lastRecentColor = useRef(recentColor);
+	useEffect(() => {
+		if (lastRecentColor.current === recentColor) {
+			return;
+		}
+		lastRecentColor.current = recentColor;
+		const timer = setTimeout(() => recordRecentColor(recentColor), 350);
+		return () => clearTimeout(timer);
+	}, [recentColor]);
+
+	const value = recentColor;
 	const open = useStore((state) => state.open);
 
 	const rootElement = useSlotRender(asChild, {
@@ -798,7 +1089,7 @@ function ColorPickerTrigger(props: ComponentProps<typeof PopoverTrigger>) {
 
 	const context = useColorPickerContext(TRIGGER_NAME);
 
-	const isDisabled = disabled || context.disabled;
+	const isDisabled = disabled || context.disabled || context.readOnly;
 
 	// Base UI composes via the `render` prop (there is no Radix `asChild`). Default
 	// to rendering the styled Button; callers can still override via `render`. The
@@ -819,11 +1110,19 @@ function ColorPickerContent(
 	const { asChild, className, children, ...popoverContentProps } = props;
 
 	const context = useColorPickerContext(CONTENT_NAME);
+	const content = (
+		<>
+			{children}
+			{(context.showRecentColors || context.swatches.length > 0) && (
+				<ColorPickerSwatches />
+			)}
+		</>
+	);
 
 	const inlineElement = useSlotRender(asChild, {
 		"data-slot": "color-picker-content",
 		className: cn("flex w-[340px] flex-col gap-4 p-4", className),
-		children,
+		children: content,
 	});
 
 	if (context.inline) {
@@ -836,7 +1135,7 @@ function ColorPickerContent(
 			{...popoverContentProps}
 			className={cn("flex w-[340px] flex-col gap-4 p-4", className)}
 		>
-			{children}
+			{content}
 		</PopoverContent>
 	);
 }
@@ -847,6 +1146,7 @@ function ColorPickerArea(props: DivProps) {
 		onPointerDown: onPointerDownProp,
 		onPointerMove: onPointerMoveProp,
 		onPointerUp: onPointerUpProp,
+		onKeyDown: onKeyDownProp,
 		className,
 		ref,
 		...areaProps
@@ -856,6 +1156,7 @@ function ColorPickerArea(props: DivProps) {
 		onPointerDown: onPointerDownProp,
 		onPointerMove: onPointerMoveProp,
 		onPointerUp: onPointerUpProp,
+		onKeyDown: onKeyDownProp,
 	});
 
 	const context = useColorPickerContext(AREA_NAME);
@@ -887,15 +1188,14 @@ function ColorPickerArea(props: DivProps) {
 				a: hsv?.a ?? 1,
 			};
 
-			store.setHsv(newHsv);
-			store.setColor(hsvToRgb(newHsv));
+			store.setColorAndHsv(hsvToRgb(newHsv), newHsv);
 		},
 		[hsv, store]
 	);
 
 	const onPointerDown = useCallback(
 		(event: PointerEvent<AreaElement>) => {
-			if (context.disabled) {
+			if (context.disabled || context.readOnly) {
 				return;
 			}
 			propsRef.current.onPointerDown?.(event);
@@ -936,6 +1236,35 @@ function ColorPickerArea(props: DivProps) {
 		},
 		[propsRef]
 	);
+	const onKeyDown = useCallback(
+		(event: KeyboardEvent<AreaElement>) => {
+			propsRef.current.onKeyDown?.(event);
+			if (event.defaultPrevented || context.disabled || context.readOnly) {
+				return;
+			}
+			const step = event.shiftKey ? 10 : 1;
+			const nextHsv = { ...hsv };
+			switch (event.key) {
+				case "ArrowLeft":
+					nextHsv.s = clamp(nextHsv.s - step, 0, 100);
+					break;
+				case "ArrowRight":
+					nextHsv.s = clamp(nextHsv.s + step, 0, 100);
+					break;
+				case "ArrowDown":
+					nextHsv.v = clamp(nextHsv.v - step, 0, 100);
+					break;
+				case "ArrowUp":
+					nextHsv.v = clamp(nextHsv.v + step, 0, 100);
+					break;
+				default:
+					return;
+			}
+			event.preventDefault();
+			store.setColorAndHsv(hsvToRgb(nextHsv), nextHsv);
+		},
+		[context.disabled, context.readOnly, hsv, propsRef, store]
+	);
 
 	const hue = hsv?.h ?? 0;
 	const backgroundHue = hsvToRgb({ h: hue, s: 100, v: 100, a: 1 });
@@ -945,12 +1274,17 @@ function ColorPickerArea(props: DivProps) {
 		"data-slot": "color-picker-area",
 		className: cn(
 			"relative h-40 w-full cursor-crosshair touch-none rounded-sm border",
-			context.disabled && "pointer-events-none opacity-50",
+			(context.disabled || context.readOnly) &&
+				"pointer-events-none opacity-50",
 			className
 		),
 		onPointerDown,
 		onPointerMove,
 		onPointerUp,
+		onKeyDown,
+		role: "group",
+		tabIndex: context.disabled || context.readOnly ? -1 : 0,
+		"aria-label": "Saturation and brightness",
 		ref: composedRef,
 		children: (
 			<>
@@ -1005,8 +1339,7 @@ function ColorPickerHueSlider(
 				v: hsv?.v ?? 0,
 				a: hsv?.a ?? 1,
 			};
-			store.setHsv(newHsv);
-			store.setColor(hsvToRgb(newHsv));
+			store.setColorAndHsv(hsvToRgb(newHsv), newHsv);
 		},
 		[hsv, store]
 	);
@@ -1015,7 +1348,7 @@ function ColorPickerHueSlider(
 		<SliderPrimitive.Root
 			data-slot="color-picker-hue-slider"
 			{...sliderProps}
-			disabled={context.disabled}
+			disabled={context.disabled || context.readOnly}
 			max={360}
 			min={0}
 			onValueChange={onValueChange}
@@ -1054,8 +1387,7 @@ function ColorPickerAlphaSlider(
 			const alpha = (raw ?? 0) / 100;
 			const newColor = { ...color, a: alpha };
 			const newHsv = { ...hsv, a: alpha };
-			store.setColor(newColor);
-			store.setHsv(newHsv);
+			store.setColorAndHsv(newColor, newHsv);
 		},
 		[color, hsv, store]
 	);
@@ -1066,7 +1398,7 @@ function ColorPickerAlphaSlider(
 		<SliderPrimitive.Root
 			data-slot="color-picker-alpha-slider"
 			{...sliderProps}
-			disabled={context.disabled}
+			disabled={context.disabled || context.readOnly}
 			max={100}
 			min={0}
 			onValueChange={onValueChange}
@@ -1152,6 +1484,245 @@ function ColorPickerSwatch(props: DivProps) {
 	});
 }
 
+function colorSwatchStyle(color: ColorValue): CSSProperties {
+	const colorString = `rgba(${Math.round(color.r)}, ${Math.round(color.g)}, ${Math.round(color.b)}, ${roundAlpha(color.a)})`;
+	if (color.a < 1) {
+		return {
+			background: `linear-gradient(${colorString}, ${colorString}), repeating-conic-gradient(#ccc 0% 25%, #fff 0% 50%) 0% 50% / 8px 8px`,
+		};
+	}
+	return { backgroundColor: colorString };
+}
+
+interface ColorPickerSwatchesProps extends ComponentProps<"div"> {
+	colors?: string[];
+	recentColors?: string[];
+}
+
+function ColorPickerSwatches({
+	className,
+	colors: colorsProp,
+	recentColors: recentColorsProp,
+	...props
+}: ColorPickerSwatchesProps) {
+	const context = useColorPickerContext(SWATCH_NAME);
+	const store = useStoreContext(SWATCH_NAME);
+	const currentColor = useStore((state) => state.color);
+	const storedRecentColors = useRecentColors();
+	const recentColors = recentColorsProp ?? storedRecentColors;
+	const swatches = colorsProp ?? context.swatches;
+
+	const parsedRecentColors = useMemo(
+		() =>
+			recentColors
+				.map((value) => {
+					const color = parseColorString(value);
+					return color ? { color, value: serializeColor(color) } : null;
+				})
+				.filter(
+					(entry): entry is { color: ColorValue; value: string } =>
+						entry !== null
+				)
+				.filter(
+					(entry, index, entries) =>
+						entries.findIndex(
+							(candidate) => candidate.value === entry.value
+						) === index
+				)
+				.slice(0, MAX_RECENT_COLORS),
+		[recentColors]
+	);
+	const parsedSwatches = useMemo(
+		() =>
+			swatches
+				.map((value) => {
+					const color = parseColorString(value);
+					return color ? { color, value: serializeColor(color) } : null;
+				})
+				.filter(
+					(entry): entry is { color: ColorValue; value: string } =>
+						entry !== null
+				)
+				.filter(
+					(entry, index, entries) =>
+						entries.findIndex(
+							(candidate) => candidate.value === entry.value
+						) === index
+				)
+				.slice(0, 12),
+		[swatches]
+	);
+
+	const selectColor = useCallback(
+		(color: ColorValue) => {
+			if (context.disabled || context.readOnly) {
+				return;
+			}
+			recordRecentColor(serializeColor(color));
+			store.setColorAndHsv(color, rgbToHsv(color));
+		},
+		[context.disabled, context.readOnly, store]
+	);
+
+	const renderGroup = useCallback(
+		(label: string, entries: Array<{ color: ColorValue; value: string }>) => {
+			if (entries.length === 0) {
+				return null;
+			}
+			const currentValue = serializeColor(currentColor);
+			return (
+				<div aria-label={label} className="flex flex-col gap-1.5" role="group">
+					<span className="text-muted-foreground text-xs">{label}</span>
+					<div className="flex flex-wrap gap-1.5">
+						{entries.map((entry) => {
+							const selected = entry.value === currentValue;
+							return (
+								<Button
+									aria-label={`Select ${label.toLowerCase()} ${entry.value}`}
+									aria-pressed={selected}
+									className={cn(
+										"size-7 rounded-md border border-border p-0 shadow-none transition-[transform,border-color,box-shadow] hover:scale-105 hover:border-ring focus-visible:ring-2 focus-visible:ring-ring",
+										selected &&
+											"border-ring ring-2 ring-ring ring-offset-1 ring-offset-popover"
+									)}
+									data-color-value={entry.value}
+									data-slot="color-picker-swatch-button"
+									disabled={context.disabled || context.readOnly}
+									key={entry.value}
+									onClick={() => selectColor(entry.color)}
+									style={colorSwatchStyle(entry.color)}
+									title={entry.value}
+									type="button"
+									variant="ghost"
+								/>
+							);
+						})}
+					</div>
+				</div>
+			);
+		},
+		[currentColor, context.disabled, context.readOnly, selectColor]
+	);
+
+	if (parsedRecentColors.length === 0 && parsedSwatches.length === 0) {
+		return null;
+	}
+
+	return (
+		<div
+			{...props}
+			className={cn(
+				"flex flex-col gap-3 border-border/70 border-t pt-3",
+				className
+			)}
+			data-slot="color-picker-swatches"
+		>
+			{context.showRecentColors
+				? renderGroup("Recent colors", parsedRecentColors)
+				: null}
+			{renderGroup("Swatches", parsedSwatches)}
+		</div>
+	);
+}
+
+interface ColorPickerPanelProps extends ComponentProps<"div"> {
+	showEyeDropper?: boolean;
+	withoutAlpha?: boolean;
+}
+
+function ColorPickerPanel({
+	className,
+	showEyeDropper = true,
+	withoutAlpha,
+	...props
+}: ColorPickerPanelProps) {
+	return (
+		<div
+			{...props}
+			className={cn("flex flex-col gap-3", className)}
+			data-slot="color-picker-panel"
+		>
+			<ColorPickerArea />
+			<ColorPickerHueSlider aria-label="Hue" />
+			{!withoutAlpha && <ColorPickerAlphaSlider aria-label="Alpha" />}
+			<div className="flex min-w-0 items-center gap-2">
+				<ColorPickerFormatSelect className="w-[4.75rem] shrink-0" />
+				<ColorPickerInput
+					className="min-w-0 flex-1"
+					withoutAlpha={withoutAlpha}
+				/>
+				{showEyeDropper && (
+					<ColorPickerEyeDropper aria-label="Pick color from screen" />
+				)}
+			</div>
+		</div>
+	);
+}
+
+interface ColorPickerPopoverProps extends Omit<ColorPickerProps, "children"> {
+	triggerAriaLabel?: string;
+	triggerClassName?: string;
+	triggerShowValue?: boolean;
+	triggerStyle?: CSSProperties;
+}
+
+function ColorPickerPopoverTrigger({
+	triggerAriaLabel = "Choose color",
+	triggerClassName,
+	triggerShowValue = true,
+	triggerStyle,
+}: Pick<
+	ColorPickerPopoverProps,
+	"triggerAriaLabel" | "triggerClassName" | "triggerShowValue" | "triggerStyle"
+>) {
+	const color = useStore((state) => state.color);
+	const displayValue = serializeColor(color);
+
+	return (
+		<ColorPickerTrigger
+			aria-label={triggerAriaLabel}
+			className={cn(
+				"inline-flex h-8 min-w-12 items-center justify-center gap-2 rounded-md border border-border bg-background px-2 text-foreground hover:bg-muted dark:bg-transparent dark:hover:bg-muted/50",
+				triggerClassName
+			)}
+			style={triggerStyle}
+		>
+			<span
+				aria-hidden="true"
+				className="size-5 shrink-0 rounded-sm border border-foreground/15"
+				style={{ ...colorSwatchStyle(color), forcedColorAdjust: "none" }}
+			/>
+			{triggerShowValue && (
+				<span className="font-mono text-xs uppercase">{displayValue}</span>
+			)}
+		</ColorPickerTrigger>
+	);
+}
+
+function ColorPickerPopover({
+	defaultValue = "#000000",
+	triggerAriaLabel = "Choose color",
+	triggerClassName,
+	triggerShowValue = true,
+	triggerStyle,
+	value,
+	...props
+}: ColorPickerPopoverProps) {
+	return (
+		<ColorPicker {...props} defaultValue={defaultValue} value={value}>
+			<ColorPickerPopoverTrigger
+				triggerAriaLabel={triggerAriaLabel}
+				triggerClassName={triggerClassName}
+				triggerShowValue={triggerShowValue}
+				triggerStyle={triggerStyle}
+			/>
+			<ColorPickerContent>
+				<ColorPickerPanel />
+			</ColorPickerContent>
+		</ColorPicker>
+	);
+}
+
 function ColorPickerEyeDropper(props: ComponentProps<typeof Button>) {
 	const { size: sizeProp, children, disabled, ...buttonProps } = props;
 
@@ -1160,7 +1731,7 @@ function ColorPickerEyeDropper(props: ComponentProps<typeof Button>) {
 
 	const color = useStore((state) => state.color);
 
-	const isDisabled = disabled || context.disabled;
+	const isDisabled = disabled || context.disabled || context.readOnly;
 
 	const onEyeDropper = useCallback(async () => {
 		if (!window.EyeDropper) {
@@ -1175,8 +1746,7 @@ function ColorPickerEyeDropper(props: ComponentProps<typeof Button>) {
 				const currentAlpha = color?.a ?? 1;
 				const newColor = hexToRgb(result.sRGBHex, currentAlpha);
 				const newHsv = rgbToHsv(newColor);
-				store.setColor(newColor);
-				store.setHsv(newHsv);
+				store.setColorAndHsv(newColor, newHsv);
 			}
 		} catch (error) {
 			console.warn("EyeDropper error:", error);
@@ -1195,6 +1765,7 @@ function ColorPickerEyeDropper(props: ComponentProps<typeof Button>) {
 		<Button
 			data-slot="color-picker-eye-dropper"
 			{...buttonProps}
+			aria-label={buttonProps["aria-label"] ?? "Pick color from screen"}
 			disabled={isDisabled}
 			onClick={onEyeDropper}
 			size={size}
@@ -1214,7 +1785,7 @@ function ColorPickerFormatSelect(props: ColorPickerFormatSelectProps) {
 
 	const context = useColorPickerContext(FORMAT_SELECT_NAME);
 	const store = useStoreContext(FORMAT_SELECT_NAME);
-	const isDisabled = disabled || context.disabled;
+	const isDisabled = disabled || context.disabled || context.readOnly;
 
 	const format = useStore((state) => state.format);
 
@@ -1265,13 +1836,11 @@ function ColorPickerInput(props: ColorPickerInputProps) {
 
 	const color = useStore((state) => state.color);
 	const format = useStore((state) => state.format);
-	const hsv = useStore((state) => state.hsv);
 
 	const onColorChange = useCallback(
 		(newColor: ColorValue) => {
 			const newHsv = rgbToHsv(newColor);
-			store.setColor(newColor);
-			store.setHsv(newHsv);
+			store.setColorAndHsv(newColor, newHsv);
 		},
 		[store]
 	);
@@ -1309,11 +1878,11 @@ function ColorPickerInput(props: ColorPickerInputProps) {
 		);
 	}
 
-	if (format === "hsb") {
+	if (format === "oklch") {
 		return (
-			<HsbInput
+			<OklchInput
+				color={color}
 				context={context}
-				hsv={hsv}
 				onColorChange={onColorChange}
 				{...props}
 			/>
@@ -1403,7 +1972,7 @@ function HexInput(props: FormatInputProps) {
 				position="isolated"
 				{...inputProps}
 				className={cn("font-mono", className)}
-				disabled={context.disabled}
+				disabled={context.disabled || context.readOnly}
 				onChange={onHexChange}
 				placeholder="#000000"
 				value={hexValue}
@@ -1421,7 +1990,7 @@ function HexInput(props: FormatInputProps) {
 				position="first"
 				{...inputProps}
 				className="flex-1 font-mono"
-				disabled={context.disabled}
+				disabled={context.disabled || context.readOnly}
 				onChange={onHexChange}
 				placeholder="#000000"
 				value={hexValue}
@@ -1431,7 +2000,7 @@ function HexInput(props: FormatInputProps) {
 				position="last"
 				{...inputProps}
 				className="w-14"
-				disabled={context.disabled}
+				disabled={context.disabled || context.readOnly}
 				inputMode="numeric"
 				max="100"
 				min="0"
@@ -1481,7 +2050,7 @@ function RgbInput(props: FormatInputProps) {
 				position="first"
 				{...inputProps}
 				className="w-14"
-				disabled={context.disabled}
+				disabled={context.disabled || context.readOnly}
 				inputMode="numeric"
 				max="255"
 				min="0"
@@ -1495,7 +2064,7 @@ function RgbInput(props: FormatInputProps) {
 				position="middle"
 				{...inputProps}
 				className="w-14"
-				disabled={context.disabled}
+				disabled={context.disabled || context.readOnly}
 				inputMode="numeric"
 				max="255"
 				min="0"
@@ -1509,7 +2078,7 @@ function RgbInput(props: FormatInputProps) {
 				position={withoutAlpha ? "last" : "middle"}
 				{...inputProps}
 				className="w-14"
-				disabled={context.disabled}
+				disabled={context.disabled || context.readOnly}
 				inputMode="numeric"
 				max="255"
 				min="0"
@@ -1524,7 +2093,7 @@ function RgbInput(props: FormatInputProps) {
 					position="last"
 					{...inputProps}
 					className="w-14"
-					disabled={context.disabled}
+					disabled={context.disabled || context.readOnly}
 					inputMode="numeric"
 					max="100"
 					min="0"
@@ -1584,7 +2153,7 @@ function HslInput(props: FormatInputProps) {
 				position="first"
 				{...inputProps}
 				className="w-14"
-				disabled={context.disabled}
+				disabled={context.disabled || context.readOnly}
 				inputMode="numeric"
 				max="360"
 				min="0"
@@ -1598,7 +2167,7 @@ function HslInput(props: FormatInputProps) {
 				position="middle"
 				{...inputProps}
 				className="w-14"
-				disabled={context.disabled}
+				disabled={context.disabled || context.readOnly}
 				inputMode="numeric"
 				max="100"
 				min="0"
@@ -1612,7 +2181,7 @@ function HslInput(props: FormatInputProps) {
 				position={withoutAlpha ? "last" : "middle"}
 				{...inputProps}
 				className="w-14"
-				disabled={context.disabled}
+				disabled={context.disabled || context.readOnly}
 				inputMode="numeric"
 				max="100"
 				min="0"
@@ -1627,7 +2196,7 @@ function HslInput(props: FormatInputProps) {
 					position="last"
 					{...inputProps}
 					className="w-14"
-					disabled={context.disabled}
+					disabled={context.disabled || context.readOnly}
 					inputMode="numeric"
 					max="100"
 					min="0"
@@ -1641,13 +2210,9 @@ function HslInput(props: FormatInputProps) {
 	);
 }
 
-interface HsbInputProps extends Omit<FormatInputProps, "color"> {
-	hsv: HSVColorValue;
-}
-
-function HsbInput(props: HsbInputProps) {
+function OklchInput(props: FormatInputProps) {
 	const {
-		hsv,
+		color,
 		onColorChange,
 		context,
 		withoutAlpha,
@@ -1655,30 +2220,35 @@ function HsbInput(props: HsbInputProps) {
 		...inputProps
 	} = props;
 
-	const alphaValue = Math.round((hsv?.a ?? 1) * 100);
+	const oklch = useMemo(() => rgbToOklch(color), [color]);
+	const lightnessValue = Number((oklch.l * 100).toFixed(1));
+	const chromaValue = Number(oklch.c.toFixed(3));
+	const hueValue = Number(oklch.h.toFixed(1));
+	const alphaValue = Math.round((color.a ?? 1) * 100);
 
-	const onHsvChannelChange = useCallback(
-		(channel: "h" | "s" | "v", max: number) =>
+	const onChannelChange = useCallback(
+		(channel: "l" | "c" | "h", min: number, max: number) =>
 			(event: ChangeEvent<InputElement>) => {
-				const value = Number.parseInt(event.target.value, 10);
-				if (!Number.isNaN(value) && value >= 0 && value <= max) {
-					const newHsv = { ...hsv, [channel]: value };
-					const newColor = hsvToRgb(newHsv);
-					onColorChange(newColor);
+				const value = Number.parseFloat(event.target.value);
+				if (!Number.isNaN(value) && value >= min && value <= max) {
+					const next = {
+						...oklch,
+						[channel]: channel === "l" ? value / 100 : value,
+					};
+					onColorChange(oklchToRgb(next));
 				}
 			},
-		[hsv, onColorChange]
+		[oklch, onColorChange]
 	);
 
 	const onAlphaChange = useCallback(
 		(event: ChangeEvent<InputElement>) => {
 			const value = Number.parseInt(event.target.value, 10);
 			if (!Number.isNaN(value) && value >= 0 && value <= 100) {
-				const currentColor = hsvToRgb(hsv);
-				onColorChange({ ...currentColor, a: value / 100 });
+				onColorChange(oklchToRgb({ ...oklch, a: value / 100 }));
 			}
 		},
-		[hsv, onColorChange]
+		[oklch, onColorChange]
 	);
 
 	return (
@@ -1687,46 +2257,49 @@ function HsbInput(props: HsbInputProps) {
 			data-slot="color-picker-input-wrapper"
 		>
 			<InputGroupItem
-				aria-label="Hue degree (0-360)"
+				aria-label="OKLCH lightness percentage (0-100)"
 				position="first"
 				{...inputProps}
-				className="w-14"
-				disabled={context.disabled}
-				inputMode="numeric"
-				max="360"
+				className="w-16"
+				disabled={context.disabled || context.readOnly}
+				inputMode="decimal"
+				max="100"
 				min="0"
-				onChange={onHsvChannelChange("h", 360)}
-				pattern="[0-9]*"
-				placeholder="0"
-				value={hsv?.h ?? 0}
+				onChange={onChannelChange("l", 0, 100)}
+				placeholder="69"
+				step="0.1"
+				type="number"
+				value={lightnessValue}
 			/>
 			<InputGroupItem
-				aria-label="Saturation percentage (0-100)"
+				aria-label="OKLCH chroma (0-0.4)"
 				position="middle"
 				{...inputProps}
-				className="w-14"
-				disabled={context.disabled}
-				inputMode="numeric"
-				max="100"
+				className="w-16"
+				disabled={context.disabled || context.readOnly}
+				inputMode="decimal"
+				max="0.4"
 				min="0"
-				onChange={onHsvChannelChange("s", 100)}
-				pattern="[0-9]*"
-				placeholder="0"
-				value={hsv?.s ?? 0}
+				onChange={onChannelChange("c", 0, 0.4)}
+				placeholder="0.16"
+				step="0.001"
+				type="number"
+				value={chromaValue}
 			/>
 			<InputGroupItem
-				aria-label="Brightness percentage (0-100)"
+				aria-label="OKLCH hue degree (0-360)"
 				position={withoutAlpha ? "last" : "middle"}
 				{...inputProps}
-				className="w-14"
-				disabled={context.disabled}
-				inputMode="numeric"
-				max="100"
+				className="w-16"
+				disabled={context.disabled || context.readOnly}
+				inputMode="decimal"
+				max="360"
 				min="0"
-				onChange={onHsvChannelChange("v", 100)}
-				pattern="[0-9]*"
-				placeholder="0"
-				value={hsv?.v ?? 0}
+				onChange={onChannelChange("h", 0, 360)}
+				placeholder="265"
+				step="0.1"
+				type="number"
+				value={hueValue}
 			/>
 			{!withoutAlpha && (
 				<InputGroupItem
@@ -1734,13 +2307,13 @@ function HsbInput(props: HsbInputProps) {
 					position="last"
 					{...inputProps}
 					className="w-14"
-					disabled={context.disabled}
+					disabled={context.disabled || context.readOnly}
 					inputMode="numeric"
 					max="100"
 					min="0"
 					onChange={onAlphaChange}
-					pattern="[0-9]*"
 					placeholder="100"
+					type="number"
 					value={alphaValue}
 				/>
 			)}
@@ -1757,8 +2330,14 @@ export {
 	ColorPickerFormatSelect,
 	ColorPickerHueSlider,
 	ColorPickerInput,
+	ColorPickerPanel,
+	type ColorPickerPanelProps,
+	ColorPickerPopover,
+	type ColorPickerPopoverProps,
 	type ColorPickerProps,
 	ColorPickerSwatch,
+	ColorPickerSwatches,
+	type ColorPickerSwatchesProps,
 	ColorPickerTrigger,
 	useStore as useColorPicker,
 };

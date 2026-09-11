@@ -1,7 +1,7 @@
 import { Button } from "@ryu/ui/components/button";
 import { Input } from "@ryu/ui/components/input";
 import { ChevronLeft, ChevronRight, Minus, Plus } from "lucide-react";
-import type { PDFDocumentProxy } from "pdfjs-dist";
+import type { PDFDocumentLoadingTask, PDFDocumentProxy } from "pdfjs-dist";
 import { useEffect, useRef, useState } from "react";
 
 interface PdfViewerProps {
@@ -18,15 +18,18 @@ export function PdfViewer({ bytes, onLoadError }: PdfViewerProps) {
 
 	useEffect(() => {
 		let disposed = false;
-		let loaded: PDFDocumentProxy | null = null;
+		let loadingTask: PDFDocumentLoadingTask | undefined;
 		import("pdfjs-dist")
 			.then(async (pdfjs) => {
+				if (disposed) {
+					return;
+				}
 				pdfjs.GlobalWorkerOptions.workerSrc = new URL(
 					"pdfjs-dist/build/pdf.worker.min.mjs",
 					import.meta.url
 				).toString();
-				loaded = await pdfjs.getDocument({ data: new Uint8Array(bytes) })
-					.promise;
+				loadingTask = pdfjs.getDocument({ data: new Uint8Array(bytes) });
+				const loaded = await loadingTask.promise;
 				if (!disposed) {
 					setDocument(loaded);
 					setPageNumber(1);
@@ -43,7 +46,8 @@ export function PdfViewer({ bytes, onLoadError }: PdfViewerProps) {
 			});
 		return () => {
 			disposed = true;
-			loaded?.cleanup().catch(() => undefined);
+			// Destroy also cancels pending parsing and terminates the owned worker.
+			loadingTask?.destroy().catch(() => undefined);
 		};
 	}, [bytes, onLoadError]);
 

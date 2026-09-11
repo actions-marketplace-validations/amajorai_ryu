@@ -7,20 +7,21 @@
 //! which resolves its provider exactly as a hand-picked model would. Nothing
 //! about providers is decided here — only *which model* the request should use.
 //!
-//! Everything fails open: an inactive config, an unparseable reply, a classifier
-//! error, or a timeout all leave the originally requested model untouched, so a
-//! misconfiguration can never break chat. The classifier is called via
-//! `Provider::complete` directly (never the pipeline), so it cannot recurse back
-//! into smart routing.
+//! Provider failures or an unparseable reply preserve the originally requested
+//! model. Governance denials propagate to the caller. Every classifier, judge
+//! and embedding call uses the pipeline's nonrecursive `InferenceClient`
+//! capability, so auxiliary work is inspected and accounted before routing continues.
 
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
-use dashmap::DashMap;
-use reqwest::Client;
+#[path = "smart_cache.rs"]
+pub(crate) mod bounded;
+use bounded::BoundedCache;
 use serde_json::{json, Value};
 use tokio::sync::OnceCell;
-use tracing::{debug, warn};
+use tracing::debug;
 
 use ryu_gw_router::{
     build_prompt, keyword_match, last_user_message, parse_choice, stage_target, truncate,
@@ -28,13 +29,12 @@ use ryu_gw_router::{
 };
 
 use crate::{
-    config::{
-        ModelRouterType, OpenAiProviderConfig, RouteStrategy, SmartRoutingConfig, StagePicker,
-    },
-    providers::ProviderRegistry,
-    router::RouterBackend,
-    semantic_cache::{cosine_similarity, embed_text},
+    config::{ModelRouterType, RouteStrategy, SmartRoutingConfig, StagePicker},
+    error::GatewayError,
+    semantic_cache::cosine_similarity,
 };
+
+use crate::pipeline::inference_governance::InferenceClient;
 
 /// Fallback embedding model for the `Embedding` strategy when the config leaves
 /// `embedding_model` empty (matches the semantic cache's default local sidecar).
@@ -60,17 +60,17 @@ fn mix_u64(mut value: u64) -> u64 {
 /// all routing config — see `api/config.rs`).
 pub struct SmartRouter {
     config: SmartRoutingConfig,
-    /// `x-ryu-session-id` → chosen target model. Only used when
+    /// Caller-policy scope + hashed session id → chosen target model. Only used when
     /// `config.cache_by_session` is set.
-    decisions: DashMap<String, String>,
+    decisions: BoundedCache<String, String>,
     /// Lazily-computed embeddings for each rule's description, in rule order.
-    /// Computed once on the first `Embedding`-strategy request. A `None` entry is
+    /// Computed once per retained caller-policy scope. A `None` entry is
     /// a rule whose description could not be embedded (skipped when matching).
-    rule_embeddings: OnceCell<Vec<Option<Vec<f32>>>>,
+    rule_embeddings: BoundedCache<String, Arc<OnceCell<Vec<Option<Vec<f32>>>>>>,
     /// Whether the configured classifier can actually discriminate between rules,
-    /// probed once on the first `Llm`-strategy request. See
+    /// probed once per retained caller-policy scope. See
     /// [`SmartRouter::classifier_discriminates`].
-    classifier_sane: OnceCell<bool>,
+    classifier_sane: BoundedCache<String, Arc<OnceCell<bool>>>,
     /// Process-local pseudo-random state for the `random` router. A configured
     /// seed makes the sequence reproducible for the same request order; it is
     /// deliberately not a session-affinity mechanism.
@@ -78,7 +78,7 @@ pub struct SmartRouter {
     random_counter: AtomicU64,
     /// Consecutive escalation verdicts by session. A missing session id cannot
     /// accumulate a streak, which keeps escalation fail-open on one-shot calls.
-    escalation_streaks: DashMap<String, u32>,
+    escalation_streaks: BoundedCache<String, Arc<std::sync::atomic::AtomicU32>>,
 }
 
 impl SmartRouter {
@@ -86,12 +86,12 @@ impl SmartRouter {
         let random_seed = config.random_seed.unwrap_or_else(process_seed);
         Self {
             config,
-            decisions: DashMap::new(),
-            rule_embeddings: OnceCell::new(),
-            classifier_sane: OnceCell::new(),
+            decisions: BoundedCache::new(256),
+            rule_embeddings: BoundedCache::new(4),
+            classifier_sane: BoundedCache::new(64),
             random_seed,
             random_counter: AtomicU64::new(0),
-            escalation_streaks: DashMap::new(),
+            escalation_streaks: BoundedCache::new(256),
         }
     }
 
@@ -109,53 +109,44 @@ impl SmartRouter {
         &self,
         messages: &Value,
         session_id: Option<&str>,
-        providers: &ProviderRegistry,
-        router: &dyn RouterBackend,
-        http: &Client,
-        embed_provider: Option<&OpenAiProviderConfig>,
-    ) -> Option<String> {
+        inference: &dyn InferenceClient,
+    ) -> Result<Option<String>, GatewayError> {
         if !self.is_active() {
-            return None;
+            return Ok(None);
         }
-
-        // 1. The classifier is sticky when requested. Random and stage routers are
-        // intentionally per-request; escalation has its own streak/latch state.
+        let session_key = session_id.map(|sid| {
+            use sha2::{Digest, Sha256};
+            format!("{}:{:x}", inference.scope(), Sha256::digest(sid.as_bytes()))
+        });
         if self.config.router_type == ModelRouterType::LlmClassifier && self.config.cache_by_session
         {
-            if let Some(sid) = session_id {
+            if let Some(sid) = &session_key {
                 if let Some(hit) = self.decisions.get(sid) {
-                    debug!(session = sid, model = %*hit, "smart routing: session cache hit");
-                    return Some(hit.clone());
+                    return Ok(Some(hit));
                 }
             }
         }
-
-        // 2. Dispatch to the configured router. Each path fails open (→ None).
         let chosen = match self.config.router_type {
             ModelRouterType::Passthrough => None,
             ModelRouterType::LlmClassifier => match self.config.strategy {
-                RouteStrategy::Llm => self.classify_llm(messages, providers, router).await,
-                RouteStrategy::Embedding => {
-                    self.classify_embedding(messages, http, embed_provider)
-                        .await
-                }
+                RouteStrategy::Llm => self.classify_llm(messages, inference).await?,
+                RouteStrategy::Embedding => self.classify_embedding(messages, inference).await?,
                 RouteStrategy::Keyword => self.classify_keyword(messages),
             },
             ModelRouterType::Random => self.classify_random(),
             ModelRouterType::StageRouter => self.classify_stage(messages),
             ModelRouterType::Escalation => {
-                self.classify_escalation(messages, session_id, providers, router)
-                    .await
+                self.classify_escalation(messages, session_key.as_deref(), inference)
+                    .await?
             }
-        }?;
-
+        };
         if self.config.router_type == ModelRouterType::LlmClassifier && self.config.cache_by_session
         {
-            if let Some(sid) = session_id {
-                self.decisions.insert(sid.to_string(), chosen.clone());
+            if let (Some(sid), Some(model)) = (session_key, &chosen) {
+                self.decisions.insert(sid, model.clone());
             }
         }
-        Some(chosen)
+        Ok(chosen)
     }
 
     /// Map a rule index (0-based) or the no-match case to a target model, sharing
@@ -247,101 +238,65 @@ impl SmartRouter {
         &self,
         messages: &Value,
         session_id: Option<&str>,
-        providers: &ProviderRegistry,
-        router: &dyn RouterBackend,
-    ) -> Option<String> {
+        inference: &dyn InferenceClient,
+    ) -> Result<Option<String>, GatewayError> {
         let weak = self.config.escalation_weak_model.trim();
         let strong = self.config.escalation_strong_model.trim();
         let judge = self.config.escalation_judge_model.trim();
         if weak.is_empty() || strong.is_empty() || judge.is_empty() {
-            return None;
+            return Ok(None);
         }
-
         let confirmations = self.config.escalation_confirmations.max(1);
-        let sid = session_id.map(str::trim).filter(|value| !value.is_empty());
-        if let Some(sid) = sid {
+        let sid = session_id.map(str::to_owned);
+        if let Some(sid) = &sid {
             if self
                 .escalation_streaks
                 .get(sid)
-                .is_some_and(|streak| *streak >= confirmations)
+                .is_some_and(|s| s.load(Ordering::Relaxed) >= confirmations)
             {
-                debug!(
-                    session = sid,
-                    model = strong,
-                    "smart routing: escalation latched"
-                );
-                return Some(strong.to_owned());
+                return Ok(Some(strong.to_owned()));
             }
         }
-
-        let decision = router.route(judge);
-        let Some(provider) = providers.get(decision.provider.as_str()) else {
-            warn!(
-                provider = decision.provider.as_str(),
-                model = %decision.model,
-                "smart routing: escalation judge provider unavailable; using weak target"
-            );
-            return Some(weak.to_owned());
+        let body = json!({"model": judge, "messages": [{"role":"user", "content": self.escalation_prompt(messages)}], "temperature":0, "max_tokens":4, "stream":false});
+        let Some(response) = inference
+            .complete(judge, body, self.config.timeout_ms)
+            .await?
+        else {
+            return Ok(Some(weak.to_owned()));
         };
-
-        let prompt = self.escalation_prompt(messages);
-        let body = json!({
-            "model": decision.model,
-            "messages": [{ "role": "user", "content": prompt }],
-            "temperature": 0,
-            "max_tokens": 4,
-            "stream": false,
-        });
-        let response = match tokio::time::timeout(
-            Duration::from_millis(self.config.timeout_ms),
-            provider.complete(&decision.model, &body),
-        )
-        .await
-        {
-            Ok(Ok(value)) => value,
-            Ok(Err(error)) => {
-                warn!(error = %error, "smart routing: escalation judge failed; using weak target");
-                return Some(weak.to_owned());
-            }
-            Err(_) => {
-                warn!(
-                    timeout_ms = self.config.timeout_ms,
-                    "smart routing: escalation judge timed out; using weak target"
-                );
-                return Some(weak.to_owned());
-            }
-        };
-
-        let verdict = response["choices"][0]["message"]["content"]
+        let escalate = response["choices"][0]["message"]["content"]
             .as_str()
             .unwrap_or("")
             .trim()
-            .to_ascii_lowercase();
-        let escalate = verdict.starts_with("escalate");
+            .to_ascii_lowercase()
+            .starts_with("escalate");
         if !escalate {
-            if let Some(sid) = sid {
+            if let Some(sid) = &sid {
                 self.escalation_streaks.remove(sid);
             }
-            return Some(weak.to_owned());
+            return Ok(Some(weak.to_owned()));
         }
-
-        let streak = if let Some(sid) = sid {
-            let mut entry = self.escalation_streaks.entry(sid.to_owned()).or_insert(0);
-            *entry = entry.saturating_add(1);
-            *entry
+        let streak = if let Some(sid) = &sid {
+            let count = self.escalation_streaks.get_or_insert_with(sid.clone(), || {
+                Arc::new(std::sync::atomic::AtomicU32::new(0))
+            });
+            count
+                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
+                    Some(n.saturating_add(1))
+                })
+                .unwrap_or(0)
+                .saturating_add(1)
         } else {
             1
         };
-        if streak >= confirmations && (sid.is_some() || confirmations == 1) {
-            debug!(
-                ?streak,
-                model = strong,
-                "smart routing: escalation confirmed"
-            );
-            Some(strong.to_owned())
-        } else {
-            Some(weak.to_owned())
-        }
+        Ok(Some(
+            if streak >= confirmations && (sid.is_some() || confirmations == 1) {
+                strong
+            } else {
+                weak
+            }
+            .to_owned(),
+        ))
     }
 
     fn escalation_prompt(&self, messages: &Value) -> String {
@@ -368,75 +323,55 @@ impl SmartRouter {
     async fn classify_embedding(
         &self,
         messages: &Value,
-        http: &Client,
-        embed_provider: Option<&OpenAiProviderConfig>,
-    ) -> Option<String> {
-        let user_msg = last_user_message(messages)?;
-        // No `[providers.openai]` is not "no embedder": Core runs an embed sidecar on
-        // loopback speaking the same OpenAI-compatible `/embeddings` shape, and it
-        // serves exactly the model `DEFAULT_EMBED_MODEL` names. Before this, the
-        // strategy warned and kept the requested model on every local-only node — so
-        // the one routing mode that needs no cloud account was the one that could not
-        // run without one. The local endpoint takes no key.
-        let (embed_base_url, embed_api_key) = match embed_provider {
-            Some(openai) => (openai.base_url.clone(), openai.api_key.clone()),
-            None => (crate::config::local_embed_base_url(), String::new()),
+        inference: &dyn InferenceClient,
+    ) -> Result<Option<String>, GatewayError> {
+        let Some(user_msg) = last_user_message(messages) else {
+            return Ok(None);
         };
         let model = if self.config.embedding_model.trim().is_empty() {
             DEFAULT_EMBED_MODEL
         } else {
             self.config.embedding_model.trim()
         };
-
-        // Rule embeddings are computed once and reused (config is a snapshot).
-        let rule_embs = self
+        let cell = self
             .rule_embeddings
-            .get_or_init(|| async {
+            .get_or_insert_with(inference.scope(), || Arc::new(OnceCell::new()));
+        let rule_embs = cell
+            .get_or_try_init(|| async {
                 let mut out = Vec::with_capacity(self.config.rules.len());
                 for rule in &self.config.rules {
-                    match embed_text(&rule.description, http, &embed_base_url, &embed_api_key, model).await {
-                        Ok(v) => out.push(Some(v)),
-                        Err(e) => {
-                            warn!(rule = %rule.description, error = %e, "smart routing: failed to embed rule description; rule disabled");
-                            out.push(None);
-                        }
-                    }
+                    out.push(
+                        inference
+                            .embed(model, &rule.description, self.config.timeout_ms)
+                            .await?,
+                    );
                 }
-                out
+                Ok::<_, GatewayError>(out)
             })
-            .await;
-
-        let query_emb = match embed_text(
-            truncate(&user_msg, MAX_CLASSIFIER_INPUT_CHARS),
-            http,
-            &embed_base_url,
-            &embed_api_key,
-            model,
-        )
-        .await
-        {
-            Ok(v) => v,
-            Err(e) => {
-                warn!(error = %e, "smart routing: failed to embed query; keeping requested model");
-                return None;
-            }
+            .await?;
+        let Some(query_emb) = inference
+            .embed(
+                model,
+                truncate(&user_msg, MAX_CLASSIFIER_INPUT_CHARS),
+                self.config.timeout_ms,
+            )
+            .await?
+        else {
+            return Ok(None);
         };
-
-        let mut best_idx: Option<usize> = None;
+        let mut best_idx = None;
         let mut best_score = self.config.similarity_threshold;
         for (idx, emb) in rule_embs.iter().enumerate() {
-            let Some(emb) = emb else { continue };
+            let Some(emb) = emb else {
+                continue;
+            };
             let score = cosine_similarity(&query_emb, emb);
             if score >= best_score {
                 best_score = score;
                 best_idx = Some(idx);
             }
         }
-        debug!(
-            ?best_idx,
-            best_score, "smart routing: embedding nearest match"
-        );
-        self.model_for_match(best_idx)
+        Ok(self.model_for_match(best_idx))
     }
 
     /// `Keyword` strategy: first rule whose description shares a significant word
@@ -487,159 +422,64 @@ impl SmartRouter {
     async fn classifier_discriminates(
         &self,
         descriptions: &[String],
-        provider: &dyn ryu_gw_providers::Provider,
-        model: &str,
-    ) -> bool {
-        // `OnceCell::get_or_init` takes an async closure here (same pattern as
-        // `rule_embeddings`), so the probe runs at most once per config even
-        // under concurrent first requests.
-        let sane = self
+        inference: &dyn InferenceClient,
+    ) -> Result<bool, GatewayError> {
+        let cell = self
             .classifier_sane
-            .get_or_init(|| async {
-                if descriptions.len() < 2 {
-                    return true;
-                }
-                const PROBE: &str = "hello";
-                let n = descriptions.len();
-
-                let forward = self
-                    .probe_choice(descriptions, PROBE, provider, model)
-                    .await;
-                let mut reversed: Vec<String> = descriptions.to_vec();
-                reversed.reverse();
-                let backward = self.probe_choice(&reversed, PROBE, provider, model).await;
-
-                match (forward, backward) {
-                    // Both named a real rule, and the answer did NOT follow the
-                    // reversal — the classifier is reading position, not content.
-                    (Some(a), Some(b)) if a >= 1 && b >= 1 && b != n + 1 - a => {
-                        warn!(
-                            model = %model,
-                            forward = a,
-                            reversed = b,
-                            "smart routing: classifier picked the same POSITION with the rule list \
-                             reversed, so it is not reading the rules — disabling LLM routing for \
-                             this config and keeping each request's requested model. Pick a larger \
-                             classifier_model, or use strategy=keyword."
-                        );
-                        false
-                    }
-                    // Anything else (agreement, a 0, or an inconclusive call) is
-                    // not proof of position-locking.
-                    _ => true,
-                }
-            })
-            .await;
-        *sane
+            .get_or_insert_with(inference.scope(), || Arc::new(OnceCell::new()));
+        let sane = cell.get_or_try_init(|| async {
+            if descriptions.len() < 2 { return Ok(true); }
+            let forward = self.probe_choice(descriptions, "hello", inference).await?;
+            let mut reversed = descriptions.to_vec(); reversed.reverse();
+            let backward = self.probe_choice(&reversed, "hello", inference).await?;
+            Ok::<_, GatewayError>(!matches!((forward, backward), (Some(a), Some(b)) if a >= 1 && b >= 1 && b != descriptions.len() + 1 - a))
+        }).await?;
+        Ok(*sane)
     }
 
-    /// Run one classifier call for the probe and parse its choice. Returns `None`
-    /// on any error/timeout/unparseable reply — the caller treats that as
-    /// inconclusive, never as a failure.
     async fn probe_choice(
         &self,
         descriptions: &[String],
         msg: &str,
-        provider: &dyn ryu_gw_providers::Provider,
-        model: &str,
-    ) -> Option<usize> {
-        let body = json!({
-            "model": model,
-            "messages": [{ "role": "user", "content": build_prompt(descriptions, msg) }],
-            "temperature": 0,
-            "max_tokens": 8,
-            "stream": false,
-        });
-        let fut = provider.complete(model, &body);
-        let resp = tokio::time::timeout(Duration::from_millis(self.config.timeout_ms), fut)
-            .await
-            .ok()?
-            .ok()?;
-        let text = resp["choices"][0]["message"]["content"].as_str()?;
-        parse_choice(text, descriptions.len())
+        inference: &dyn InferenceClient,
+    ) -> Result<Option<usize>, GatewayError> {
+        let model = &self.config.classifier_model;
+        let body = json!({"model":model, "messages":[{"role":"user", "content":build_prompt(descriptions, msg)}], "temperature":0, "max_tokens":8, "stream":false});
+        let Some(response) = inference
+            .complete(model, body, self.config.timeout_ms)
+            .await?
+        else {
+            return Ok(None);
+        };
+        Ok(response["choices"][0]["message"]["content"]
+            .as_str()
+            .and_then(|text| parse_choice(text, descriptions.len())))
     }
 
-    /// `Llm` strategy: run the cheap classifier model once and map its reply to a
-    /// target model.
     async fn classify_llm(
         &self,
         messages: &Value,
-        providers: &ProviderRegistry,
-        router: &dyn RouterBackend,
-    ) -> Option<String> {
-        let user_msg = last_user_message(messages)?;
-
-        // Resolve the (cheap) classifier model to a concrete provider + model
-        // through the normal router, so the classifier itself is swappable and
-        // can be local, hosted, or an openrouter/ slug.
-        let decision = router.route(&self.config.classifier_model);
-        let Some(provider) = providers.get(decision.provider.as_str()) else {
-            warn!(
-                provider = decision.provider.as_str(),
-                model = %decision.model,
-                "smart routing: classifier provider not configured; keeping requested model"
-            );
-            return None;
+        inference: &dyn InferenceClient,
+    ) -> Result<Option<String>, GatewayError> {
+        let Some(user_msg) = last_user_message(messages) else {
+            return Ok(None);
         };
-
-        let descriptions: Vec<String> = self
+        let descriptions: Vec<_> = self
             .config
             .rules
             .iter()
             .map(|r| r.description.clone())
             .collect();
-
-        // Refuse to "route" with a classifier that cannot tell the rules apart.
-        // Probed once per config; see `classifier_discriminates`.
         if !self
-            .classifier_discriminates(&descriptions, provider, &decision.model)
-            .await
+            .classifier_discriminates(&descriptions, inference)
+            .await?
         {
-            return None;
+            return Ok(None);
         }
-
-        let prompt = build_prompt(&descriptions, &user_msg);
-        let body = json!({
-            "model": decision.model,
-            "messages": [{ "role": "user", "content": prompt }],
-            "temperature": 0,
-            "max_tokens": 8,
-            "stream": false,
-        });
-
-        let fut = provider.complete(&decision.model, &body);
-        let resp = match tokio::time::timeout(Duration::from_millis(self.config.timeout_ms), fut)
-            .await
-        {
-            Ok(Ok(v)) => v,
-            Ok(Err(e)) => {
-                warn!(error = %e, "smart routing: classifier call failed; keeping requested model");
-                return None;
-            }
-            Err(_) => {
-                warn!(
-                    timeout_ms = self.config.timeout_ms,
-                    "smart routing: classifier timed out; keeping requested model"
-                );
-                return None;
-            }
-        };
-
-        let text = resp["choices"][0]["message"]["content"]
-            .as_str()
-            .unwrap_or("");
-
-        match parse_choice(text, self.config.rules.len()) {
-            // A valid rule number (1..=N) → route to that rule's model.
-            Some(n) if n >= 1 => self.model_for_match(Some(n - 1)),
-            // "0" = explicitly no rule matched → default_model fallback.
-            Some(_) => self.model_for_match(None),
-            // Unparseable reply → fail open (keep the requested model).
-            None => {
-                warn!(reply = %text, "smart routing: unparseable classifier reply; keeping requested model");
-                None
-            }
-        }
+        let choice = self
+            .probe_choice(&descriptions, &user_msg, inference)
+            .await?;
+        Ok(self.model_for_match(choice.and_then(|n| n.checked_sub(1))))
     }
 }
 
@@ -647,7 +487,7 @@ impl SmartRouter {
 // keyword_match, truncate) + MAX_CLASSIFIER_INPUT_CHARS moved to the
 // `ryu_gw_router` crate (pure `&str`/`Value` logic) and are imported at the top;
 // the async provider/embedding orchestration above stays here (it is bound to
-// the gateway's ProviderRegistry + semantic_cache).
+// the gateway's governed auxiliary-inference capability).
 
 #[cfg(test)]
 mod tests {
@@ -840,11 +680,8 @@ pub trait SmartRouterBackend: Send + Sync {
         &self,
         messages: &Value,
         session_id: Option<&str>,
-        providers: &ProviderRegistry,
-        router: &dyn RouterBackend,
-        http: &Client,
-        embed_provider: Option<&OpenAiProviderConfig>,
-    ) -> Option<String>;
+        inference: &dyn InferenceClient,
+    ) -> Result<Option<String>, GatewayError>;
 }
 
 #[async_trait::async_trait]
@@ -856,21 +693,9 @@ impl SmartRouterBackend for SmartRouter {
         &self,
         messages: &Value,
         session_id: Option<&str>,
-        providers: &ProviderRegistry,
-        router: &dyn RouterBackend,
-        http: &Client,
-        embed_provider: Option<&OpenAiProviderConfig>,
-    ) -> Option<String> {
-        SmartRouter::resolve(
-            self,
-            messages,
-            session_id,
-            providers,
-            router,
-            http,
-            embed_provider,
-        )
-        .await
+        inference: &dyn InferenceClient,
+    ) -> Result<Option<String>, GatewayError> {
+        SmartRouter::resolve(self, messages, session_id, inference).await
     }
 }
 
@@ -1011,12 +836,9 @@ mod smart_router_registry_tests {
             &self,
             _messages: &Value,
             _session_id: Option<&str>,
-            _providers: &ProviderRegistry,
-            _router: &dyn RouterBackend,
-            _http: &Client,
-            _embed_provider: Option<&OpenAiProviderConfig>,
-        ) -> Option<String> {
-            Some("stub-model".to_string())
+            _inference: &dyn InferenceClient,
+        ) -> Result<Option<String>, GatewayError> {
+            Ok(Some("stub-model".to_string()))
         }
     }
 

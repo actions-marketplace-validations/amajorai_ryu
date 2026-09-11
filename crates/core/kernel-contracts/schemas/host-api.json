@@ -1,6 +1,55 @@
 {
   "methods": [
     {
+      "capability": "identity.read",
+      "grant": "identity:read",
+      "method": "identity.current",
+      "streaming": false,
+      "tsHost": false
+    },
+    {
+      "capability": "security.check",
+      "grant": "security:check",
+      "method": "security.check",
+      "streaming": false,
+      "tsHost": false
+    },
+    {
+      "capability": "backups.app",
+      "grant": "backups:app",
+      "method": "backups.destinations",
+      "streaming": false,
+      "tsHost": true
+    },
+    {
+      "capability": "backups.app",
+      "grant": "backups:app",
+      "method": "backups.create",
+      "streaming": false,
+      "tsHost": true
+    },
+    {
+      "capability": "backups.app",
+      "grant": "backups:app",
+      "method": "backups.list",
+      "streaming": false,
+      "tsHost": true
+    },
+    {
+      "capability": "backups.app",
+      "grant": "backups:app",
+      "method": "backups.get",
+      "streaming": false,
+      "tsHost": true
+    },
+    {
+      "capability": "backups.app",
+      "grant": "backups:app",
+      "method": "backups.restore",
+      "streaming": false,
+      "tsHost": true
+    },
+    {
       "capability": "host.capabilities",
       "grant": null,
       "method": "host.capabilities",
@@ -386,6 +435,20 @@
       "tsHost": false
     },
     {
+      "capability": "gateway.budgetSpend",
+      "grant": "usage:read",
+      "method": "gateway.budgetSpend",
+      "streaming": false,
+      "tsHost": false
+    },
+    {
+      "capability": "gateway.audit",
+      "grant": "usage:read",
+      "method": "gateway.audit",
+      "streaming": false,
+      "tsHost": false
+    },
+    {
       "capability": "learning.recordFeedback",
       "grant": "learning:crud",
       "method": "learning.recordFeedback",
@@ -522,6 +585,13 @@
       "capability": "core.listAgents",
       "grant": "core:list_agents",
       "method": "assets.searchGifs",
+      "streaming": false,
+      "tsHost": true
+    },
+    {
+      "capability": "core.listAgents",
+      "grant": "core:list_agents",
+      "method": "assets.searchImages",
       "streaming": false,
       "tsHost": true
     },
@@ -1072,6 +1142,13 @@
       "tsHost": true
     },
     {
+      "capability": "mail.crud",
+      "grant": "mail:crud",
+      "method": "mail.request",
+      "streaming": false,
+      "tsHost": true
+    },
+    {
       "capability": "calendar.crud",
       "grant": "calendar:crud",
       "method": "calendar.jobs",
@@ -1471,5 +1548,5 @@
       "tsHost": false
     }
   ],
-  "version": "1.11.0"
+  "version": "1.14.0"
 }

@@ -1,5 +1,8 @@
 import { strToU8, unzipSync, zipSync } from "fflate";
+import { literalMessageId } from "./message-id.ts";
 import { BUILT_IN_LANGUAGE_PACKS, EN_MESSAGES } from "./messages.ts";
+
+export { literalMessageId } from "./message-id.ts";
 
 export const DEFAULT_LOCALE = "en" as const;
 export const LANGUAGE_PACK_SCHEMA_VERSION = 1 as const;
@@ -12,39 +15,29 @@ export const MAX_LANGUAGE_PACK_BYTES = 4 * 1024 * 1024;
 /** Maximum compressed size accepted by browser/native local archive import. */
 export const MAX_LANGUAGE_PACK_ARCHIVE_BYTES = 8 * 1024 * 1024;
 
-/** Stable fallback id used by shared UI primitives for literal labels that have
- * not yet been assigned a product-specific message id. The readable fallback is
- * still carried to `translate`, while the hash keeps translations independent of
- * component/file paths and safe to use as a language-pack key. */
-export function literalMessageId(value: string): string {
-	let hash = 2_166_136_261;
-	for (const character of value) {
-		hash = Math.imul(hash ^ (character.codePointAt(0) ?? 0), 16_777_619);
-	}
-	const slug =
-		value
-			.trim()
-			.toLowerCase()
-			.replace(/[^a-z0-9]+/gu, "-")
-			.replace(/^-+|-+$/gu, "")
-			.slice(0, 48) || "text";
-	return `literal.${slug}.${(hash >>> 0).toString(16).padStart(8, "0")}`;
-}
-
 const CORE_LITERAL_MESSAGE_IDS = new Map<string, string>();
+
+function normalizeLiteral(value: string): string {
+	return value
+		.trim()
+		.replace(/\s+/gu, " ")
+		.replace(/[.…]+$/u, "")
+		.trim()
+		.toLocaleLowerCase("en");
+}
 
 /** Prefer a canonical catalog id for common labels, then fall back to a stable
  * literal id so shared primitives can localize legacy copy incrementally. */
 export function messageIdForLiteral(value: string): string {
-	const normalized = value.trim();
+	const normalized = normalizeLiteral(value);
 	const existing = CORE_LITERAL_MESSAGE_IDS.get(normalized);
 	if (existing) {
 		return existing;
 	}
 	const entry = Object.entries(EN_MESSAGES).find(
-		([, message]) => message === normalized
+		([, message]) => normalizeLiteral(message) === normalized
 	);
-	const id = entry?.[0] ?? literalMessageId(normalized);
+	const id = entry?.[0] ?? literalMessageId(value.trim());
 	CORE_LITERAL_MESSAGE_IDS.set(normalized, id);
 	return id;
 }
@@ -618,8 +611,40 @@ export function formatMessage(
 	return formatMessageValue(message, values, locale);
 }
 
-function directionForLocale(locale: string): LanguageDirection {
+export function directionForLocale(locale: string): LanguageDirection {
 	return /^(ar|fa|he|ur|ps|dv)(?:-|$)/iu.test(locale) ? "rtl" : "ltr";
+}
+
+/** Resolve the highest-priority valid locale from an HTTP Accept-Language header. */
+export function localeFromAcceptLanguage(header: string | null): string {
+	if (!header) {
+		return DEFAULT_LOCALE;
+	}
+	const candidates = header
+		.split(",")
+		.map((part, index) => {
+			const [rawLocale, ...parameters] = part.trim().split(";");
+			const quality = parameters.find((parameter) =>
+				/^\s*q\s*=/iu.test(parameter)
+			);
+			const parsedQuality = quality ? Number(quality.split("=")[1]?.trim()) : 1;
+			return {
+				index,
+				locale: rawLocale?.trim() ?? "",
+				quality: Number.isFinite(parsedQuality) ? parsedQuality : 0,
+			};
+		})
+		.filter((candidate) => candidate.quality > 0 && candidate.locale !== "*")
+		.sort(
+			(left, right) => right.quality - left.quality || left.index - right.index
+		);
+	for (const candidate of candidates) {
+		const canonical = canonicalLocale(candidate.locale, "");
+		if (canonical) {
+			return canonical;
+		}
+	}
+	return DEFAULT_LOCALE;
 }
 
 function localeLanguageAndScript(locale: string): string {
@@ -869,8 +894,8 @@ export class I18nRuntime {
 		const candidateMessages = [
 			selected?.messages[id],
 			base?.messages[id],
-			EN_MESSAGES[id as keyof typeof EN_MESSAGES],
 			fallback,
+			EN_MESSAGES[id as keyof typeof EN_MESSAGES],
 		];
 		const message =
 			candidateMessages.find(

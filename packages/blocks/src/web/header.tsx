@@ -1,5 +1,6 @@
 "use client";
 
+import { useLocalizedString, useLocalizedText } from "@ryu/i18n/react";
 import { Badge } from "@ryu/ui/components/badge";
 import { buttonVariants } from "@ryu/ui/components/button";
 import {
@@ -41,6 +42,10 @@ interface HeaderLink {
 	to: string;
 }
 
+function LocalizedHeaderCopy({ value }: { value: string }) {
+	return <>{useLocalizedText(value, { literal: true })}</>;
+}
+
 // Header stays minimal: the Products menu shows Ryu's mental model — workspaces
 // and standalone services on top, with the open platform and infrastructure
 // underneath. Solutions and Resources remain separate; Marketplace is the one
@@ -51,7 +56,17 @@ const MARKETING_LINKS: readonly HeaderLink[] = [
 
 const SURFACE_LINKS = [
 	...PRODUCT_REALMS.filter((realm) =>
-		["os", "bot", "console", "box", "mail", "notify", "hire"].includes(realm.id)
+		[
+			"os",
+			"bot",
+			"console",
+			"box",
+			"mail",
+			"notify",
+			"hire",
+			"compute",
+			"share",
+		].includes(realm.id)
 	).map(({ href, shortLabel }) => ({ href, label: shortLabel })),
 	{ href: "/marketplace/apps", label: "Apps" },
 ];
@@ -88,10 +103,11 @@ function ProductLinkGroup({
 	links: readonly { href: string; label: string }[];
 	title: string;
 }) {
+	const localizedTitle = useLocalizedText(title, { literal: true });
 	return (
 		<div>
 			<p className="mb-2 px-3 font-medium text-muted-foreground text-sm">
-				{title}
+				{localizedTitle}
 			</p>
 			<div>
 				{links.map((product) => (
@@ -103,7 +119,7 @@ function ProductLinkGroup({
 						}
 					>
 						<span className="font-medium text-foreground text-xl tracking-tight transition-colors hover:text-accent-foreground">
-							{product.label}
+							<LocalizedHeaderCopy value={product.label} />
 						</span>
 					</MotionNavigationMenuLink>
 				))}
@@ -113,6 +129,9 @@ function ProductLinkGroup({
 }
 
 function PrimaryProductLinks() {
+	const exploreLabel = useLocalizedText("Explore the platform →", {
+		literal: true,
+	});
 	return (
 		<div>
 			<div className="grid w-[760px] grid-cols-3 gap-x-6 gap-y-7 p-2">
@@ -126,7 +145,7 @@ function PrimaryProductLinks() {
 					render={<Link data-cuelume-hover="tick" href="/platform" />}
 				>
 					<span className="font-medium text-foreground text-sm">
-						Explore the platform →
+						{exploreLabel}
 					</span>
 				</MotionNavigationMenuLink>
 			</div>
@@ -135,6 +154,7 @@ function PrimaryProductLinks() {
 }
 
 function ProductsMenu({ pathname }: { pathname: string }) {
+	const productsLabel = useLocalizedText("Products", { literal: true });
 	return (
 		<>
 			<MotionNavigationMenuTrigger
@@ -148,7 +168,7 @@ function ProductsMenu({ pathname }: { pathname: string }) {
 						"bg-muted"
 				)}
 			>
-				Products
+				{productsLabel}
 			</MotionNavigationMenuTrigger>
 			<MotionNavigationMenuContent>
 				<PrimaryProductLinks />
@@ -199,7 +219,7 @@ function HeaderLinkList({
 							rel="noopener noreferrer"
 							target="_blank"
 						>
-							{link.label}
+							<LocalizedHeaderCopy value={link.label} />
 						</a>
 					);
 				}
@@ -211,7 +231,7 @@ function HeaderLinkList({
 						href={link.to as Route}
 						key={link.to}
 					>
-						{link.label}
+						<LocalizedHeaderCopy value={link.label} />
 					</Link>
 				);
 			})}
@@ -226,6 +246,9 @@ function PortalMobileNavigation({
 	links: readonly HeaderLink[];
 	pathname: string;
 }) {
+	const localizedNavigationLabel = useLocalizedString(
+		"Open workspace navigation"
+	);
 	if (links.length === 0) {
 		return null;
 	}
@@ -233,7 +256,7 @@ function PortalMobileNavigation({
 	return (
 		<DropdownMenu>
 			<DropdownMenuTrigger
-				aria-label="Open workspace navigation"
+				aria-label={localizedNavigationLabel}
 				className={cn(
 					buttonVariants({ size: "icon-sm", variant: "ghost" }),
 					"md:hidden"
@@ -287,6 +310,7 @@ export default function Header({
 	showCatalogMenus = true,
 	homeHref = "/",
 	signedIn = false,
+	transparent = false,
 	variant = "marketing",
 }: {
 	className?: string;
@@ -315,8 +339,19 @@ export default function Header({
 	showCatalogMenus?: boolean;
 	/** Where the marketing home link goes. Portal surfaces omit the brand link. */
 	homeHref?: string;
+	/** Let a landing visual continue behind the marketing header. */
+	transparent?: boolean;
 }) {
 	const pathname = usePathname();
+	const localizedBackToDashboard = useLocalizedString("Back to dashboard");
+	const localizedDashboard = useLocalizedText("Dashboard", { literal: true });
+	const localizedWorkspaceNavigation = useLocalizedString(
+		"Workspace navigation"
+	);
+	const localizedResearchPreview = useLocalizedText("Research Preview", {
+		literal: true,
+	});
+	const localizedResources = useLocalizedText("Resources", { literal: true });
 
 	if (variant === "portal") {
 		return (
@@ -361,7 +396,7 @@ export default function Header({
 						{portalContextNav ? (
 							<div className="flex min-h-12 items-center gap-3 px-4 sm:px-6">
 								<Link
-									aria-label="Back to dashboard"
+									aria-label={localizedBackToDashboard}
 									className={cn(
 										"inline-flex shrink-0 items-center gap-1.5 rounded-md px-2 py-1 font-medium text-sm transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-2",
 										inverse
@@ -372,7 +407,7 @@ export default function Header({
 									href="/dashboard"
 								>
 									<ArrowLeft aria-hidden="true" className="size-4" />
-									<span>Dashboard</span>
+									<span>{localizedDashboard}</span>
 								</Link>
 								<div className="min-w-0 flex-1 overflow-x-auto">
 									{portalContextNav}
@@ -381,7 +416,7 @@ export default function Header({
 						) : links.length > 0 ? (
 							<div className="flex min-h-12 items-center px-4 sm:px-6">
 								<nav
-									aria-label="Workspace navigation"
+									aria-label={localizedWorkspaceNavigation}
 									className="hidden items-center gap-0.5 md:flex"
 								>
 									<HeaderLinkList links={links} pathname={pathname} portal />
@@ -398,17 +433,26 @@ export default function Header({
 	}
 
 	return (
-		<div className={`relative ${className ?? ""}`}>
-			{/* Progressive blur background */}
-			<ProgressiveBlur
-				blurAmount="12px"
-				className="absolute inset-0 z-0"
-				height="100px"
-				position="top"
-				useThemeBackground
-			/>
+		<div
+			className={cn(className ? undefined : "relative", className)}
+			data-transparent={transparent ? "true" : undefined}
+		>
+			{transparent ? null : (
+				<ProgressiveBlur
+					blurAmount="12px"
+					className="absolute inset-0 z-0"
+					height="100px"
+					position="top"
+					useThemeBackground
+				/>
+			)}
 
-			<div className="relative z-10 flex flex-row items-center justify-between p-4 px-10">
+			<div
+				className={cn(
+					"relative z-10 flex flex-row items-center justify-between p-4 px-10",
+					transparent && "bg-background/20 backdrop-blur-sm"
+				)}
+			>
 				<div className="flex flex-1 items-center gap-3">
 					<Link
 						className="flex items-center gap-4"
@@ -417,7 +461,7 @@ export default function Header({
 					>
 						<Logo size="28px" variant="outline" />
 						<Badge className="rounded-bl-lg" variant="secondary">
-							Research Preview
+							{localizedResearchPreview}
 						</Badge>
 					</Link>
 					{orgSlot ? (
@@ -526,7 +570,7 @@ export default function Header({
 												"text-accent-foreground"
 										)}
 									>
-										Resources
+										{localizedResources}
 									</MotionNavigationMenuTrigger>
 									<MotionNavigationMenuContent>
 										<div className="grid w-[820px] grid-cols-3 gap-x-6 gap-y-7 p-2">
@@ -577,7 +621,7 @@ export default function Header({
 												}
 											>
 												<span className="font-medium text-foreground text-sm">
-													Read the docs →
+													<LocalizedHeaderCopy value="Read the docs →" />
 												</span>
 											</MotionNavigationMenuLink>
 										</div>

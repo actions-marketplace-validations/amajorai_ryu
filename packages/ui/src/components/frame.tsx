@@ -1,3 +1,4 @@
+import { useLocalizedText } from "@ryu/i18n/react";
 import { cn } from "@ryu/ui/lib/utils.ts";
 import type * as React from "react";
 
@@ -38,26 +39,37 @@ function FrameHeader({ className, ...props }: React.ComponentProps<"header">) {
 	);
 }
 
-function FrameTitle({ className, ...props }: React.ComponentProps<"div">) {
+function FrameTitle({
+	children,
+	className,
+	...props
+}: React.ComponentProps<"div">) {
+	const localizedChildren = useLocalizedText(children, { literal: true });
 	return (
 		<div
 			className={cn("font-medium text-sm", className)}
 			data-slot="frame-panel-title"
 			{...props}
-		/>
+		>
+			{localizedChildren}
+		</div>
 	);
 }
 
 function FrameDescription({
+	children,
 	className,
 	...props
 }: React.ComponentProps<"div">) {
+	const localizedChildren = useLocalizedText(children, { literal: true });
 	return (
 		<div
 			className={cn("text-muted-foreground text-sm", className)}
 			data-slot="frame-panel-description"
 			{...props}
-		/>
+		>
+			{localizedChildren}
+		</div>
 	);
 }
 

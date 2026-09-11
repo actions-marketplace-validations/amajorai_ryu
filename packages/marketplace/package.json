@@ -16,6 +16,7 @@
     "./likes/store": "./src/likes/likes-store.ts",
     "./catalog/host": "./src/catalog/host.tsx",
     "./catalog/scorecard": "./src/catalog/scorecard.ts",
+    "./catalog/design-system-scorecard": "./src/catalog/design-system-scorecard.ts",
     "./catalog/recommendations": "./src/catalog/recommendations.ts",
     "./catalog/chrome/for-you-section": "./src/catalog/chrome/for-you-section.tsx",
     "./catalog/chrome/marketplace-home": "./src/catalog/chrome/marketplace-home.tsx",
@@ -57,13 +58,15 @@
     "./catalog/detail/support-extension-panel": "./src/catalog/detail/support-extension-panel.tsx",
     "./catalog/detail/publisher-health": "./src/catalog/detail/publisher-health.ts",
     "./catalog/detail/publisher-health-card": "./src/catalog/detail/publisher-health-card.tsx",
+    "./catalog/detail/agent-audit-panel": "./src/catalog/detail/agent-audit-panel.tsx",
     "./catalog/detail/scorecard-panel": "./src/catalog/detail/scorecard-panel.tsx",
     "./catalog/chrome/dither-banner": "./src/catalog/chrome/dither-banner.tsx",
     "./catalog/chrome/marketplace-prompt-banner": "./src/catalog/chrome/marketplace-prompt-banner.tsx",
     "./catalog/detail/dependency-graph": "./src/catalog/detail/dependency-graph.tsx",
     "./report": "./src/report/report-provider.tsx",
     "./report/types": "./src/report/types.ts",
-    "./report/dialog": "./src/report/report-dialog.tsx"
+    "./report/dialog": "./src/report/report-dialog.tsx",
+    "./catalog/engine-logos": "./src/catalog/engine-logos.ts"
   },
   "scripts": {
     "check-types": "tsc --noEmit",

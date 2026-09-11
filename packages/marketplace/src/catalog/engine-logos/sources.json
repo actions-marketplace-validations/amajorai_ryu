@@ -1,0 +1,113 @@
+{
+  "llamacpp": {
+    "file": "llamacpp.svg",
+    "source": "https://raw.githubusercontent.com/ggml-org/llama.cpp/9dcf84e5ae2718947188b539aab8b9c2b15d3ba1/media/llama1-icon-transparent.svg",
+    "project": "https://github.com/ggml-org/llama.cpp",
+    "sha256": "611af871c3ba331afa3350d4c94e546607ccdd952c6dfd928dc94dc1e0f0b3ba"
+  },
+  "ollama": {
+    "file": "ollama.svg",
+    "source": "https://raw.githubusercontent.com/ollama/ollama/83ed7d9965b1ee07e0f0b29fd46e47c31f0fcab8/docs/ollama-logo.svg",
+    "project": "https://github.com/ollama/ollama",
+    "sha256": "397a6ee071cce1496edd8a86dd1c91ce005712ec161690e411b3dc7f151181f5"
+  },
+  "vllm": {
+    "file": "vllm.svg",
+    "source": "https://raw.githubusercontent.com/vllm-project/media-kit/79b2ea5db25b723f2d81dae203a87c5b9a076722/vLLM-Logo.svg",
+    "project": "https://github.com/vllm-project/vllm",
+    "sha256": "12a0812e247cef4b31160e0d0267142ffe491491537f3e275d8bc645b61eb1a8"
+  },
+  "sglang": {
+    "file": "sglang.svg",
+    "source": "https://raw.githubusercontent.com/sgl-project/sglang/5aab054ec8ce6b6100fbfb7aafe67d632a7df3aa/assets/logo_square.svg",
+    "project": "https://github.com/sgl-project/sglang",
+    "sha256": "09ccea391ea4da9d896d6fae0f31e5a52a456bfe837f266a99a69c2242d95fe3"
+  },
+  "mlx": {
+    "file": "mlx.svg",
+    "source": "https://raw.githubusercontent.com/ml-explore/mlx/365bd0fbac2e96631a1b2c4a34ca5a0771cdfde5/docs/logo/mlx_logo.svg",
+    "project": "https://github.com/ml-explore/mlx",
+    "sha256": "cc4dc6a9d782f1a4f548fbcc77c7ae941176ef3468167d77bf7bada66f6771e1"
+  },
+  "mlx-serve": {
+    "file": "mlx-serve.png",
+    "source": "https://raw.githubusercontent.com/ddalcu/mlx-serve/16a47ecb1e6030416cbf5431abc3fb924868d9b2/website/appiconb.png",
+    "project": "https://github.com/ddalcu/mlx-serve",
+    "sha256": "3c35ec51d3ba6c0e4872413ecac55df0b3f8cd2aa8f9f58f52913676366ce5a0"
+  },
+  "omlx": {
+    "file": "omlx.svg",
+    "source": "https://raw.githubusercontent.com/jundot/omlx/b908f563c32378f6479a093093fb988b76e05b7c/omlx/admin/static/logo-light.svg",
+    "project": "https://github.com/jundot/omlx",
+    "sha256": "2c9b454c9935c6e2f705aab3f262d90582739c93ff426db7346cd12ca5bfa2f0"
+  },
+  "lemonade": {
+    "file": "lemonade.svg",
+    "source": "https://raw.githubusercontent.com/lemonade-sdk/lemonade/bc8d99ccfee301742f1dd86a3f6ec406bb8a863d/src/app/assets/logo.svg",
+    "project": "https://github.com/lemonade-sdk/lemonade",
+    "sha256": "bfa64b2b3f31977515f1380285a461d82abb54c0ec1a251b9358bd1000514b71"
+  },
+  "mesh-llm": {
+    "file": "mesh-llm.png",
+    "source": "https://raw.githubusercontent.com/Mesh-LLM/mesh-llm/9bb7b1eed68ea5d637fa37b457e619a33333f55a/crates/mesh-llm-ui/public/meshllm-apple-touch-icon.png",
+    "project": "https://github.com/Mesh-LLM/mesh-llm",
+    "sha256": "bb93afaed5a7036c5c5b4a244c104a0e6b37cc78718f686884a78246ff0fa865"
+  },
+  "sdcpp": {
+    "file": "sdcpp.png",
+    "source": "https://raw.githubusercontent.com/leejet/stable-diffusion.cpp/d04e8950c1ec8d30248cbe996682b3182fb1adf6/assets/logo.png",
+    "project": "https://github.com/leejet/stable-diffusion.cpp",
+    "sha256": "8e6e56be643ef2173e565a9dfcfc8e80493cfce5ae9c18ba3a4d3c91337d3085"
+  },
+  "microsandbox": {
+    "file": "microsandbox.png",
+    "source": "https://raw.githubusercontent.com/superradcompany/microsandbox/e25cae318d7aa15b5191351bddc913f43778c3b1/docs/logo/favicon.png",
+    "project": "https://github.com/superradcompany/microsandbox",
+    "sha256": "23e497b5f7f067aa673ba1bed4847eb980414a60c871d8b1b90eeced6bd5ea61"
+  },
+  "opensandbox": {
+    "file": "opensandbox.svg",
+    "source": "https://raw.githubusercontent.com/opensandbox-group/OpenSandbox/ae6d552307e4f5fcddde0dcd2f9254f2f9d2fc60/docs/public/favicon.svg",
+    "project": "https://github.com/opensandbox-group/OpenSandbox",
+    "sha256": "f95a05354594ebf9b3581e5184c24f53fa2e7bc0bc48185ffd2b9793087f16dc"
+  },
+  "docker": {
+    "file": "docker.svg",
+    "source": "existing bundled Ryu asset: apps/desktop/public/assets/logos/docker.svg",
+    "sha256": "29e91bf0593f02cf32efc849f2e9707dfddd4684b4d72b2a2b6a89da9626c60d"
+  },
+  "apple": {
+    "file": "apple.svg",
+    "source": "existing bundled Ryu asset: apps/desktop/public/logos/apple.svg",
+    "sha256": "0b8ffab7955ccdd02e8a3a8cfc0091abb1ddb2d1e9eb0861a4c6ee3bad7d3582"
+  },
+  "ryutts": {
+    "file": "ryutts.svg",
+    "source": "existing bundled Ryu asset: apps/desktop/public/assets/logos/ryu_light.svg",
+    "sha256": "b1f349be0f7e046070596440b8063ca7a897f0d51cb351bf52a4769d22b6249c"
+  },
+  "whispercpp": {
+    "file": "whispercpp.jpeg",
+    "source": "https://user-images.githubusercontent.com/1991296/235238348-05d0f6a4-da44-4900-a1de-d0707e75b763.jpeg",
+    "project": "https://github.com/ggml-org/whisper.cpp",
+    "sha256": "74595f08ac20770fb912aa5b9d28b9ef5f4c166c400bd4814c914f877cb05bf2"
+  },
+  "llama-swap": {
+    "file": "llama-swap.png",
+    "darkFile": "llama-swap-dark.png",
+    "source": "https://raw.githubusercontent.com/mostlygeek/llama-swap/8fa85899e424d47b81fa60aff08b238a793e2e2b/ui/public/favicon.svg",
+    "selection": "Unmodified embedded light-icon and dark-icon PNGs",
+    "project": "https://github.com/mostlygeek/llama-swap",
+    "sha256": "9d60bf52bd19f2640b0c1d33e4d19ba17be6a6c449e678785e7ef2bceda37ce1",
+    "darkSha256": "813fb6822d8bad3113b777a69468991f2d8f150ba4a521fa8991e3a7e8a48484"
+  },
+  "freetoken": {
+    "file": "freetoken-light.svg",
+    "darkFile": "freetoken-dark.svg",
+    "source": "https://raw.githubusercontent.com/FlashML-org/FreeToken/af71ba43206e124f5ff6419b47ee36c6e9981078/assets/freetoken-logo-light.svg",
+    "darkSource": "https://raw.githubusercontent.com/FlashML-org/FreeToken/af71ba43206e124f5ff6419b47ee36c6e9981078/assets/freetoken-logo-dark.svg",
+    "project": "https://github.com/FlashML-org/FreeToken",
+    "sha256": "0570b42b09b2c69468e82d26fe51b84046c523a1e3a2b030dc61cc7ee5ad65c9",
+    "darkSha256": "e0dfd89f0ae6204f23d70acded6fc0f63715fc851f37b20e71ec4f92c0b856a0"
+  }
+}

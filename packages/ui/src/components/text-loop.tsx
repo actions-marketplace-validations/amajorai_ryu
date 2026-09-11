@@ -1,5 +1,6 @@
 "use client";
 
+import { TextMorph } from "@ryu/ui/components/text-morph";
 import { cn } from "@ryu/ui/lib/utils.ts";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import { Children, type ReactNode, useEffect, useState } from "react";
@@ -54,8 +55,41 @@ export function TextLoop({
 		return <span className={cn("truncate", className)}>{items[0]}</span>;
 	}
 
+	const textItems = items.every(
+		(item): item is string => typeof item === "string"
+	)
+		? items
+		: null;
+	if (textItems) {
+		const longestText = textItems.reduce(
+			(longest, item) => (item.length > longest.length ? item : longest),
+			textItems[0] ?? ""
+		);
+		return (
+			<span
+				aria-atomic="true"
+				aria-live="polite"
+				className={cn("inline-grid min-w-0 max-w-full", className)}
+			>
+				<span
+					aria-hidden="true"
+					className="invisible col-start-1 row-start-1 min-w-0 max-w-full truncate"
+				>
+					{longestText}
+				</span>
+				<TextMorph
+					className="col-start-1 row-start-1 min-w-0 max-w-full truncate"
+					duration={280}
+				>
+					{textItems[index] ?? ""}
+				</TextMorph>
+			</span>
+		);
+	}
+
 	return (
 		<span
+			aria-atomic="true"
 			aria-live="polite"
 			className={cn("inline-grid min-w-0 max-w-full", className)}
 		>

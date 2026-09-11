@@ -9,8 +9,8 @@
   "name": "Drawesome",
   "version": "0.1.0",
   "stability": "experimental",
-  "description": "A lightweight sketching studio for Ryu with seven natural-feeling pens, area erasing, and SVG or PNG export. Sketches persist in app storage and stay local to the node.",
-  "tagline": "Put a real pen in your workspace",
+  "description": "A lightweight sketching studio for Ryu with seven natural-feeling pens, area erasing, SVG or PNG export, plus chat dialogs for sketching or annotating visual references.",
+  "tagline": "Sketch ideas and attach them to chat",
   "keywords": [
     "drawing",
     "sketching",

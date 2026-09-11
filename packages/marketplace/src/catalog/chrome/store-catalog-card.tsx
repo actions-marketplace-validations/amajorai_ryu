@@ -97,8 +97,10 @@ export default function StoreCatalogCard({
 	brandIcon,
 	iconId,
 	iconUrl,
+	iconUrlDark,
 	iconBackground,
 	iconPadding,
+	iconAppearance,
 	dither,
 	themePreview,
 	name,
@@ -149,10 +151,12 @@ export default function StoreCatalogCard({
 	iconId?: string | null;
 	/** A resolvable icon image (Iconify/icons0.dev/remote logo). Wins over `icon`. */
 	iconUrl?: string | null;
+	iconUrlDark?: string | null;
 	/** Optional CSS background for the icon square (e.g. a solid/gradient colour). */
 	iconBackground?: string;
 	/** The listing's declared inset for its logo (manifest `iconPadding`). */
 	iconPadding?: string | null;
+	iconAppearance?: "bare" | "monochrome";
 	/** Optional dithered-gradient background for the icon square. Validated before
 	 *  paint; a malformed spec is ignored and the flat/`img` path is used. Wins over
 	 *  `iconBackground` when valid. */
@@ -305,10 +309,12 @@ export default function StoreCatalogCard({
 				className="pointer-events-none size-10 shrink-0"
 				dither={dither}
 				fallback={brandIcon}
+				iconAppearance={iconAppearance}
 				iconBackground={iconBackground}
 				iconId={iconId}
 				iconPadding={iconPadding}
 				iconUrl={iconUrl}
+				iconUrlDark={iconUrlDark}
 				name={name}
 				seedId={seedId}
 				seedPlate={seedPlate}

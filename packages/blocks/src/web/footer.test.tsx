@@ -35,3 +35,15 @@ test("footer keeps GitHub and its star count in the build row", () => {
 	expect(html.match(/aria-label="Ryu on GitHub"/g)).toHaveLength(1);
 	expect(html).toContain("1,234");
 });
+
+test("footer accepts the website controls", () => {
+	const html = renderToStaticMarkup(
+		<Footer
+			languagePicker={<span>Language picker</span>}
+			soundToggle={<span>Sound toggle</span>}
+		/>
+	);
+
+	expect(html).toContain("Language picker");
+	expect(html).toContain("Sound toggle");
+});

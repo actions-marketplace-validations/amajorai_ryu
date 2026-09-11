@@ -120,7 +120,40 @@
         "title": "Clips",
         "icon": "film-01",
         "target": "/plugin/app__clips-companion",
+        "context": {
+          "view": "editor"
+        },
         "order": 65
+      },
+      {
+        "id": "clips-create",
+        "title": "Create",
+        "icon": "add-01",
+        "target": "/plugin/app__clips-companion",
+        "context": {
+          "view": "create"
+        },
+        "order": 66
+      },
+      {
+        "id": "clips-inspiration",
+        "title": "Inspiration",
+        "icon": "sparkles",
+        "target": "/plugin/app__clips-companion",
+        "context": {
+          "view": "inspiration"
+        },
+        "order": 67
+      },
+      {
+        "id": "clips-templates",
+        "title": "Templates",
+        "icon": "grid-view",
+        "target": "/plugin/app__clips-companion",
+        "context": {
+          "view": "templates"
+        },
+        "order": 68
       }
     ],
     "chat_widget_templates": [

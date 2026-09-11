@@ -7,6 +7,7 @@ import {
 	GhostIcon,
 	Image01Icon,
 	InformationCircleIcon,
+	PencilEdit01Icon,
 	Target01Icon,
 	Tick02Icon,
 	Video01Icon,
@@ -121,6 +122,8 @@ export interface GoalPlusButtonProps {
 	onAttach?: () => void;
 	onDirectorySelect?: (item: ComposerMenuItem) => void;
 	onMenuOpenChange?: (open: boolean) => void;
+	/** Open the app-owned sketch dialog. Omitted when Drawesome is unavailable. */
+	onSketch?: () => void;
 	/**
 	 * Toggles contributed by enabled plugins (`composer_controls`). Each renders as
 	 * a toggle row in the Assist section, mirroring the built-in double-check row.
@@ -141,6 +144,7 @@ export interface GoalPlusButtonProps {
  */
 export const GoalPlusButton = memo(function GoalPlusButton({
 	onAttach,
+	onSketch,
 	goal,
 	ghost,
 	doubleCheck,
@@ -183,19 +187,25 @@ export const GoalPlusButton = memo(function GoalPlusButton({
 	const VerdictIcon = verdictOk ? Tick02Icon : InformationCircleIcon;
 	const verdictTone = verdictOk ? "text-status-success" : "text-status-warning";
 	const menuGroups: ComposerMenuGroup[] = [];
+	const addItems: ComposerMenuItem[] = [];
 	if (onAttach) {
-		menuGroups.push({
-			id: "add",
-			label: "Add",
-			items: [
-				{
-					id: "action:attach",
-					label: "Files and images",
-					description: "Attach context from this device",
-					icon: <HugeiconsIcon className="size-4" icon={Image01Icon} />,
-				},
-			],
+		addItems.push({
+			id: "action:attach",
+			label: "Files and images",
+			description: "Attach context from this device",
+			icon: <HugeiconsIcon className="size-4" icon={Image01Icon} />,
 		});
+	}
+	if (onSketch) {
+		addItems.push({
+			id: "action:sketch",
+			label: "Sketch",
+			description: "Draw a visual reference to attach",
+			icon: <HugeiconsIcon className="size-4" icon={PencilEdit01Icon} />,
+		});
+	}
+	if (addItems.length > 0) {
+		menuGroups.push({ id: "add", label: "Add", items: addItems });
 	}
 	const createItems: ComposerMenuItem[] = [];
 	if (imageGen) {
@@ -293,6 +303,8 @@ export const GoalPlusButton = memo(function GoalPlusButton({
 	const handleMenuSelect = (item: ComposerMenuItem) => {
 		if (item.id === "action:attach") {
 			onAttach?.();
+		} else if (item.id === "action:sketch") {
+			onSketch?.();
 		} else if (item.id === "action:image") {
 			imageGen?.onGenerate();
 		} else if (item.id === "action:video") {

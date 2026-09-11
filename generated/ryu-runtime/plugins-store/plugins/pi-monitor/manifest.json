@@ -27,7 +27,7 @@
     "websocket",
     "developer"
   ],
-  "icon": "monitor-02",
+  "icon": "computer",
   "iconDither": { "from": 12, "to": "transparent", "direction": "down" },
   "surfaces": {
     "gateway": { "support": "none" },

@@ -30,6 +30,7 @@ import {
 	type Capability,
 	CodedRpcError,
 	capabilitiesFromGrants,
+	createI18nHostServices,
 	type HostPush,
 	type HostServices,
 	type WidgetGlobalsPatch,
@@ -301,50 +302,21 @@ export function AppWidget({ part }: { part: WidgetPartLike }) {
 			}
 			return d;
 		};
-		return {
-			i18nSnapshot: () =>
-				i18n?.getSnapshot() ?? {
-					direction: "ltr",
+		const i18nServices = createI18nHostServices(
+			i18n ?? {
+				getSnapshot: () => ({
+					direction: "ltr" as const,
 					locale: "en",
 					packId: null,
 					packName: null,
 					packVersion: null,
-				},
-			i18nTranslate: (input) =>
-				i18n?.t(input.id, input.values, input.defaultMessage) ??
-				input.defaultMessage,
-			i18nSubscribe: (_input, emit, signal) =>
-				new Promise<void>((resolve) => {
-					let done = false;
-					const finish = () => {
-						if (done) {
-							return;
-						}
-						done = true;
-						unsubscribe();
-						signal.removeEventListener("abort", finish);
-						resolve();
-					};
-					const push = () =>
-						emit(
-							JSON.stringify(
-								i18n?.getSnapshot() ?? {
-									direction: "ltr",
-									locale: "en",
-									packId: null,
-									packName: null,
-									packVersion: null,
-								}
-							)
-						);
-					const unsubscribe = i18n?.subscribe(push) ?? (() => undefined);
-					push();
-					if (signal.aborted) {
-						finish();
-					} else {
-						signal.addEventListener("abort", finish, { once: true });
-					}
 				}),
+				subscribe: () => () => undefined,
+				t: (_id, _values, fallback) => fallback ?? _id,
+			}
+		);
+		return {
+			...i18nServices,
 			uiToastDismiss: (input) => toastHost.dismiss(input),
 			uiToastShow: (input) => toastHost.show(input),
 			uiToastUpdate: (input) => toastHost.update(input),

@@ -108,6 +108,7 @@ const PROVIDER_ENGINE_KEY: Record<string, string> = {
 	google: "gemini",
 	"claude-pro-max": "claude",
 	"openai-codex": "codex",
+	chatgpt: "chatgpt",
 	anthropic: "anthropic",
 	openai: "openai",
 	mistral: "mistral",
