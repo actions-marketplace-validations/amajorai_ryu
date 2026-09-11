@@ -1,7 +1,10 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { expect, test } from "@playwright/test";
-import { newProject } from "../../../apps-store/video-studio/shared/project.ts";
+import {
+	newProject,
+	newSegment,
+} from "../../../apps-store/video-studio/shared/project.ts";
 
 const proofDir = path.resolve(
 	import.meta.dirname,
@@ -710,6 +713,107 @@ test("production Video Studio resumes source analysis after a completed run with
 	expect(errors).toEqual([]);
 	await page.screenshot({
 		path: path.join(proofDir, "video-analysis-completed.png"),
+		fullPage: true,
+		animations: "disabled",
+	});
+});
+
+test("production Video Studio bounds preview blobs to the current project and abandons old preload queues", async ({
+	page,
+}) => {
+	const errors: string[] = [];
+	page.on("pageerror", (error) => errors.push(error.message));
+	const assets = [
+		"Slow old source",
+		"Current preview",
+		"Unused queued source",
+	].map((name) => ({
+		id: crypto.randomUUID(),
+		name,
+		kind: "image" as const,
+		duration: 5,
+		width: 640,
+		height: 360,
+		hasAudio: false,
+		createdAt: "2026-09-12T00:00:00Z",
+	}));
+	const old = newProject("Old project");
+	old.segments = [newSegment(assets[0]!), newSegment(assets[2]!, 5)];
+	const current = newProject("Current project");
+	current.segments = [newSegment(assets[1]!)];
+	const shared = newProject("Shared source project");
+	shared.segments = [newSegment(assets[1]!)];
+	const empty = newProject("Empty project");
+	const html = await readFile(
+		"/tmp/ryu-video-performance-build/index.html",
+		"utf8"
+	);
+	const bridge = `<script>const projects=${JSON.stringify([old, current, shared, empty])},assets=${JSON.stringify(assets)};const reads={};const live=new Set();const create=URL.createObjectURL.bind(URL),revoke=URL.revokeObjectURL.bind(URL);URL.createObjectURL=blob=>{const url=create(blob);live.add(url);document.body.dataset.liveUrls=String(live.size);return url};URL.revokeObjectURL=url=>{live.delete(url);document.body.dataset.liveUrls=String(live.size);revoke(url)};window.ryu={app:{request:async({path})=>{if(path==="/projects")return {projects};const selected=projects.find(project=>path==="/projects/"+project.id);if(selected)return selected;if(path==="/assets")return {assets};if(path==="/renders")return {jobs:[]};const asset=assets.find(asset=>path.startsWith("/assets/"+asset.id+"/data?"));if(asset){reads[asset.name]=(reads[asset.name]||0)+1;document.body.dataset.mediaReads=JSON.stringify(reads);if(asset.id===assets[0].id){await new Promise(resolve=>{const done=e=>{if(e.data!=="release-old-media")return;removeEventListener("message",done);resolve()};addEventListener("message",done)});return {data:"AA==",done:false,size:100}}const canvas=document.createElement("canvas");canvas.width=640;canvas.height=360;const ctx=canvas.getContext("2d");ctx.fillStyle="#172554";ctx.fillRect(0,0,640,360);ctx.fillStyle="#ffffff";ctx.font="32px sans-serif";ctx.textAlign="center";ctx.fillText("Current project preview",320,180);const data=canvas.toDataURL("image/png").split(",")[1];return {data,size:data.length,done:true}}throw Error("Unexpected fixture request "+path)}}};</script>`;
+	await page.route("**/embedded-polling-child.html", (route) =>
+		route.fulfill({
+			contentType: "text/html",
+			body: html.replace("<head>", `<head>${bridge}`),
+		})
+	);
+	await page.setViewportSize({ width: 1600, height: 1200 });
+	await page.goto("/embedded-polling-proof.html");
+	await page.locator("main").evaluate((element) => {
+		element.style.maxWidth = "none";
+	});
+	await page.locator("iframe").evaluate((element) => {
+		element.style.height = "950px";
+	});
+	const frame = page.frameLocator('iframe[title="Companion workspace"]');
+	await expect(frame.locator("body")).toHaveAttribute(
+		"data-media-reads",
+		JSON.stringify({ "Slow old source": 1 })
+	);
+	await frame
+		.getByRole("combobox", { name: "Project", exact: true })
+		.selectOption(current.id);
+	await expect(frame.locator("body")).toHaveAttribute("data-live-urls", "1");
+	await page
+		.locator("iframe")
+		.evaluate((element: HTMLIFrameElement) =>
+			element.contentWindow?.postMessage("release-old-media", "*")
+		);
+	await frame
+		.getByRole("combobox", { name: "Project", exact: true })
+		.selectOption(shared.id);
+	await expect(frame.locator("body")).toHaveAttribute(
+		"data-media-reads",
+		JSON.stringify({ "Slow old source": 1, "Current preview": 1 })
+	);
+	await expect(frame.locator("body")).toHaveAttribute("data-live-urls", "1");
+	await frame
+		.getByRole("combobox", { name: "Project", exact: true })
+		.selectOption(empty.id);
+	await expect(frame.locator("body")).toHaveAttribute("data-live-urls", "0");
+	await frame
+		.getByRole("combobox", { name: "Project", exact: true })
+		.selectOption(current.id);
+	await expect(frame.locator("body")).toHaveAttribute(
+		"data-media-reads",
+		JSON.stringify({ "Slow old source": 1, "Current preview": 2 })
+	);
+	await expect(frame.locator("body")).toHaveAttribute("data-live-urls", "1");
+	await expect
+		.poll(() =>
+			frame
+				.locator(".studio-preview img")
+				.evaluateAll((images) =>
+					images.some(
+						(image) =>
+							image instanceof HTMLImageElement &&
+							image.complete &&
+							image.naturalWidth === 640
+					)
+				)
+		)
+		.toBe(true);
+	expect(errors).toEqual([]);
+	await page.screenshot({
+		path: path.join(proofDir, "video-preview-resources-completed.png"),
 		fullPage: true,
 		animations: "disabled",
 	});

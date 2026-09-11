@@ -293,6 +293,8 @@ impl InferenceClient for GovernedInference {
 
 #[cfg(test)]
 mod tests {
+	const MAX_PROVIDER_STREAM_BYTES: usize = 8 * 1024 * 1024;
+
     use super::*;
     use crate::{
         config::{
@@ -953,11 +955,9 @@ mod tests {
             ctx(),
             "openai".into(),
             "test".into(),
-            7,
-            Instant::now(),
-            None,
-            None,
-            None,
+			7,
+			Instant::now(),
+			None,
         );
         let mut stream = observed.into_data_stream();
         assert!(stream.next().await.unwrap().is_ok());
@@ -982,11 +982,9 @@ mod tests {
             ctx(),
             "openai".into(),
             "test".into(),
-            9,
-            Instant::now(),
-            None,
-            None,
-            None,
+			9,
+			Instant::now(),
+			None,
         );
         drop(body);
         let event = events.try_recv().unwrap();
