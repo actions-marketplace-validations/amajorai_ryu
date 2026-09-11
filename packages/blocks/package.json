@@ -79,6 +79,7 @@
     "@ryu/ui": "workspace:*",
     "@streamdown/code": "^1.1.1",
     "@tabler/icons-react": "^3.41.1",
+    "@toolwind/corner-shape": "0.0.8-3",
     "@xyflow/react": "^12.10.2",
     "ai": "catalog:",
     "html2canvas-pro": "^2.0.4",

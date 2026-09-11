@@ -523,8 +523,13 @@ export function formatBytes(bytes: number): string {
 }
 
 /** List all Spaces, most-recently-updated first. */
-export async function fetchSpaces(target: ApiTarget): Promise<Space[]> {
-	const json = await request<{ spaces?: SpaceWire[] }>(target, "/api/spaces");
+export async function fetchSpaces(
+	target: ApiTarget,
+	signal?: AbortSignal
+): Promise<Space[]> {
+	const json = await request<{ spaces?: SpaceWire[] }>(target, "/api/spaces", {
+		signal,
+	});
 	return (json.spaces ?? []).map(toSpace);
 }
 

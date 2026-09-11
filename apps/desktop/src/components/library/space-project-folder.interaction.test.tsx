@@ -118,7 +118,8 @@ mock.module("@/src/contexts/SpacesContext.tsx", () => ({
 	}),
 }));
 mock.module("@/src/contexts/TabsContext.tsx", () => ({
-	useTabsContext: () => ({ openTab }),
+	useTabSelector: (selector: (state: { openTab: typeof openTab }) => unknown) =>
+		selector({ openTab }),
 }));
 
 const { SpaceProjectFolder } = await import("./SpaceProjectFolder.tsx");

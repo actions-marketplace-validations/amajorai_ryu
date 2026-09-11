@@ -15,7 +15,7 @@ import {
 	NativeSelectOption,
 } from "@ryu/ui/components/native-select";
 import { ApiError, type ApiTarget } from "@ryuhq/core-client/client";
-import { fetchSpaces } from "@ryuhq/core-client/spaces";
+import { useQuery } from "@tanstack/react-query";
 import {
 	useCallback,
 	useEffect,
@@ -44,6 +44,8 @@ import {
 	testBackupDestination,
 } from "@/src/lib/api/backups.ts";
 import { toTarget } from "@/src/lib/api/client.ts";
+import { queryClient } from "@/src/lib/query-client.ts";
+import { spaceListQueryOptions } from "@/src/lib/space-list-query.ts";
 import { SettingsCard, SettingsSection } from "./shared/settings-items.tsx";
 
 const EMPTY: BackupOverview = {
@@ -413,7 +415,8 @@ export function BackupSettings({
 	const [editing, setEditing] = useState<BackupDestination>();
 	const [destinationId, setDestinationId] = useState("");
 	const [selection, setSelection] = useState(spaceId ?? "node");
-	const [spaces, setSpaces] = useState<Array<{ id: string; name: string }>>([]);
+	const spacesQuery = useQuery(spaceListQueryOptions(target), queryClient);
+	const spaces = spacesQuery.data ?? [];
 	const [schedule, setSchedule] = useState("0 2 * * *");
 	const [retention, setRetention] = useState(7);
 	const [records, setRecords] = useState<BackupRecord[] | null>(null);
@@ -462,17 +465,7 @@ export function BackupSettings({
 					setLoading(false);
 				}
 			});
-		fetchSpaces(targetRef.current)
-			.then((value) => {
-				if (!disposed) {
-					setSpaces(value);
-				}
-			})
-			.catch(() => {
-				if (!disposed) {
-					setSpaces([]);
-				}
-			});
+
 		return () => {
 			disposed = true;
 		};

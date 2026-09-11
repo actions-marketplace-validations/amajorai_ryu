@@ -119,6 +119,19 @@ for f in bindings/java/pom.xml bindings/java/README.md; do
   log "  $f -> $NEW"
 done
 
+# 3b) Language binding metadata and documented install versions. The SDK hub's
+# version gate reads these four ecosystems as one public release surface; leaving
+# them behind creates a mixed train even when the npm/Cargo/Java packages moved.
+log "Language SDK binding versions (Python + C# + Kotlin)"
+for f in bindings/python/pyproject.toml bindings/python/README.md bindings/csharp/Ryu.Sdk.csproj bindings/csharp/README.md bindings/kotlin/build.gradle.kts; do
+  [[ -f "$f" ]] || continue
+  perl -0777 -pi -e 'my ($o,$n)=($ENV{OLD},$ENV{NEW});
+    s/^version = "\Q$o\E"/version = "$n"/mg;
+    s{<Version>\Q$o\E</Version>}{<Version>$n</Version>}g;
+    s{(ryu-sdk(?:==| --version )?)\Q$o\E}{$1$n}g;' "$f"
+  log "  $f -> $NEW"
+done
+
 # 4) tauri.conf.json — the desktop tag driver.
 log "tauri.conf.json (desktop tag driver)"
 while IFS= read -r f; do

@@ -1,6 +1,7 @@
 import type { GlyphValue } from "@ryu/ui/components/glyph.ts";
-import { useCallback, useEffect, useState } from "react";
-import { type ApiTarget, AppDisabledError } from "@/src/lib/api/client.ts";
+import { skipToken, useQuery } from "@tanstack/react-query";
+import { useCallback, useMemo } from "react";
+import { AppDisabledError } from "@/src/lib/api/client.ts";
 import {
 	createDatabase as apiCreateDatabase,
 	createPage as apiCreatePage,
@@ -19,7 +20,6 @@ import {
 	uploadSpaceFile as apiUploadSpaceFile,
 	fetchDocument,
 	fetchDocuments,
-	fetchSpaces,
 	type RetrievalMode,
 	type RetrievalModeChange,
 	type RetrievalModeProgress,
@@ -31,7 +31,9 @@ import {
 } from "@/src/lib/api/spaces.ts";
 import { useCoreRefresh } from "@/src/lib/core-refresh.ts";
 import { useEntityCap } from "@/src/lib/gating/useEntityCap.ts";
+import { queryClient } from "@/src/lib/query-client.ts";
 import type { ResourceVisibility } from "@/src/lib/resource-visibility.ts";
+import { spaceListQueryOptions } from "@/src/lib/space-list-query.ts";
 import { useActiveNode } from "./useActiveNode.ts";
 
 export interface UseSpacesResult {
@@ -145,6 +147,8 @@ export interface UseSpacesResult {
 	) => Promise<UploadedSpaceFile>;
 }
 
+const EMPTY_DOCUMENT_REVISIONS: ReadonlyMap<string, number> = new Map();
+
 /// Loads Spaces from the active Core node and exposes create/delete plus the
 /// per-space document and search operations. Mutations keep the in-memory list
 /// in sync so the UI reflects changes (e.g. document counts) without a manual
@@ -157,47 +161,76 @@ export function useSpaces(): UseSpacesResult {
 
 	const { guard } = useEntityCap();
 
-	const [spaces, setSpaces] = useState<Space[]>([]);
-	const [loading, setLoading] = useState(true);
-	const [error, setError] = useState<string | null>(null);
-	const [documentRevisions, setDocumentRevisions] = useState<
-		ReadonlyMap<string, number>
-	>(() => new Map());
-	const [appDisabled, setAppDisabled] = useState<{
-		app: string;
-		message: string;
-	} | null>(null);
-	const bumpDocumentRevision = useCallback((spaceId: string) => {
-		setDocumentRevisions((current) => {
-			const next = new Map(current);
-			next.set(spaceId, (current.get(spaceId) ?? 0) + 1);
-			return next;
-		});
-	}, []);
-
+	const options = useMemo(
+		() => spaceListQueryOptions({ url, token, userJwt }),
+		[url, token, userJwt]
+	);
+	const queryKey = options.queryKey;
+	const revisionKey = useMemo(
+		() => ["space-document-revisions", url, token, userJwt],
+		[url, token, userJwt]
+	);
+	const query = useQuery(options, queryClient);
+	const revisions = useQuery<ReadonlyMap<string, number>>(
+		{
+			queryKey: revisionKey,
+			queryFn: skipToken,
+			initialData: () => new Map<string, number>(),
+			enabled: false,
+			staleTime: Number.POSITIVE_INFINITY,
+		},
+		queryClient
+	);
+	const spaces = query.data ?? [];
+	const loading = query.isPending;
+	const failure = query.error;
+	const appDisabled =
+		failure instanceof AppDisabledError
+			? { app: failure.app, message: failure.message }
+			: null;
+	const error =
+		failure && !appDisabled
+			? failure instanceof Error
+				? failure.message
+				: "Failed to load spaces"
+			: null;
+	const documentRevisions = revisions.data ?? EMPTY_DOCUMENT_REVISIONS;
+	const bumpDocumentRevision = useCallback(
+		(spaceId: string) => {
+			queryClient.setQueryData<ReadonlyMap<string, number>>(
+				revisionKey,
+				(current) => {
+					const next = new Map(current);
+					next.set(spaceId, (next.get(spaceId) ?? 0) + 1);
+					return next;
+				}
+			);
+		},
+		[revisionKey]
+	);
 	const reload = useCallback(async () => {
-		setLoading(true);
-		setError(null);
-		setAppDisabled(null);
-		const target: ApiTarget = { url, token, userJwt };
-		try {
-			setSpaces(await fetchSpaces(target));
-		} catch (e) {
-			// A disabled-app 503 is not a load failure — it has its own actionable
-			// surface (the Enable prompt), so route it there instead of `error`.
-			if (e instanceof AppDisabledError) {
-				setAppDisabled({ app: e.app, message: e.message });
-			} else {
-				setError(e instanceof Error ? e.message : "Failed to load spaces");
+		await queryClient.refetchQueries(
+			{ queryKey, exact: true },
+			{ cancelRefetch: false }
+		);
+	}, [queryKey]);
+	const refreshAfterMutation = useCallback(async () => {
+		await queryClient.cancelQueries({ queryKey, exact: true });
+		await queryClient.invalidateQueries({ queryKey, exact: true });
+	}, [queryKey]);
+	const setSpaces = useCallback(
+		async (update: (rows: Space[]) => Space[]) => {
+			await queryClient.cancelQueries({ queryKey, exact: true });
+			const missing = queryClient.getQueryData(queryKey) === undefined;
+			queryClient.setQueryData<Space[]>(queryKey, (current) =>
+				update(current ?? [])
+			);
+			if (missing) {
+				await queryClient.invalidateQueries({ queryKey, exact: true });
 			}
-		} finally {
-			setLoading(false);
-		}
-	}, [url, token, userJwt]);
-
-	useEffect(() => {
-		reload().catch(() => undefined);
-	}, [reload]);
+		},
+		[queryKey]
+	);
 
 	// Auto-recover when Core reconnects or the user hits "Refresh all".
 	useCoreRefresh(reload);
@@ -221,30 +254,30 @@ export function useSpaces(): UseSpacesResult {
 				retrievalMode,
 				visibility
 			);
-			await reload();
+			await refreshAfterMutation();
 			return created.retrievalMode;
 		},
-		[url, token, userJwt, reload, guard, spaces.length]
+		[url, token, userJwt, refreshAfterMutation, guard, spaces.length]
 	);
 
 	const remove = useCallback(
 		async (id: string) => {
 			await apiDeleteSpace({ url, token, userJwt }, id);
-			setSpaces((prev) => prev.filter((s) => s.id !== id));
+			await setSpaces((prev) => prev.filter((s) => s.id !== id));
 		},
-		[url, token, userJwt]
+		[url, token, userJwt, setSpaces]
 	);
 
 	const rename = useCallback(
 		async (id: string, name: string) => {
 			await apiRenameSpace({ url, token, userJwt }, id, name);
-			setSpaces((prev) =>
+			await setSpaces((prev) =>
 				prev.map((space) =>
 					space.id === id ? { ...space, name, updatedAt: Date.now() } : space
 				)
 			);
 		},
-		[url, token, userJwt]
+		[url, token, userJwt, setSpaces]
 	);
 
 	const listDocuments = useCallback(
@@ -257,10 +290,10 @@ export function useSpaces(): UseSpacesResult {
 			await apiIngestDocument({ url, token, userJwt }, spaceId, title, content);
 			bumpDocumentRevision(spaceId);
 			// Refresh the list so the space's document count stays accurate.
-			await reload();
+			await refreshAfterMutation();
 			return fetchDocuments({ url, token, userJwt }, spaceId);
 		},
-		[url, token, userJwt, bumpDocumentRevision, reload]
+		[url, token, userJwt, bumpDocumentRevision, refreshAfterMutation]
 	);
 
 	const search = useCallback(
@@ -280,11 +313,11 @@ export function useSpaces(): UseSpacesResult {
 			bumpDocumentRevision(spaceId);
 			// A parented "row page" is hidden from listings, so no reload is needed.
 			if (!parentId) {
-				await reload();
+				await refreshAfterMutation();
 			}
 			return id;
 		},
-		[url, token, userJwt, bumpDocumentRevision, reload]
+		[url, token, userJwt, bumpDocumentRevision, refreshAfterMutation]
 	);
 
 	const createDatabase = useCallback(
@@ -295,10 +328,10 @@ export function useSpaces(): UseSpacesResult {
 				title
 			);
 			bumpDocumentRevision(spaceId);
-			await reload();
+			await refreshAfterMutation();
 			return id;
 		},
-		[url, token, userJwt, bumpDocumentRevision, reload]
+		[url, token, userJwt, bumpDocumentRevision, refreshAfterMutation]
 	);
 
 	const createWhiteboard = useCallback(
@@ -309,10 +342,10 @@ export function useSpaces(): UseSpacesResult {
 				title
 			);
 			bumpDocumentRevision(spaceId);
-			await reload();
+			await refreshAfterMutation();
 			return id;
 		},
-		[url, token, userJwt, bumpDocumentRevision, reload]
+		[url, token, userJwt, bumpDocumentRevision, refreshAfterMutation]
 	);
 
 	const uploadFile = useCallback(
@@ -368,18 +401,20 @@ export function useSpaces(): UseSpacesResult {
 			if (removed) {
 				bumpDocumentRevision(spaceId);
 			}
-			await reload();
+			await refreshAfterMutation();
 			return removed;
 		},
-		[url, token, userJwt, bumpDocumentRevision, reload]
+		[url, token, userJwt, bumpDocumentRevision, refreshAfterMutation]
 	);
 
 	const setSpaceIcon = useCallback(
 		async (id: string, icon: GlyphValue) => {
 			await apiSetSpaceIcon({ url, token, userJwt }, id, icon);
-			setSpaces((prev) => prev.map((s) => (s.id === id ? { ...s, icon } : s)));
+			await setSpaces((prev) =>
+				prev.map((s) => (s.id === id ? { ...s, icon } : s))
+			);
 		},
-		[url, token, userJwt]
+		[url, token, userJwt, setSpaces]
 	);
 
 	const setSpaceVisibility = useCallback(
@@ -394,7 +429,7 @@ export function useSpaces(): UseSpacesResult {
 				visibility,
 				teamId
 			);
-			setSpaces((prev) =>
+			await setSpaces((prev) =>
 				prev.map((space) =>
 					space.id === id
 						? {
@@ -406,7 +441,7 @@ export function useSpaces(): UseSpacesResult {
 				)
 			);
 		},
-		[url, token, userJwt]
+		[url, token, userJwt, setSpaces]
 	);
 
 	const setRetrievalMode = useCallback(
@@ -421,14 +456,14 @@ export function useSpaces(): UseSpacesResult {
 			// counts, and a full refetch would blank the detail pane mid-interaction.
 			// `change.mode` (Core's echo), never the requested `mode` — the list must
 			// show what the node has, not what this client asked for.
-			setSpaces((prev) =>
+			await setSpaces((prev) =>
 				prev.map((s) =>
 					s.id === id ? { ...s, retrievalMode: change.mode } : s
 				)
 			);
 			return change;
 		},
-		[url, token, userJwt]
+		[url, token, userJwt, setSpaces]
 	);
 
 	const setDocumentIcon = useCallback(

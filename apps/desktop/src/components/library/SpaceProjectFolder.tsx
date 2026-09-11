@@ -12,7 +12,7 @@ import { Skeleton } from "@ryu/ui/components/skeleton.tsx";
 import type { ReactNode } from "react";
 import { lazy, Suspense, useEffect, useState } from "react";
 import { useSpacesContext } from "@/src/contexts/SpacesContext.tsx";
-import { useTabsContext } from "@/src/contexts/TabsContext.tsx";
+import { useTabSelector } from "@/src/contexts/TabsContext.tsx";
 import type {
 	Space,
 	SpaceDocument,
@@ -193,7 +193,7 @@ export function SpaceProjectFolder({
 		getDocument,
 		listDocuments,
 	} = useSpacesContext();
-	const { openTab } = useTabsContext();
+	const openTab = useTabSelector((state) => state.openTab);
 	const documentRevision = documentRevisions.get(space.id) ?? 0;
 	const [documentList, setDocumentList] = useState<DocumentListState>({
 		status: "loading",

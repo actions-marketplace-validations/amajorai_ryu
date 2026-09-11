@@ -26,6 +26,7 @@
     "@ryu/ui": "workspace:*",
     "@ryuhq/core-client": "workspace:*",
     "@ryuhq/protocol": "workspace:*",
+    "@toolwind/corner-shape": "0.0.8-3",
     "ai": "catalog:",
     "electron-updater": "^6.3.9",
     "motion": "^11",

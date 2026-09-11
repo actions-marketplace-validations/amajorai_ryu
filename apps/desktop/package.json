@@ -77,6 +77,7 @@
     "@tauri-apps/plugin-process": "^2",
     "@tauri-apps/plugin-store": "^2.4.2",
     "@tauri-apps/plugin-updater": "^2",
+    "@toolwind/corner-shape": "0.0.8-3",
     "@xyflow/react": "^12.10.2",
     "agentation": "^3.0.2",
     "ai": "catalog:",

@@ -84,6 +84,7 @@ describe("useSpaces document revisions", () => {
 
 		await act(async () => {
 			await result().saveDocument("space-1", "page-1", "Page", "Updated");
+			await new Promise((resolve) => setTimeout(resolve, 0));
 		});
 		expect(result().documentRevisions.get("space-1")).toBe(1);
 
@@ -96,6 +97,7 @@ describe("useSpaces document revisions", () => {
 				"space-1",
 				new File(["content"], "document.txt", { type: "text/plain" })
 			);
+			await new Promise((resolve) => setTimeout(resolve, 0));
 		});
 
 		expect(result().documentRevisions.get("space-1")).toBe(6);
