@@ -412,3 +412,111 @@ test("production Monitors avoids overlapping details and rejects a previous sele
 		animations: "disabled",
 	});
 });
+
+test("production Fine-tuning coalesces slow job reads and preserves configuration while hidden", async ({
+	page,
+}) => {
+	const errors: string[] = [];
+	page.on("pageerror", (error) => errors.push(error.message));
+	const html = await readFile(
+		"/tmp/ryu-finetune-performance-build/index.html",
+		"utf8"
+	);
+	const bridge = `<script>let reads=0;window.ryu={finetune:{capability:async()=>({can_train_local:true,gpu:"Local GPU"}),adapters:async()=>({adapters:[]}),list:async()=>{document.body.dataset.jobReads=String(++reads);if(reads===1)await new Promise(resolve=>{const done=e=>{if(e.data!=="release-jobs")return;removeEventListener("message",done);resolve()};addEventListener("message",done)});return {jobs:[]}},start:async()=>{document.body.dataset.started="true";throw Error("No training starts in this proof")}}};</script>`;
+	await page.route("**/embedded-polling-child.html", (route) =>
+		route.fulfill({
+			contentType: "text/html",
+			body: html.replace("<head>", `<head>${bridge}`),
+		})
+	);
+	await page.clock.install();
+	await page.goto("/embedded-polling-proof.html");
+	const frame = page.frameLocator('iframe[title="Companion workspace"]');
+	await frame
+		.getByRole("textbox", { name: "Base model id", exact: true })
+		.fill("unsloth/llama-3-8b-bnb-4bit");
+	await frame
+		.getByRole("textbox", { name: "Output adapter name", exact: true })
+		.fill("My saved draft");
+	await page.clock.fastForward(13_000);
+	await expect(frame.locator("body")).toHaveAttribute("data-job-reads", "1");
+	await page
+		.locator("iframe")
+		.evaluate((element: HTMLIFrameElement) =>
+			element.contentWindow?.postMessage("release-jobs", "*")
+		);
+	await page.clock.fastForward(1);
+	await page.getByRole("button", { name: "Another tab", exact: true }).click();
+	await page.waitForTimeout(150);
+	await page.clock.fastForward(21_000);
+	await expect(frame.locator("body")).toHaveAttribute("data-job-reads", "1");
+	await page.getByRole("button", { name: "Companion", exact: true }).click();
+	await expect(frame.locator("body")).toHaveAttribute("data-job-reads", "2");
+	await expect(
+		frame.getByRole("textbox", { name: "Output adapter name", exact: true })
+	).toHaveValue("My saved draft");
+	expect(await frame.locator("body").getAttribute("data-started")).toBeNull();
+	expect(errors).toEqual([]);
+	await mkdir(proofDir, { recursive: true });
+	await page.screenshot({
+		path: path.join(proofDir, "finetune-completed.png"),
+		fullPage: true,
+		animations: "disabled",
+	});
+});
+
+test("production Fine-tuning keeps live progress and refreshes once on repeated terminal frames", async ({
+	page,
+}) => {
+	const errors: string[] = [];
+	page.on("pageerror", (error) => errors.push(error.message));
+	const html = await readFile(
+		"/tmp/ryu-finetune-performance-build/index.html",
+		"utf8"
+	);
+	const bridge = `<script>let lists=0,adapters=0;window.ryu={context:{view:"history"},finetune:{capability:async()=>({can_train_local:true,gpu:"Local GPU"}),adapters:async()=>{document.body.dataset.adapterReads=String(++adapters);return {adapters:[]}},list:async()=>{document.body.dataset.jobReads=String(++lists);return {jobs:[{id:"run-a",output_name:"Training preview",state:"running",step:10,max_steps:100}]}},stream:async(_input,hooks)=>{document.body.dataset.streams="1";hooks.signal.addEventListener("abort",()=>{document.body.dataset.streamAborted="true"});addEventListener("message",e=>{if(e.data==="progress")hooks.onFrame(JSON.stringify({step:50}));if(e.data==="terminal"){for(let i=0;i<4;i++)hooks.onFrame(JSON.stringify({state:"succeeded",step:100}))}})}}};</script>`;
+	await page.route("**/embedded-polling-child.html", (route) =>
+		route.fulfill({
+			contentType: "text/html",
+			body: html.replace("<head>", `<head>${bridge}`),
+		})
+	);
+	await page.clock.install();
+	await page.goto("/embedded-polling-proof.html");
+	const frame = page.frameLocator('iframe[title="Companion workspace"]');
+	await frame.getByRole("button", { name: /Training preview/ }).press("Enter");
+	await expect(frame.locator("body")).toHaveAttribute("data-streams", "1");
+	await page.getByRole("button", { name: "Another tab", exact: true }).click();
+	await page.waitForTimeout(150);
+	await page
+		.locator("iframe")
+		.evaluate((element: HTMLIFrameElement) =>
+			element.contentWindow?.postMessage("progress", "*")
+		);
+	await page.clock.fastForward(9000);
+	await expect(frame.locator("body")).toHaveAttribute("data-job-reads", "1");
+	await expect(frame.getByText("50 / 100", { exact: true })).toHaveCount(1);
+	expect(
+		await frame.locator("body").getAttribute("data-stream-aborted")
+	).toBeNull();
+	await page.getByRole("button", { name: "Companion", exact: true }).click();
+	await expect(frame.locator("body")).toHaveAttribute("data-job-reads", "2");
+	await page
+		.locator("iframe")
+		.evaluate((element: HTMLIFrameElement) =>
+			element.contentWindow?.postMessage("terminal", "*")
+		);
+	await expect(frame.locator("body")).toHaveAttribute("data-job-reads", "3");
+	await expect(frame.locator("body")).toHaveAttribute(
+		"data-adapter-reads",
+		"2"
+	);
+	await expect(frame.getByText("100 / 100", { exact: true })).toBeVisible();
+	expect(errors).toEqual([]);
+	await mkdir(proofDir, { recursive: true });
+	await page.screenshot({
+		path: path.join(proofDir, "finetune-progress-completed.png"),
+		fullPage: true,
+		animations: "disabled",
+	});
+});
