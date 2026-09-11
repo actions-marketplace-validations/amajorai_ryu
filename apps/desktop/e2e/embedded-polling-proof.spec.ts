@@ -1,6 +1,7 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { expect, test } from "@playwright/test";
+import { newProject } from "../../../apps-store/video-studio/shared/project.ts";
 
 const proofDir = path.resolve(
 	import.meta.dirname,
@@ -516,6 +517,199 @@ test("production Fine-tuning keeps live progress and refreshes once on repeated 
 	await mkdir(proofDir, { recursive: true });
 	await page.screenshot({
 		path: path.join(proofDir, "finetune-progress-completed.png"),
+		fullPage: true,
+		animations: "disabled",
+	});
+});
+
+test("production Video Studio retains a newly queued export against an old poll and pauses hidden reads", async ({
+	page,
+}) => {
+	const errors: string[] = [];
+	page.on("pageerror", (error) => errors.push(error.message));
+	const project = newProject("Performance preview");
+	project.titles.push({
+		id: crypto.randomUUID(),
+		start: 0,
+		end: 5,
+		text: "Ryu Video Studio",
+		x: 0.5,
+		y: 0.5,
+		fontSize: 0.08,
+		color: "#ffffff",
+		fadeIn: 0,
+		fadeOut: 0,
+		animation: "fade",
+	});
+	const html = await readFile(
+		"/tmp/ryu-video-performance-build/index.html",
+		"utf8"
+	);
+	const bridge = `<script>let reads=0;const project=${JSON.stringify(project)};const job={id:"render-preview",projectId:project.id,revision:0,status:"running",progress:0.2};window.ryu={app:{request:async({path,method})=>{if(path==="/projects")return {projects:[project]};if(path==="/assets")return {assets:[]};if(path==="/renders"){document.body.dataset.renderReads=String(++reads);if(reads===1){await new Promise(resolve=>{const done=e=>{if(e.data!=="release-renders")return;removeEventListener("message",done);resolve()};addEventListener("message",done)});return {jobs:[]}}return {jobs:[{...job,status:"completed",progress:1}]}}if(path.endsWith("/render")&&method==="POST"){document.body.dataset.exportRequests="1";return job}throw Error("Unexpected fixture request "+path)}}};</script>`;
+	await page.route("**/embedded-polling-child.html", (route) =>
+		route.fulfill({
+			contentType: "text/html",
+			body: html.replace("<head>", `<head>${bridge}`),
+		})
+	);
+	await page.clock.install();
+	await page.setViewportSize({ width: 1600, height: 1200 });
+	await page.goto("/embedded-polling-proof.html");
+	await page.locator("main").evaluate((element) => {
+		element.style.maxWidth = "none";
+	});
+	await page.locator("iframe").evaluate((element) => {
+		element.style.height = "950px";
+	});
+	const frame = page.frameLocator('iframe[title="Companion workspace"]');
+	await expect(
+		frame.getByRole("button", { name: "Export video", exact: true })
+	).toBeEnabled();
+	await page.clock.fastForward(6000);
+	await expect(frame.locator("body")).toHaveAttribute("data-render-reads", "1");
+	await frame
+		.getByRole("button", { name: "Export video", exact: true })
+		.press("Enter");
+	await expect(
+		frame.getByText("Encoding video…", { exact: true })
+	).toBeVisible();
+	await page
+		.locator("iframe")
+		.evaluate((element: HTMLIFrameElement) =>
+			element.contentWindow?.postMessage("release-renders", "*")
+		);
+	await page.clock.fastForward(1);
+	await expect(
+		frame.getByText("Encoding video…", { exact: true })
+	).toBeVisible();
+	await page.getByRole("button", { name: "Another tab", exact: true }).click();
+	await page.waitForTimeout(150);
+	await page.clock.fastForward(10_000);
+	await expect(frame.locator("body")).toHaveAttribute("data-render-reads", "1");
+	await page.getByRole("button", { name: "Companion", exact: true }).click();
+	await expect(frame.locator("body")).toHaveAttribute("data-render-reads", "2");
+	await expect(frame.getByRole("status")).toHaveText(
+		"Export completed. Your video is ready to download."
+	);
+	await expect(
+		frame.getByRole("button", { name: "Download MP4", exact: true })
+	).toBeVisible();
+	await frame
+		.getByRole("button", { name: "Play timeline", exact: true })
+		.press("Enter");
+	await page.clock.runFor(1000);
+	await frame
+		.getByRole("button", { name: "Pause playback", exact: true })
+		.press("Enter");
+	await expect(
+		frame.getByRole("spinbutton", { name: "Playhead", exact: true })
+	).not.toHaveValue("0");
+	expect(errors).toEqual([]);
+	await page.screenshot({
+		path: path.join(proofDir, "video-export-completed.png"),
+		fullPage: true,
+		animations: "disabled",
+	});
+});
+
+test("production Video Studio resumes source analysis after a completed run without overlapping reads", async ({
+	page,
+}) => {
+	const errors: string[] = [];
+	page.on("pageerror", (error) => errors.push(error.message));
+	const project = newProject("Analysis preview");
+	const asset = {
+		id: crypto.randomUUID(),
+		name: "Scene study.mp4",
+		kind: "video",
+		duration: 5,
+		width: 1920,
+		height: 1080,
+		hasAudio: true,
+		createdAt: "2026-09-12T00:00:00Z",
+	};
+	const html = await readFile(
+		"/tmp/ryu-video-performance-build/index.html",
+		"utf8"
+	);
+	const bridge = `<script>let reads=0,starts=0;const project=${JSON.stringify(project)},asset=${JSON.stringify(asset)};const analysis={assetId:asset.id,status:"completed",createdAt:asset.createdAt,sceneCuts:[2.5],waveform:[0.1,0.4,0.2,0.6,0.1],duration:5};window.ryu={app:{request:async({path,method})=>{if(path==="/projects")return {projects:[project]};if(path==="/assets")return {assets:[asset]};if(path==="/renders")return {jobs:[]};if(path.endsWith("/analysis")){document.body.dataset.analysisReads=String(++reads);if(reads===1)await new Promise(resolve=>{const done=e=>{if(e.data!=="release-analysis")return;removeEventListener("message",done);resolve()};addEventListener("message",done)});return {analysis:{...analysis,status:reads===2?"running":"completed"}}}if(path.endsWith("/analyze")&&method==="POST"){document.body.dataset.analysisStarts=String(++starts);return {...analysis,status:"running"}}throw Error("Unexpected fixture request "+path)}}};</script>`;
+	await page.route("**/embedded-polling-child.html", (route) =>
+		route.fulfill({
+			contentType: "text/html",
+			body: html.replace("<head>", `<head>${bridge}`),
+		})
+	);
+	await page.clock.install();
+	await page.setViewportSize({ width: 1600, height: 1200 });
+	await page.goto("/embedded-polling-proof.html");
+	await page.locator("main").evaluate((element) => {
+		element.style.maxWidth = "none";
+	});
+	await page.locator("iframe").evaluate((element) => {
+		element.style.height = "950px";
+	});
+	const frame = page.frameLocator('iframe[title="Companion workspace"]');
+	await frame
+		.getByRole("button", { name: "View analysis", exact: true })
+		.press("Enter");
+	await expect(frame.locator("body")).toHaveAttribute(
+		"data-analysis-reads",
+		"1"
+	);
+	await page.clock.fastForward(6000);
+	await expect(frame.locator("body")).toHaveAttribute(
+		"data-analysis-reads",
+		"1"
+	);
+	await page
+		.locator("iframe")
+		.evaluate((element: HTMLIFrameElement) =>
+			element.contentWindow?.postMessage("release-analysis", "*")
+		);
+	await expect(
+		frame.getByText("1 detected scene changes", { exact: true })
+	).toBeVisible();
+	await page.clock.fastForward(10_000);
+	await expect(frame.locator("body")).toHaveAttribute(
+		"data-analysis-reads",
+		"1"
+	);
+	await frame
+		.getByRole("button", { name: "Analyze source", exact: true })
+		.press("Enter");
+	await expect(frame.locator("body")).toHaveAttribute(
+		"data-analysis-reads",
+		"2"
+	);
+	await expect(
+		frame.getByText("Analyzing scenes and audio…", { exact: true })
+	).toBeVisible();
+	await page.getByRole("button", { name: "Another tab", exact: true }).click();
+	await page.waitForTimeout(150);
+	await page.clock.fastForward(10_000);
+	await expect(frame.locator("body")).toHaveAttribute(
+		"data-analysis-reads",
+		"2"
+	);
+	await page.getByRole("button", { name: "Companion", exact: true }).click();
+	await expect(frame.locator("body")).toHaveAttribute(
+		"data-analysis-reads",
+		"3"
+	);
+	await expect(
+		frame.getByText("1 detected scene changes", { exact: true })
+	).toBeVisible();
+	await page.clock.fastForward(6000);
+	await expect(frame.locator("body")).toHaveAttribute(
+		"data-analysis-reads",
+		"3"
+	);
+	await frame
+		.getByText("1 detected scene changes", { exact: true })
+		.scrollIntoViewIfNeeded();
+	expect(errors).toEqual([]);
+	await page.screenshot({
+		path: path.join(proofDir, "video-analysis-completed.png"),
 		fullPage: true,
 		animations: "disabled",
 	});
