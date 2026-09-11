@@ -9,6 +9,8 @@ regexes = [
   '''sk-secret-1234567890''',
   # Documentation-only placeholder retained in older public mirror commits.
   '''ryu-sk-your-secret-key''',
+  # Non-secret JWT-shaped adapter sentinel retained in older public mirror commits.
+  '''eyJhbGciOiJub25lIiwidHlwIjoiSldUIn0\\.eyJodHRwczovL2FwaS5vcGVuYWkuY29tL2F1dGgiOnsiY2hhdGdwdF9hY2NvdW50X2lkIjoicnl1LWxvY2FsIn19\\.''',
 ]
 paths = [
   # Vendored single-file plugin-UI fixtures: minified/bundled third-party web apps
