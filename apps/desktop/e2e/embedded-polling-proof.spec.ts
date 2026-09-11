@@ -304,3 +304,111 @@ test("production Quests pauses list polls and preserves typing ahead of scratchp
 		animations: "disabled",
 	});
 });
+
+test("production Broadcast keeps its draft and selection while hidden reads stop", async ({
+	page,
+}) => {
+	const errors: string[] = [];
+	page.on("pageerror", (error) => errors.push(error.message));
+	const html = await readFile(
+		"/tmp/ryu-broadcast-performance-build/index.html",
+		"utf8"
+	);
+	const bridge = `<script>let reads=0;window.ryu={chat:{list:async()=>{document.body.dataset.broadcastReads=String(++reads);return [{id:"chat-a",title:"Planning",agent_id:"agent-a",message_count:3,run_status:"running",archived:false}]},send:async()=>{document.body.dataset.sent="true";throw Error("Sending is not part of this read-only proof")}}};</script>`;
+	await page.route("**/embedded-polling-child.html", (route) =>
+		route.fulfill({
+			contentType: "text/html",
+			body: html.replace("<head>", `<head>${bridge}`),
+		})
+	);
+	await page.clock.install();
+	await page.goto("/embedded-polling-proof.html");
+	const frame = page.frameLocator('iframe[title="Companion workspace"]');
+	await frame.getByRole("tab", { name: /Selected/ }).click();
+	await frame.getByRole("checkbox", { name: /^Select Planning/ }).check();
+	await frame
+		.getByRole("textbox", { name: "Broadcast message", exact: true })
+		.fill("Draft only — do not send");
+	await page.getByRole("button", { name: "Another tab", exact: true }).click();
+	await page.waitForTimeout(150);
+	await page.clock.fastForward(31_000);
+	await expect(frame.locator("body")).toHaveAttribute(
+		"data-broadcast-reads",
+		"1"
+	);
+	await page.getByRole("button", { name: "Companion", exact: true }).click();
+	await expect(frame.locator("body")).toHaveAttribute(
+		"data-broadcast-reads",
+		"2"
+	);
+	await expect(
+		frame.getByRole("checkbox", { name: /^Select Planning/ })
+	).toBeChecked();
+	await expect(
+		frame.getByRole("textbox", { name: "Broadcast message", exact: true })
+	).toHaveValue("Draft only — do not send");
+	expect(await frame.locator("body").getAttribute("data-sent")).toBeNull();
+	expect(errors).toEqual([]);
+	await mkdir(proofDir, { recursive: true });
+	await page.screenshot({
+		path: path.join(proofDir, "broadcast-completed.png"),
+		fullPage: true,
+		animations: "disabled",
+	});
+});
+
+test("production Monitors avoids overlapping details and rejects a previous selection", async ({
+	page,
+}) => {
+	const errors: string[] = [];
+	page.on("pageerror", (error) => errors.push(error.message));
+	const html = await readFile(
+		"/tmp/ryu-monitors-performance-build/index.html",
+		"utf8"
+	);
+	const bridge = `<script>let aReads=0;let held="a";addEventListener("message",e=>{if(e.data==="hold-monitor-b")held="b"});window.ryu={monitors:{list:async()=>["a","b"].map(id=>({id,name:"Monitor "+id.toUpperCase(),url:"https://example.com/"+id,backend:"http",check:{type:"uptime"},interval:"5m",enabled:true,notify:[],created_at:"2026-09-12T00:00:00Z",updated_at:"2026-09-12T00:00:00Z"})),snapshots:async({id})=>{if(id==="a")document.body.dataset.aReads=String(++aReads);if(id===held){await new Promise(resolve=>{const done=e=>{if(e.data!=="release-monitor-"+id)return;removeEventListener("message",done);resolve()};addEventListener("message",done)})}return []},alerts:async({id})=>[{id:1,monitor_id:id,monitor_name:"Monitor "+id.toUpperCase(),title:"Alert "+id.toUpperCase(),message:"Controlled monitor detail",kind:"uptime",acknowledged:false,created_at:"2026-09-12T00:00:00Z"}]}};</script>`;
+	await page.route("**/embedded-polling-child.html", (route) =>
+		route.fulfill({
+			contentType: "text/html",
+			body: html.replace("<head>", `<head>${bridge}`),
+		})
+	);
+	await page.clock.install();
+	await page.goto("/embedded-polling-proof.html");
+	const frame = page.frameLocator('iframe[title="Companion workspace"]');
+	await frame.getByRole("button", { name: /Monitor A/ }).press("Enter");
+	await expect(frame.locator("body")).toHaveAttribute("data-a-reads", "1");
+	await page.clock.fastForward(16_000);
+	await expect(frame.locator("body")).toHaveAttribute("data-a-reads", "1");
+	await frame.getByRole("button", { name: /Monitor B/ }).press("Enter");
+	await expect(frame.getByText("Alert B", { exact: true })).toBeVisible();
+	await page
+		.locator("iframe")
+		.evaluate((element: HTMLIFrameElement) =>
+			element.contentWindow?.postMessage("release-monitor-a", "*")
+		);
+	await page.clock.fastForward(1);
+	await expect(frame.getByText("Alert A", { exact: true })).toHaveCount(0);
+	await page
+		.locator("iframe")
+		.evaluate((element: HTMLIFrameElement) =>
+			element.contentWindow?.postMessage("hold-monitor-b", "*")
+		);
+	await frame.getByRole("button", { name: /Monitor A/ }).press("Enter");
+	await expect(frame.getByText("Alert A", { exact: true })).toBeVisible();
+	await frame.getByRole("button", { name: /Monitor B/ }).press("Enter");
+	await expect(frame.getByText("Alert A", { exact: true })).toHaveCount(0);
+	await page
+		.locator("iframe")
+		.evaluate((element: HTMLIFrameElement) =>
+			element.contentWindow?.postMessage("release-monitor-b", "*")
+		);
+	await expect(frame.getByText("Alert B", { exact: true })).toBeVisible();
+	expect(errors).toEqual([]);
+	await mkdir(proofDir, { recursive: true });
+	await page.screenshot({
+		path: path.join(proofDir, "monitors-completed.png"),
+		fullPage: true,
+		animations: "disabled",
+	});
+});
