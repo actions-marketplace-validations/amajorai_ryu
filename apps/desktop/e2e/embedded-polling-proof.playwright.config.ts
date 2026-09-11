@@ -14,7 +14,7 @@ export default defineConfig({
 	},
 	webServer: {
 		command:
-			"bunx vite build --config ../../../apps-store/warmup/ui/vite.config.ts --outDir /tmp/ryu-warmup-performance-build && bunx vite build --config ../../../apps-store/approvals/ui/vite.config.ts --outDir /tmp/ryu-approvals-performance-build && bunx vite --config harness/vite.embedded-polling-proof.config.ts",
+			"bunx vite build --config ../../../apps-store/warmup/ui/vite.config.ts --outDir /tmp/ryu-warmup-performance-build && bunx vite build --config ../../../apps-store/approvals/ui/vite.config.ts --outDir /tmp/ryu-approvals-performance-build && bunx vite build --config ../../../apps-store/quests/ui/vite.config.ts --outDir /tmp/ryu-quests-performance-build && bunx vite --config harness/vite.embedded-polling-proof.config.ts",
 		url: "http://127.0.0.1:5209/embedded-polling-proof.html",
 		reuseExistingServer: false,
 		timeout: 120_000,

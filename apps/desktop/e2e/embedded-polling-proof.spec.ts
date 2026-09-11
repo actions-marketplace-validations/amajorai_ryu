@@ -171,3 +171,136 @@ test("production Inbox waits for its refreshed decision list and pauses inactive
 		animations: "disabled",
 	});
 });
+
+test("production Inbox refreshes notifications without repeating icon downloads", async ({
+	page,
+}) => {
+	const errors: string[] = [];
+	page.on("pageerror", (error) => errors.push(error.message));
+	const html = await readFile(
+		"/tmp/ryu-approvals-performance-build/index.html",
+		"utf8"
+	);
+	const bridge = `<script>let lists=0,icons=0;window.ryu={approvals:{list:async()=>[]},quests:{list:async()=>[]},suggestions:{list:async()=>[]},notifications:{list:async()=>{document.body.dataset.notificationReads=String(++lists);return [{id:"notice",title:"Build complete",body:"Workspace is ready",created_at:"2026-09-12T00:00:00Z",level:"info",user_id:"fixture",ack_required:false,acked:false,source_app_id:"com.test.sender"}]},appIcons:async()=>{document.body.dataset.iconReads=String(++icons);return {"com.test.sender":{name:"Workspace",glyph:"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24'%3E%3Crect width='24' height='24' rx='6' fill='%230088ff'/%3E%3C/svg%3E",background:null}}}}};</script>`;
+	await page.route("**/embedded-polling-child.html", (route) =>
+		route.fulfill({
+			contentType: "text/html",
+			body: html.replace("<head>", `<head>${bridge}`),
+		})
+	);
+	await page.clock.install();
+	await page.goto("/embedded-polling-proof.html");
+	const frame = page.frameLocator('iframe[title="Companion workspace"]');
+	await expect(
+		frame.getByText("Build complete", { exact: true })
+	).toBeVisible();
+	await expect(frame.locator("body")).toHaveAttribute("data-icon-reads", "1");
+	await page.clock.fastForward(16_000);
+	await expect(frame.locator("body")).toHaveAttribute(
+		"data-notification-reads",
+		"2"
+	);
+	await expect(frame.locator("body")).toHaveAttribute("data-icon-reads", "1");
+	await frame
+		.getByRole("button", { name: "Refresh", exact: true })
+		.press("Enter");
+	await expect(frame.locator("body")).toHaveAttribute(
+		"data-notification-reads",
+		"3"
+	);
+	await expect(frame.locator("body")).toHaveAttribute("data-icon-reads", "2");
+	await page.getByRole("button", { name: "Another tab", exact: true }).click();
+	await page.waitForTimeout(150);
+	await page.clock.fastForward(61_000);
+	await expect(frame.locator("body")).toHaveAttribute(
+		"data-notification-reads",
+		"3"
+	);
+	await expect(frame.locator("body")).toHaveAttribute("data-icon-reads", "2");
+	await page.getByRole("button", { name: "Companion", exact: true }).click();
+	await expect(frame.locator("body")).toHaveAttribute(
+		"data-notification-reads",
+		"4"
+	);
+	await expect(
+		frame.getByText("Build complete", { exact: true })
+	).toBeVisible();
+	const titleBox = await frame
+		.getByText("Build complete", { exact: true })
+		.boundingBox();
+	const bodyBox = await frame
+		.getByText("Workspace is ready", { exact: true })
+		.boundingBox();
+	expect(titleBox).not.toBeNull();
+	expect(bodyBox).not.toBeNull();
+	expect(bodyBox!.y).toBeGreaterThan(titleBox!.y);
+	expect(errors).toEqual([]);
+	await mkdir(proofDir, { recursive: true });
+	await page.screenshot({
+		path: path.join(proofDir, "notifications-completed.png"),
+		fullPage: true,
+		animations: "disabled",
+	});
+});
+
+test("production Quests pauses list polls and preserves typing ahead of scratchpad load", async ({
+	page,
+}) => {
+	const errors: string[] = [];
+	page.on("pageerror", (error) => errors.push(error.message));
+	const html = await readFile(
+		"/tmp/ryu-quests-performance-build/index.html",
+		"utf8"
+	);
+	const bridge = `<script>let reads=0;window.ryu={quests:{list:async()=>{document.body.dataset.questReads=String(++reads);return []},scratchpad:()=>new Promise(resolve=>{const ready=e=>{if(e.data!=="release-scratchpad")return;removeEventListener("message",ready);resolve("Old stored text")};addEventListener("message",ready)}),setScratchpad:async({text})=>{document.body.dataset.savedScratchpad=text}}};</script>`;
+	await page.route("**/embedded-polling-child.html", (route) =>
+		route.fulfill({
+			contentType: "text/html",
+			body: html.replace("<head>", `<head>${bridge}`),
+		})
+	);
+	await page.clock.install();
+	await page.goto("/embedded-polling-proof.html");
+	const frame = page.frameLocator('iframe[title="Companion workspace"]');
+	await frame.getByRole("button", { name: /Scratchpad/ }).click();
+	await frame
+		.getByRole("textbox", { name: "Scratchpad", exact: true })
+		.fill("Keep my new draft");
+	await page
+		.locator("iframe")
+		.evaluate((element: HTMLIFrameElement) =>
+			element.contentWindow?.postMessage("release-scratchpad", "*")
+		);
+	await expect(
+		frame.getByRole("textbox", { name: "Scratchpad", exact: true })
+	).toHaveValue("Keep my new draft");
+	await page.clock.fastForward(1000);
+	await expect(frame.locator("body")).toHaveAttribute(
+		"data-saved-scratchpad",
+		"Keep my new draft"
+	);
+	await page.getByRole("button", { name: "Another tab", exact: true }).click();
+	await page.waitForTimeout(150);
+	const before = await frame.locator("body").getAttribute("data-quest-reads");
+	await page.clock.fastForward(31_000);
+	await expect(frame.locator("body")).toHaveAttribute(
+		"data-quest-reads",
+		before!
+	);
+	await page.getByRole("button", { name: "Companion", exact: true }).click();
+	await expect
+		.poll(async () =>
+			Number(await frame.locator("body").getAttribute("data-quest-reads"))
+		)
+		.toBeGreaterThan(Number(before));
+	await expect(
+		frame.getByRole("textbox", { name: "Scratchpad", exact: true })
+	).toHaveValue("Keep my new draft");
+	expect(errors).toEqual([]);
+	await mkdir(proofDir, { recursive: true });
+	await page.screenshot({
+		path: path.join(proofDir, "quests-completed.png"),
+		fullPage: true,
+		animations: "disabled",
+	});
+});

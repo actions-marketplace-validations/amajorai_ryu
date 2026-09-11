@@ -31,7 +31,7 @@
     "media",
     "local"
   ],
-  "icon": "file-convert",
+  "icon": "file-export",
   "iconDither": { "from": 204, "to": "transparent", "direction": "down" },
   "surfaces": {
     "gateway": { "support": "none" },
@@ -70,13 +70,13 @@
       "implies": ["convert.view"]
     }
   ],
-  "companion": { "label": "Convert", "icon": "file-convert" },
+  "companion": { "label": "Convert", "icon": "file-export" },
   "contributes": {
     "sidebar_buttons": [
       {
         "id": "convert-new",
         "title": "Convert",
-        "icon": "file-convert",
+        "icon": "file-export",
         "target": "/plugin/app__convert-companion",
         "context": { "view": "convert" },
         "order": 58

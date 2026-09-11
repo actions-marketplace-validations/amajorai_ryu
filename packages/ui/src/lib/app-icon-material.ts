@@ -88,5 +88,4 @@ export function appIconMaterial(
 
 export const APP_ICON_FALLBACK_GLYPH: CSSProperties = {
 	color: "currentColor",
-	filter: "none",
 };
