@@ -1531,13 +1531,23 @@ fn is_exact_compiled_manifest(manifest: &crate::plugin_manifest::PluginManifest)
     if !is_compiled_in_manifest(&manifest.id) {
         return false;
     }
-    let digest = crate::plugins::isolation::manifest_sha256_for_trust(manifest);
-    crate::plugin_manifest::PluginManifestLoader::load_builtins()
-        .into_iter()
-        .any(|builtin| {
-            builtin.id == manifest.id
-                && crate::plugins::isolation::manifest_sha256_for_trust(&builtin) == digest
-        })
+    // The comparison authority is compiled into this binary. Parse and hash it
+    // once, rather than rebuilding the entire catalog for every row in a list.
+    // Never cache the caller's verdict by id: its content may have changed.
+    static DIGESTS: std::sync::OnceLock<std::collections::HashMap<String, String>> =
+        std::sync::OnceLock::new();
+    let digests = DIGESTS.get_or_init(|| {
+        crate::plugin_manifest::PluginManifestLoader::load_builtins()
+            .into_iter()
+            .map(|builtin| {
+                let digest = crate::plugins::isolation::manifest_sha256_for_trust(&builtin);
+                (builtin.id, digest)
+            })
+            .collect()
+    });
+    digests.get(&manifest.id).is_some_and(|expected| {
+        expected == &crate::plugins::isolation::manifest_sha256_for_trust(manifest)
+    })
 }
 
 pub(crate) fn record_verified_official_package(
@@ -2042,6 +2052,27 @@ mod tests {
 
         clear_verified_official_digest(&manifest.id);
         assert_eq!(tier_for_manifest(&manifest), PluginTier::Community);
+    }
+
+    #[test]
+    fn compiled_digest_cache_rechecks_manifest_content() {
+        let original = crate::plugin_manifest::PluginManifestLoader::load_builtins()
+            .into_iter()
+            .find(|manifest| is_core_plugin_id(&manifest.id))
+            .expect("compiled Core manifest");
+        assert!(is_exact_compiled_manifest(&original));
+
+        let mut changed = original.clone();
+        changed.name.push_str(" modified");
+        assert!(!is_exact_compiled_manifest(&changed));
+        assert!(is_exact_compiled_manifest(&original));
+
+        changed = original.clone();
+        changed
+            .permission_grants
+            .push("preferences:write".to_owned());
+        assert!(!is_exact_compiled_manifest(&changed));
+        assert!(is_exact_compiled_manifest(&original));
     }
 
     #[test]

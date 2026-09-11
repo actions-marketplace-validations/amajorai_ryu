@@ -1057,3 +1057,134 @@ test("production Workflows pauses awaiting-input reads while hidden and stops af
 		animations: "disabled",
 	});
 });
+
+test("production Video Studio history stays responsive while budget reads wait and hidden polling stops", async ({
+	page,
+}) => {
+	const errors: string[] = [];
+	page.on("pageerror", (error) => errors.push(error.message));
+	const project = newProject("Generation history preview");
+	const asset = {
+		id: crypto.randomUUID(),
+		name: "Completed frame.png",
+		kind: "image",
+		duration: 5,
+		width: 640,
+		height: 360,
+		hasAudio: false,
+		createdAt: "2026-09-12T00:00:00Z",
+	};
+	const job = {
+		id: crypto.randomUUID(),
+		request: {
+			id: crypto.randomUUID(),
+			projectId: project.id,
+			kind: "image",
+			prompt: "Stored generation request",
+		},
+		projectRevision: 0,
+		status: "requested",
+		assetIds: [],
+		message: "",
+		createdAt: asset.createdAt,
+		updatedAt: asset.createdAt,
+	};
+	const html = await readCompanionHtml("video");
+	const bridge = `<script>
+	const project=${JSON.stringify(project)},asset=${JSON.stringify(asset)},job=${JSON.stringify(job)};
+	let reads=0,budgets=0,audits=0,complete=false,released=false;
+	addEventListener("message",event=>{if(event.data==="complete-generation")complete=true;if(event.data==="release-metadata")released=true});
+	const metadata=()=>released?Promise.resolve():new Promise(resolve=>{const done=event=>{if(event.data!=="release-metadata")return;removeEventListener("message",done);resolve()};addEventListener("message",done)});
+	const request=async({path})=>{
+		if(path==="/projects")return {projects:[project]};
+		if(path==="/assets")return {assets:[asset]};
+		if(path==="/renders")return {jobs:[]};
+		if(path.startsWith("/generations?")){document.body.dataset.generationReads=String(++reads);return {jobs:[{...job,status:complete?"completed":"requested",assetIds:complete?[asset.id]:[]}]}};
+		if(path==="/budget"){document.body.dataset.budgetReads=String(++budgets);await metadata();return {reachable:true,users:{},agents:{},sessions:{},unit:"micro_usd"}};
+		if(path==="/budget/audit"){document.body.dataset.auditReads=String(++audits);await metadata();return {reachable:true,entries:[]}};
+		throw Error("Unexpected fixture request "+path);
+	};
+	window.ryu={app:{request},media:{image:async()=>{document.body.dataset.generated="true";throw Error("Generation is not part of this read-only proof")}}};
+	</script>`;
+	await page.route("**/embedded-polling-child.html", (route) =>
+		route.fulfill({
+			contentType: "text/html",
+			body: html.replace("<head>", `<head>${bridge}`),
+		})
+	);
+	await page.clock.install();
+	await page.setViewportSize({ width: 1600, height: 1200 });
+	await page.goto("/embedded-polling-proof.html");
+	await page.locator("main").evaluate((element) => {
+		element.style.maxWidth = "none";
+	});
+	await page.locator("iframe").evaluate((element) => {
+		element.style.height = "950px";
+	});
+	const frame = page.frameLocator('iframe[title="Companion workspace"]');
+	await frame.getByRole("button", { name: /Show .*more tabs/ }).click();
+	await frame.getByRole("option", { name: /^Reorder Generate / }).click();
+	await expect(frame.locator("body")).toHaveAttribute(
+		"data-generation-reads",
+		"1"
+	);
+	await frame.locator("summary").filter({ hasText: "Requested" }).click();
+	await expect(
+		frame.getByText("Stored generation request", { exact: true })
+	).toBeVisible();
+	await page.clock.fastForward(2100);
+	await expect(frame.locator("body")).toHaveAttribute(
+		"data-generation-reads",
+		"2"
+	);
+	await page.clock.fastForward(2100);
+	await expect(frame.locator("body")).toHaveAttribute(
+		"data-generation-reads",
+		"3"
+	);
+	await expect(frame.locator("body")).toHaveAttribute("data-budget-reads", "1");
+	await expect(frame.locator("body")).toHaveAttribute("data-audit-reads", "1");
+	await page.getByRole("button", { name: "Another tab", exact: true }).click();
+	await page.waitForTimeout(150);
+	await page.clock.fastForward(35_000);
+	await expect(frame.locator("body")).toHaveAttribute(
+		"data-generation-reads",
+		"3"
+	);
+	await expect(frame.locator("body")).toHaveAttribute("data-budget-reads", "1");
+	await page
+		.locator("iframe")
+		.evaluate((element: HTMLIFrameElement) =>
+			element.contentWindow?.postMessage("complete-generation", "*")
+		);
+	await page.getByRole("button", { name: "Companion", exact: true }).click();
+	await expect(frame.locator("body")).toHaveAttribute(
+		"data-generation-reads",
+		"4"
+	);
+	await expect(
+		frame.getByText("Saved media: Completed frame.png", { exact: true })
+	).toBeVisible();
+	await page
+		.locator("iframe")
+		.evaluate((element: HTMLIFrameElement) =>
+			element.contentWindow?.postMessage("release-metadata", "*")
+		);
+	await expect(frame.locator("body")).toHaveAttribute("data-budget-reads", "2");
+	await expect(frame.locator("body")).toHaveAttribute("data-audit-reads", "2");
+	await page.clock.fastForward(10_000);
+	await expect(frame.locator("body")).toHaveAttribute(
+		"data-generation-reads",
+		"4"
+	);
+	expect(await frame.locator("body").getAttribute("data-generated")).toBeNull();
+	await frame
+		.getByText("Saved media: Completed frame.png", { exact: true })
+		.scrollIntoViewIfNeeded();
+	expect(errors).toEqual([]);
+	await page.screenshot({
+		path: path.join(proofDir, "video-generation-history-completed.png"),
+		fullPage: true,
+		animations: "disabled",
+	});
+});

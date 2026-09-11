@@ -176,7 +176,7 @@
  */
 
 import { Buffer } from "node:buffer";
-import { spawn } from "node:child_process";
+import { type ChildProcess, spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
@@ -254,6 +254,61 @@ const RYU_STEP_INPUT_FIELD_CAP = 400;
 
 /** Grace period between SIGTERM and SIGKILL when a turn is aborted. */
 const ABORT_KILL_GRACE_MS = 5000;
+
+/** Keep cancellation attached only while the child can still be running. */
+function attachChildAbort(
+	proc: ChildProcess,
+	signal: AbortSignal,
+	onAbort: () => void,
+	graceMs: number
+): () => void {
+	let closed = false;
+	let timer: ReturnType<typeof setTimeout> | undefined;
+	const exited = () => proc.exitCode !== null || proc.signalCode !== null;
+	const dispose = () => {
+		closed = true;
+		if (timer !== undefined) {
+			clearTimeout(timer);
+		}
+		signal.removeEventListener("abort", abort);
+		proc.removeListener("close", dispose);
+		proc.removeListener("error", dispose);
+	};
+	const abort = () => {
+		if (closed || exited()) {
+			return;
+		}
+		onAbort();
+		try {
+			proc.kill("SIGTERM");
+		} catch {
+			dispose();
+			return;
+		}
+		if (exited()) {
+			return;
+		}
+		timer = setTimeout(() => {
+			// `killed` means a signal was sent, not that the process exited.
+			if (!(closed || exited())) {
+				try {
+					proc.kill("SIGKILL");
+				} catch {
+					/* Already reaped. */
+				}
+			}
+		}, graceMs);
+		timer.unref?.();
+	};
+	proc.once("close", dispose);
+	proc.once("error", dispose);
+	if (signal.aborted) {
+		abort();
+	} else {
+		signal.addEventListener("abort", abort, { once: true });
+	}
+	return dispose;
+}
 
 /** Optional override/extension file, read next to this extension. */
 const OVERRIDES_FILE_NAME = "ryu-subagents.json";
@@ -1099,20 +1154,14 @@ async function runSingleAgent(
 			});
 
 			if (signal) {
-				const killProc = (): void => {
-					wasAborted = true;
-					proc.kill("SIGTERM");
-					setTimeout(() => {
-						if (!proc.killed) {
-							proc.kill("SIGKILL");
-						}
-					}, ABORT_KILL_GRACE_MS);
-				};
-				if (signal.aborted) {
-					killProc();
-				} else {
-					signal.addEventListener("abort", killProc, { once: true });
-				}
+				attachChildAbort(
+					proc,
+					signal,
+					() => {
+						wasAborted = true;
+					},
+					ABORT_KILL_GRACE_MS
+				);
 			}
 		});
 
