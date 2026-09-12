@@ -1046,6 +1046,7 @@ export const IPC = {
 		speak: "tts:speak",
 	},
 	shadow: {
+		getSpeechHistory: "shadow:getSpeechHistory",
 		getCurrentContext: "shadow:getCurrentContext",
 		getProactive: "shadow:getProactive",
 		getProactiveInbox: "shadow:getProactiveInbox",
@@ -1270,6 +1271,9 @@ export interface IslandShadowApi {
 	getCurrentContext(): Promise<ShadowContextResult>;
 	getProactive(): Promise<ShadowProactiveResult>;
 	getProactiveInbox(): Promise<ShadowProactiveInboxResult>;
+	getSpeechHistory(
+		input: import("@ryuhq/core-client/shadow").SpeechHistoryInput
+	): Promise<import("@ryuhq/core-client/shadow").SpeechHistory>;
 	postFeedback(req: FeedbackRequest): Promise<FeedbackResult>;
 	setCaptureControl(
 		update: CaptureControlUpdate

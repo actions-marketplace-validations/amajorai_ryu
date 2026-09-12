@@ -32,8 +32,8 @@ jobs:
           REPO: ${{ github.repository }}
           TAG: ${{ inputs.tag }}
           OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
-          OPENCODE_MODEL: deepseek-flash
-          OPENCODE_MAX_TOKENS: "8000"
+          OPENCODE_MODEL: deepseek-v4.1-flash
+          OPENCODE_MAX_TOKENS: "16000"
           OPENCODE_SESSION_ID: "ryu-${{ github.repository }}-${{ github.run_id }}"
         shell: bash
         run: |

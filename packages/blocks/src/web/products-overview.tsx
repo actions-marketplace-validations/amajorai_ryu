@@ -7,7 +7,10 @@ import {
 	products,
 	productsByCategory,
 } from "./data/products.tsx";
-import { landingSurfaceCardXlClass } from "./landing-card-tones.ts";
+import {
+	landingSurfaceCardXlClass,
+	landingVisualFrameClass,
+} from "./landing-card-tones.ts";
 import { Reveal } from "./reveal.tsx";
 import { AgentsVisual, CoreVisual, ToolGatewayVisual } from "./visuals.tsx";
 
@@ -39,7 +42,7 @@ function ProductCard({
 			{product.hero.visual ? (
 				<div
 					aria-hidden="true"
-					className="flex h-64 items-center overflow-hidden bg-muted/40 p-6 [&>*]:w-full"
+					className={`${landingVisualFrameClass} flex h-64 items-center [&>*]:w-full`}
 					data-product-visual
 					inert
 				>

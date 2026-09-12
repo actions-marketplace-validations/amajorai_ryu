@@ -31,7 +31,10 @@ import {
 	type HostServices,
 	validatePluginRoute,
 } from "@ryu/app-host/rpc";
-import { thirdPartyPluginSrcdoc } from "@ryu/app-host/third-party-plugin";
+import {
+	htmlCompanionSrcdoc,
+	thirdPartyPluginSrcdoc,
+} from "@ryu/app-host/third-party-plugin";
 import { useI18n } from "@ryu/i18n/react";
 import { useEffect, useMemo, useState } from "react";
 import type { PluginCompanion } from "../../shared/ipc.ts";
@@ -116,6 +119,14 @@ export function IslandPluginHost({
 	const services = useMemo<HostServices>(
 		() => ({
 			...createI18nHostServices(i18n),
+			storageCompareAndSet: (input) =>
+				pluginHostInvoke(
+					companion.pluginId,
+					"storage.compareAndSet",
+					input
+				) as Promise<boolean>,
+			timelineTranscripts: (input) =>
+				window.island.shadow.getSpeechHistory(input),
 			listAgents: async () => {
 				const result = await window.island.core.agents();
 				if (!result.available) {
@@ -217,7 +228,13 @@ export function IslandPluginHost({
 	const srcdoc = useMemo(
 		() =>
 			bundle.status === "ready" && bundle.code
-				? thirdPartyPluginSrcdoc(nonce, toBase64Utf8(bundle.code), companion.id)
+				? /^\s*(?:<!doctype\s+html|<html[\s>])/i.test(bundle.code)
+					? htmlCompanionSrcdoc(nonce, bundle.code, companion.id)
+					: thirdPartyPluginSrcdoc(
+							nonce,
+							toBase64Utf8(bundle.code),
+							companion.id
+						)
 				: null,
 		[bundle, nonce, companion.id]
 	);

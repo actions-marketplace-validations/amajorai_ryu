@@ -63,6 +63,7 @@ import {
 	TAB_UNLOAD_INTERVAL_MS,
 	TAB_UNLOAD_MINUTES_KEY,
 } from "@/src/lib/tab-memory-policy.ts";
+import type { TabTransfer } from "@/src/lib/tab-transfer.ts";
 import {
 	listenForEntityActivation,
 	registerWindowTabs,
@@ -306,7 +307,7 @@ interface TabsContextValue {
 	/** Clear a tab's pending scroll-to-message after ChatPage consumes it. */
 	clearScrollToMessage: (tabId: string) => void;
 	closeGroup: (groupId: string) => void;
-	closeTab: (id: string) => void;
+	closeTab: (id: string, options?: { transferred?: boolean }) => void;
 	// Grouping
 	createGroup: (tabId: string) => string;
 	/** Reset every branch of a split to equal fractions, at every depth. Sizes
@@ -814,6 +815,7 @@ export interface InitialTab {
 	node?: string;
 	path: string;
 	title?: string;
+	transfer?: TabTransfer;
 }
 
 /** localStorage key holding the previous session's open tabs, so the "restore
@@ -1166,7 +1168,13 @@ export function TabsProvider({
 	// (spawned with an `initialTab`) always seeds from that one conversation.
 	const [initialState] = useState<StartupState>(() => {
 		if (initialTab) {
-			const id = makeTabId();
+			const id = initialTab.transfer?.tab.id ?? makeTabId();
+			if (initialTab.transfer?.artifact) {
+				useArtifactStore.getState().put(initialTab.transfer.artifact);
+			}
+			if (initialTab.node) {
+				useNodeStore.getState().setTabOverride(id, initialTab.node);
+			}
 			return {
 				tabs: [
 					{
@@ -1179,6 +1187,7 @@ export function TabsProvider({
 						initialPrompt: initialTab.initialPrompt,
 						initialSubmit: initialTab.initialSubmit,
 						initialProactiveOpening: initialTab.initialProactiveOpening,
+						...initialTab.transfer?.tab,
 					},
 				],
 				activeId: id,
@@ -1604,7 +1613,7 @@ export function TabsProvider({
 	);
 
 	const closeTab = useCallback(
-		(id: string) => {
+		(id: string, options?: { transferred?: boolean }) => {
 			// Drop any per-tab node override so the in-memory map doesn't keep stale
 			// entries for tabs that no longer exist.
 			useNodeStore.getState().clearTabOverride(id);
@@ -1632,7 +1641,9 @@ export function TabsProvider({
 			if (idx === -1) {
 				return;
 			}
-			setClosedTabs((stack) => [...stack, { tab: prev[idx], index: idx }]);
+			if (!options?.transferred) {
+				setClosedTabs((stack) => [...stack, { tab: prev[idx], index: idx }]);
+			}
 			// If the tab is part of a split, its surviving siblings stay together.
 			// Prefer focusing one of them so the split remains visible after the
 			// close, rather than jumping to an unrelated neighbor tab.

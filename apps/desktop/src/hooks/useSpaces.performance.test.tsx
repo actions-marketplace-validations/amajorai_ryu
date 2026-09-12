@@ -1,14 +1,20 @@
 import { afterEach, expect, mock, test } from "bun:test";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
-import { QueryClient } from "@tanstack/react-query";
+import {
+	notifyManager,
+	QueryClient,
+	QueryObserver,
+} from "@tanstack/react-query";
 import { act } from "react";
 import { createRoot } from "react-dom/client";
 import { AppDisabledError } from "@/src/lib/api/client.ts";
+import type { SpaceDocument } from "@/src/lib/api/spaces.ts";
 
 if (typeof document === "undefined") {
 	GlobalRegistrator.register();
 }
 Reflect.set(globalThis, "IS_REACT_ACT_ENVIRONMENT", true);
+notifyManager.setScheduler(queueMicrotask);
 const client = new QueryClient({
 	defaultOptions: { queries: { retry: false } },
 });
@@ -19,6 +25,7 @@ interface Read {
 	signal: AbortSignal;
 }
 const reads: Read[] = [];
+const documentReads: (Read & { jwt: string; space: string })[] = [];
 mock.module("@/src/lib/query-client.ts", () => ({ queryClient: client }));
 mock.module("./useActiveNode.ts", () => ({ useActiveNode: () => node }));
 mock.module("@/src/lib/core-refresh.ts", () => ({
@@ -38,7 +45,16 @@ mock.module("@/src/lib/api/spaces.ts", () => ({
 	renameSpace: async () => undefined,
 	deleteDocument: async () => true,
 	fetchDocument: async () => ({}),
-	fetchDocuments: async () => [],
+	fetchDocuments: (target: typeof node, space: string, signal: AbortSignal) =>
+		new Promise((resolve, reject) =>
+			documentReads.push({
+				signal,
+				resolve,
+				reject,
+				jwt: target.userJwt,
+				space,
+			})
+		),
 	ingestDocument: async () => undefined,
 	searchSpace: async () => [],
 	setDocumentIcon: async () => undefined,
@@ -79,6 +95,7 @@ afterEach(async () => {
 	client.clear();
 	root = createRoot(document.createElement("div"));
 	reads.length = 0;
+	documentReads.length = 0;
 	node = { ...node, userJwt: "one" };
 });
 test("cached list mutations and revision signals reach every observer of the same scope", async () => {
@@ -130,4 +147,70 @@ test("disabled-app errors retain their actionable state", async () => {
 	expect(first.appDisabled?.app).toBe("@ryu/spaces");
 	expect(first.error).toBeNull();
 	expect(first.loading).toBe(false);
+});
+
+test("concurrent document lists coalesce while explicit refresh still reads current data", async () => {
+	await act(async () => root.render(<Harness />));
+	const a = first.listDocuments("space");
+	const b = second.listDocuments("space");
+	expect(documentReads).toHaveLength(1);
+	documentReads[0].resolve([{ id: "old" }]);
+	expect(await a).toEqual(await b);
+	const refreshed = first.listDocuments("space");
+	expect(documentReads).toHaveLength(2);
+	documentReads[1].resolve([{ id: "fresh" }]);
+	expect((await refreshed).map((document) => document.id)).toEqual(["fresh"]);
+});
+test("a document mutation bypasses an unfinished old-revision list", async () => {
+	await act(async () => root.render(<Harness />));
+	const old = first.listDocuments("space");
+	await act(async () => {
+		await first.saveDocument("space", "doc", "New", "Text");
+	});
+	const current = second.listDocuments("space");
+	expect(documentReads).toHaveLength(2);
+	documentReads[1].resolve([{ id: "new" }]);
+	expect((await current).map((document) => document.id)).toEqual(["new"]);
+	documentReads[0].resolve([{ id: "old" }]);
+	await old;
+	const { spaceDocumentListQueryOptions } = await import(
+		"@/src/lib/space-document-list-query.ts"
+	);
+	expect(
+		client
+			.getQueryData<SpaceDocument[]>(
+				spaceDocumentListQueryOptions(node, "space", 1).queryKey
+			)
+			?.map((document) => document.id)
+	).toEqual(["new"]);
+});
+test("document reads never coalesce across identities on the same node", async () => {
+	await act(async () => root.render(<Harness />));
+	const old = first.listDocuments("space");
+	node = { ...node, userJwt: "two" };
+	await act(async () => root.render(<Harness />));
+	const current = first.listDocuments("space");
+	expect(documentReads.map((read) => read.jwt)).toEqual(["one", "two"]);
+	documentReads[0].resolve([{ id: "old" }]);
+	documentReads[1].resolve([{ id: "new" }]);
+	expect((await old).map((document) => document.id)).toEqual(["old"]);
+	expect((await current).map((document) => document.id)).toEqual(["new"]);
+});
+
+test("unmounting a query observer does not abort another consumer's imperative read", async () => {
+	await act(async () => root.render(<Harness />));
+	const { spaceDocumentListQueryOptions } = await import(
+		"@/src/lib/space-document-list-query.ts"
+	);
+	const observer = new QueryObserver(
+		client,
+		spaceDocumentListQueryOptions(node, "space", 0)
+	);
+	const unsubscribe = observer.subscribe(() => undefined);
+	const pending = first.listDocuments("space");
+	expect(documentReads).toHaveLength(1);
+	unsubscribe();
+	expect(documentReads[0].signal.aborted).toBe(false);
+	documentReads[0].resolve([{ id: "kept" }]);
+	expect((await pending).map((document) => document.id)).toEqual(["kept"]);
 });

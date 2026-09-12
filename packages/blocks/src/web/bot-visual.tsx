@@ -22,9 +22,9 @@ export function BotAppVisual() {
 	] as const;
 
 	return (
-		<div className="mx-auto w-full max-w-5xl overflow-hidden rounded-2xl bg-[#f1f1ef] text-foreground/80 ring-1 ring-black/10">
+		<div className="mx-auto w-full max-w-5xl overflow-hidden rounded-2xl bg-card text-foreground/80 ring-1 ring-border/60">
 			<div className="grid min-h-[35rem] md:grid-cols-[18rem_1fr]">
-				<aside className="border-black/10 border-r bg-[#e8e8e5] p-4">
+				<aside className="border-border/60 border-r bg-muted/60 p-4">
 					<div className="flex items-center justify-between">
 						<div className="flex items-center gap-2 text-foreground/80 text-sm">
 							<Logo className="text-foreground" size="22px" variant="outline" />
@@ -35,7 +35,7 @@ export function BotAppVisual() {
 							className="size-4 text-foreground/45"
 						/>
 					</div>
-					<div className="mt-4 flex items-center gap-2 rounded-lg bg-white/65 px-3 py-2 text-foreground/40 text-xs">
+					<div className="mt-4 flex items-center gap-2 rounded-lg bg-background/70 px-3 py-2 text-foreground/40 text-xs">
 						<Search aria-hidden="true" className="size-3.5" /> Search
 					</div>
 					<div className="mt-4 space-y-1.5">
@@ -43,7 +43,7 @@ export function BotAppVisual() {
 							<div
 								className={cn(
 									"flex items-center gap-2.5 rounded-lg px-2 py-2",
-									index === 1 && "bg-white/65"
+									index === 1 && "bg-background/70"
 								)}
 								key={name}
 							>
@@ -68,15 +68,15 @@ export function BotAppVisual() {
 						))}
 					</div>
 					<div className="mt-auto flex items-center gap-2 pt-8 text-foreground/50 text-xs">
-						<span className="flex size-7 items-center justify-center rounded-full bg-white/70">
+						<span className="flex size-7 items-center justify-center rounded-full bg-background/80">
 							AS
 						</span>
 						Armand Segall
 					</div>
 				</aside>
 
-				<section className="flex min-w-0 flex-col bg-[#f8f8f6]">
-					<div className="flex items-center gap-2 border-black/10 border-b px-5 py-4 text-foreground/80 text-sm">
+				<section className="flex min-w-0 flex-col bg-background">
+					<div className="flex items-center gap-2 border-border/60 border-b px-5 py-4 text-foreground/80 text-sm">
 						<span className="flex size-7 items-center justify-center rounded-full bg-[#f59e0b] text-black text-xs">
 							N
 						</span>
@@ -89,7 +89,7 @@ export function BotAppVisual() {
 					<div className="flex flex-1 flex-col justify-between p-5 md:p-7">
 						<div>
 							<p className="text-center text-foreground/40 text-xs">9:19 PM</p>
-							<div className="mt-5 max-w-xl rounded-2xl bg-[#e7e7e5] px-4 py-3 text-foreground/80 text-sm leading-relaxed">
+							<div className="mt-5 max-w-xl rounded-2xl bg-muted px-4 py-3 text-foreground/80 text-sm leading-relaxed">
 								I pulled the project notes, compared the changes, and drafted
 								this week's update. Review it before I send it.
 							</div>
@@ -98,8 +98,8 @@ export function BotAppVisual() {
 								Ready to work
 							</div>
 						</div>
-						<div className="flex items-center gap-3 rounded-full bg-white px-4 py-3 text-foreground/40 text-sm ring-1 ring-black/10">
-							<span className="flex size-6 items-center justify-center rounded-full bg-black/5">
+						<div className="flex items-center gap-3 rounded-full bg-card px-4 py-3 text-foreground/40 text-sm ring-1 ring-border/60">
+							<span className="flex size-6 items-center justify-center rounded-full bg-muted">
 								+
 							</span>
 							<span className="flex-1">Message Ryu Bot</span>

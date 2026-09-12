@@ -131,6 +131,7 @@ import { toggleFullscreen, useFullscreen } from "@/src/lib/fullscreen.ts";
 import { conversationEntityKey } from "@/src/lib/window-routing.ts";
 import { useNodeStore } from "@/src/store/useNodeStore.ts";
 import { useSidePanelRouteStore } from "@/src/store/useSidePanelRouteStore.ts";
+import { MoveTabToWindowMenuItem } from "./MoveTabToWindowMenuItem.tsx";
 import { OpenInNewWindowContextMenuItem } from "./OpenInNewWindowMenuItem.tsx";
 import { OverflowTooltip } from "./overflow-tooltip.tsx";
 import { SeasonalParticles } from "./SeasonalEffects.tsx";
@@ -872,6 +873,7 @@ function PinnedTab({ tab, isActive }: { tab: Tab; isActive: boolean }) {
 					iconClassName="size-4"
 					onClick={() => openTabInNewWindow(tab)}
 				/>
+				<MoveTabToWindowMenuItem tabId={tab.id} />
 				<OpenInSidePanelItem tab={tab} />
 				<TabLayoutMenuItems onChange={setTabLayout} value={tabLayout} />
 				<ContextMenuSeparator />
@@ -1125,6 +1127,7 @@ function RegularTab({
 					iconClassName="size-4"
 					onClick={() => openTabInNewWindow(tab)}
 				/>
+				<MoveTabToWindowMenuItem tabId={tab.id} />
 				<OpenInSidePanelItem tab={tab} />
 				<ContextMenuItem disabled={!hasClosedTabs} onClick={restoreTab}>
 					<HugeiconsIcon className="size-4" icon={ArrowTurnBackwardIcon} />

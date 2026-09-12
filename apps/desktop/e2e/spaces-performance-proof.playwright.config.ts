@@ -14,7 +14,7 @@ export default defineConfig({
 	},
 	webServer: {
 		command:
-			"bunx vite --config harness/vite.spaces-performance-proof.config.ts",
+			"bunx vite build --emptyOutDir --config harness/vite.spaces-performance-proof.config.ts --outDir /tmp/ryu-spaces-preview-build && bunx vite preview --config harness/vite.spaces-performance-proof.config.ts --outDir /tmp/ryu-spaces-preview-build --host 127.0.0.1 --strictPort --port 5212",
 		url: "http://127.0.0.1:5212/spaces-performance-proof.html",
 		reuseExistingServer: false,
 		timeout: 120_000,

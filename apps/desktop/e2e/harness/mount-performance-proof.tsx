@@ -5,9 +5,10 @@ import { Button } from "@ryu/ui/components/button.tsx";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import "../../src/index.css";
-const granted = capabilitiesFromGrants(["warmup:crud"]);
+const granted = capabilitiesFromGrants(["warmup:crud", "app:http"]);
 function App() {
 	const [html, setHtml] = useState("");
+	const [mounted, setMounted] = useState(true);
 	const [version, setVersion] = useState(1);
 	const [theme, setTheme] = useState(false);
 	const [connections, setConnections] = useState(0);
@@ -33,7 +34,10 @@ function App() {
 	>([]);
 	const srcdoc = useMemo(() => {
 		const startedAt = performance.timeOrigin + performance.now();
-		const readyScript = `<script>const observer=new MutationObserver(()=>{if(!document.getElementById("warmup-prompt"))return;observer.disconnect();requestAnimationFrame(()=>requestAnimationFrame(()=>parent.postMessage({kind:"proof-mounted",version:${version},readyAt:performance.timeOrigin+performance.now()},"*")))});observer.observe(document,{childList:true,subtree:true});</script>`;
+		const pendingRead = new URLSearchParams(location.search).has("pendingRead")
+			? `window.ryu.app.request({path:"/status"}).catch(()=>{});`
+			: "";
+		const readyScript = `<script>const observer=new MutationObserver(()=>{if(!document.getElementById("warmup-prompt"))return;observer.disconnect();${pendingRead}requestAnimationFrame(()=>requestAnimationFrame(()=>parent.postMessage({kind:"proof-mounted",version:${version},readyAt:performance.timeOrigin+performance.now()},"*")))});observer.observe(document,{childList:true,subtree:true});</script>`;
 		const document = htmlCompanionSrcdoc(
 			"stable-test-nonce",
 			html.replace(
@@ -52,6 +56,10 @@ function App() {
 	}, [html, version]);
 
 	const services: HostServices = {
+		appRequest: async (_input, signal) => {
+			const response = await fetch("/proof-pending-read", { signal });
+			return await response.json();
+		},
 		listAgents: async () => [],
 		registerRoute: async (claim) => ({ path: claim.path }),
 		warmupDetect: async () => {
@@ -84,6 +92,9 @@ function App() {
 					Replace document
 				</Button>
 				<Button onClick={() => setTheme(!theme)}>Update appearance</Button>
+				<Button onClick={() => setMounted(!mounted)}>
+					{mounted ? "Close companion" : "Open companion"}
+				</Button>
 				<span data-testid="connections">{connections}</span>
 				<span data-testid="reads">{reads}</span>
 			</div>
@@ -91,7 +102,7 @@ function App() {
 				{JSON.stringify(samples)}
 			</output>
 			<div className="h-[700px] rounded-xl border">
-				{html && (
+				{html && mounted && (
 					<ExtensionHost
 						granted={granted}
 						nonce="stable-test-nonce"

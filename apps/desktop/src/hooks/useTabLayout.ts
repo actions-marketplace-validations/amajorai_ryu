@@ -1,5 +1,6 @@
 import { useIsMobile } from "@ryu/ui/hooks/use-mobile.ts";
 import { useEffect, useState } from "react";
+import { isDetachedTabWindow } from "@/src/lib/tab-transfer.ts";
 
 /** Tab layout preference: the compact title-bar strip, sidebar list, center-pane
     scroll track, or infinite canvas. Window-local + reactive across the
@@ -52,7 +53,7 @@ export function useTabLayout(): TabLayout {
 		return () => window.removeEventListener("storage", handler);
 	}, []);
 
-	return isMobile ? "horizontal" : layout;
+	return isMobile || isDetachedTabWindow() ? "horizontal" : layout;
 }
 
 export function setTabLayout(layout: TabLayout) {

@@ -154,21 +154,40 @@ export function useGatewayStatus(): GatewayStatusHandle {
 	const { target } = useCore();
 	const [state, setState] = useState<LoadState>({ kind: "idle" });
 	const reqIdRef = useRef(0);
+	const lifetimeRef = useRef(false);
+	const targetRef = useRef(target);
+	targetRef.current = target;
+	const inFlightRef = useRef<AbortController | null>(null);
 
 	const load = useCallback(
 		async (background: boolean) => {
+			if (!lifetimeRef.current || targetRef.current !== target) {
+				return;
+			}
+			if (background && inFlightRef.current) {
+				return;
+			}
+			inFlightRef.current?.abort();
+			const controller = new AbortController();
+			inFlightRef.current = controller;
 			const reqId = ++reqIdRef.current;
 			if (!background) {
 				setState({ kind: "loading" });
 			}
 			try {
-				const raw = await request<RawStatus>(target, "/api/gateway/status");
-				if (reqId === reqIdRef.current) {
+				const raw = await request<RawStatus>(target, "/api/gateway/status", {
+					signal: controller.signal,
+				});
+				if (!controller.signal.aborted && reqId === reqIdRef.current) {
 					setState({ kind: "ready", raw });
 				}
 			} catch (err) {
-				if (reqId === reqIdRef.current) {
+				if (!controller.signal.aborted && reqId === reqIdRef.current) {
 					setState({ kind: "error", message: errText(err) });
+				}
+			} finally {
+				if (inFlightRef.current === controller) {
+					inFlightRef.current = null;
 				}
 			}
 		},
@@ -176,9 +195,16 @@ export function useGatewayStatus(): GatewayStatusHandle {
 	);
 
 	useEffect(() => {
+		lifetimeRef.current = true;
 		load(false);
 		const handle = setInterval(() => load(true), REFRESH_INTERVAL_MS);
-		return () => clearInterval(handle);
+		return () => {
+			lifetimeRef.current = false;
+			reqIdRef.current++;
+			clearInterval(handle);
+			inFlightRef.current?.abort();
+			inFlightRef.current = null;
+		};
 	}, [load]);
 
 	const refresh = useCallback(() => {

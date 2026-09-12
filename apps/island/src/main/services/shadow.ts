@@ -7,6 +7,11 @@
 // running (:3030 unreachable) calls resolve to `{ available: false, reason }`
 // rather than rejecting, so the overlay can render a quiet "unavailable" state.
 
+import {
+	type SpeechHistory,
+	type SpeechHistoryInput,
+	speechHistoryQuery,
+} from "@ryuhq/core-client/shadow";
 import type {
 	CaptureControl,
 	CaptureControlResult,
@@ -21,6 +26,26 @@ import type {
 } from "../../shared/ipc.ts";
 import { loadConfig, shadowApiToken } from "./config.ts";
 import { isContextReadAllowed } from "./consent.ts";
+
+export async function getSpeechHistory(
+	input: SpeechHistoryInput
+): Promise<SpeechHistory> {
+	if (!isContextReadAllowed()) {
+		throw new Error(
+			"Allow context reading in Island before reading Shadow speech history."
+		);
+	}
+	const response = await shadowFetch(
+		`/transcripts?${speechHistoryQuery(input)}`,
+		{ method: "GET" }
+	);
+	if (!response.ok) {
+		throw new Error(
+			"Shadow speech history is unavailable. Check that transcription is running."
+		);
+	}
+	return (await response.json()) as SpeechHistory;
+}
 
 /** Shadow probes should be quick; capture runs locally. */
 const SHADOW_TIMEOUT_MS = 4000;

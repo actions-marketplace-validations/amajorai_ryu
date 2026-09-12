@@ -165,6 +165,19 @@ impl McpRegistry {
         limit: usize,
         skills_allowlist: &[String],
     ) -> Vec<ToolDescriptor> {
+        self.search_scoped_for_user(query, kind, limit, skills_allowlist, None)
+            .await
+    }
+
+    /// The user is server-verified, never a tool argument or query parameter.
+    pub async fn search_scoped_for_user(
+        &self,
+        query: &str,
+        kind: Option<ToolKind>,
+        limit: usize,
+        skills_allowlist: &[String],
+        user_id: Option<&str>,
+    ) -> Vec<ToolDescriptor> {
         let mut builtins: Vec<ToolDescriptor> = self
             .list_all_tools()
             .await
@@ -200,7 +213,7 @@ impl McpRegistry {
         // Composio: searchable-not-listed. Pull live, capped, key-gated.
         let want_composio = matches!(kind, None | Some(ToolKind::Composio));
         let composio = if want_composio && super::composio::is_configured() {
-            composio_candidates(&self.http, query).await
+            composio_candidates(&self.http, query, user_id).await
         } else {
             Vec::new()
         };
@@ -462,9 +475,17 @@ impl McpRegistry {
 /// Fetch a capped slice of Composio actions as descriptors. Toolkit-agnostic
 /// (empty toolkit → catalog drops the empty filter), capped at 50/search. Bound
 /// to Core's Composio client, so it stays kernel-side.
-async fn composio_candidates(http: &reqwest::Client, query: &str) -> Vec<ToolDescriptor> {
+async fn composio_candidates(
+    http: &reqwest::Client,
+    query: &str,
+    user_id: Option<&str>,
+) -> Vec<ToolDescriptor> {
     const CAP: usize = 50;
-    let raw = match crate::composio_catalog::list_actions(http, "", query, CAP).await {
+    let result = match ryu_composio::service::catalog(user_id).await {
+        Some(result) => result,
+        None => crate::composio_catalog::list_actions(http, "", query, CAP).await,
+    };
+    let raw = match result {
         Ok(v) => v,
         Err(e) => {
             tracing::debug!("composio search skipped: {e}");

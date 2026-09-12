@@ -13,6 +13,7 @@ mod secrets;
 mod shadow_auth;
 mod standalone;
 mod startup;
+mod tab_transfer;
 mod tray;
 mod update_schedule;
 mod win_process;
@@ -1543,19 +1544,37 @@ fn encode_param(s: &str) -> String {
 #[tauri::command]
 async fn open_tab_window(
     app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
     registry: tauri::State<'_, window_registry::WindowRegistry>,
     path: Option<String>,
     conversation_id: Option<String>,
     entity_key: Option<String>,
     node: Option<String>,
     title: Option<String>,
-) -> Result<(), String> {
+    transfer: Option<serde_json::Value>,
+    drag_out: Option<bool>,
+) -> Result<bool, String> {
     use std::sync::atomic::Ordering;
 
+    let drop_position = if drag_out.unwrap_or(false) {
+        let Some(position) = tab_transfer::outside_window(&window)? else {
+            return Ok(false);
+        };
+        Some(position)
+    } else {
+        None
+    };
+    let transfer_script = transfer
+        .as_ref()
+        .map(tab_transfer::initialization_script)
+        .transpose()?;
     let n = TAB_WINDOW_SEQ.fetch_add(1, Ordering::Relaxed);
     let label = format!("tab-{n}");
 
     let mut params: Vec<String> = vec!["window=tab".to_string()];
+    if transfer.is_some() {
+        params.push("detached=1".to_string());
+    }
     if let Some(ref p) = path {
         params.push(format!("path={}", encode_param(p)));
     }
@@ -1579,7 +1598,7 @@ async fn open_tab_window(
         WebviewUrl::App(format!("index.html?{query}").into())
     };
 
-    let win = WebviewWindowBuilder::new(&app, &label, url)
+    let mut builder = WebviewWindowBuilder::new(&app, &label, url)
         .title(title.as_deref().unwrap_or("Ryu"))
         .inner_size(1100.0, 780.0)
         .min_inner_size(800.0, 600.0)
@@ -1590,9 +1609,31 @@ async fn open_tab_window(
         // title bar) instead of Tauri intercepting it — mirrors the main window's
         // `dragDropEnabled: false` in tauri.conf.json.
         .disable_drag_drop_handler()
-        .zoom_hotkeys_enabled(true)
-        .build()
-        .map_err(|e| e.to_string())?;
+        .zoom_hotkeys_enabled(true);
+    if let Some(script) = transfer_script {
+        builder = builder.initialization_script(script).visible(false);
+    }
+    let transfers = app.state::<tab_transfer::TabTransfers>();
+    let ready = if transfer.is_some() {
+        Some(transfers.begin(&label)?)
+    } else {
+        None
+    };
+    let win = match builder.build() {
+        Ok(win) => win,
+        Err(error) => {
+            transfers.remove(&label);
+            return Err(error.to_string());
+        }
+    };
+    let mut transfer_guard = transfer
+        .as_ref()
+        .map(|_| tab_transfer::TransferWindowGuard::new(&win));
+    if let Some(position) = drop_position {
+        // Position using native physical coordinates, so mixed DPI and displays
+        // to the left of the primary screen do not inherit CSS-coordinate drift.
+        tab_transfer::position_at_drop(&win, position);
+    }
 
     // Mirror the main window's frameless overlay window controls on
     // Windows/Linux. macOS keeps its native traffic lights and does not need a
@@ -1621,6 +1662,10 @@ async fn open_tab_window(
         )?;
     }
 
+    if let Some(receiver) = ready {
+        tab_transfer::wait_for_renderer(&win, receiver).await?;
+    }
+
     // A newly-created WebviewWindow is not guaranteed to become the foreground
     // window on every platform, especially when the command was invoked from a
     // background tab renderer. Make the browser-style tear-off deterministic.
@@ -1628,7 +1673,10 @@ async fn open_tab_window(
     win.unminimize().map_err(|e| e.to_string())?;
     win.set_focus().map_err(|e| e.to_string())?;
 
-    Ok(())
+    if let Some(guard) = &mut transfer_guard {
+        guard.commit();
+    }
+    Ok(true)
 }
 
 /// Toggle the WebView inspector (DevTools). Used by the global right-click menu.
@@ -1896,6 +1944,7 @@ pub fn run() {
         ))
         .manage(keep_awake::KeepAwakeState::default())
         .manage(window_registry::WindowRegistry::default())
+        .manage(tab_transfer::TabTransfers::default())
         .manage(app_update::AppUpdateState::default())
         // Single-instance MUST be the first plugin. On Windows/Linux a `ryu://`
         // link spawns a second process; this forwards the URL to the live
@@ -2181,6 +2230,8 @@ pub fn run() {
             close_media_pip,
             agent_browser_stream_status,
             open_tab_window,
+            tab_transfer::tab_transfer_ready,
+            tab_transfer::watch_tab_drag,
             window_registry::register_window_tabs,
             window_registry::route_entity_open,
             tray::get_hide_tray_icon,

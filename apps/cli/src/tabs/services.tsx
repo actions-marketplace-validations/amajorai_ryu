@@ -32,13 +32,16 @@
 import type { KeyEvent } from "@opentui/core";
 import { useKeyboard } from "@opentui/react";
 import { type ApiTarget, request } from "@ryuhq/core-client/client";
-import { fetchSidecarStatus } from "@ryuhq/core-client/system";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Badge } from "@/components/ui/badge.tsx";
 import { Spinner } from "@/components/ui/spinner.tsx";
 import { useTheme } from "@/components/ui/theme-provider.tsx";
 import { useCore } from "../core/CoreContext.tsx";
 import { useInputFocused } from "../core/InputFocusContext.tsx";
+import {
+	loadServices,
+	type ServicesSnapshot,
+} from "../core/services-snapshot.ts";
 import { ErrorView } from "../ui/ErrorView.tsx";
 import { Loading } from "../ui/Loading.tsx";
 import { type KeyHint, StatusBar } from "../ui/StatusBar.tsx";
@@ -88,69 +91,6 @@ const NAME_WIDTH = 12;
 const CATEGORY_WIDTH = 8;
 const LIST_HEIGHT = 16;
 
-interface SetupListWire {
-	installed?: string[];
-}
-interface SetupStatusWire {
-	states?: Record<string, { state?: string } | undefined>;
-}
-
-// The three Core probes, merged into the per-row view model. The running probe
-// (fetchSidecarStatus) is the liveness signal: when it throws, Core is treated
-// as offline (parity with app.core_connected + statuses.is_empty()).
-interface ServicesSnapshot {
-	installed: Set<string>;
-	installStates: Record<string, string>;
-	offline: boolean;
-	running: Set<string>;
-}
-
-async function loadServices(target: ApiTarget): Promise<ServicesSnapshot> {
-	let offline = false;
-	const running = new Set<string>();
-	const installed = new Set<string>();
-	const installStates: Record<string, string> = {};
-
-	try {
-		const statusMap = await fetchSidecarStatus(target);
-		for (const [name, isRunning] of Object.entries(statusMap)) {
-			if (isRunning) {
-				running.add(name);
-			}
-		}
-	} catch {
-		// /api/sidecar/status is the liveness probe - a failure means Core is down.
-		offline = true;
-	}
-
-	try {
-		const list = await request<SetupListWire>(target, "/api/setup/list");
-		for (const name of list.installed ?? []) {
-			installed.add(name);
-		}
-	} catch {
-		// Non-fatal: an unreachable setup list just leaves everything not-installed.
-	}
-
-	try {
-		const status = await request<SetupStatusWire>(target, "/api/setup/status");
-		for (const [name, value] of Object.entries(status.states ?? {})) {
-			if (value?.state) {
-				installStates[name] = value.state;
-			}
-		}
-	} catch {
-		// Non-fatal: no install-state detail.
-	}
-
-	return {
-		offline: offline && installed.size === 0,
-		running,
-		installed,
-		installStates,
-	};
-}
-
 async function postAction(target: ApiTarget, path: string): Promise<boolean> {
 	try {
 		await request(target, path, { method: "POST" });
@@ -168,7 +108,7 @@ interface RowStatus {
 }
 
 export function ServicesTab({ active }: TabProps) {
-	const { target, url, token } = useCore();
+	const { target } = useCore();
 	const theme = useTheme();
 	const { notify } = useToast();
 	const inputFocused = useInputFocused();
@@ -183,16 +123,32 @@ export function ServicesTab({ active }: TabProps) {
 
 	// Track the latest load so a stale resolve cannot clobber fresh data.
 	const reqRef = useRef(0);
+	const scopeRef = useRef({ active, target });
+	scopeRef.current = { active, target };
+	const inFlightRef = useRef<AbortController | null>(null);
+	const loadScopeActiveRef = useRef(false);
 
 	const runLoad = useCallback(
-		(showSpinner: boolean) => {
+		(showSpinner: boolean, supersede = true) => {
+			if (
+				!(loadScopeActiveRef.current && scopeRef.current.active) ||
+				scopeRef.current.target !== target
+			) {
+				return;
+			}
+			if (inFlightRef.current && !supersede) {
+				return;
+			}
+			inFlightRef.current?.abort();
+			const controller = new AbortController();
+			inFlightRef.current = controller;
 			const reqId = ++reqRef.current;
 			if (showSpinner) {
 				setLoading(true);
 			}
-			loadServices(target)
+			loadServices(target, controller.signal)
 				.then((next) => {
-					if (reqRef.current !== reqId) {
+					if (controller.signal.aborted || reqRef.current !== reqId) {
 						return;
 					}
 					setSnapshot(next);
@@ -212,12 +168,15 @@ export function ServicesTab({ active }: TabProps) {
 					});
 				})
 				.catch((err: unknown) => {
-					if (reqRef.current !== reqId) {
+					if (controller.signal.aborted || reqRef.current !== reqId) {
 						return;
 					}
 					setError(err instanceof Error ? err.message : String(err));
 				})
 				.finally(() => {
+					if (inFlightRef.current === controller) {
+						inFlightRef.current = null;
+					}
 					if (reqRef.current === reqId) {
 						setLoading(false);
 					}
@@ -226,22 +185,22 @@ export function ServicesTab({ active }: TabProps) {
 		[target]
 	);
 
-	// First load on activation + reload on node switch. url/token are primitives so
-	// they are safe in deps (avoids the fresh-target-object loop).
-	useEffect(() => {
-		if (active) {
-			runLoad(true);
-		}
-	}, [active, runLoad]);
-
-	// Live status poll while active (mirrors the Rust last_poll loop), silent so it
-	// never flashes the loading spinner.
+	// Activation owns the polling request. Timer ticks skip a busy read;
+	// user actions supersede it so their refresh cannot publish pre-action data.
 	useEffect(() => {
 		if (!active) {
 			return;
 		}
-		const handle = setInterval(() => runLoad(false), POLL_MS);
-		return () => clearInterval(handle);
+		loadScopeActiveRef.current = true;
+		runLoad(true);
+		const handle = setInterval(() => runLoad(false, false), POLL_MS);
+		return () => {
+			loadScopeActiveRef.current = false;
+			clearInterval(handle);
+			reqRef.current++;
+			inFlightRef.current?.abort();
+			inFlightRef.current = null;
+		};
 	}, [active, runLoad]);
 
 	const isInstalled = useCallback(

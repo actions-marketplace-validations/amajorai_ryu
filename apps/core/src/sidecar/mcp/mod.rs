@@ -19,6 +19,7 @@ pub mod channel_tool;
 pub mod client;
 pub mod composio;
 pub mod delegate;
+mod discovery;
 pub mod notify_tool;
 pub mod orchestrator;
 pub mod routines_tool;
@@ -3967,8 +3968,14 @@ impl McpRegistry {
         // Core-owned typed plan boundary. These tools are the only direct tool
         // surface exposed to agents using the `verified_plan_only` posture.
         all.extend(crate::safe_actions::tools());
-        for name in &names {
-            match self.tools_for_server(name).await {
+        for (name, result) in
+            discovery::collect(
+                names,
+                |name| async move { self.tools_for_server(&name).await },
+            )
+            .await
+        {
+            match result {
                 Ok(tools) => all.extend(tools),
                 Err(e) => tracing::warn!("MCP server '{name}' tools/list failed: {e}"),
             }
@@ -4053,6 +4060,9 @@ impl McpRegistry {
     ///     agent allow a whole server with one entry. The `*` entry is the
     ///     explicit all-tools marker used by newly-created agents.
     pub async fn tools_for_agent(&self, allowlist: Option<&[String]>) -> Vec<RegistryTool> {
+        if allowlist.is_some_and(|entries| entries.is_empty()) {
+            return Vec::new();
+        }
         let all = self.list_all_tools().await;
         match allowlist {
             None => all,
@@ -4725,6 +4735,22 @@ impl McpRegistry {
                 tool_annotations.as_ref(),
                 tool_http_method.as_deref(),
             )?;
+        }
+
+        // Passport consumes the bound identity in its own process. This branch
+        // precedes local vault consultation so remote mode never decrypts a
+        // second local copy or silently falls back after a service failure.
+        if tool_id == web_fetch::GET_TOOL_ID && !profile_ids.is_empty() {
+            if let Ok(base) = std::env::var("RYU_PASSPORT_URL") {
+                if let Some(list) = allowlist {
+                    let candidate = RegistryTool::candidate(tool_id, web_fetch::SERVER_NAME, "get");
+                    if !tool_allowed(&candidate, list) {
+                        return Err(anyhow!("tool '{tool_id}' is not in this agent's allowlist"));
+                    }
+                }
+                let agent = agent_id.ok_or_else(|| anyhow!("Passport requires a calling agent"))?;
+                return crate::identity::passport::fetch(&base, agent, profile_ids, &arguments, session_id.clone()).await;
+            }
         }
 
         // Identity Vault consult (epic #517): for a bound agent, a tool call
@@ -6972,6 +6998,148 @@ mod tests {
     static MCP_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
     fn lock_mcp_env() -> std::sync::MutexGuard<'static, ()> {
         MCP_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    struct RestoreDiscoveryAllowHosts(Option<std::ffi::OsString>);
+    impl Drop for RestoreDiscoveryAllowHosts {
+        fn drop(&mut self) {
+            match &self.0 {
+                Some(value) => std::env::set_var("RYU_AGENT_EGRESS_ALLOW_HOSTS", value),
+                None => std::env::remove_var("RYU_AGENT_EGRESS_ALLOW_HOSTS"),
+            }
+        }
+    }
+
+    fn allow_discovery_test_host(address: std::net::SocketAddr) -> RestoreDiscoveryAllowHosts {
+        let restore = RestoreDiscoveryAllowHosts(std::env::var_os("RYU_AGENT_EGRESS_ALLOW_HOSTS"));
+        let mut allowed = restore.0.clone().unwrap_or_default();
+        if !allowed.is_empty() {
+            allowed.push(",");
+        }
+        allowed.push(address.to_string());
+        std::env::set_var("RYU_AGENT_EGRESS_ALLOW_HOSTS", allowed);
+        restore
+    }
+
+    #[tokio::test]
+    async fn http_discovery_runs_concurrently_and_keeps_healthy_servers() {
+        use std::sync::atomic::AtomicUsize;
+        let _env_lock = lock_mcp_env();
+        let active = Arc::new(AtomicUsize::new(0));
+        let peak = Arc::new(AtomicUsize::new(0));
+        let gate = Arc::new(tokio::sync::Semaphore::new(0));
+        let (started, mut starts) = tokio::sync::mpsc::unbounded_channel();
+        let app = {
+            let active = active.clone();
+            let peak = peak.clone();
+            let gate = gate.clone();
+            axum::Router::new().route(
+                "/:server",
+                axum::routing::post(move |axum::extract::Path(name): axum::extract::Path<String>, axum::Json(body): axum::Json<Value>| {
+                    let active = active.clone();
+                    let peak = peak.clone();
+                    let gate = gate.clone();
+                    let started = started.clone();
+                    async move {
+                        if body["method"] != "tools/list" {
+                            return axum::Json(json!({"jsonrpc":"2.0","id":body["id"],"result":{}}));
+                        }
+                        peak.fetch_max(active.fetch_add(1, Ordering::SeqCst) + 1, Ordering::SeqCst);
+                        started.send(name.clone()).unwrap();
+                        gate.acquire().await.unwrap().forget();
+                        active.fetch_sub(1, Ordering::SeqCst);
+                        if name == "fixture-5" {
+                            axum::Json(json!({"jsonrpc":"2.0","id":body["id"],"error":{"code":-32000,"message":"unavailable"}}))
+                        } else {
+                            axum::Json(json!({"jsonrpc":"2.0","id":body["id"],"result":{"tools":[{"name":"probe","description":name,"inputSchema":{"type":"object"}}]}}))
+                        }
+                    }
+                }),
+            )
+        };
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let _allow_host = allow_discovery_test_host(address);
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let registry = Arc::new(McpRegistry::empty());
+        for index in 0..6 {
+            let name = format!("fixture-{index}");
+            registry.servers.write().unwrap().insert(
+                name.clone(),
+                McpServerConfig {
+                    enabled: true,
+                    transport: Some("streamable-http".to_owned()),
+                    url: Some(format!("http://{address}/{name}")),
+                    ..Default::default()
+                },
+            );
+        }
+        let discovery = {
+            let registry = registry.clone();
+            tokio::spawn(async move { registry.list_all_tools().await })
+        };
+        for _ in 0..4 {
+            tokio::time::timeout(std::time::Duration::from_secs(3), starts.recv())
+                .await
+                .unwrap()
+                .unwrap();
+        }
+        assert!(starts.try_recv().is_err());
+        gate.add_permits(6);
+        let tools = tokio::time::timeout(std::time::Duration::from_secs(3), discovery)
+            .await
+            .unwrap()
+            .unwrap();
+        let mut ids: Vec<_> = tools
+            .into_iter()
+            .filter(|tool| tool.server.starts_with("fixture-"))
+            .map(|tool| tool.id)
+            .collect();
+        ids.sort();
+        assert_eq!(
+            ids,
+            (0..5)
+                .map(|index| format!("fixture-{index}.probe"))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(peak.load(Ordering::SeqCst), 4);
+        assert_eq!(active.load(Ordering::SeqCst), 0);
+        server.abort();
+        let _ = server.await;
+    }
+
+    #[tokio::test]
+    async fn empty_allowlist_skips_server_discovery() {
+        let _env_lock = lock_mcp_env();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("local stalled MCP endpoint");
+        let _allow_host = allow_discovery_test_host(listener.local_addr().unwrap());
+        let registry = McpRegistry::empty();
+        registry.servers.write().unwrap().insert(
+            "stalled".to_owned(),
+            McpServerConfig {
+                enabled: true,
+                transport: Some("streamable-http".to_owned()),
+                url: Some(format!("http://{}/mcp", listener.local_addr().unwrap())),
+                ..Default::default()
+            },
+        );
+        let tools = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            registry.tools_for_agent(Some(&[])),
+        )
+        .await
+        .expect("an empty allowlist must not wait on any endpoint");
+        assert!(tools.is_empty());
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(20), listener.accept())
+                .await
+                .is_err(),
+            "discovery must not connect for an empty allowlist"
+        );
     }
 
     fn sample_tool() -> RegistryTool {

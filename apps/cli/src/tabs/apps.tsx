@@ -100,7 +100,7 @@ function errText(err: unknown): string {
 }
 
 export function AppsTab({ active }: TabProps) {
-	const { target, url, token } = useCore();
+	const { target } = useCore();
 	const theme = useTheme();
 	const { notify } = useToast();
 
@@ -114,39 +114,73 @@ export function AppsTab({ active }: TabProps) {
 
 	// Track the latest request so a stale resolve cannot clobber fresh data.
 	const reqRef = useRef(0);
+	const lifetimeRef = useRef(false);
+	const scopeRef = useRef({ target, active });
+	scopeRef.current = { target, active };
+	const inFlightRef = useRef<AbortController | null>(null);
 
-	const runLoad = useCallback(() => {
-		const reqId = ++reqRef.current;
-		setLoading(true);
-		setError(null);
-		fetchCatalog(target)
-			.then((next) => {
-				if (reqRef.current !== reqId) {
-					return;
-				}
-				setItems(next);
-				setIndex((i) => (next.length === 0 ? 0 : Math.min(i, next.length - 1)));
-				setLoaded(true);
-			})
-			.catch((err: unknown) => {
-				if (reqRef.current !== reqId) {
-					return;
-				}
-				setError(errText(err));
-				setLoaded(true);
-			})
-			.finally(() => {
-				if (reqRef.current === reqId) {
-					setLoading(false);
-				}
-			});
-	}, [target]);
+	const runLoad = useCallback(
+		(background = false) => {
+			if (
+				!(lifetimeRef.current && scopeRef.current.active) ||
+				scopeRef.current.target !== target
+			) {
+				return;
+			}
+			if (background && inFlightRef.current) {
+				return;
+			}
+			inFlightRef.current?.abort();
+			const controller = new AbortController();
+			inFlightRef.current = controller;
+			const reqId = ++reqRef.current;
+			if (!background) {
+				setLoading(true);
+			}
+			setError(null);
+			fetchCatalog(target, controller.signal)
+				.then((next) => {
+					if (controller.signal.aborted || reqRef.current !== reqId) {
+						return;
+					}
+					setItems(next);
+					setIndex((i) =>
+						next.length === 0 ? 0 : Math.min(i, next.length - 1)
+					);
+					setLoaded(true);
+				})
+				.catch((err: unknown) => {
+					if (controller.signal.aborted || reqRef.current !== reqId) {
+						return;
+					}
+					setError(errText(err));
+					setLoaded(true);
+				})
+				.finally(() => {
+					if (inFlightRef.current === controller) {
+						inFlightRef.current = null;
+					}
+					if (reqRef.current === reqId) {
+						setLoading(false);
+					}
+				});
+		},
+		[target]
+	);
 
 	// Lazy first load on activation, plus reload on a node switch (url/token).
 	useEffect(() => {
-		if (active) {
-			runLoad();
+		if (!active) {
+			return;
 		}
+		lifetimeRef.current = true;
+		runLoad();
+		return () => {
+			lifetimeRef.current = false;
+			reqRef.current++;
+			inFlightRef.current?.abort();
+			inFlightRef.current = null;
+		};
 	}, [active, runLoad]);
 
 	// While a row is installing, poll the catalog so the Core-side
@@ -157,7 +191,7 @@ export function AppsTab({ active }: TabProps) {
 		if (!(active && hasInstalling)) {
 			return;
 		}
-		const id = setInterval(runLoad, INSTALLING_POLL_MS);
+		const id = setInterval(() => runLoad(true), INSTALLING_POLL_MS);
 		return () => clearInterval(id);
 	}, [active, hasInstalling, runLoad]);
 

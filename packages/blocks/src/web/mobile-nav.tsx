@@ -16,7 +16,11 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import type { RefObject } from "react";
 import { useEffect, useRef, useState } from "react";
-import { PRODUCT_REALMS } from "./data/product-realms.ts";
+import {
+	PRODUCT_NAV_GROUPS,
+	PRODUCT_REALMS,
+	productRealmsFor,
+} from "./data/product-realms.ts";
 import {
 	DOCS_URL,
 	resourceCategories,
@@ -46,29 +50,25 @@ const RESOURCE_ACTIVE_PREFIXES = [
 ];
 
 const PRODUCT_SHEET = [
-	{
-		title: "Products",
+	...PRODUCT_NAV_GROUPS.map((group, index) => ({
+		title: group.title,
 		links: [
-			...PRODUCT_REALMS.filter((realm) =>
-				[
-					"os",
-					"bot",
-					"console",
-					"box",
-					"mail",
-					"notify",
-					"hire",
-					"compute",
-					"share",
-				].includes(realm.id)
-			).map(({ label, href }) => ({ label, href, external: false })),
-			{
-				label: "Ryu Apps",
-				href: "/marketplace/apps",
+			...productRealmsFor(group.ids).map(({ label, href }) => ({
+				label,
+				href,
 				external: false,
-			},
+			})),
+			...(index === 2
+				? [
+						{
+							label: "Ryu Apps",
+							href: "/marketplace/apps",
+							external: false,
+						},
+					]
+				: []),
 		],
-	},
+	})),
 	{
 		title: "Platform",
 		links: [

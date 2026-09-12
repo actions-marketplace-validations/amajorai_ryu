@@ -222,6 +222,9 @@ pub async fn list_connections(
     toolkit: &str,
     user_id: Option<&str>,
 ) -> Result<Value> {
+    if let Some(result) = crate::service::list_connections(toolkit, user_id).await {
+        return result;
+    }
     let entity = resolve_entity(user_id);
     let raw = get_json(
         client,
@@ -287,6 +290,9 @@ async fn ensure_auth_config(client: &Client, toolkit: &str) -> Result<String> {
 pub async fn initiate(client: &Client, toolkit: &str, user_id: Option<&str>) -> Result<Value> {
     if toolkit.trim().is_empty() {
         return Err(anyhow!("toolkit is required to connect"));
+    }
+    if let Some(result) = crate::service::initiate(toolkit, user_id).await {
+        return result;
     }
     let auth_config_id = ensure_auth_config(client, toolkit).await?;
     let body = json!({

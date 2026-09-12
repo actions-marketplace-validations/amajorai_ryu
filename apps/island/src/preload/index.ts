@@ -195,6 +195,8 @@ const api: IslandApi = {
 			ipcRenderer.invoke(IPC.catalog.selectSource, req),
 	},
 	shadow: {
+		getSpeechHistory: (input) =>
+			ipcRenderer.invoke(IPC.shadow.getSpeechHistory, input),
 		getCurrentContext: (): Promise<ShadowContextResult> =>
 			ipcRenderer.invoke(IPC.shadow.getCurrentContext),
 		getProactive: (): Promise<ShadowProactiveResult> =>

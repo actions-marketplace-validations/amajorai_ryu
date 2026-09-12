@@ -1,4 +1,4 @@
-import { I18nProvider, useI18n } from "@ryu/i18n/react";
+import { I18nProvider, I18nText, useI18n } from "@ryu/i18n/react";
 import { createRoot } from "react-dom/client";
 import "../../src/index.css";
 
@@ -12,13 +12,9 @@ function ProofSurface() {
 				<div className="mx-auto flex max-w-2xl flex-col gap-6">
 					<header className="rounded-2xl border bg-card p-6 shadow-sm">
 						<p className="text-muted-foreground text-xs uppercase tracking-wide">
-							Shared runtime proof
+							<I18nText id="language.title" />
 						</p>
 						<h1>Activity</h1>
-						<p className="text-muted-foreground">
-							Raw legacy copy, attributes, and dynamic content remain on their
-							approved localization paths.
-						</p>
 					</header>
 					<section className="rounded-2xl border bg-card p-6 shadow-sm">
 						<div className="flex items-center gap-3">

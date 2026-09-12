@@ -208,6 +208,7 @@ export function ExtensionHost({
 		// `agent.cancel` can abort the matching in-flight stream and unmount can abort
 		// all of them.
 		const activeStreams = new Map<number, AbortController>();
+		const readLifetime = new AbortController();
 
 		// Post the terminal reply that ends a request (unary or streaming).
 		const postResult = (id: number, result?: unknown, error?: unknown) => {
@@ -384,7 +385,13 @@ export function ExtensionHost({
 				return;
 			}
 
-			dispatchRpc(req.method, req.args, granted, servicesRef.current)
+			dispatchRpc(
+				req.method,
+				req.args,
+				granted,
+				servicesRef.current,
+				readLifetime.signal
+			)
 				.then((result) => {
 					const reply: RpcResponse = {
 						kind: "ryu-plugin-rpc-result",
@@ -454,6 +461,7 @@ export function ExtensionHost({
 		window.addEventListener("message", onWindowMessage);
 		return () => {
 			disposed = true;
+			readLifetime.abort();
 			window.removeEventListener("message", onWindowMessage);
 			const pushTarget = pushRefRef.current;
 			if (pushTarget) {

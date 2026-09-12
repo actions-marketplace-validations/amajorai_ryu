@@ -1,0 +1,30 @@
+--- a/build/with-xcode-changes.js
++++ b/build/with-xcode-changes.js
+@@ -207,20 +207,22 @@
+         }
+     }
+     if (targetToUpdate) {
++        // Keep the object before removing references; the target getter becomes undefined.
++        const oldConfigurationList = targetToUpdate.props.buildConfigurationList;
+         // Remove existing build phases
+-        targetToUpdate.props.buildConfigurationList.props.buildConfigurations.forEach((config) => {
++        oldConfigurationList.props.buildConfigurations.forEach((config) => {
+             config.getReferrers().forEach((ref) => {
+                 ref.removeReference(config.uuid);
+             });
+             config.removeFromProject();
+         });
+         // Remove existing build configuration list
+-        targetToUpdate.props.buildConfigurationList
++        oldConfigurationList
+             .getReferrers()
+             .forEach((ref) => {
+-            ref.removeReference(targetToUpdate.props.buildConfigurationList.uuid);
+-        });
+-        targetToUpdate.props.buildConfigurationList.removeFromProject();
++            ref.removeReference(oldConfigurationList.uuid);
++        });
++        oldConfigurationList.removeFromProject();
+         // Create new build phases
+         targetToUpdate.props.buildConfigurationList =
+             (0, configuration_list_1.createConfigurationListForType)(project, props);

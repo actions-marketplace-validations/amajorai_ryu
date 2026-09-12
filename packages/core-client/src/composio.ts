@@ -184,3 +184,45 @@ function normalizeAccessLevel(value: unknown): ConnectionAccessLevel {
 	}
 	return "risk_based";
 }
+
+/** Completion metadata only; refresh the connection list for its access policy. */
+export interface ComposioConnectionCompletion {
+	active: true;
+	id: string;
+	status: "ACTIVE";
+	toolkit: string;
+}
+
+export async function completeComposioConnection(
+	target: ApiTarget,
+	sessionUri: string,
+	send: typeof request = request
+): Promise<ComposioConnectionCompletion> {
+	if (!sessionUri || new TextEncoder().encode(sessionUri).byteLength > 4096) {
+		throw new Error("Invalid callback session URI");
+	}
+	const value = await send<Record<string, unknown>>(
+		target,
+		"/api/composio/connections/complete",
+		{
+			method: "POST",
+			body: { sessionUri },
+			signal: AbortSignal.timeout(45_000),
+		}
+	);
+	if (
+		typeof value.id !== "string" ||
+		!value.id ||
+		typeof value.toolkit !== "string" ||
+		value.status !== "ACTIVE" ||
+		value.active !== true
+	) {
+		throw new Error("Core did not confirm an active connection");
+	}
+	return {
+		id: value.id,
+		toolkit: value.toolkit,
+		status: "ACTIVE",
+		active: true,
+	};
+}

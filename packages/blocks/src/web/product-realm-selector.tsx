@@ -42,46 +42,48 @@ export function ProductRealmSelector() {
 				</p>
 			</div>
 
-			<div
-				className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4"
-				data-testid="product-bento-grid"
-			>
-				{PRODUCT_BENTO_ITEMS.map((product) => {
-					const Icon = product.icon;
-					return (
-						<Link
-							className={cn(
-								"group relative flex min-h-64 min-w-0 flex-col justify-between overflow-hidden rounded-3xl bg-muted/35 p-6 outline-offset-4 transition-colors hover:bg-muted/60 focus-visible:outline-2 focus-visible:outline-ring md:p-7",
-								product.span
-							)}
-							data-testid={`realm-card-${product.id}`}
-							href={product.href as Route}
-							key={product.id}
-						>
-							<div className="flex items-start justify-between gap-4">
-								<div className="flex size-11 items-center justify-center rounded-2xl bg-background text-foreground shadow-sm">
-									<Icon
+			<div className="rounded-[2rem] bg-muted/20 p-2 md:p-3">
+				<div
+					className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4"
+					data-testid="product-bento-grid"
+				>
+					{PRODUCT_BENTO_ITEMS.map((product) => {
+						const Icon = product.icon;
+						return (
+							<Link
+								className={cn(
+									"group relative flex min-h-64 min-w-0 flex-col justify-between overflow-hidden rounded-3xl bg-muted/35 p-6 outline-offset-4 transition-colors hover:bg-muted/60 focus-visible:outline-2 focus-visible:outline-ring md:p-7",
+									product.span
+								)}
+								data-testid={`realm-card-${product.id}`}
+								href={product.href as Route}
+								key={product.id}
+							>
+								<div className="flex items-start justify-between gap-4">
+									<div className="flex size-11 items-center justify-center rounded-2xl bg-background text-foreground shadow-sm">
+										<Icon
+											aria-hidden="true"
+											className="size-5"
+											strokeWidth={1.75}
+										/>
+									</div>
+									<ArrowUpRight
 										aria-hidden="true"
-										className="size-5"
-										strokeWidth={1.75}
+										className="size-5 text-muted-foreground transition-transform group-hover:translate-x-0.5 group-hover:-translate-y-0.5"
 									/>
 								</div>
-								<ArrowUpRight
-									aria-hidden="true"
-									className="size-5 text-muted-foreground transition-transform group-hover:translate-x-0.5 group-hover:-translate-y-0.5"
-								/>
-							</div>
-							<div className="max-w-xl">
-								<h3 className="font-heading font-medium text-2xl tracking-tight">
-									{product.label}
-								</h3>
-								<p className="mt-2 max-w-lg text-muted-foreground text-sm leading-relaxed">
-									{product.description}
-								</p>
-							</div>
-						</Link>
-					);
-				})}
+								<div className="max-w-xl">
+									<h3 className="font-heading font-medium text-2xl tracking-tight">
+										{product.label}
+									</h3>
+									<p className="mt-2 max-w-lg text-muted-foreground text-sm leading-relaxed">
+										{product.description}
+									</p>
+								</div>
+							</Link>
+						);
+					})}
+				</div>
 			</div>
 		</section>
 	);

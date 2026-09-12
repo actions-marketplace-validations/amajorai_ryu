@@ -166,14 +166,14 @@ if (!key) {
 	fallback("OPENCODE_API_KEY is not set");
 }
 
-try {
+const requestAiNotes = async () => {
 	const res = await fetch(
 		`${process.env.OPENCODE_API_BASE || "https://opencode.ai/zen/go/v1"}/chat/completions`,
 		{
 			method: "POST",
 			headers: opencodeHeaders(key, sessionContext),
 			body: JSON.stringify({
-				model: process.env.OPENCODE_MODEL || "deepseek-flash",
+				model: process.env.OPENCODE_MODEL || "deepseek-v4.1-flash",
 				temperature: 0.2,
 				max_tokens: Number(process.env.OPENCODE_MAX_TOKENS || 16_000),
 				messages: [
@@ -205,15 +205,20 @@ try {
 		}
 	);
 	if (!res.ok) {
-		throw new Error(`HTTP ${res.status}`);
+		const detail = (await res.text()).slice(0, 200);
+		throw new Error(`HTTP ${res.status}${detail ? `: ${detail}` : ""}`);
 	}
 	const json = await res.json();
-	const text = json?.choices?.[0]?.message?.content;
-	if (!text) {
-		throw new Error("no content");
+	const choice = json?.choices?.[0];
+	const content = choice?.message?.content;
+	if (!content) {
+		throw new Error(
+			`no content (finish_reason=${choice?.finish_reason ?? "?"}, ` +
+				`completion_tokens=${json?.usage?.completion_tokens ?? "?"})`
+		);
 	}
 	const parsed = JSON.parse(
-		text
+		content
 			.trim()
 			.replace(/^```(?:json)?\s*/i, "")
 			.replace(/\s*```$/, "")
@@ -233,9 +238,30 @@ try {
 	if (compare) {
 		lines.push("", compare);
 	}
-	emit(lines);
-} catch (error) {
+	return lines;
+};
+
+const configuredAttempts = Number(process.env.AI_NOTES_ATTEMPTS || 3);
+const attempts = Number.isFinite(configuredAttempts)
+	? Math.max(1, Math.floor(configuredAttempts))
+	: 3;
+let lines;
+let failure = "AI generation failed";
+for (let attempt = 1; attempt <= attempts; attempt++) {
+	try {
+		lines = await requestAiNotes();
+		break;
+	} catch (error) {
+		failure = error instanceof Error ? error.message : "AI generation failed";
+		if (attempt < attempts) {
+			await new Promise((resolve) => setTimeout(resolve, attempt * 1000));
+		}
+	}
+}
+
+if (!lines) {
 	// Any failure at all falls back to the real, unpolished bullets unless the
 	// caller explicitly requires AI output for a stable release.
-	fallback(error instanceof Error ? error.message : "AI generation failed");
+	fallback(failure);
 }
+emit(lines);

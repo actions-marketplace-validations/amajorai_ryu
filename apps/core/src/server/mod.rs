@@ -4017,6 +4017,10 @@ pub fn create_router(
             post(composio_connection_initiate),
         )
         .route(
+            "/api/composio/connections/complete",
+            post(composio_connection_complete),
+        )
+        .route(
             "/api/composio/connections/:id",
             get(composio_connection_status),
         )
@@ -32838,6 +32842,7 @@ mod tool_search_scope_tests {
 )]
 async fn tools_search(
     State(state): State<ServerState>,
+    axum::Extension(caller): axum::Extension<Option<crate::identity_verify::VerifiedCaller>>,
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> Json<serde_json::Value> {
     let query = params.get("q").map(String::as_str).unwrap_or_default();
@@ -32868,7 +32873,13 @@ async fn tools_search(
 
     let mut results = state
         .mcp
-        .search_scoped(query, kind, fetch, &skills_allowlist)
+        .search_scoped_for_user(
+            query,
+            kind,
+            fetch,
+            &skills_allowlist,
+            caller.as_ref().map(|caller| caller.user_id.as_str()),
+        )
         .await;
     if let Some(agent) = agent {
         if let Some(allow) = resolved_agent_tool_allowlist(&state, agent).await {
@@ -37642,7 +37653,7 @@ async fn composio_connections(
     // No Composio key is the default state, not a failure: report it as an empty,
     // unconfigured list (200) so callers show a "connect an integration" empty
     // state rather than a load error. 502 stays reserved for real upstream faults.
-    if !crate::composio_auth::is_configured() {
+    if !ryu_composio::service::is_configured() && !crate::composio_auth::is_configured() {
         return (
             StatusCode::OK,
             Json(json!({ "data": [], "configured": false })),
@@ -37738,6 +37749,56 @@ async fn composio_connection_initiate(
     }
 }
 
+/// Callback session data only; identity is supplied by authenticated middleware.
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ComposioCompleteBody {
+    session_uri: String,
+}
+
+/// Redeem a provider-returned session only for the authenticated caller.
+#[utoipa::path(
+    post,
+    path = "/api/composio/connections/complete",
+    tag = "Composio",
+    summary = "Complete a Connect account after callback identity verification",
+    request_body = serde_json::Value,
+    responses((status = 200, description = "Verified account metadata", body = serde_json::Value))
+)]
+async fn composio_connection_complete(
+    axum::Extension(caller): axum::Extension<Option<crate::identity_verify::VerifiedCaller>>,
+    Json(body): Json<ComposioCompleteBody>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    if let Err(error) = crate::mcp_oauth::owner_for_caller(caller.as_ref()) {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({ "error": error.to_string() })),
+        );
+    }
+    if body.session_uri.is_empty() || body.session_uri.len() > 4096 {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "Invalid callback session URI" })),
+        );
+    }
+    match ryu_composio::service::complete(
+        &body.session_uri,
+        caller.as_ref().map(|caller| caller.user_id.as_str()),
+    )
+    .await
+    {
+        Some(Ok(value)) => (StatusCode::OK, Json(value)),
+        Some(Err(error)) => (
+            StatusCode::BAD_GATEWAY,
+            Json(json!({ "error": error.to_string() })),
+        ),
+        None => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({ "error": "Connect is not configured" })),
+        ),
+    }
+}
+
 /// Add the owner's stored access ceiling to the metadata-only Composio list.
 /// Missing policy rows resolve to the safe `RiskBased` default, which keeps
 /// connections created by older Core versions governed after an upgrade.
@@ -37784,7 +37845,28 @@ async fn decorate_composio_access_levels(
 async fn composio_connection_status(
     State(state): State<ServerState>,
     axum::extract::Path(id): axum::extract::Path<String>,
+    axum::Extension(caller): axum::Extension<Option<crate::identity_verify::VerifiedCaller>>,
 ) -> (StatusCode, Json<serde_json::Value>) {
+    if let Err(error) = crate::mcp_oauth::owner_for_caller(caller.as_ref()) {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({ "error": error.to_string() })),
+        );
+    }
+    if let Some(result) = ryu_composio::service::connection_status(
+        &id,
+        caller.as_ref().map(|caller| caller.user_id.as_str()),
+    )
+    .await
+    {
+        return match result {
+            Ok(value) => (StatusCode::OK, Json(value)),
+            Err(error) => (
+                StatusCode::BAD_GATEWAY,
+                Json(json!({ "error": error.to_string() })),
+            ),
+        };
+    }
     match crate::composio_connect::connection_status(&state.client, &id).await {
         Ok(value) => (StatusCode::OK, Json(value)),
         Err(e) => (

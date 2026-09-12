@@ -976,11 +976,13 @@ export async function setDocumentIcon(
 /** List the documents in a Space. */
 export async function fetchDocuments(
 	target: ApiTarget,
-	spaceId: string
+	spaceId: string,
+	signal?: AbortSignal
 ): Promise<SpaceDocument[]> {
 	const json = await request<{ documents?: DocumentWire[] }>(
 		target,
-		`/api/spaces/${spaceId}/documents`
+		`/api/spaces/${spaceId}/documents`,
+		{ signal }
 	);
 	return (json.documents ?? []).map(toDocument);
 }

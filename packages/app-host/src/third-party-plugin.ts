@@ -417,6 +417,7 @@ ${indentGeneratedScript(I18N_BRIDGE, "        ")},
           image: function (args) { return call("media.image", [args || {}]); },
           video: function (args) { return call("media.video", [args || {}]); },
           tts: function (args) { return call("media.tts", [args || {}]); },
+          recording: function (args) { return call("media.recording", [args || {}]); },
           transcribe: function (args) { return call("media.transcribe", [args || {}]); }
         },
         // Read-only catalog reads (needs grant core:list_agents) — chat models + TTS engines.
@@ -1058,6 +1059,7 @@ ${indentGeneratedScript(I18N_BRIDGE, "      ")},
         image: function (a) { return call("media.image", [a || {}]); },
         video: function (a) { return call("media.video", [a || {}]); },
         tts: function (a) { return call("media.tts", [a || {}]); },
+        recording: function (a) { return call("media.recording", [a || {}]); },
         transcribe: function (a) { return call("media.transcribe", [a || {}]); }
       },
       // Assistant bridge — see the sibling bridge above. Kept in step with it
@@ -1195,6 +1197,7 @@ ${indentGeneratedScript(I18N_BRIDGE, "      ")},
       // Shadow is machine-pinned). frame returns a data: URL (CSP img-src data: blob:);
       // openReview/openSettings are shell-navigation verbs.
       timeline: {
+        transcripts: function (a) { return call("timeline.transcripts", [a || {}]); },
         list: function (a) { return call("timeline.list", [a || {}]); },
         journal: function (a) { return call("timeline.journal", [a || {}]); },
         frame: function (a) { return call("timeline.frame", [a || {}]); },

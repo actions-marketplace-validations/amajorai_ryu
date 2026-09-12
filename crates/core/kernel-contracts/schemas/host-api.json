@@ -561,6 +561,13 @@
       "tsHost": true
     },
     {
+      "capability": "media.recording",
+      "grant": "media:record",
+      "method": "media.recording",
+      "streaming": false,
+      "tsHost": true
+    },
+    {
       "capability": "core.listAgents",
       "grant": "core:list_agents",
       "method": "registry.engineModels",
@@ -1072,6 +1079,13 @@
       "tsHost": true
     },
     {
+      "capability": "timeline.speech",
+      "grant": "timeline:speech",
+      "method": "timeline.transcripts",
+      "streaming": false,
+      "tsHost": true
+    },
+    {
       "capability": "timeline.read",
       "grant": "timeline:read",
       "method": "timeline.frame",
@@ -1548,5 +1562,5 @@
       "tsHost": false
     }
   ],
-  "version": "1.14.0"
+  "version": "1.15.0"
 }

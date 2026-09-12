@@ -14,6 +14,7 @@ import {
 import Link from "next/link";
 import { useState } from "react";
 import { GatewayRequestPreview } from "./gateway-request-preview.tsx";
+import { landingVisualFrameClass } from "./landing-card-tones.ts";
 import { SectionTitle } from "./section-title.tsx";
 
 const TOOLS = [
@@ -27,7 +28,10 @@ function ToolAccessPreview() {
 	const [enabled, setEnabled] = useState<string[]>(["Gmail", "Notion"]);
 	const [model, setModel] = useState("Claude");
 	return (
-		<div className="bg-background p-6 md:p-8" data-testid="tool-access-preview">
+		<div
+			className="overflow-hidden rounded-[1.5rem] bg-background p-6 md:p-8"
+			data-testid="tool-access-preview"
+		>
 			<div className="flex items-center justify-between gap-4">
 				<span className="font-medium">Client follow-up</span>
 				<span className="text-muted-foreground text-xs">Example agent</span>
@@ -43,7 +47,10 @@ function ToolAccessPreview() {
 			</Tabs>
 			<div className="mt-8 space-y-3">
 				{TOOLS.map(({ name, scope, Icon }) => (
-					<div className="flex items-center gap-4 bg-muted/40 p-4" key={name}>
+					<div
+						className="flex items-center gap-4 rounded-xl bg-muted/40 p-4"
+						key={name}
+					>
 						<Icon
 							aria-hidden="true"
 							className="size-5 shrink-0 text-primary"
@@ -83,7 +90,10 @@ function DeploymentPreview() {
 	const [mode, setMode] = useState("cloud");
 	const hosted = mode === "cloud";
 	return (
-		<div className="bg-background p-6 md:p-8" data-testid="deployment-preview">
+		<div
+			className="overflow-hidden rounded-[1.5rem] bg-background p-6 md:p-8"
+			data-testid="deployment-preview"
+		>
 			<div className="flex flex-wrap items-center justify-between gap-4">
 				<span className="font-medium">Deployment</span>
 				<span className="text-muted-foreground text-xs">Example setup</span>
@@ -95,7 +105,7 @@ function DeploymentPreview() {
 				</TabsList>
 			</Tabs>
 			<div className="mt-8 flex flex-col items-center gap-4">
-				<div className="flex w-full items-center gap-4 bg-muted/40 p-4">
+				<div className="flex w-full items-center gap-4 rounded-xl bg-muted/40 p-4">
 					<Laptop aria-hidden="true" className="size-6 text-muted-foreground" />
 					<div>
 						<p className="text-sm">Your team</p>
@@ -108,7 +118,7 @@ function DeploymentPreview() {
 					aria-hidden="true"
 					className="size-5 text-muted-foreground"
 				/>
-				<div className="w-full bg-primary/5 p-6">
+				<div className="w-full rounded-2xl bg-primary/5 p-6">
 					<div className="flex items-center gap-3">
 						<Server aria-hidden="true" className="size-6 text-primary" />
 						<span className="font-medium">
@@ -118,7 +128,7 @@ function DeploymentPreview() {
 					<div className="mt-5 grid grid-cols-3 gap-2">
 						{["Agents", "Tools", "Workflows"].map((name) => (
 							<span
-								className="bg-background px-2 py-3 text-center text-xs"
+								className="rounded-lg bg-background px-2 py-3 text-center text-xs"
 								key={name}
 							>
 								{name}
@@ -163,7 +173,7 @@ export function HomeCapabilitySections() {
 						Explore connections
 					</Link>
 				</div>
-				<div className="bg-muted/40 p-4 md:p-8" data-product-visual>
+				<div className={landingVisualFrameClass} data-product-visual>
 					<ToolAccessPreview />
 				</div>
 			</section>
@@ -184,12 +194,12 @@ export function HomeCapabilitySections() {
 						Explore Gateway
 					</Link>
 				</div>
-				<div className="bg-muted/40 p-4 md:p-8" data-product-visual>
+				<div className={landingVisualFrameClass} data-product-visual>
 					<GatewayRequestPreview />
 				</div>
 			</section>
 			<section
-				className="bg-muted/30"
+				className="mx-4 overflow-hidden rounded-[2.5rem] bg-muted/30 sm:mx-6 md:mx-8"
 				data-testid="managed-deployment"
 				id="managed-deployment"
 			>
@@ -207,7 +217,7 @@ export function HomeCapabilitySections() {
 							See Ryu Console
 						</Link>
 					</div>
-					<div className="bg-muted/40 p-4 md:p-8" data-product-visual>
+					<div className={landingVisualFrameClass} data-product-visual>
 						<DeploymentPreview />
 					</div>
 				</div>

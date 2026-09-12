@@ -814,7 +814,11 @@ export function OsVisual() {
 }
 
 /** A visual for the standalone tool/Skill execution gateway. */
-export function ToolGatewayVisual() {
+export function ToolGatewayVisual({
+	serviceName = "Ryu Gateway",
+}: {
+	serviceName?: string;
+}) {
 	return (
 		<MinimalCard>
 			<div className="space-y-3">
@@ -829,12 +833,56 @@ export function ToolGatewayVisual() {
 				<div className="flex items-center gap-2">
 					<Node>Any system</Node>
 					<Wire className="flex-1" />
-					<Node emphasis>Ryu Gateway</Node>
+					<Node emphasis>{serviceName}</Node>
 					<Wire className="flex-1" delays={[0.25, 0.65]} />
 					<Node>Tool + Skill</Node>
 				</div>
 				<div className="rounded-lg border border-border bg-foreground/[0.03] px-3 py-2 font-mono text-[11px] text-muted-foreground">
 					tools.github.create_issue({"{ title }"})
+				</div>
+			</div>
+		</MinimalCard>
+	);
+}
+
+/** The four-lane standalone integration boundary: MCP, Skills, tools, and Composio. */
+export function ConnectVisual() {
+	const lanes = [
+		{ label: "MCP hosting", value: "/mcp/*" },
+		{ label: "Skills", value: "SKILL.md" },
+		{ label: "Tool gateway", value: "/v1/exec/tool" },
+		{ label: "Composio", value: "provider call" },
+	];
+	return (
+		<MinimalCard>
+			<div className="space-y-3">
+				<div className="flex items-center justify-between">
+					<span className="font-medium text-foreground text-sm">
+						Ryu Connect
+					</span>
+					<span className="font-mono text-[10px] text-muted-foreground">
+						one tenant edge
+					</span>
+				</div>
+				<div className="grid grid-cols-2 gap-2">
+					{lanes.map((lane) => (
+						<div
+							className="rounded-lg border border-border bg-muted/30 px-3 py-2"
+							key={lane.label}
+						>
+							<p className="text-foreground/80 text-xs">{lane.label}</p>
+							<p className="mt-1 font-mono text-[10px] text-muted-foreground">
+								{lane.value}
+							</p>
+						</div>
+					))}
+				</div>
+				<div className="flex items-center gap-2">
+					<Node>Product</Node>
+					<Wire className="flex-1" delays={[0.2, 0.6]} />
+					<Node emphasis>Connect</Node>
+					<Wire className="flex-1" delays={[0.4, 0.8]} />
+					<Node>MCP + Composio</Node>
 				</div>
 			</div>
 		</MinimalCard>

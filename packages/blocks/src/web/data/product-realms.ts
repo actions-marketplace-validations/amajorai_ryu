@@ -3,7 +3,9 @@ import {
 	Bell,
 	Bot,
 	Box,
+	Cable,
 	Cpu,
+	Key,
 	Mail,
 	Monitor,
 	Settings2,
@@ -22,6 +24,8 @@ export type ProductRealmId =
 	| "bot"
 	| "console"
 	| "gateway"
+	| "connect"
+	| "passport"
 	| "box"
 	| "mail"
 	| "notify"
@@ -38,6 +42,25 @@ export interface ProductRealm {
 	shortLabel: string;
 	type: "workspace" | "service";
 }
+
+/**
+ * Shared navigation groups keep the desktop dropdown and mobile sheet aligned.
+ * The platform links remain a separate column in the desktop menu.
+ */
+export const PRODUCT_NAV_GROUPS = [
+	{
+		title: "Main Products",
+		ids: ["os", "bot", "console"] as const,
+	},
+	{
+		title: "Service APIs",
+		ids: ["connect", "passport", "box", "mail", "notify"] as const,
+	},
+	{
+		title: "Capacity & Apps",
+		ids: ["compute", "share", "hire"] as const,
+	},
+] as const;
 
 export const PRODUCT_REALMS: readonly ProductRealm[] = [
 	{
@@ -76,6 +99,26 @@ export const PRODUCT_REALMS: readonly ProductRealm[] = [
 		id: "gateway",
 		label: "Ryu Gateway",
 		shortLabel: "Gateway",
+		type: "service",
+	},
+	{
+		description:
+			"MCP hosting, Skills, governed tools, and Composio behind one edge.",
+		href: "/products/connect",
+		icon: Cable,
+		id: "connect",
+		label: "Ryu Connect",
+		shortLabel: "Connect",
+		type: "service",
+	},
+	{
+		description:
+			"Encrypted identity connections for agents and their allowed sessions.",
+		href: "/products/passport",
+		icon: Key,
+		id: "passport",
+		label: "Ryu Passport",
+		shortLabel: "Passport",
 		type: "service",
 	},
 	{
@@ -137,6 +180,15 @@ export const PRODUCT_REALMS: readonly ProductRealm[] = [
 		type: "service",
 	},
 ];
+
+export function productRealmsFor(
+	ids: readonly ProductRealmId[]
+): ProductRealm[] {
+	return ids.flatMap((id) => {
+		const realm = PRODUCT_REALMS.find((candidate) => candidate.id === id);
+		return realm ? [realm] : [];
+	});
+}
 
 export function productRealm(id: ProductRealmId): ProductRealm {
 	return PRODUCT_REALMS.find((realm) => realm.id === id) ?? PRODUCT_REALMS[0];

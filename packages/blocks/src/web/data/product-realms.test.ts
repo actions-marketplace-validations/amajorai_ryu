@@ -1,5 +1,9 @@
 import { expect, test } from "bun:test";
-import { PRODUCT_REALMS } from "./product-realms.ts";
+import {
+	PRODUCT_NAV_GROUPS,
+	PRODUCT_REALMS,
+	productRealmsFor,
+} from "./product-realms.ts";
 
 test("the product realm keeps the public product names and destinations together", () => {
 	expect(PRODUCT_REALMS.map((realm) => realm.id)).toEqual([
@@ -7,6 +11,8 @@ test("the product realm keeps the public product names and destinations together
 		"bot",
 		"console",
 		"gateway",
+		"connect",
+		"passport",
 		"box",
 		"mail",
 		"notify",
@@ -19,6 +25,8 @@ test("the product realm keeps the public product names and destinations together
 		"Ryu Bot",
 		"Ryu Console",
 		"Ryu Gateway",
+		"Ryu Connect",
+		"Ryu Passport",
 		"Ryu Box",
 		"Ryu Mail",
 		"Ryu Notify",
@@ -30,4 +38,21 @@ test("the product realm keeps the public product names and destinations together
 		expect(realm.href.startsWith("/")).toBe(true);
 		expect(realm.description.length).toBeGreaterThan(20);
 	}
+});
+
+test("product navigation keeps the landing taxonomy in three groups", () => {
+	expect(PRODUCT_NAV_GROUPS.map((group) => group.title)).toEqual([
+		"Main Products",
+		"Service APIs",
+		"Capacity & Apps",
+	]);
+	expect(
+		PRODUCT_NAV_GROUPS.map((group) =>
+			productRealmsFor(group.ids).map((realm) => realm.id)
+		)
+	).toEqual([
+		["os", "bot", "console"],
+		["connect", "passport", "box", "mail", "notify"],
+		["compute", "share", "hire"],
+	]);
 });

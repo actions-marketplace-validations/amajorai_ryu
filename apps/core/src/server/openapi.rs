@@ -422,6 +422,7 @@ use utoipa::OpenApi;
         // Composio
         super::composio_actions,
         super::composio_connection_initiate,
+        super::composio_connection_complete,
         super::composio_connection_status,
         super::composio_connections,
         super::composio_status,

@@ -16,6 +16,7 @@
 
 import { CheckmarkCircle02Icon, Copy01Icon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
+import { useOptionalI18n } from "@ryu/i18n/react";
 import { Button } from "@ryu/ui/components/button";
 import {
 	Dialog,
@@ -73,6 +74,15 @@ export interface LoginViewProps {
 	waiting?: boolean;
 }
 
+function useLoginText() {
+	const i18n = useOptionalI18n();
+	return (
+		id: string,
+		fallback: string,
+		values?: Record<string, unknown>
+	): string => i18n?.t(id, values, fallback) ?? fallback;
+}
+
 function SetupStatus({
 	children,
 	complete = false,
@@ -113,6 +123,8 @@ function LocalCoreSetupDialog({
 	onOpenCoreDownloads?: () => void | Promise<void>;
 	onUseCloud?: () => void | Promise<void>;
 }) {
+	const t = useLoginText();
+
 	return (
 		<Dialog open={state !== null}>
 			<DialogContent showCloseButton={false}>
@@ -121,37 +133,53 @@ function LocalCoreSetupDialog({
 						<DialogHeader>
 							<DialogTitle>
 								{state.phase === "downloading"
-									? "Downloading Ryu Core"
+									? t("login.core-downloading-title", "Downloading Ryu Core")
 									: state.phase === "waiting"
-										? "Set up Ryu Core"
-										: "Core download needs a hand"}
+										? t("login.core-setup-title", "Set up Ryu Core")
+										: t("login.core-error-title", "Core download needs a hand")}
 							</DialogTitle>
 							<DialogDescription>
 								{state.phase === "downloading"
-									? "Ryu is getting the right Core build for this computer."
+									? t(
+											"login.core-build-description",
+											"Ryu is getting the right Core build for this computer."
+										)
 									: state.phase === "waiting"
-										? "Open the download to start Core, then leave this window open. Ryu connects as soon as Core is ready."
+										? t(
+												"login.core-start-description",
+												"Open the download to start Core, then leave this window open. Ryu connects as soon as Core is ready."
+											)
 										: state.message}
 							</DialogDescription>
 						</DialogHeader>
 
 						<div className="space-y-2">
 							{state.phase === "downloading" ? (
-								<SetupStatus>Downloading Ryu Core…</SetupStatus>
+								<SetupStatus>
+									{t("login.core-downloading", "Downloading Ryu Core…")}
+								</SetupStatus>
 							) : null}
 							{state.phase === "waiting" ? (
 								<>
 									<SetupStatus complete>
-										Download started: {state.fileName}
+										{t(
+											"login.core-download-started",
+											"Download started: {fileName}",
+											{
+												fileName: state.fileName,
+											}
+										)}
 									</SetupStatus>
-									<SetupStatus muted>Waiting for Ryu Core…</SetupStatus>
+									<SetupStatus muted>
+										{t("login.core-waiting", "Waiting for Ryu Core…")}
+									</SetupStatus>
 								</>
 							) : null}
 						</div>
 
 						<DialogFooter className="sm:justify-between">
 							<Button onClick={onUseCloud} type="button" variant="ghost">
-								Use Ryu Cloud instead
+								{t("login.use-cloud", "Use Ryu Cloud instead")}
 							</Button>
 							{state.phase === "waiting" ? (
 								<Button
@@ -159,12 +187,12 @@ function LocalCoreSetupDialog({
 									type="button"
 									variant="outline"
 								>
-									Download again
+									{t("login.download-again", "Download again")}
 								</Button>
 							) : null}
 							{state.phase === "error" ? (
 								<Button onClick={onOpenCoreDownloads} type="button">
-									Open Core downloads
+									{t("login.open-core-downloads", "Open Core downloads")}
 								</Button>
 							) : null}
 						</DialogFooter>
@@ -180,12 +208,13 @@ function LocalCoreSetupDialog({
  *  confirms. */
 function DeviceCode({ userCode }: { userCode: string }) {
 	const [copied, setCopied] = useState(false);
+	const t = useLoginText();
 
 	const copy = async () => {
 		try {
 			await navigator.clipboard.writeText(userCode);
 			setCopied(true);
-			toast.success("Copied to clipboard");
+			toast.success(t("login.copied", "Copied to clipboard"));
 			setTimeout(() => setCopied(false), 2000);
 		} catch {
 			// Clipboard unavailable; the code stays visible for manual entry.
@@ -194,7 +223,7 @@ function DeviceCode({ userCode }: { userCode: string }) {
 
 	return (
 		<button
-			aria-label="Copy device code"
+			aria-label={t("login.copy-device-code", "Copy device code")}
 			className="group flex items-center gap-3 rounded-xl bg-muted/40 px-8 py-4 transition-colors hover:bg-muted/60"
 			onClick={copy}
 			type="button"
@@ -231,6 +260,8 @@ function DeviceAuthAction({
 	hasVerificationUri,
 	onOpenVerification,
 }: Pick<LoginViewProps, "hasVerificationUri" | "onOpenVerification">) {
+	const t = useLoginText();
+
 	if (!hasVerificationUri) {
 		return null;
 	}
@@ -241,7 +272,7 @@ function DeviceAuthAction({
 			size="lg"
 			variant="mono"
 		>
-			Open
+			{t("login.open", "Open")}
 		</Button>
 	);
 }
@@ -265,6 +296,8 @@ export function LoginView({
 	onOpenCoreDownloads,
 	onUseCloud,
 }: LoginViewProps) {
+	const t = useLoginText();
+
 	return (
 		// The empty area around the centered column is the start page's window
 		// drag handle on macOS — the interactive children (buttons) override it,
@@ -290,10 +323,16 @@ export function LoginView({
 							stagger={false}
 							subtitle={
 								userCode
-									? "Enter the code below on the verification page"
-									: "Hang tight while we get things ready"
+									? t(
+											"login.enter-code",
+											"Enter the code below on the verification page"
+										)
+									: t(
+											"login.hang-tight",
+											"Hang tight while we get things ready"
+										)
 							}
-							title="Activate your device"
+							title={t("login.activate-device", "Activate your device")}
 						/>
 
 						<div className="flex flex-col items-center gap-3">
@@ -303,8 +342,11 @@ export function LoginView({
 
 									{polling ? (
 										<p className="flex items-center gap-2 text-muted-foreground text-sm">
-											<Spinner className="size-4" /> Waiting for you to approve
-											in the browser…
+											<Spinner className="size-4" />
+											{t(
+												"login.waiting-approval",
+												"Waiting for you to approve in the browser…"
+											)}
 										</p>
 									) : null}
 								</>
@@ -314,7 +356,8 @@ export function LoginView({
 								// "waiting for approval" hint that only applies once the code
 								// (and its verification page) exist.
 								<p className="flex items-center gap-2 text-muted-foreground text-sm">
-									<Spinner className="size-4" /> Getting your sign-in code…
+									<Spinner className="size-4" />
+									{t("login.getting-signin-code", "Getting your sign-in code…")}
 								</p>
 							)}
 						</div>
@@ -330,7 +373,7 @@ export function LoginView({
 								onClick={onCancel}
 								type="button"
 							>
-								Cancel
+								{t("common.cancel", "Cancel")}
 							</button>
 						</div>
 					</>
@@ -338,8 +381,11 @@ export function LoginView({
 					<>
 						<PageHeader
 							stagger={false}
-							subtitle="Your friendly ghost that lives on your desktop"
-							title="Hey, I'm Ryu"
+							subtitle={t(
+								"login.subtitle",
+								"Your friendly ghost that lives on your desktop"
+							)}
+							title={t("login.title", "Hey, I'm Ryu")}
 						/>
 
 						<div className="flex w-full max-w-xs flex-col items-center gap-3">
@@ -352,7 +398,7 @@ export function LoginView({
 								size="lg"
 								variant="mono"
 							>
-								Get Started
+								{t("login.get-started", "Get Started")}
 							</Button>
 							{onContinueAsGuest ? (
 								<Button
@@ -364,10 +410,14 @@ export function LoginView({
 								>
 									{guestLoading ? (
 										<span className="flex items-center justify-center gap-2">
-											<Spinner className="size-4" /> Starting guest session…
+											<Spinner className="size-4" />
+											{t(
+												"login.starting-guest-session",
+												"Starting guest session…"
+											)}
 										</span>
 									) : (
-										"Try Ryu without an account"
+										t("login.try-without-account", "Try Ryu without an account")
 									)}
 								</Button>
 							) : null}
@@ -387,7 +437,7 @@ export function LoginView({
 											type="button"
 											variant="outline"
 										>
-											Try again
+											{t("common.try-again", "Try again")}
 										</Button>
 									) : null}
 								</div>

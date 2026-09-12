@@ -9,8 +9,9 @@ import {
 } from "@ryu/ui/components/context-menu.tsx";
 import { ProjectFolder } from "@ryu/ui/components/project-folder.tsx";
 import { Skeleton } from "@ryu/ui/components/skeleton.tsx";
+import { useInView } from "motion/react";
 import type { ReactNode } from "react";
-import { lazy, Suspense, useEffect, useState } from "react";
+import { lazy, Suspense, useEffect, useRef, useState } from "react";
 import { useSpacesContext } from "@/src/contexts/SpacesContext.tsx";
 import { useTabSelector } from "@/src/contexts/TabsContext.tsx";
 import type {
@@ -25,7 +26,35 @@ const PagePreview = lazy(() =>
 	}))
 );
 
-const previewCache = new Map<string, SpaceDocumentContent>();
+const previewCaches = new WeakMap<object, Map<string, SpaceDocumentContent>>();
+const MAX_PREVIEWS = 100;
+const MAX_PREVIEW_SOURCE_BYTES = 4 * 1024 * 1024;
+
+/** useSpaces keeps this reader stable only within one URL/token/user-JWT scope. */
+export function spaceDocumentPreviewCacheFor(
+	reader: object
+): Map<string, SpaceDocumentContent> {
+	let cache = previewCaches.get(reader);
+	if (!cache) {
+		cache = new Map();
+		previewCaches.set(reader, cache);
+	}
+	return cache;
+}
+
+export function readSpaceDocumentPreview(
+	cache: Map<string, SpaceDocumentContent>,
+	spaceId: string,
+	document: SpaceDocument
+): SpaceDocumentContent | undefined {
+	const key = previewCacheKey(spaceId, document);
+	const content = cache.get(key);
+	if (content) {
+		cache.delete(key);
+		cache.set(key, content);
+	}
+	return content;
+}
 
 type DocumentListState =
 	| { status: "error" }
@@ -58,7 +87,24 @@ export function storeSpaceDocumentPreview(
 			cache.delete(cachedKey);
 		}
 	}
+	cache.delete(key);
+	// Oversized content can still render in the current view without being retained.
+	if (content.source.length * 2 > MAX_PREVIEW_SOURCE_BYTES) {
+		return;
+	}
 	cache.set(key, content);
+	let sourceBytes = 0;
+	for (const value of cache.values()) {
+		sourceBytes += value.source.length * 2;
+	}
+	while (cache.size > MAX_PREVIEWS || sourceBytes > MAX_PREVIEW_SOURCE_BYTES) {
+		const oldest = cache.entries().next().value;
+		if (!oldest) {
+			break;
+		}
+		sourceBytes -= oldest[1].source.length * 2;
+		cache.delete(oldest[0]);
+	}
 }
 
 function isPreviewableDocument(document: SpaceDocument): boolean {
@@ -193,6 +239,15 @@ export function SpaceProjectFolder({
 		getDocument,
 		listDocuments,
 	} = useSpacesContext();
+	const folderRef = useRef<HTMLDivElement>(null);
+	const nearViewport = useInView(folderRef, {
+		once: true,
+		margin: "200px",
+		initial: typeof IntersectionObserver === "undefined",
+	});
+	const [opened, setOpened] = useState(false);
+	const shouldLoad = nearViewport || opened;
+	const previewCache = spaceDocumentPreviewCacheFor(getDocument);
 	const openTab = useTabSelector((state) => state.openTab);
 	const documentRevision = documentRevisions.get(space.id) ?? 0;
 	const [documentList, setDocumentList] = useState<DocumentListState>({
@@ -204,6 +259,9 @@ export function SpaceProjectFolder({
 	);
 
 	useEffect(() => {
+		if (!shouldLoad) {
+			return;
+		}
 		let cancelled = false;
 
 		const load = async () => {
@@ -227,7 +285,11 @@ export function SpaceProjectFolder({
 			const initialStates = new Map<string, PreviewState>();
 			const uncachedDocuments: SpaceDocument[] = [];
 			for (const document of previewDocuments) {
-				const cached = previewCache.get(previewCacheKey(space.id, document));
+				const cached = readSpaceDocumentPreview(
+					previewCache,
+					space.id,
+					document
+				);
 				if (cached) {
 					initialStates.set(document.id, {
 						content: cached,
@@ -269,7 +331,15 @@ export function SpaceProjectFolder({
 		return () => {
 			cancelled = true;
 		};
-	}, [documentRevision, getDocument, listDocuments, loadAttempt, space.id]);
+	}, [
+		shouldLoad,
+		documentRevision,
+		getDocument,
+		listDocuments,
+		loadAttempt,
+		space.id,
+		previewCache,
+	]);
 
 	const documents =
 		documentList.status === "ready" ? documentList.documents : [];
@@ -308,7 +378,7 @@ export function SpaceProjectFolder({
 	}));
 
 	const folder = (
-		<div className="group relative w-fit">
+		<div className="group relative w-fit" ref={folderRef}>
 			<ProjectFolder
 				count={documents.length}
 				description={space.description ?? "Pages and databases in this Space."}
@@ -368,6 +438,11 @@ export function SpaceProjectFolder({
 					);
 				}}
 				itemLabel="document"
+				onOpenChange={(open) => {
+					if (open) {
+						setOpened(true);
+					}
+				}}
 				previews={previews}
 				title={space.name}
 			/>

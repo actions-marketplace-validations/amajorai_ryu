@@ -21,15 +21,16 @@
 //! ## Validation signal (why `fetch_state`, not `poll`)
 //!
 //! A connection is "alive" iff its backend can still produce sealed state for
-//! its domain. So the sweep resolves the per-domain [`CredentialBackend`] and
-//! calls [`CredentialSource::fetch_state`]: `Ok(_)` → alive (stamp
-//! `last_checked`), `Err(_)` → stale (flip to `NEEDS_AUTH` + broadcast). We do
+//! its domain. Manual state is checked in this engine's own store; other
+//! backends use [`CredentialSource::fetch_state`]. Available state stamps
+//! `last_checked`; absent state flips to `NEEDS_AUTH` and broadcasts. We do
 //! **not** use [`CredentialSource::poll`]: for the default [`ManualImport`]
 //! backend `poll` always returns `NeedsAuth` (its flow only completes on
 //! import), which would spuriously flip every connection on the first sweep.
 //!
 //! In v1 only the manual backend is really usable, and its `fetch_state` is a
 //! local vault read (no transient network failures), so flip-on-error is safe.
+//! This does not establish whether a remote provider still accepts the session.
 //! Live capture backends added later may need to distinguish a transient fetch
 //! error from genuine auth-staleness before flipping.
 //!
@@ -123,7 +124,18 @@ impl HealthEngine {
                 continue;
             }
             let backend = self.registry.resolve(&conn.domain);
-            match backend.fetch_state(&conn.profile_id, &conn.domain).await {
+            // Manual credentials belong to this engine's store. The legacy
+            // backend accessor uses a process-global store, which is absent in
+            // standalone Passport and cannot represent multiple tenant stores.
+            let state = match &backend {
+                super::CredentialBackend::Manual(_) => conn
+                    .encrypted_state
+                    .clone()
+                    .ok_or_else(|| anyhow::anyhow!("manual connection has no sealed state")),
+                #[cfg(test)]
+                _ => backend.fetch_state(&conn.profile_id, &conn.domain).await,
+            };
+            match state {
                 Ok(_sealed) => {
                     // Alive — record the successful check. The sealed blob is
                     // intentionally dropped here; nothing logs it.
@@ -281,6 +293,30 @@ mod tests {
         assert_eq!(flipped, 0, "a NEEDS_AUTH connection is not a candidate");
         // Untouched: last_checked stays 0 (no backend call, no stamp).
         assert_eq!(store.get(&conn.id).await.unwrap().unwrap().last_checked, 0);
+    }
+
+    #[tokio::test]
+    async fn manual_sweeps_use_the_engine_store_without_a_global() {
+        let first = IdentityStore::open_in_memory().unwrap();
+        let second = IdentityStore::open_in_memory().unwrap();
+        for store in [&first, &second] {
+            let connection = store
+                .create("same-profile", "same.example.com", None)
+                .await
+                .unwrap();
+            store
+                .import_state(&connection.id, &SecretState::new("test-session".to_owned()))
+                .await
+                .unwrap();
+            let engine = HealthEngine::new(
+                store.clone(),
+                CredentialSourceRegistry::with_default("manual"),
+            );
+            assert_eq!(engine.run_sweep().await.unwrap(), 0);
+            let after = store.get(&connection.id).await.unwrap().unwrap();
+            assert_eq!(after.status, ConnectionStatus::Authenticated);
+            assert!(after.last_checked > 0);
+        }
     }
 
     #[test]

@@ -195,9 +195,13 @@ async function postJson<T>(
 	return (text ? JSON.parse(text) : undefined) as T;
 }
 
-export async function fetchWorkflows(target: ApiTarget): Promise<Workflow[]> {
+export async function fetchWorkflows(
+	target: ApiTarget,
+	signal?: AbortSignal
+): Promise<Workflow[]> {
 	const resp = await fetchForTarget(target)(apiUrl(target, "/workflows"), {
 		headers: makeHeaders(target.token, target.userJwt),
+		signal,
 	});
 	if (!resp.ok) {
 		throw await errorFromResponse(resp, "/workflows");
@@ -279,12 +283,14 @@ export async function runWorkflow(
 /** Fetch the current state of a run (e.g. to poll a suspended run). */
 export async function getWorkflowRun(
 	target: ApiTarget,
-	runId: string
+	runId: string,
+	signal?: AbortSignal
 ): Promise<WorkflowRun> {
 	const resp = await fetchForTarget(target)(
 		apiUrl(target, `/workflows/runs/${runId}`),
 		{
 			headers: makeHeaders(target.token, target.userJwt),
+			signal,
 		}
 	);
 	if (!resp.ok) {

@@ -19,6 +19,7 @@
 mod consult;
 mod elicitation;
 mod governed;
+pub(crate) mod passport;
 
 pub use consult::{consult_for_tool_call, consult_for_tool_call_with_agent, ConsultOutcome};
 pub use elicitation::{needs_connection, to_envelope};

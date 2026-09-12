@@ -22,7 +22,11 @@ test("localizes every legacy DOM surface without translating code or dynamic con
 	await expect(proof).toBeVisible();
 	await expect(page.locator("html")).toHaveAttribute("lang", "es");
 	await expect(page.locator("html")).toHaveAttribute("dir", "ltr");
+	await expect(proof.locator("p").first()).toHaveText("Idioma y estilo");
 	await expect(proof.locator("h1")).toHaveText("Actividad");
+	await expect(proof.getByTestId("switch-arabic")).toHaveText(
+		"Cambiar a árabe"
+	);
 	await expect(proof.getByRole("button", { name: "Cancelar" })).toHaveText(
 		"Cancelar"
 	);
@@ -40,7 +44,11 @@ test("localizes every legacy DOM surface without translating code or dynamic con
 	await proof.getByTestId("switch-arabic").click();
 	await expect(page.locator("html")).toHaveAttribute("lang", "ar");
 	await expect(page.locator("html")).toHaveAttribute("dir", "rtl");
+	await expect(proof.locator("p").first()).toHaveText("اللغة والأسلوب");
 	await expect(proof.locator("h1")).toHaveText("النشاط");
+	await expect(proof.getByTestId("switch-arabic")).toHaveText(
+		"التبديل إلى العربية"
+	);
 	await expect(proof.getByRole("button", { name: "إلغاء" })).toHaveText(
 		"إلغاء"
 	);

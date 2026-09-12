@@ -458,6 +458,7 @@ const VIDEO_STUDIO_MANIFEST: &str =
 
 #[cfg(test)]
 const BUILTIN_MANIFESTS: &[&str] = &[
+    include_str!("../../../../generated/ryu-runtime/apps-store/life-recorder/manifest.json"),
     VIDEO_STUDIO_MANIFEST,
     SAFE_ACTIONS_MANIFEST,
     // Backstage is a Core-tier satellite, so the hermetic test catalog must

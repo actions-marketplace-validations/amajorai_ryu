@@ -165,11 +165,12 @@ export async function fetchSystemInfo(
  * Mirrors the shape used by the services page.
  */
 export async function fetchSidecarStatus(
-	target: ApiTarget
+	target: ApiTarget,
+	signal?: AbortSignal
 ): Promise<Record<string, boolean>> {
 	const json = await request<{
 		sidecars?: { name: string; running: boolean }[];
-	}>(target, "/api/sidecar/status");
+	}>(target, "/api/sidecar/status", { signal });
 	const map: Record<string, boolean> = {};
 	for (const s of json.sidecars ?? []) {
 		map[s.name] = s.running;

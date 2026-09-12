@@ -1,33 +1,28 @@
-import {
-	EditorKit,
-	type MyEditor,
-} from "@ryu/ui/components/editor/editor-kit.tsx";
+import { BaseEditorKit } from "@ryu/ui/components/editor/editor-base-kit.tsx";
+import { MarkdownKit } from "@ryu/ui/components/editor/plugins/markdown-kit.tsx";
 import { EditorStatic } from "@ryu/ui/components/editor/ui/editor-static.tsx";
-import { Plate, usePlateEditor } from "platejs/react";
+import { createSlateEditor } from "platejs";
+import { useMemo } from "react";
 
-type EditorKitPlugin = (typeof EditorKit)[number];
-type MarkdownEditorPlugin = EditorKitPlugin & {
-	api: { markdown: MyEditor["api"]["markdown"] };
-	key: "markdown";
-};
+const markdownPlugin = MarkdownKit.find((plugin) => plugin.key === "markdown")!;
 
-const markdownPlugin = EditorKit.find(
-	(plugin): plugin is MarkdownEditorPlugin => plugin.key === "markdown"
-);
 export function PagePreview({ source }: { source: string }) {
-	const editor = usePlateEditor({
-		plugins: EditorKit,
-		value: (currentEditor) =>
-			currentEditor.getApi(markdownPlugin).markdown.deserialize(source || ""),
-	});
-
+	const editor = useMemo(
+		() =>
+			createSlateEditor({
+				plugins: BaseEditorKit,
+				value: (currentEditor) =>
+					currentEditor
+						.getApi(markdownPlugin)
+						.markdown.deserialize(source || ""),
+			}),
+		[source]
+	);
 	return (
-		<Plate editor={editor}>
-			<EditorStatic
-				className="pointer-events-none max-h-44 overflow-hidden px-4 py-3 text-sm [&_.slate-p]:my-0 [&_.slate-p]:leading-5"
-				editor={editor}
-				variant="none"
-			/>
-		</Plate>
+		<EditorStatic
+			className="pointer-events-none max-h-44 overflow-hidden px-4 py-3 text-sm [&_.slate-p]:my-0 [&_.slate-p]:leading-5"
+			editor={editor}
+			variant="none"
+		/>
 	);
 }

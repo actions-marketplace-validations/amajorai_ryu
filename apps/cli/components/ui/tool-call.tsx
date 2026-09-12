@@ -1,9 +1,11 @@
-// @ts-nocheck - vendored termcn component, see scripts/vendor-termcn.ts
+// @ts-nocheck - termcn compatibility surface; host-owned lifecycle fixes are protected by scripts/vendor-termcn.ts
 /* @jsxImportSource @opentui/react */
 import { useKeyboard } from "@opentui/react";
 import { useEffect, useRef, useState } from "react";
 
 import { useTheme } from "@/components/ui/theme-provider";
+import { useAnimation } from "@/hooks/use-animation";
+import { useInputFocused } from "@/src/core/InputFocusContext";
 import { Diff, toolDiffLines } from "@/components/ui/diff";
 
 export type ToolCallStatus = "pending" | "running" | "success" | "error";
@@ -32,31 +34,30 @@ export const ToolCall = ({
   const [collapsed, setCollapsed] = useState(defaultCollapsed);
   const [elapsed, setElapsed] = useState(0);
   const startRef = useRef(Date.now());
-  const [frame, setFrame] = useState(0);
+  const frame = useAnimation(status === "running" ? 12 : 0);
 
   const spinnerFrames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
   const spinnerIcon = spinnerFrames[frame % spinnerFrames.length] ?? "⠋";
-  useEffect(() => {
-    const id = setInterval(() => setFrame((f) => f + 1), Math.round(1000 / 12));
-    return () => clearInterval(id);
-  }, []);
+
 
   useEffect(() => {
-    if (status !== "running") {
-      return;
+    if (status === "running") {
+      startRef.current = Date.now();
+      setElapsed(0);
     }
-    startRef.current = Date.now();
-    const id = setInterval(() => {
-      setElapsed(Date.now() - startRef.current);
-    }, 100);
-    return () => clearInterval(id);
   }, [status]);
 
-  useKeyboard((key) => {
-    if (collapsible && (key.name === "return" || key.name === " ")) {
-      setCollapsed((c) => !c);
+  useEffect(() => {
+    if (status !== "running" || duration !== undefined) {
+      return;
     }
-  });
+    const updateElapsed = () => setElapsed(Date.now() - startRef.current);
+    updateElapsed();
+    const id = setInterval(updateElapsed, 100);
+    return () => clearInterval(id);
+  }, [status, duration]);
+
+
 
   const statusIcon = () => {
     switch (status) {
@@ -98,7 +99,8 @@ export const ToolCall = ({
 
   return (
     <box flexDirection="column">
-      <box gap={1}>
+      {collapsible ? <ToolCallKeys toggle={() => setCollapsed((value) => !value)} /> : null}
+      <box flexDirection="row" gap={1}>
         {statusIcon()}
         <text fg={nameColor}>
           {status !== "pending" ? <b>{name}</b> : name}
@@ -138,3 +140,16 @@ export const ToolCall = ({
     </box>
   );
 };
+
+
+function ToolCallKeys({ toggle }: { toggle: () => void }) {
+  const focused = useInputFocused();
+  return focused ? null : <ActiveToolCallKeys toggle={toggle} />;
+}
+
+function ActiveToolCallKeys({ toggle }: { toggle: () => void }) {
+  useKeyboard((key) => {
+    if (key.name === "return" || key.name === " ") toggle();
+  });
+  return null;
+}

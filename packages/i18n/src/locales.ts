@@ -1,8 +1,13 @@
 import type { LanguageDirection, LanguagePack } from "./core.ts";
 import { officialLiteralMessages } from "./literal-translations.ts";
+import { officialLoginMessages } from "./login-locales.ts";
 import type { MessageId } from "./messages.ts";
 
 type MessageCatalog = Record<MessageId, string>;
+type BaseMessageCatalog = Omit<
+	MessageCatalog,
+	Extract<MessageId, `login.${string}`>
+>;
 
 function officialPack(
 	id: string,
@@ -24,7 +29,7 @@ function officialPack(
 	};
 }
 
-const SPANISH_MESSAGES: MessageCatalog = {
+const SPANISH_MESSAGES: BaseMessageCatalog = {
 	"common.active": "Activo",
 	"common.add": "Añadir",
 	"common.added": "Añadido",
@@ -382,7 +387,7 @@ const SPANISH_MESSAGES: MessageCatalog = {
 	"sample.greeting": "Bienvenido a Ryu, {name}.",
 };
 
-const FRENCH_MESSAGES: MessageCatalog = {
+const FRENCH_MESSAGES: BaseMessageCatalog = {
 	"common.active": "Actif",
 	"common.add": "Ajouter",
 	"common.added": "Ajouté",
@@ -743,7 +748,7 @@ const FRENCH_MESSAGES: MessageCatalog = {
 	"sample.greeting": "Bienvenue dans Ryu, {name}.",
 };
 
-const GERMAN_MESSAGES: MessageCatalog = {
+const GERMAN_MESSAGES: BaseMessageCatalog = {
 	"common.active": "Aktiv",
 	"common.add": "Hinzufügen",
 	"common.added": "Hinzugefügt",
@@ -1102,7 +1107,7 @@ const GERMAN_MESSAGES: MessageCatalog = {
 	"sample.greeting": "Willkommen bei Ryu, {name}.",
 };
 
-const PORTUGUESE_MESSAGES: MessageCatalog = {
+const PORTUGUESE_MESSAGES: BaseMessageCatalog = {
 	"common.active": "Ativo",
 	"common.add": "Adicionar",
 	"common.added": "Adicionado",
@@ -1458,7 +1463,7 @@ const PORTUGUESE_MESSAGES: MessageCatalog = {
 	"sample.greeting": "Boas-vindas ao Ryu, {name}.",
 };
 
-const JAPANESE_MESSAGES: MessageCatalog = {
+const JAPANESE_MESSAGES: BaseMessageCatalog = {
 	"common.active": "有効",
 	"common.add": "追加",
 	"common.added": "追加済み",
@@ -1814,7 +1819,7 @@ const JAPANESE_MESSAGES: MessageCatalog = {
 	"sample.greeting": "Ryu へようこそ、{name} さん。",
 };
 
-const CHINESE_MESSAGES: MessageCatalog = {
+const CHINESE_MESSAGES: BaseMessageCatalog = {
 	"common.active": "已启用",
 	"common.add": "添加",
 	"common.added": "已添加",
@@ -2158,7 +2163,7 @@ const CHINESE_MESSAGES: MessageCatalog = {
 	"sample.greeting": "欢迎来到 Ryu，{name}。",
 };
 
-const ITALIAN_MESSAGES: MessageCatalog = {
+const ITALIAN_MESSAGES: BaseMessageCatalog = {
 	"common.active": "Attivo",
 	"common.add": "Aggiungi",
 	"common.added": "Aggiunto",
@@ -2517,7 +2522,7 @@ const ITALIAN_MESSAGES: MessageCatalog = {
 	"sample.greeting": "Benvenuto in Ryu, {name}.",
 };
 
-const KOREAN_MESSAGES: MessageCatalog = {
+const KOREAN_MESSAGES: BaseMessageCatalog = {
 	"common.active": "활성화됨",
 	"common.add": "추가",
 	"common.added": "추가됨",
@@ -2868,7 +2873,7 @@ const KOREAN_MESSAGES: MessageCatalog = {
 	"sample.greeting": "Ryu에 오신 것을 환영합니다, {name}님.",
 };
 
-const HINDI_MESSAGES: MessageCatalog = {
+const HINDI_MESSAGES: BaseMessageCatalog = {
 	"common.active": "सक्रिय",
 	"common.add": "जोड़ें",
 	"common.added": "जोड़ा गया",
@@ -3216,7 +3221,7 @@ const HINDI_MESSAGES: MessageCatalog = {
 	"sample.greeting": "Ryu में आपका स्वागत है, {name}।",
 };
 
-const RUSSIAN_MESSAGES: MessageCatalog = {
+const RUSSIAN_MESSAGES: BaseMessageCatalog = {
 	"common.active": "Активно",
 	"common.add": "Добавить",
 	"common.added": "Добавлено",
@@ -3572,7 +3577,7 @@ const RUSSIAN_MESSAGES: MessageCatalog = {
 	"sample.greeting": "Добро пожаловать в Ryu, {name}.",
 };
 
-const ARABIC_MESSAGES: MessageCatalog = {
+const ARABIC_MESSAGES: BaseMessageCatalog = {
 	"common.active": "نشط",
 	"common.add": "إضافة",
 	"common.added": "تمت الإضافة",
@@ -3927,42 +3932,52 @@ const ARABIC_MESSAGES: MessageCatalog = {
 export const OFFICIAL_LANGUAGE_PACKS: readonly LanguagePack[] = [
 	officialPack("official/es", "es", "Español", {
 		...SPANISH_MESSAGES,
+		...officialLoginMessages("es"),
 		...officialLiteralMessages("es"),
 	}),
 	officialPack("official/fr", "fr", "Français", {
 		...FRENCH_MESSAGES,
+		...officialLoginMessages("fr"),
 		...officialLiteralMessages("fr"),
 	}),
 	officialPack("official/de", "de", "Deutsch", {
 		...GERMAN_MESSAGES,
+		...officialLoginMessages("de"),
 		...officialLiteralMessages("de"),
 	}),
 	officialPack("official/pt-br", "pt-BR", "Português (Brasil)", {
 		...PORTUGUESE_MESSAGES,
+		...officialLoginMessages("pt-BR"),
 		...officialLiteralMessages("pt-BR"),
 	}),
 	officialPack("official/ja", "ja", "日本語", {
 		...JAPANESE_MESSAGES,
+		...officialLoginMessages("ja"),
 		...officialLiteralMessages("ja"),
 	}),
 	officialPack("official/zh-cn", "zh-CN", "简体中文", {
 		...CHINESE_MESSAGES,
+		...officialLoginMessages("zh-CN"),
 		...officialLiteralMessages("zh-CN"),
 	}),
 	officialPack("official/it", "it", "Italiano", {
 		...ITALIAN_MESSAGES,
+		...officialLoginMessages("it"),
 		...officialLiteralMessages("it"),
 	}),
 	officialPack("official/ko", "ko", "한국어", {
 		...KOREAN_MESSAGES,
+		...officialLoginMessages("ko"),
 		...officialLiteralMessages("ko"),
 	}),
 	officialPack("official/hi", "hi", "हिन्दी", {
 		...HINDI_MESSAGES,
+		...officialLoginMessages("hi"),
 		...officialLiteralMessages("hi"),
 	}),
 	officialPack("official/ru", "ru", "Русский", {
 		...RUSSIAN_MESSAGES,
+		...officialLoginMessages("ru"),
 		...officialLiteralMessages("ru"),
 	}),
 	officialPack(
@@ -3971,6 +3986,7 @@ export const OFFICIAL_LANGUAGE_PACKS: readonly LanguagePack[] = [
 		"العربية",
 		{
 			...ARABIC_MESSAGES,
+			...officialLoginMessages("ar"),
 			...officialLiteralMessages("ar"),
 		},
 		"rtl"

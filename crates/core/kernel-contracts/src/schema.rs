@@ -1752,6 +1752,8 @@ pub fn capability_label(grant: &str) -> String {
         "core:list_agents" => "Lists agents & models".to_string(),
         "media:generate" => "Generates images, video & speech".to_string(),
         "media:transcribe" => "Transcribes audio".to_string(),
+        "media:record" => "Records your device's microphone when you start capture".to_string(),
+        "timeline:speech" => "Reads recorded speech history".to_string(),
         // Common MCP tool grants.
         "mcp:web_search" => "Web search".to_string(),
         "mcp:web_scrape" => "Web scraping".to_string(),

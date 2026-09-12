@@ -148,8 +148,10 @@ export default function ToolsLibrary() {
 		agents,
 		agentFilter,
 		setAgentFilter,
-		loading,
-		error,
+		serversLoading: loading,
+		serversError: error,
+		toolsLoading,
+		toolsError,
 		callTool,
 		createServer,
 		deleteServer,
@@ -285,7 +287,12 @@ export default function ToolsLibrary() {
 		);
 	}
 
-	const hasNothing = servers.length === 0 && tools.length === 0;
+	const toolsStatus = toolsLoading
+		? "Loading tools…"
+		: toolsError
+			? "Tool discovery failed. Refresh to try again."
+			: null;
+	const hasNothing = servers.length === 0 && tools.length === 0 && !toolsStatus;
 
 	return (
 		<StoreCatalogLayout
@@ -298,6 +305,7 @@ export default function ToolsLibrary() {
 						profileIds={profileIds}
 						server={selectedServer}
 						tools={tools.filter((t) => t.server === selectedServer.name)}
+						toolsStatus={toolsStatus}
 					/>
 				) : selectedTool ? (
 					<ToolDetail
@@ -379,61 +387,84 @@ export default function ToolsLibrary() {
 			}}
 			hasSelection={selectedServer != null || selectedTool != null}
 			list={
-				hasNothing ? (
-					<Empty className="p-8">
-						<EmptyHeader>
-							<EmptyMedia variant="icon">
-								<HugeiconsIcon icon={ServerStack01Icon} />
-							</EmptyMedia>
-							<EmptyTitle>No MCP servers registered</EmptyTitle>
-							<EmptyDescription>
-								Add a server to give your agents new tools, or browse the MCP
-								catalog in the Store.
-							</EmptyDescription>
-						</EmptyHeader>
-						<EmptyContent>
-							<AddServerDialog onCreateServer={createServer} />
-						</EmptyContent>
-					</Empty>
-				) : effectiveView === "flat" ? (
-					<FlatToolList
-						agentFilter={agentFilter}
-						onClearFilters={() => {
-							setAgentFilter(null);
-							setQuery("");
-							setView("server");
-						}}
-						onSelect={setSelectedId}
-						searching={searching}
-						selectedId={selectedId}
-						tools={flatTools}
-					/>
-				) : (
-					<div className="flex flex-col gap-4 pt-2">
-						{groups.map((group) => (
-							<ServerToolGroup
-								allowlisted={agentFilter !== null}
-								group={group}
-								key={group.server.name}
+				<>
+					{toolsStatus && (
+						<div
+							className="flex items-center gap-2 p-3 text-muted-foreground text-sm"
+							role={toolsError ? "alert" : "status"}
+						>
+							{toolsLoading && <Spinner className="size-4" />}
+							<span>{toolsStatus}</span>
+							{toolsError && (
+								<Button
+									onClick={() => void reload().catch(() => undefined)}
+									size="sm"
+									variant="outline"
+								>
+									Refresh tools
+								</Button>
+							)}
+						</div>
+					)}
+					{hasNothing ? (
+						<Empty className="p-8">
+							<EmptyHeader>
+								<EmptyMedia variant="icon">
+									<HugeiconsIcon icon={ServerStack01Icon} />
+								</EmptyMedia>
+								<EmptyTitle>No MCP servers registered</EmptyTitle>
+								<EmptyDescription>
+									Add a server to give your agents new tools, or browse the MCP
+									catalog in the Store.
+								</EmptyDescription>
+							</EmptyHeader>
+							<EmptyContent>
+								<AddServerDialog onCreateServer={createServer} />
+							</EmptyContent>
+						</Empty>
+					) : effectiveView === "flat" ? (
+						toolsStatus && tools.length === 0 ? null : (
+							<FlatToolList
+								agentFilter={agentFilter}
+								onClearFilters={() => {
+									setAgentFilter(null);
+									setQuery("");
+									setView("server");
+								}}
 								onSelect={setSelectedId}
+								searching={searching}
 								selectedId={selectedId}
+								tools={flatTools}
 							/>
-						))}
-						{ungrouped.length > 0 ? (
-							<ToolGroupShell
-								count={ungrouped.length}
-								label={UNGROUPED_LABEL}
-								note="Advertised by a server that is no longer registered."
-							>
-								<ToolCards
+						)
+					) : (
+						<div className="flex flex-col gap-4 pt-2">
+							{groups.map((group) => (
+								<ServerToolGroup
+									allowlisted={agentFilter !== null}
+									group={group}
+									key={group.server.name}
 									onSelect={setSelectedId}
 									selectedId={selectedId}
-									tools={ungrouped}
+									toolsStatus={toolsStatus}
 								/>
-							</ToolGroupShell>
-						) : null}
-					</div>
-				)
+							))}
+							{ungrouped.length > 0 ? (
+								<ToolGroupShell
+									count={ungrouped.length}
+									label={UNGROUPED_LABEL}
+									note="Advertised by a server that is no longer registered."
+								>
+									<ToolCards
+										onSelect={setSelectedId}
+										selectedId={selectedId}
+										tools={ungrouped}
+									/>
+								</ToolGroupShell>
+							) : null}
+						</div>
+					)}
+				</>
 			}
 			onCloseDetail={() => setSelectedId(null)}
 			search={{
@@ -452,8 +483,10 @@ function ServerToolGroup({
 	onSelect,
 	selectedId,
 	allowlisted,
+	toolsStatus,
 }: {
 	group: ServerGroup;
+	toolsStatus: string | null;
 	onSelect: (id: string) => void;
 	selectedId: string | null;
 	/** An agent allowlist filter is active, so an empty group means "none of this
@@ -481,7 +514,9 @@ function ServerToolGroup({
 					<span className="min-w-0 truncate font-medium text-sm">
 						{server.name}
 					</span>
-					<Badge variant="secondary">{formatCount(tools.length) ?? "—"}</Badge>
+					<Badge variant="secondary">
+						{toolsStatus ? "—" : (formatCount(tools.length) ?? "—")}
+					</Badge>
 					<McpAuthBadge server={server} />
 					{server.enabled ? null : <Badge variant="outline">Disabled</Badge>}
 					{unavailable ? (
@@ -504,11 +539,12 @@ function ServerToolGroup({
 				<div className="pt-1">
 					{tools.length === 0 ? (
 						<p className="px-1 pb-1 text-muted-foreground text-sm">
-							{allowlisted
-								? "None of this server's tools are on the selected agent's allowlist."
-								: server.enabled
-									? "This server advertises no tools."
-									: "Enable this server to see the tools it advertises."}
+							{toolsStatus ??
+								(allowlisted
+									? "None of this server's tools are on the selected agent's allowlist."
+									: server.enabled
+										? "This server advertises no tools."
+										: "Enable this server to see the tools it advertises.")}
 						</p>
 					) : (
 						<ToolCards
@@ -686,6 +722,7 @@ function ServerDetail({
 	profileIds,
 	server,
 	tools,
+	toolsStatus,
 }: {
 	apps: AppInfo[];
 	deleteServer: (name: string) => Promise<{ error?: string; ok: boolean }>;
@@ -696,6 +733,7 @@ function ServerDetail({
 	profileIds: string[];
 	server: McpServer;
 	tools: McpTool[];
+	toolsStatus: string | null;
 }) {
 	return (
 		<ListingDetailShell
@@ -716,7 +754,7 @@ function ServerDetail({
 								label: "Installed",
 								value: server.available === false ? "No" : "Yes",
 							},
-							{ label: "Tools", value: `${tools.length}` },
+							{ label: "Tools", value: toolsStatus ?? `${tools.length}` },
 						]}
 					/>
 				</ListingAsideCard>
@@ -738,7 +776,7 @@ function ServerDetail({
 						{
 							label: "Tools",
 							sub: tools.length === 1 ? "tool" : "tools",
-							value: `${tools.length}`,
+							value: toolsStatus ? "—" : `${tools.length}`,
 						},
 						{
 							label: "State",

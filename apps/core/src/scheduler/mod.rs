@@ -413,6 +413,10 @@ async fn run_target_with_job(
             Ok(None)
         }
         JobTarget::IdentityHealth => {
+            if let Some(result) = crate::identity::passport::health_sweep().await {
+                result.map_err(|error| error.to_string())?;
+                return Ok(None);
+            }
             let engine = crate::identity::health::global_engine()
                 .ok_or_else(|| "identity health engine not initialized".to_string())?;
             engine.run_sweep().await?;

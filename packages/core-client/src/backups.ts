@@ -24,8 +24,11 @@ export interface BackupOverview {
 	policies: BackupPolicy[];
 }
 
-export function getBackups(target: ApiTarget): Promise<BackupOverview> {
-	return request(target, "/api/backups");
+export function getBackups(
+	target: ApiTarget,
+	signal?: AbortSignal
+): Promise<BackupOverview> {
+	return request(target, "/api/backups", { signal });
 }
 export function generateBackupKey(
 	target: ApiTarget
@@ -66,11 +69,13 @@ export function testBackupDestination(
 export function listBackups(
 	target: ApiTarget,
 	id: string,
-	spaceId?: string
+	spaceId?: string,
+	signal?: AbortSignal
 ): Promise<BackupRecord[]> {
 	return request(
 		target,
-		`/api/backups/destinations/${encodeURIComponent(id)}/backups${spaceId ? `?spaceId=${encodeURIComponent(spaceId)}` : ""}`
+		`/api/backups/destinations/${encodeURIComponent(id)}/backups${spaceId ? `?spaceId=${encodeURIComponent(spaceId)}` : ""}`,
+		{ signal }
 	);
 }
 export function saveBackupPolicy(

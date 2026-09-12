@@ -342,6 +342,10 @@ import {
 	parseSlashCommandContribution,
 	type SlashCommand,
 } from "@/src/lib/slash-commands.ts";
+import {
+	registerTabSnapshot,
+	TabTransferBlockedError,
+} from "@/src/lib/tab-transfer.ts";
 import { deriveTurnComposerProgress } from "@/src/lib/turn-composer-progress.ts";
 import { messageNeedsWorkspace } from "@/src/lib/workspace-intent.ts";
 import { resolveWorkspaceFilePath } from "@/src/lib/workspace-links.ts";
@@ -354,6 +358,7 @@ import { useDockPanelRequestStore } from "@/src/store/useDockPanelRequestStore.t
 import { useFileTreeSearchStore } from "@/src/store/useFileTreeSearchStore.ts";
 import { useMeetingRecordingStore } from "@/src/store/useMeetingRecordingStore.ts";
 import { isLocalNode } from "@/src/store/useNodeStore.ts";
+import { useQuickReplyStore } from "@/src/store/useQuickReplyStore.ts";
 import {
 	publishSidebarTodoProgress,
 	sidebarTodoProgressKey,
@@ -5382,6 +5387,42 @@ export default function ChatPage({
 	const composerSeed = initialSubmit
 		? undefined
 		: (initialPrompt ?? restoredDraft);
+	useEffect(() => {
+		if (!currentTabId) {
+			return;
+		}
+		return registerTabSnapshot(currentTabId, () => {
+			// Temporary history exists only in this renderer; keep its owner until
+			// the temporary-chat runtime can resume it in another renderer.
+			if (ghostChatActive && messages.length > 0) {
+				throw new TabTransferBlockedError(
+					"Save this temporary chat before moving it to another window."
+				);
+			}
+			return {
+				initialPrompt: composerDraftRef.current,
+				initialImages: attachedImages,
+				initialAgent: agentId ?? undefined,
+				initialModel: effectiveModel ?? undefined,
+				initialProject: chatFolder ?? undefined,
+				initialGhost: ghostChatActive,
+				initialPluginFlags: pluginFlags,
+				initialTeamId: teamId ?? undefined,
+				initialQuote: quote ?? undefined,
+			};
+		});
+	}, [
+		currentTabId,
+		attachedImages,
+		agentId,
+		effectiveModel,
+		chatFolder,
+		ghostChatActive,
+		pluginFlags,
+		teamId,
+		quote,
+		messages.length,
+	]);
 	const handleCreateFocusedThread = useCallback(async () => {
 		const pending = replyContext;
 		if (!(pending && convId) || creatingReplyThread) {
@@ -5489,6 +5530,23 @@ export default function ChatPage({
 		},
 		[maybeAutoQueue, submitNow]
 	);
+
+	// Sidebar quick replies use the same submit path as the visible composer. Keep
+	// the callback in a ref so the tab registers once per conversation instead of
+	// rebuilding its cross-component bridge on every composer render.
+	const registerQuickReplyHandler = useQuickReplyStore(
+		(state) => state.registerHandler
+	);
+	const quickReplySubmitRef = useRef(handleComposerSubmit);
+	quickReplySubmitRef.current = handleComposerSubmit;
+	useEffect(() => {
+		if (!convId) {
+			return;
+		}
+		return registerQuickReplyHandler(chatTarget.url, convId, (content) => {
+			void quickReplySubmitRef.current({ role: "user", content });
+		});
+	}, [chatTarget.url, convId, registerQuickReplyHandler]);
 
 	const handleAgentUiSubmit = useCallback(
 		(value: unknown) => {

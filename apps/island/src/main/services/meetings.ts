@@ -13,6 +13,7 @@ import type {
 	IslandStartMeetingInput,
 } from "../../shared/ipc.ts";
 import { coreHeaders, loadConfig } from "./config.ts";
+import { withResponseDeadline } from "./response-deadline.ts";
 
 /** Reconnect delay for the meeting event stream. */
 const RECONNECT_DELAY_MS = 3000;
@@ -26,43 +27,31 @@ function reasonFromError(error: unknown): string {
 	return "unreachable";
 }
 
-async function fetchWithTimeout(
-	url: string,
-	init: RequestInit,
-	timeoutMs: number
-): Promise<Response> {
-	const controller = new AbortController();
-	const timer = setTimeout(() => controller.abort(), timeoutMs);
-	try {
-		return await fetch(url, { ...init, signal: controller.signal });
-	} finally {
-		clearTimeout(timer);
-	}
-}
-
 /** Start a meeting via `POST /api/meetings`. Never rejects. */
 export async function startMeeting(
 	input: IslandStartMeetingInput
 ): Promise<IslandMeetingResult> {
 	const { coreBaseUrl } = loadConfig();
 	try {
-		const resp = await fetchWithTimeout(
+		return await withResponseDeadline<IslandMeetingResult>(
 			`${coreBaseUrl}/api/meetings`,
 			{
 				method: "POST",
 				headers: coreHeaders({ "Content-Type": "application/json" }),
 				body: JSON.stringify(input),
 			},
-			ACTION_TIMEOUT_MS
+			ACTION_TIMEOUT_MS,
+			async (resp) => {
+				if (!resp.ok) {
+					return { available: false, reason: `core responded ${resp.status}` };
+				}
+				const data = (await resp.json()) as { meeting?: IslandMeeting };
+				if (!data.meeting) {
+					return { available: false, reason: "no meeting returned" };
+				}
+				return { available: true, meeting: data.meeting };
+			}
 		);
-		if (!resp.ok) {
-			return { available: false, reason: `core responded ${resp.status}` };
-		}
-		const data = (await resp.json()) as { meeting?: IslandMeeting };
-		if (!data.meeting) {
-			return { available: false, reason: "no meeting returned" };
-		}
-		return { available: true, meeting: data.meeting };
 	} catch (error) {
 		return { available: false, reason: reasonFromError(error) };
 	}
@@ -74,19 +63,21 @@ export async function finalizeMeeting(
 ): Promise<IslandMeetingResult> {
 	const { coreBaseUrl } = loadConfig();
 	try {
-		const resp = await fetchWithTimeout(
+		return await withResponseDeadline<IslandMeetingResult>(
 			`${coreBaseUrl}/api/meetings/${encodeURIComponent(id)}/finalize`,
 			{ method: "POST", headers: coreHeaders() },
-			ACTION_TIMEOUT_MS
+			ACTION_TIMEOUT_MS,
+			async (resp) => {
+				if (!resp.ok) {
+					return { available: false, reason: `core responded ${resp.status}` };
+				}
+				const data = (await resp.json()) as { meeting?: IslandMeeting };
+				if (!data.meeting) {
+					return { available: false, reason: "no meeting returned" };
+				}
+				return { available: true, meeting: data.meeting };
+			}
 		);
-		if (!resp.ok) {
-			return { available: false, reason: `core responded ${resp.status}` };
-		}
-		const data = (await resp.json()) as { meeting?: IslandMeeting };
-		if (!data.meeting) {
-			return { available: false, reason: "no meeting returned" };
-		}
-		return { available: true, meeting: data.meeting };
 	} catch (error) {
 		return { available: false, reason: reasonFromError(error) };
 	}

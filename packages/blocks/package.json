@@ -17,6 +17,8 @@
     "./companion/compact-app.css": "./src/companion/compact-app.css",
     "./companion/app-ui": "./src/companion/app-ui.tsx",
     "./companion/controls": "./src/companion/controls.tsx",
+    "./companion/browser-recording": "./src/companion/browser-recording.ts",
+    "./companion/audio-pcm": "./src/companion/audio-pcm.ts",
     "./desktop/install-button": "./src/desktop/install-button.tsx",
     "./desktop/settings-items": "./src/desktop/settings-items.tsx",
     "./desktop/skills-catalog": "./src/desktop/skills-catalog.tsx",

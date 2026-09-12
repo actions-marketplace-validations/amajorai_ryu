@@ -26,6 +26,7 @@
 // rest of `core-client`.
 
 import { type ApiTarget, apiUrl } from "./client.ts";
+import { createResourceId } from "./ids.ts";
 
 /** Which resource a room maps to. Mirrors the gateway's `RoomKind`. */
 export type RealtimeKind = "conversation" | "document" | "application";
@@ -419,22 +420,17 @@ const WEBSOCKET_OPEN = 1;
 
 /** Create an opaque per-client correlation id without making it an auth input. */
 export function createRealtimeClientId(): string {
-	const randomUuid = globalThis.crypto?.randomUUID?.();
-	if (randomUuid) {
-		return randomUuid;
+	if (
+		typeof globalThis.crypto?.getRandomValues === "function" ||
+		typeof globalThis.crypto?.randomUUID === "function"
+	) {
+		try {
+			return createResourceId();
+		} catch {
+			/* Preserve the legacy correlation-only fallback below. */
+		}
 	}
-	// Older React Native runtimes may not expose randomUUID. The server accepts
-	// only UUIDs, so format 16 random bytes when getRandomValues is available.
 	const bytes = new Uint8Array(16);
-	globalThis.crypto?.getRandomValues?.(bytes);
-	if (bytes.some((value) => value !== 0)) {
-		bytes[6] = ((bytes[6] ?? 0) & 0x0f) | 0x40;
-		bytes[8] = ((bytes[8] ?? 0) & 0x3f) | 0x80;
-		const hex = Array.from(bytes, (value) =>
-			value.toString(16).padStart(2, "0")
-		);
-		return `${hex.slice(0, 4).join("")}-${hex.slice(4, 6).join("")}-${hex.slice(6, 8).join("")}-${hex.slice(8, 10).join("")}-${hex.slice(10).join("")}`;
-	}
 	// This value is correlation metadata, never an auth input. A UUID-shaped
 	// Math.random fallback keeps older React Native runtimes on the same echo-
 	// suppression contract while the signed user JWT continues to own identity.

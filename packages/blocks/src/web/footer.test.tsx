@@ -22,6 +22,7 @@ test("footer carries the universal integration positioning", () => {
 	expect(html).not.toContain("Ryu is the integration layer for AI.");
 	expect(html).not.toContain("We deploy and run AI agents safely in the cloud");
 	expect(html).not.toContain("Autonomous AI in the cloud");
+	expect(html).not.toContain("Backed by");
 });
 
 test("footer keeps GitHub and its star count in the build row", () => {

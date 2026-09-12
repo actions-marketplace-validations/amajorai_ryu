@@ -9,7 +9,23 @@ test("the standalone product set includes the direct service APIs", () => {
 		products
 			.filter((product) => product.standalone)
 			.map((product) => product.slug)
-	).toEqual(["gateway", "box", "notify", "mail", "hire"]);
+	).toEqual([
+		"gateway",
+		"passport",
+		"connect",
+		"box",
+		"notify",
+		"mail",
+		"hire",
+	]);
+	expect(getProduct("passport")).toMatchObject({
+		name: "Ryu Passport",
+		standalone: true,
+	});
+	expect(getProduct("connect")).toMatchObject({
+		name: "Ryu Connect",
+		standalone: true,
+	});
 	expect(getProduct("notify")).toMatchObject({
 		name: "Ryu Notify",
 		standalone: true,

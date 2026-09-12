@@ -5,15 +5,19 @@ import type { Route } from "next";
 import Link from "next/link";
 import { useState } from "react";
 import { products } from "./data/products.tsx";
+import { landingVisualFrameClass } from "./landing-card-tones.ts";
 import { SectionTitle, sectionSubtitleClass } from "./sections.tsx";
 
 const SERVICE_DESCRIPTIONS: Record<string, string> = {
+	connect:
+		"Host MCP, Skills, governed tools, and Composio behind one tenant edge.",
 	gateway:
 		"Route model and tool requests with shared access rules and budgets.",
 	box: "Give agents a persistent workspace for files and code.",
 	notify: "Send notifications through one API.",
 	mail: "Give agents an inbox to send and receive email.",
 	hire: "Call a specialist agent for a specific task.",
+	passport: "Keep agent identity connections encrypted and explicit.",
 };
 
 export function StandaloneServicesSection() {
@@ -36,7 +40,7 @@ export function StandaloneServicesSection() {
 						capabilities you need.
 					</p>
 					<div
-						className="mt-10 flex min-h-72 items-center justify-center overflow-hidden bg-muted/40 p-6 md:min-h-96 md:p-10 [&>*]:w-full"
+						className={`${landingVisualFrameClass} mt-10 flex min-h-72 items-center justify-center md:min-h-96 [&>*]:w-full`}
 						data-product-visual
 					>
 						{selected?.hero.visual}

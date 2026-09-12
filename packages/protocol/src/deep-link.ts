@@ -408,3 +408,58 @@ export function buildRyuDeepLink(intent: DeepLinkBuildInput): string {
 		? `${base}?node=${encodeURIComponent(node.replace(TRAILING_SLASHES, ""))}`
 		: base;
 }
+
+function validConnectSession(sessionUri: string): boolean {
+	if (!sessionUri) {
+		return false;
+	}
+	for (const character of sessionUri) {
+		const code = character.charCodeAt(0);
+		if (code <= 32 || code === 127) {
+			return false;
+		}
+	}
+	try {
+		// Count UTF-8 bytes without relying on TextEncoder in native runtimes.
+		return (
+			encodeURIComponent(sessionUri).replace(/%[\dA-F]{2}/gu, "x").length <=
+			4096
+		);
+	} catch {
+		return false;
+	}
+}
+
+/** Opaque callback handoff only. The receiving surface must confirm a configured
+ * node and use its authenticated user; the link cannot select either identity.
+ * Kept separate from install/navigation intents so unsupported surfaces ignore it.
+ */
+export function parseConnectCallbackDeepLink(
+	raw: string
+): { sessionUri: string } | null {
+	if (raw.length > 16_384 || raw.includes("#")) {
+		return null;
+	}
+	const parts = splitDeepLink(raw);
+	if (
+		parts?.category !== "connect" ||
+		parts.pathStr !== "complete" ||
+		!hasExactQueryKeys(parts.query, ["session_uri"])
+	) {
+		return null;
+	}
+	try {
+		decodeURIComponent(parts.query.replace(PLUS, " "));
+	} catch {
+		return null;
+	}
+	const sessionUri = parseQuery(parts.query).get("session_uri") ?? "";
+	return validConnectSession(sessionUri) ? { sessionUri } : null;
+}
+
+export function buildConnectCallbackDeepLink(sessionUri: string): string {
+	if (!validConnectSession(sessionUri)) {
+		throw new Error("Invalid Connect callback session");
+	}
+	return `ryu://connect/complete?session_uri=${encodeURIComponent(sessionUri)}`;
+}

@@ -12,6 +12,7 @@ import type {
 	IslandQuestResult,
 } from "../../shared/ipc.ts";
 import { coreHeaders, loadConfig } from "./config.ts";
+import { withResponseDeadline } from "./response-deadline.ts";
 
 /** Reconnect delay for the quest event stream. */
 const RECONNECT_DELAY_MS = 3000;
@@ -25,20 +26,6 @@ function reasonFromError(error: unknown): string {
 	return "unreachable";
 }
 
-async function fetchWithTimeout(
-	url: string,
-	init: RequestInit,
-	timeoutMs: number
-): Promise<Response> {
-	const controller = new AbortController();
-	const timer = setTimeout(() => controller.abort(), timeoutMs);
-	try {
-		return await fetch(url, { ...init, signal: controller.signal });
-	} finally {
-		clearTimeout(timer);
-	}
-}
-
 /** POST a quest suggestion action (accept / dismiss). Never rejects. */
 async function postQuestAction(
 	id: string,
@@ -46,19 +33,21 @@ async function postQuestAction(
 ): Promise<IslandQuestResult> {
 	const { coreBaseUrl } = loadConfig();
 	try {
-		const resp = await fetchWithTimeout(
+		return await withResponseDeadline<IslandQuestResult>(
 			`${coreBaseUrl}/api/quests/${encodeURIComponent(id)}/${path}`,
 			{ method: "POST", headers: coreHeaders() },
-			ACTION_TIMEOUT_MS
+			ACTION_TIMEOUT_MS,
+			async (resp) => {
+				if (!resp.ok) {
+					return { available: false, reason: `core responded ${resp.status}` };
+				}
+				const data = (await resp.json()) as { quest?: IslandQuest };
+				if (!data.quest) {
+					return { available: false, reason: "no quest returned" };
+				}
+				return { available: true, quest: data.quest };
+			}
 		);
-		if (!resp.ok) {
-			return { available: false, reason: `core responded ${resp.status}` };
-		}
-		const data = (await resp.json()) as { quest?: IslandQuest };
-		if (!data.quest) {
-			return { available: false, reason: "no quest returned" };
-		}
-		return { available: true, quest: data.quest };
 	} catch (error) {
 		return { available: false, reason: reasonFromError(error) };
 	}

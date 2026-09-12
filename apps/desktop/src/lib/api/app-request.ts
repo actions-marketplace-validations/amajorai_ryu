@@ -89,12 +89,36 @@ export function validateMountedAppRequest(
 	};
 }
 
+/** Keep startup retry delays owned by the calling read. */
+function waitForRetry(ms: number, signal?: AbortSignal): Promise<void> {
+	return new Promise((resolve, reject) => {
+		if (signal?.aborted) {
+			reject(signal.reason);
+			return;
+		}
+		const cleanup = () => {
+			clearTimeout(timer);
+			signal?.removeEventListener("abort", abort);
+		};
+		const abort = () => {
+			cleanup();
+			reject(signal?.reason);
+		};
+		const timer = setTimeout(() => {
+			cleanup();
+			resolve();
+		}, ms);
+		signal?.addEventListener("abort", abort, { once: true });
+	});
+}
+
 /** Forward a request that already passed the mounted-app path and method policy. */
 export async function requestValidatedMountedApp(
 	target: ApiTarget,
 	validated: ValidatedMountedAppRequest
 ): Promise<unknown> {
 	for (let attempt = 0; ; attempt++) {
+		validated.signal?.throwIfAborted();
 		try {
 			return await request<unknown>(target, validated.path, {
 				body: validated.body,
@@ -110,7 +134,7 @@ export async function requestValidatedMountedApp(
 			if (!retryableRead || delay === undefined) {
 				throw error;
 			}
-			await new Promise<void>((resolve) => setTimeout(resolve, delay));
+			await waitForRetry(delay, validated.signal);
 		}
 	}
 }

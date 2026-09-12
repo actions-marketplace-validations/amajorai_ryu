@@ -9,6 +9,18 @@ export default defineConfig({
 		{
 			name: "mount-proof-bundle",
 			configureServer(server) {
+				let started = 0;
+				let closed = 0;
+				server.middlewares.use("/proof-read-state", (_req, res) => {
+					res.setHeader("Content-Type", "application/json");
+					res.end(JSON.stringify({ started, closed }));
+				});
+				server.middlewares.use("/proof-pending-read", (_req, res) => {
+					started++;
+					res.on("close", () => {
+						closed++;
+					});
+				});
 				server.middlewares.use("/proof-warmup.html", (_req, res) => {
 					res.setHeader("content-type", "text/html");
 					res.end(readFileSync("/tmp/ryu-warmup-performance-build/index.html"));

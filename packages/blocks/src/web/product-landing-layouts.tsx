@@ -1,4 +1,5 @@
 import type { ReactNode } from "react";
+import { landingVisualFrameClass } from "./landing-card-tones.ts";
 import {
 	landingHeadlineClass,
 	landingSubheadlineClass,
@@ -30,7 +31,7 @@ export function ProductHeroFrame({
 					</div>
 				</div>
 				<div
-					className="flex min-h-80 min-w-0 items-center justify-center overflow-hidden bg-muted/40 p-6 md:min-h-[24rem] md:p-10 [&>*]:w-full [&>*]:max-w-3xl"
+					className={`${landingVisualFrameClass} flex min-h-80 min-w-0 items-center justify-center md:min-h-[24rem] [&>*]:w-full [&>*]:max-w-3xl`}
 					data-product-visual
 				>
 					{visual}
@@ -50,7 +51,7 @@ export function ProductBentoFrame({ items }: { items: BentoItem[] }) {
 				<article className="flex min-w-0 flex-col" key={item.title}>
 					{item.visual ? (
 						<div
-							className="mb-6 flex min-h-52 items-center justify-center bg-muted/40 p-6 [&>*]:w-full"
+							className={`${landingVisualFrameClass} mb-6 flex min-h-52 items-center justify-center [&>*]:w-full`}
 							data-product-visual
 						>
 							{item.visual}

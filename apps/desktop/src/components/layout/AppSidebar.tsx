@@ -47,11 +47,7 @@ import {
 import type { IconSvgElement } from "@hugeicons/react";
 import { HugeiconsIcon } from "@hugeicons/react";
 import {
-	contributionSourceRequest,
 	DECLARATIVE_HTTP_GRANT,
-	isCoreReadPath,
-	isViewSourceHttpMethod,
-	normalizeViewRefreshMs,
 	renderContributionActionHttp,
 	renderTemplate,
 	type SourceItem,
@@ -231,6 +227,7 @@ import {
 	useSidebarMode,
 } from "@/src/hooks/useSidebarMode.ts";
 import { useSidebarModes } from "@/src/hooks/useSidebarModes.ts";
+import { sidebarSectionQueryOptions } from "@/src/hooks/useSidebarSectionSource.ts";
 import { useSidebarVariant } from "@/src/hooks/useSidebarVariant.ts";
 import { setTabLayout, useTabLayout } from "@/src/hooks/useTabLayout.ts";
 import { useTeams } from "@/src/hooks/useTeams.ts";
@@ -345,6 +342,7 @@ import {
 } from "./appearance-context-menu.tsx";
 import { BotChatSectionDialog } from "./BotChatSectionDialog.tsx";
 import { CustomizeSidebarDialog } from "./CustomizeSidebarDialog.tsx";
+import { MoveTabToWindowMenuItem } from "./MoveTabToWindowMenuItem.tsx";
 import { NavUser } from "./NavUser.tsx";
 import { OverflowTooltip } from "./overflow-tooltip.tsx";
 import { PinnedAgentStage } from "./pinned-agent-stage.tsx";
@@ -2046,6 +2044,7 @@ function VerticalTabRow({ tab, isActive }: { tab: Tab; isActive: boolean }) {
 						Duplicate tab
 					</ContextMenuItem>
 					<OpenInNewWindowContextMenuItem onClick={openTabInNewWindow} />
+					<MoveTabToWindowMenuItem tabId={tab.id} />
 					<TabLayoutMenuItems onChange={setTabLayout} value={tabLayout} />
 					<ContextMenuSeparator />
 					<ContextMenuItem onClick={() => closeTab(tab.id)}>
@@ -5162,53 +5161,12 @@ export function DynamicSidebarSection({
 		spec?.entity?.idKey ?? "id"
 	);
 	const source = spec?.source;
-	const sourceRequest = contributionSourceRequest(contribution, source);
-	const sourcePath = source?.http?.path;
-	const sourceMethod = source?.http?.method ?? "GET";
-	const refreshMs = normalizeViewRefreshMs(source?.refreshMs);
-	const fetchable = Boolean(
-		canUseDeclarativeHttp &&
-			sourceRequest &&
-			source &&
-			sourcePath &&
-			isCoreReadPath(sourcePath) &&
-			isViewSourceHttpMethod(sourceMethod)
-	);
 	const target = toTarget(node);
-	// Shared across every section reading the same endpoint on the same node. The
-	// PAYLOAD is cached, not the mapped rows, because two sections map/filter the
-	// same payload differently.
-	const queryKey = useMemo(
-		() => [
-			"contributed-section-source",
-			target.url,
-			target.token,
-			sourceRequest?.path ?? "",
-			sourceRequest?.method ?? "",
-		],
-		[target.url, target.token, sourceRequest]
-	);
-
+	const sourceOptions = sidebarSectionQueryOptions(contribution, target);
+	const queryKey = sourceOptions.queryKey;
 	const { data: payload } = useQuery({
-		queryKey,
-		enabled: fetchable,
-		// A dead node or a route gated behind a disabled app answers non-2xx; that
-		// is an empty section, not an error state to retry into.
-		retry: false,
-		queryFn: async () => {
-			if (!sourceRequest) {
-				return null;
-			}
-			const resp = await fetch(apiUrl(target, sourceRequest.path), {
-				method: sourceRequest.method,
-				headers: await requestHeaders(target),
-			});
-			return resp.ok ? ((await resp.json()) as unknown) : null;
-		},
-		// Live sections declare their own cadence; the floor keeps a typo like
-		// `refreshMs: 10` from turning the sidebar into a request loop. Collapsed =
-		// nothing visible to keep fresh, so the poll stops.
-		refetchInterval: refreshMs !== null && !collapsed ? refreshMs : false,
+		...sourceOptions,
+		refetchInterval: collapsed ? false : sourceOptions.refetchInterval,
 	});
 
 	const rows = useMemo(

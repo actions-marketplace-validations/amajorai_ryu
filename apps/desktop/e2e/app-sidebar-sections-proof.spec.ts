@@ -1,6 +1,8 @@
 // Browser proof for the app-owned record pickers that now use the desktop
 // sidebar contribution primitive instead of shipping their own primary rail.
 
+import { writeFile } from "node:fs/promises";
+import path from "node:path";
 import { expect, test } from "@playwright/test";
 
 const STORY_URL = "/app-sidebar-sections-proof.html";
@@ -32,6 +34,18 @@ test.describe("app-owned sidebar sections", () => {
 		]) {
 			await expect(page.getByText(item, { exact: true })).toBeVisible();
 		}
+		await expect(page.locator("html")).toHaveAttribute(
+			"data-section-reads",
+			"7"
+		);
+		await page.screenshot({
+			path: path.resolve(
+				import.meta.dirname,
+				"../../../docs/proof/performance-sweep/sidebar-source-shared-completed.png"
+			),
+			fullPage: true,
+			animations: "disabled",
+		});
 	});
 
 	test("opens a migrated row through its declarative item target", async ({
@@ -53,5 +67,57 @@ test.describe("app-owned sidebar sections", () => {
 		await expect(page.locator("#opened-context")).toHaveText(
 			'{"campaignId":"campaign-1"}'
 		);
+	});
+});
+
+test("staggered app feed readers retain one polling cadence", async ({
+	page,
+}) => {
+	await page.goto(`${STORY_URL}?polling`);
+	await expect(page.getByRole("button", { name: /Launch plan/ })).toBeVisible();
+	await page.waitForTimeout(450);
+	await page
+		.getByRole("button", { name: "Mount shared reader", exact: true })
+		.click();
+	await page.waitForTimeout(2500);
+	const times = await page
+		.locator("html")
+		.getAttribute("data-source-read-times");
+	const readings: number[] = JSON.parse(times ?? "[]");
+	expect(readings.length).toBeGreaterThanOrEqual(3);
+	const intervals = readings
+		.slice(1)
+		.map((value, index) => value - readings[index]);
+	for (const interval of intervals) {
+		expect(interval).toBeGreaterThanOrEqual(950);
+	}
+	await expect(page.getByRole("button", { name: /Launch plan/ })).toBeVisible();
+	await page.screenshot({
+		path: path.resolve(
+			import.meta.dirname,
+			"../../../docs/proof/performance-sweep/sidebar-source-cadence-completed.png"
+		),
+		fullPage: true,
+		animations: "disabled",
+	});
+	await writeFile(
+		path.resolve(
+			import.meta.dirname,
+			"../../../docs/proof/performance-sweep/sidebar-source-cadence.json"
+		),
+		`${JSON.stringify(
+			{
+				readings,
+				intervals,
+				scope:
+					"Real DynamicSidebarSection plus shared source hook; controlled fetch responses; second reader mounted after 450ms",
+			},
+			null,
+			2
+		)}\n`
+	);
+	await test.info().attach("source-poll-intervals", {
+		body: JSON.stringify({ readings, intervals }),
+		contentType: "application/json",
 	});
 });

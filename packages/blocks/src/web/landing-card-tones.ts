@@ -34,6 +34,8 @@ export function landingCardSurfaceClass(_tone: LandingCardTone) {
 }
 
 export const landingMutedCardSurfaceClass = "h-full bg-muted/40 p-6";
+export const landingVisualFrameClass =
+	"overflow-hidden rounded-[2rem] bg-muted/40 p-2 md:p-3";
 export const landingSurfaceCardClass = "py-6";
 export const landingSurfaceCardFlexClass = "flex h-full flex-col gap-5 py-6";
 export const landingSurfaceCardXlClass = "py-6";

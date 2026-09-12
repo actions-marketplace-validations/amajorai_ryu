@@ -1,4 +1,13 @@
+import {
+	parseSpeechHistoryInput,
+	type SpeechHistory,
+	type SpeechHistoryInput,
+} from "@ryuhq/core-client/shadow";
 import type { TranscriptionDetail } from "@ryuhq/core-client/voice";
+import {
+	type MediaRecordingService,
+	parseMediaRecordingInput,
+} from "./media-recording.ts";
 import type { RouteClaim } from "./rpc-routes.ts";
 
 export {
@@ -190,6 +199,7 @@ export type Capability =
 	// Split from `media.generate` so a transcribe-only app need not also unlock
 	// generation (least privilege).
 	| "media.transcribe"
+	| "media.recording"
 	// Fine-tune runs (grant `finetune:runs`) — the `@ryu/finetune` app drives
 	// training runs against Core's orchestration + durable job store. One capability
 	// gates the whole `finetune.*` family (unary calls + the live progress stream).
@@ -257,6 +267,7 @@ export type Capability =
 	// `timeline.frame` keyframe→data-URL verb (CSP `img-src data: blob:`) and the
 	// `timeline.openReview`/`openSettings` shell-navigation verbs.
 	| "timeline.read"
+	| "timeline.speech"
 	// Agent Inboxes (grant `mail:crud`) — the `@ryu/mail` app drives Core's
 	// `/api/mail/*` orchestration (inbox CRUD, message list/send, inbound-secret
 	// rotation) from its sandboxed companion frame. Host-direct (the monitors
@@ -1190,7 +1201,7 @@ export interface HostServices {
 		process_id: string;
 	}): Promise<{ ok: boolean; requested: boolean; process_id: string }>;
 	/** Forward a call to `/api/ext/<owning-plugin-id><path>`. */
-	appRequest?(input: AppRequestPayload): Promise<unknown>;
+	appRequest?(input: AppRequestPayload, signal?: AbortSignal): Promise<unknown>;
 	/** Open a host-owned application-room realtime connection. */
 	realtimeConnect?(
 		input: RealtimeConnectPayload
@@ -1987,6 +1998,7 @@ export interface HostServices {
 	timelineList?(input: {
 		rangeMinutes: number;
 	}): Promise<TimelineEventRecord[] | null>;
+	timelineTranscripts?(input: SpeechHistoryInput): Promise<SpeechHistory>;
 	/** Open the Weekly Review tab — a shell-navigation verb (the desktop page's
 	 *  `navigate("/review")`); fire-and-forget from the frame's view. */
 	timelineOpenReview?(): void;
@@ -1999,6 +2011,7 @@ export interface HostServices {
 		filename?: string;
 		detailed?: boolean;
 	}): Promise<string | TranscriptionDetail>;
+	mediaRecording?: MediaRecordingService;
 	/** Synthesize speech (`/api/voice/speak`). Returns a `data:` audio URL. */
 	ttsSpeak?(input: {
 		text: string;
@@ -2274,6 +2287,8 @@ const LOCAL_HOST_CAPABILITIES: ReadonlySet<Capability> = new Set([
  *  greenfield app host-bridge methods opt in; the legacy paths keep string errors so
  *  their existing readers are unaffected. */
 const CODED_ERROR_CAPABILITIES: ReadonlySet<Capability> = new Set<Capability>([
+	"timeline.speech",
+	"media.recording",
 	"ui.toast",
 	"app.http",
 	"app.realtime",
@@ -2379,7 +2394,8 @@ export async function dispatchRpc(
 	method: string,
 	args: unknown[],
 	granted: ReadonlySet<Capability>,
-	services: HostServices
+	services: HostServices,
+	signal?: AbortSignal
 ): Promise<unknown> {
 	assertGranted(method, granted);
 	switch (method) {
@@ -4015,6 +4031,38 @@ export async function dispatchRpc(
 			services.activityOpenSession(input);
 			return null;
 		}
+		case "media.recording": {
+			const input = parseMediaRecordingInput(args[0]);
+			if (!input) {
+				throw new CodedRpcError("invalid_args", "Invalid recording action.");
+			}
+			if (!services.mediaRecording) {
+				return {
+					available: false,
+					background: false,
+					state: "idle",
+					message:
+						"Microphone capture is unavailable on this surface. Import audio instead.",
+				};
+			}
+			return await services.mediaRecording(input);
+		}
+		case "timeline.transcripts": {
+			const input = parseSpeechHistoryInput(args[0]);
+			if (!input) {
+				throw new CodedRpcError(
+					"invalid_args",
+					"Choose a speech history window of up to one day."
+				);
+			}
+			if (!services.timelineTranscripts) {
+				throw new CodedRpcError(
+					"server_error",
+					"Shadow speech history is unavailable on this surface."
+				);
+			}
+			return await services.timelineTranscripts(input);
+		}
 		case "timeline.list": {
 			const input = asTimelineRangeArg(args[0]);
 			if (!input) {
@@ -4667,7 +4715,9 @@ export async function dispatchRpc(
 			if (!services.appRequest) {
 				throw new CodedRpcError("server_error", "app.request is not available");
 			}
-			return await services.appRequest(input);
+			const readSignal = input.method === "GET" ? signal : undefined;
+			readSignal?.throwIfAborted();
+			return await services.appRequest(input, readSignal);
 		}
 		case "realtime.connect": {
 			const input = asRealtimeConnectArg(args[0]);

@@ -62,10 +62,14 @@ export interface CreateConnectionInput {
 	source?: string;
 }
 
-export async function listIdentities(target: ApiTarget): Promise<Profile[]> {
+export async function listIdentities(
+	target: ApiTarget,
+	signal?: AbortSignal
+): Promise<Profile[]> {
 	const json = await request<{ profiles?: Profile[] }>(
 		target,
-		"/api/identities"
+		"/api/identities",
+		{ signal }
 	);
 	return json.profiles ?? [];
 }

@@ -16,6 +16,11 @@ export default defineConfig({
 		dedupe: ["react", "react-dom"],
 		alias: { "@": path.resolve(import.meta.dirname, "../..") },
 	},
+	build: {
+		rollupOptions: {
+			input: path.resolve(import.meta.dirname, "spaces-performance-proof.html"),
+		},
+	},
 	server: {
 		host: "127.0.0.1",
 		port: 5212,

@@ -56,6 +56,7 @@ import {
 	createScopedToastHost,
 	createSileoToastRenderer,
 } from "@ryu/app-host/toast-host";
+import { browserRecordingHost } from "@ryu/blocks/companion/browser-recording";
 import { useI18n } from "@ryu/i18n/react";
 import { Button } from "@ryu/ui/components/button";
 import {
@@ -201,6 +202,7 @@ import {
 	frameUrl,
 	getJournal,
 	getProactiveInbox,
+	getSpeechHistory,
 	getTimeline,
 	postFeedback,
 } from "@/src/lib/api/shadow.ts";
@@ -634,6 +636,10 @@ export function PluginHostPanel({
 }) {
 	const node = useActiveNode();
 	const getActiveNode = useActiveNodeGetter();
+	useEffect(
+		() => () => browserRecordingHost.release(companion.pluginId),
+		[companion.pluginId]
+	);
 	const i18n = useI18n();
 	const { distributeInstalledSkill } = useSkillDistributionFlow();
 	const [connectedNonce, setConnectedNonce] = useState<string | null>(null);
@@ -1161,6 +1167,8 @@ export function PluginHostPanel({
 					input.filename ?? "recording.wav"
 				);
 			},
+			mediaRecording: (input) =>
+				browserRecordingHost.call(companion.pluginId, input),
 			// User file upload → Uploads system space. Host opens the picker (frame
 			// cannot), uploads, and returns a data_url so CSP-locked frames can render.
 			uploadFile: async (input) => {
@@ -1483,6 +1491,7 @@ export function PluginHostPanel({
 				sanitizeTimelineEvents(await getTimeline(rangeMinutes)) as unknown as
 					| Record<string, unknown>[]
 					| null,
+			timelineTranscripts: getSpeechHistory,
 			timelineJournal: async ({ rangeMinutes, narrate }) =>
 				enrichTimelineJournal(
 					await getJournal(rangeMinutes, { narrate })
@@ -1812,8 +1821,8 @@ export function PluginHostPanel({
 			blueprintRequest: (input) => blueprintRequest(toTarget(node), input),
 			// Generic companion → OWN sidecar forwarder. The plugin id is host-owned;
 			// the frame can choose only the relative path/method/body.
-			appRequest: (input) =>
-				ownAppRequest(toTarget(node), companion.pluginId, input),
+			appRequest: (input, signal) =>
+				ownAppRequest(toTarget(node), companion.pluginId, { ...input, signal }),
 			// Generic application-room realtime. The node target, node bearer and
 			// user JWT remain in this trusted host; only the opaque join result crosses
 			// the RPC boundary into the null-origin companion.

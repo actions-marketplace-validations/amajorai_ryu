@@ -27,7 +27,7 @@ pub use ryu_composio::execute::SERVER_NAME;
 
 /// True when a Composio key is configured (preferences or env).
 pub fn is_configured() -> bool {
-    ryu_composio::auth::is_configured()
+    ryu_composio::service::is_configured() || ryu_composio::auth::is_configured()
 }
 
 /// Execute a Composio action (`tool` = the action slug, e.g. `GITHUB_CREATE_ISSUE`).
@@ -54,6 +54,11 @@ pub async fn dispatch_with_connection(
     user_id: Option<&str>,
     connected_account_id: Option<&str>,
 ) -> Result<Value> {
+    if let Some(result) =
+        ryu_composio::service::dispatch(tool, &arguments, user_id, connected_account_id).await
+    {
+        return result;
+    }
     match ryu_composio::execute::dispatch_with_connection(
         http,
         tool,

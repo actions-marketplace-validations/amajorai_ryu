@@ -12,17 +12,18 @@ import ProductLandingCtas from "./product-landing-ctas.tsx";
 import { ProductRealmSelector } from "./product-realm-selector.tsx";
 import { SectionTitle } from "./sections.tsx";
 import { StandaloneServicesSection } from "./standalone-services-section.tsx";
+import StartupPrograms from "./startup-programs.tsx";
 
 export default function RealmsHero() {
 	return (
 		<div className="bg-background text-foreground" data-testid="realms-hero">
 			<section
-				className="relative mx-4 flex min-h-svh items-center overflow-hidden rounded-3xl px-6 py-12 sm:mx-6 sm:px-10 md:mx-8 md:px-16 md:py-16 lg:px-24"
+				className="mx-auto flex max-w-6xl flex-col items-center px-6 pt-20 pb-10 text-center md:pt-28 md:pb-12"
 				data-testid="hero-viewport"
 			>
-				<div className="relative z-10 w-full max-w-2xl">
+				<div className="w-full max-w-3xl">
 					<PageHeader
-						className="max-w-xl"
+						className="mx-auto max-w-2xl text-center"
 						stagger={false}
 						title={
 							<>
@@ -38,13 +39,17 @@ export default function RealmsHero() {
 								/>
 							</>
 						}
-						titleClassName={landingHeadlineClass}
+						titleClassName={cn(
+							landingHeadlineClass,
+							"text-center text-2xl sm:text-3xl md:text-3xl"
+						)}
 					/>
-					<div className="mt-8 flex flex-wrap items-center gap-3">
+					<div className="mt-7 flex flex-wrap items-center justify-center gap-2.5">
 						<DownloadMenu
+							className="rounded-full"
 							label="Download"
 							showSeparator={false}
-							size="default"
+							size="sm"
 						/>
 						<a
 							className={cn(
@@ -60,6 +65,7 @@ export default function RealmsHero() {
 					</div>
 				</div>
 			</section>
+			<StartupPrograms className="mt-0 pb-12 md:mt-2 md:pb-16" />
 			<div className="mx-auto max-w-6xl px-6 py-16">
 				<ProductRealmSelector />
 			</div>

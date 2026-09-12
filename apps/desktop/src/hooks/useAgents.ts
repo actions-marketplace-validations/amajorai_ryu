@@ -1,5 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import { useCallback, useMemo } from "react";
+import { agentListOptions } from "@/src/lib/agent-list-query.ts";
 import { personaToGlyphValue } from "@/src/lib/agent-persona.ts";
 import {
 	type Agent,
@@ -8,7 +9,6 @@ import {
 	createAgent as apiCreateAgent,
 	deleteAgent as apiDeleteAgent,
 	updateAgent as apiUpdateAgent,
-	fetchAgents,
 } from "@/src/lib/api/agents.ts";
 import type { ApiTarget } from "@/src/lib/api/client.ts";
 import {
@@ -17,7 +17,6 @@ import {
 	fetchActiveEngine,
 	fetchEngines,
 } from "@/src/lib/api/engines.ts";
-import { useAgentsRefresh } from "@/src/lib/core-refresh.ts";
 import { PlanCapError } from "@/src/lib/gating/planCapBridge.ts";
 import { useEntityCap } from "@/src/lib/gating/useEntityCap.ts";
 import { queryClient } from "@/src/lib/query-client.ts";
@@ -65,11 +64,6 @@ function recordToSummary(agent: Agent): AgentSummary {
 	};
 }
 
-interface AgentRoster {
-	activeEngine: ActiveEngine | null;
-	agents: AgentSummary[];
-	engines: Engine[];
-}
 const EMPTY_AGENTS: AgentSummary[] = [];
 const EMPTY_ENGINES: Engine[] = [];
 
@@ -88,51 +82,54 @@ export function useAgents(): UseAgentsResult {
 
 	const { guard, limitFor } = useEntityCap();
 
-	const queryKey = useMemo(
-		() => ["desktop-agent-roster", url, token, userJwt],
+	const options = useMemo(
+		() => agentListOptions({ url, token, userJwt }),
 		[url, token, userJwt]
 	);
-	const query = useQuery(
+	const queryKey = options.queryKey;
+	const query = useQuery(options, queryClient);
+	const enginesKey = useMemo(
+		() => ["desktop-agent-engines", url, token, userJwt],
+		[url, token, userJwt]
+	);
+	const enginesQuery = useQuery(
 		{
-			queryKey,
+			queryKey: enginesKey,
 			queryFn: async () => {
 				const target: ApiTarget = { url, token, userJwt };
-				const [agents, engines, activeEngine] = await Promise.all([
-					fetchAgents(target),
+				const [engines, activeEngine] = await Promise.all([
 					fetchEngines(target),
 					fetchActiveEngine(target).catch(() => null),
 				]);
-				return { agents, engines, activeEngine };
+				return { engines, activeEngine };
 			},
 			staleTime: 30_000,
 		},
 		queryClient
 	);
-	const agents = query.data?.agents ?? EMPTY_AGENTS;
-	const engines = query.data?.engines ?? EMPTY_ENGINES;
-	const activeEngine = query.data?.activeEngine ?? null;
+	const agents = query.data ?? EMPTY_AGENTS;
+	const engines = enginesQuery.data?.engines ?? EMPTY_ENGINES;
+	const activeEngine = enginesQuery.data?.activeEngine ?? null;
 	const loading = query.isPending;
-	const error = query.error?.message ?? null;
+	const error = query.error?.message ?? enginesQuery.error?.message ?? null;
 	const reload = useCallback(async () => {
-		await queryClient.refetchQueries(
-			{ queryKey, exact: true },
-			{ cancelRefetch: false }
+		await Promise.all(
+			[queryKey, enginesKey].map((key) =>
+				queryClient.refetchQueries(
+					{ queryKey: key, exact: true },
+					{ cancelRefetch: false }
+				)
+			)
 		);
-	}, [queryKey]);
-	// Global refresh already invalidates the shared query. Roster-only events
-	// coalesce concurrent observers onto the same request as well.
-	useAgentsRefresh(reload);
+	}, [queryKey, enginesKey]);
 	const setAgents = useCallback(
 		(update: (agents: AgentSummary[]) => AgentSummary[]) => {
 			const hadRoster = queryClient.getQueryData(queryKey) !== undefined;
-			queryClient.setQueryData<AgentRoster>(queryKey, (current) => ({
-				agents: update(current?.agents ?? EMPTY_AGENTS),
-				engines: current?.engines ?? EMPTY_ENGINES,
-				activeEngine: current?.activeEngine ?? null,
-			}));
+			queryClient.setQueryData<AgentSummary[]>(queryKey, (current) =>
+				update(current ?? EMPTY_AGENTS)
+			);
 			if (!hadRoster) {
-				// A successful mutation can beat the initial list request. Publish its
-				// result immediately, then recover the rest of the roster in the background.
+				// Publish the mutation immediately, then recover the rest of the roster.
 				void queryClient.invalidateQueries({ queryKey, exact: true });
 			}
 		},

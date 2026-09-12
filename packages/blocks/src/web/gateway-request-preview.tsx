@@ -45,7 +45,7 @@ export function GatewayRequestPreview() {
 	const example = EXAMPLES[selected];
 	return (
 		<div
-			className="w-full overflow-hidden bg-background"
+			className="w-full overflow-hidden rounded-[1.5rem] bg-background"
 			data-testid="gateway-request-preview"
 		>
 			<div className="flex flex-wrap items-center justify-between gap-4 bg-muted/50 px-6 py-4">

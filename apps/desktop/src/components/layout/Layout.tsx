@@ -103,6 +103,10 @@ import { DESKTOP_HOTKEYS } from "@/src/lib/hotkeys/actions.ts";
 import { coreKvHotkeyStorage } from "@/src/lib/hotkeys/storage.ts";
 import { onboardingInitialTab } from "@/src/lib/onboarding-navigation.ts";
 import { useProductMode } from "@/src/lib/product-mode.ts";
+import {
+	isDetachedTabWindow,
+	readTabTransfer,
+} from "@/src/lib/tab-transfer.ts";
 import { windowChromeLayout } from "@/src/lib/window-chrome-layout.ts";
 import { useLiveActivities } from "@/src/live/useLiveActivities.ts";
 import { useAssistantStore } from "@/src/store/useAssistantStore.ts";
@@ -271,7 +275,8 @@ function LayoutContent({
 }: LayoutContentProps) {
 	const productMode = useProductMode();
 	const botProduct = productMode === "bot";
-	const osProduct = productMode === "os";
+	const detachedWindow = isDetachedTabWindow();
+	const osProduct = productMode === "os" && !detachedWindow;
 	const activeNode = useActiveNode();
 	const { canSwitchToConsole } = useConsoleAccess(activeNode);
 	const { canUpdateDesktopApp } = useAppSurface();
@@ -803,7 +808,7 @@ function LayoutContent({
 			    loads, and a missing app must be explained wherever the user notices
 			    it is missing. */}
 			{!(botProduct || osProduct) && <SafeModeBanner />}
-			{!osProduct && (
+			{!osProduct && (!detachedWindow || sidebarShown) && (
 				<AppSidebar
 					activeConversationId={activeConversationId}
 					onDeleteConversation={handleDeleteConversation}
@@ -857,7 +862,7 @@ function LayoutContent({
 			    equivalent, and a 288px panel pinned over a 375px viewport would just
 			    shadow the Sheet that `<AppSidebar>` already renders at this width —
 			    so the whole hand-rolled float stands down on mobile. */}
-			{!(open || isMobile) && (
+			{!(open || isMobile || detachedWindow) && (
 				<div
 					className="fixed top-0 left-0 z-50 h-full"
 					style={{ pointerEvents: "none", width: `${sidebarWidth + 16}px` }}
@@ -1086,6 +1091,10 @@ function getSavedSidebarWidth(): number {
     conversation/node instead of a blank chat. Read once at mount. */
 function readInitialTab(): InitialTab | undefined {
 	try {
+		const transfer = readTabTransfer();
+		if (transfer) {
+			return { ...transfer.tab, node: transfer.node, transfer };
+		}
 		const p = new URLSearchParams(window.location.search);
 		if (p.get("window") !== "tab") {
 			return undefined;
@@ -1112,9 +1121,11 @@ export default function Layout() {
 			? { path: location.pathname }
 			: undefined;
 	const initialTabRef = useRef(
-		botProduct
-			? { path: "/chat", title: "New chat" }
-			: (readInitialTab() ??
+		readTabTransfer()
+			? readInitialTab()
+			: botProduct
+				? { path: "/chat", title: "New chat" }
+				: (readInitialTab() ??
 					appRouteInitialTab ??
 					onboardingInitialTab(location.state))
 	);
@@ -1144,6 +1155,7 @@ export default function Layout() {
 						<SkillDistributionProvider>
 							<TitleBarProvider>
 								<SidebarProvider
+									defaultOpen={!isDetachedTabWindow()}
 									style={
 										{
 											"--sidebar-width": `${sidebarWidth}px`,

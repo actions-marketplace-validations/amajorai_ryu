@@ -1,6 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { useCallback, useMemo, useState } from "react";
-import { type AgentSummary, fetchAgents } from "@/src/lib/api/agents.ts";
+import { agentListOptions } from "@/src/lib/agent-list-query.ts";
+import type { AgentSummary } from "@/src/lib/api/agents.ts";
 import type { ApiTarget } from "@/src/lib/api/client.ts";
 import {
 	callMcpTool as apiCallMcpTool,
@@ -37,8 +38,12 @@ export interface UseMcpResult {
 	loading: boolean;
 	reload: () => Promise<void>;
 	servers: McpServer[];
+	serversError: string | null;
+	serversLoading: boolean;
 	setAgentFilter: (agentId: string | null) => void;
 	tools: McpTool[];
+	toolsError: string | null;
+	toolsLoading: boolean;
 	updateServer: (
 		name: string,
 		input: UpdateMcpServerInput
@@ -65,7 +70,11 @@ export function useMcp(): UseMcpResult {
 	);
 	const serversKey = useMemo(() => ["mcp-servers", ...scope], [scope]);
 	const toolsPrefix = useMemo(() => ["mcp-tools", ...scope], [scope]);
-	const agentsKey = useMemo(() => ["mcp-agent-options", ...scope], [scope]);
+	const agentsOptions = useMemo(
+		() => agentListOptions({ url, token, userJwt }),
+		[url, token, userJwt]
+	);
+	const agentsKey = agentsOptions.queryKey;
 	const serversQuery = useQuery(
 		{
 			queryKey: serversKey,
@@ -87,26 +96,21 @@ export function useMcp(): UseMcpResult {
 		},
 		queryClient
 	);
-	const agentsQuery = useQuery(
-		{
-			queryKey: agentsKey,
-			queryFn: ({ signal }) => fetchAgents({ url, token, userJwt }, signal),
-			staleTime: 30_000,
-			retry: false,
-		},
-		queryClient
-	);
+	const agentsQuery = useQuery(agentsOptions, queryClient);
 	const servers = serversQuery.data ?? [];
 	const tools = toolsQuery.data ?? [];
 	const agents = agentsQuery.data ?? [];
 	// Agent options are supplemental; a slow roster must not block server/tool browsing.
 	const loading = serversQuery.isPending || toolsQuery.isPending;
-	const failure = serversQuery.error ?? toolsQuery.error;
-	const error = failure
-		? failure instanceof Error
-			? failure.message
-			: "Failed to load MCP registry"
-		: null;
+	const describeError = (failure: unknown): string | null =>
+		failure
+			? failure instanceof Error
+				? failure.message
+				: "Failed to load MCP registry"
+			: null;
+	const serversError = describeError(serversQuery.error);
+	const toolsError = describeError(toolsQuery.error);
+	const error = serversError ?? toolsError;
 	const reload = useCallback(async () => {
 		await Promise.all(
 			[serversKey, toolsPrefix, agentsKey].map((queryKey) =>
@@ -192,6 +196,10 @@ export function useMcp(): UseMcpResult {
 		agentFilter,
 		setAgentFilter,
 		loading,
+		serversLoading: serversQuery.isPending,
+		toolsLoading: toolsQuery.isPending,
+		serversError,
+		toolsError,
 		error,
 		reload,
 		callTool,

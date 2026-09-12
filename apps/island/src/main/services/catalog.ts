@@ -18,6 +18,7 @@ import type {
 	CatalogSourcesResult,
 } from "../../shared/ipc.ts";
 import { coreHeaders, loadConfig } from "./config.ts";
+import { withResponseDeadline } from "./response-deadline.ts";
 
 const PROBE_TIMEOUT_MS = 8000;
 
@@ -29,19 +30,6 @@ function reasonFromError(error: unknown): string {
 		return error.message;
 	}
 	return "unreachable";
-}
-
-async function fetchWithTimeout(
-	url: string,
-	init: RequestInit
-): Promise<Response> {
-	const controller = new AbortController();
-	const timer = setTimeout(() => controller.abort(), PROBE_TIMEOUT_MS);
-	try {
-		return await fetch(url, { ...init, signal: controller.signal });
-	} finally {
-		clearTimeout(timer);
-	}
 }
 
 interface SourceWire {
@@ -66,22 +54,25 @@ export async function sources(
 ): Promise<CatalogSourcesResult> {
 	const { coreBaseUrl } = loadConfig();
 	try {
-		const resp = await fetchWithTimeout(
+		return await withResponseDeadline<CatalogSourcesResult>(
 			`${coreBaseUrl}/api/catalog/sources?kind=${kind}`,
-			{ method: "GET", headers: coreHeaders() }
+			{ method: "GET", headers: coreHeaders() },
+			PROBE_TIMEOUT_MS,
+			async (resp) => {
+				if (!resp.ok) {
+					return { available: false, reason: `core responded ${resp.status}` };
+				}
+				const data = (await resp.json()) as {
+					active?: string;
+					sources?: SourceWire[];
+				};
+				return {
+					available: true,
+					active: data.active ?? "",
+					sources: (data.sources ?? []).map(toSource),
+				};
+			}
 		);
-		if (!resp.ok) {
-			return { available: false, reason: `core responded ${resp.status}` };
-		}
-		const data = (await resp.json()) as {
-			active?: string;
-			sources?: SourceWire[];
-		};
-		return {
-			available: true,
-			active: data.active ?? "",
-			sources: (data.sources ?? []).map(toSource),
-		};
 	} catch (error) {
 		return { available: false, reason: reasonFromError(error) };
 	}
@@ -94,22 +85,25 @@ export async function selectSource(
 ): Promise<CatalogActionResult> {
 	const { coreBaseUrl } = loadConfig();
 	try {
-		const resp = await fetchWithTimeout(
+		return await withResponseDeadline<CatalogActionResult>(
 			`${coreBaseUrl}/api/catalog/sources/select`,
 			{
 				method: "POST",
 				headers: coreHeaders({ "Content-Type": "application/json" }),
 				body: JSON.stringify({ kind, id }),
+			},
+			PROBE_TIMEOUT_MS,
+			async (resp) => {
+				if (!resp.ok) {
+					return {
+						available: true,
+						ok: false,
+						error: `core responded ${resp.status}`,
+					};
+				}
+				return { available: true, ok: true };
 			}
 		);
-		if (!resp.ok) {
-			return {
-				available: true,
-				ok: false,
-				error: `core responded ${resp.status}`,
-			};
-		}
-		return { available: true, ok: true };
 	} catch (error) {
 		return { available: false, reason: reasonFromError(error) };
 	}
@@ -144,15 +138,18 @@ async function listSkills(query: string): Promise<CatalogListResult> {
 		q.set("query", query);
 	}
 	try {
-		const resp = await fetchWithTimeout(
+		return await withResponseDeadline<CatalogListResult>(
 			`${coreBaseUrl}/api/skills/catalog?${q.toString()}`,
-			{ method: "GET", headers: coreHeaders() }
+			{ method: "GET", headers: coreHeaders() },
+			PROBE_TIMEOUT_MS,
+			async (resp) => {
+				if (!resp.ok) {
+					return { available: false, reason: `core responded ${resp.status}` };
+				}
+				const data = (await resp.json()) as { skills?: SkillCardWire[] };
+				return { available: true, items: (data.skills ?? []).map(skillToItem) };
+			}
 		);
-		if (!resp.ok) {
-			return { available: false, reason: `core responded ${resp.status}` };
-		}
-		const data = (await resp.json()) as { skills?: SkillCardWire[] };
-		return { available: true, items: (data.skills ?? []).map(skillToItem) };
 	} catch (error) {
 		return { available: false, reason: reasonFromError(error) };
 	}
@@ -161,21 +158,24 @@ async function listSkills(query: string): Promise<CatalogListResult> {
 async function installSkill(id: string): Promise<CatalogActionResult> {
 	const { coreBaseUrl } = loadConfig();
 	try {
-		const resp = await fetchWithTimeout(
+		return await withResponseDeadline<CatalogActionResult>(
 			`${coreBaseUrl}/api/skills/catalog/install`,
 			{
 				method: "POST",
 				headers: coreHeaders({ "Content-Type": "application/json" }),
 				body: JSON.stringify({ id }),
+			},
+			PROBE_TIMEOUT_MS,
+			async (resp) => {
+				const data = (await resp.json().catch(() => ({}))) as {
+					success?: boolean;
+					error?: string;
+					result?: unknown;
+				};
+				const ok = resp.ok && data.success !== false && Boolean(data.result);
+				return { available: true, ok, error: ok ? undefined : data.error };
 			}
 		);
-		const data = (await resp.json().catch(() => ({}))) as {
-			success?: boolean;
-			error?: string;
-			result?: unknown;
-		};
-		const ok = resp.ok && data.success !== false && Boolean(data.result);
-		return { available: true, ok, error: ok ? undefined : data.error };
 	} catch (error) {
 		return { available: false, reason: reasonFromError(error) };
 	}
@@ -198,15 +198,21 @@ interface McpServerWire {
 /** Fetch the set of registered MCP server names (for installed-state derivation). */
 async function mcpServerNames(coreBaseUrl: string): Promise<Set<string>> {
 	try {
-		const resp = await fetchWithTimeout(`${coreBaseUrl}/api/mcp/servers`, {
-			method: "GET",
-			headers: coreHeaders(),
-		});
-		if (!resp.ok) {
-			return new Set();
-		}
-		const data = (await resp.json()) as { servers?: McpServerWire[] };
-		return new Set((data.servers ?? []).map((s) => s.name));
+		return await withResponseDeadline<Set<string>>(
+			`${coreBaseUrl}/api/mcp/servers`,
+			{
+				method: "GET",
+				headers: coreHeaders(),
+			},
+			PROBE_TIMEOUT_MS,
+			async (resp) => {
+				if (!resp.ok) {
+					return new Set();
+				}
+				const data = (await resp.json()) as { servers?: McpServerWire[] };
+				return new Set((data.servers ?? []).map((s) => s.name));
+			}
+		);
 	} catch {
 		return new Set();
 	}
@@ -233,19 +239,30 @@ async function listMcp(query: string): Promise<CatalogListResult> {
 	}
 	try {
 		const [resp, installed] = await Promise.all([
-			fetchWithTimeout(`${coreBaseUrl}/api/mcp/catalog?${q.toString()}`, {
-				method: "GET",
-				headers: coreHeaders(),
-			}),
+			withResponseDeadline(
+				`${coreBaseUrl}/api/mcp/catalog?${q.toString()}`,
+				{
+					method: "GET",
+					headers: coreHeaders(),
+				},
+				PROBE_TIMEOUT_MS,
+				async (response) => ({
+					ok: response.ok,
+					status: response.status,
+					servers: response.ok
+						? (((await response.json()) as { servers?: McpCardWire[] })
+								.servers ?? [])
+						: [],
+				})
+			),
 			mcpServerNames(coreBaseUrl),
 		]);
 		if (!resp.ok) {
 			return { available: false, reason: `core responded ${resp.status}` };
 		}
-		const data = (await resp.json()) as { servers?: McpCardWire[] };
 		return {
 			available: true,
-			items: (data.servers ?? []).map((s) => mcpToItem(s, installed)),
+			items: resp.servers.map((s) => mcpToItem(s, installed)),
 		};
 	} catch (error) {
 		return { available: false, reason: reasonFromError(error) };
@@ -255,21 +272,24 @@ async function listMcp(query: string): Promise<CatalogListResult> {
 async function installMcp(id: string): Promise<CatalogActionResult> {
 	const { coreBaseUrl } = loadConfig();
 	try {
-		const resp = await fetchWithTimeout(
+		return await withResponseDeadline<CatalogActionResult>(
 			`${coreBaseUrl}/api/mcp/catalog/install`,
 			{
 				method: "POST",
 				headers: coreHeaders({ "Content-Type": "application/json" }),
 				body: JSON.stringify({ id }),
+			},
+			PROBE_TIMEOUT_MS,
+			async (resp) => {
+				const data = (await resp.json().catch(() => ({}))) as {
+					success?: boolean;
+					error?: string;
+					server?: unknown;
+				};
+				const ok = resp.ok && data.success !== false && Boolean(data.server);
+				return { available: true, ok, error: ok ? undefined : data.error };
 			}
 		);
-		const data = (await resp.json().catch(() => ({}))) as {
-			success?: boolean;
-			error?: string;
-			server?: unknown;
-		};
-		const ok = resp.ok && data.success !== false && Boolean(data.server);
-		return { available: true, ok, error: ok ? undefined : data.error };
 	} catch (error) {
 		return { available: false, reason: reasonFromError(error) };
 	}

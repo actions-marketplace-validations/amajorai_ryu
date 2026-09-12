@@ -398,16 +398,24 @@ function DestinationDialog({
 	);
 }
 
-export function BackupSettings({
+export function BackupSettings(props: { target: ApiTarget; spaceId?: string }) {
+	const key = JSON.stringify([
+		props.target.url,
+		props.target.token ?? null,
+		props.target.userJwt ?? null,
+		props.spaceId ?? null,
+	]);
+	return <ScopedBackupSettings key={key} {...props} />;
+}
+
+function ScopedBackupSettings({
 	target,
 	spaceId,
 }: {
 	target: ApiTarget;
 	spaceId?: string;
 }) {
-	const [overview, setOverview] = useState<BackupOverview>(EMPTY);
-	const [loading, setLoading] = useState(true);
-	const [error, setError] = useState<string | null>(null);
+	const [actionError, setError] = useState<string | null>(null);
 	const [notice, setNotice] = useState<string | null>(null);
 	const [trackedOperation, setTrackedOperation] = useState<string | null>(null);
 	const [busy, setBusy] = useState(false);
@@ -425,53 +433,84 @@ export function BackupSettings({
 	const id = useId();
 	const targetRef = useRef(target);
 	targetRef.current = target;
-	const identity = `${target.url}\n${target.token ?? ""}\n${target.userJwt ?? ""}`;
+	const mounted = useRef(true);
+	const browseController = useRef<AbortController | null>(null);
+	const queryTarget = useMemo(
+		() => ({ ...target }),
+		[target.url, target.token, target.userJwt, target.fetch]
+	);
+	const queryKey = useMemo(
+		() => [
+			"backup-overview",
+			queryTarget.url,
+			queryTarget.token ?? null,
+			queryTarget.userJwt ?? null,
+		],
+		[queryTarget]
+	);
+	const backupQuery = useQuery(
+		{
+			queryKey,
+			queryFn: ({ signal }) => getBackups(queryTarget, signal),
+			staleTime: 0,
+			retry: false,
+			refetchInterval: (query) =>
+				query.state.data?.operations.some(active)
+					? 1500
+					: query.state.data?.policies.some((policy) => policy.enabled)
+						? 15_000
+						: false,
+		},
+		queryClient
+	);
+	const overview = backupQuery.data ?? EMPTY;
+	const running = overview.operations.some(active);
+	const loading = backupQuery.isPending;
+	const error =
+		actionError ?? (backupQuery.error ? message(backupQuery.error) : null);
 	const scope: BackupScope =
 		selection === "node"
 			? { kind: "node" }
 			: { kind: "space", spaceId: selection };
-	const reload = useCallback(async () => {
-		const response = await getBackups(targetRef.current);
-		setOverview(response);
-		setError(null);
-		setLoading(false);
-		setDestinationId((current) =>
-			response.destinations.some((d) => d.id === current)
-				? current
-				: (response.destinations[0]?.id ?? "")
-		);
+	useEffect(() => {
+		mounted.current = true;
+		return () => {
+			mounted.current = false;
+		};
 	}, []);
 	useEffect(() => {
-		let disposed = false;
-		setLoading(true);
-		setRecords(null);
-		setOverview(EMPTY);
-		setNotice(null);
-		getBackups(targetRef.current)
-			.then((value) => {
-				if (!disposed) {
-					setOverview(value);
-					setDestinationId(value.destinations[0]?.id ?? "");
-					setError(null);
-				}
-			})
-			.catch((error: unknown) => {
-				if (!disposed) {
-					setError(message(error));
-				}
-			})
-			.finally(() => {
-				if (!disposed) {
-					setLoading(false);
-				}
+		if (backupQuery.data) {
+			setDestinationId((current) =>
+				backupQuery.data.destinations.some(
+					(destination) => destination.id === current
+				)
+					? current
+					: (backupQuery.data.destinations[0]?.id ?? "")
+			);
+		}
+	}, [backupQuery.data]);
+	const reload = useCallback(async () => {
+		if (!mounted.current) {
+			return;
+		}
+		setError(null);
+		await queryClient.cancelQueries({ queryKey, exact: true });
+		if (!mounted.current) {
+			return;
+		}
+		try {
+			await queryClient.fetchQuery({
+				queryKey,
+				queryFn: ({ signal }) => getBackups(queryTarget, signal),
+				staleTime: 0,
+				retry: false,
 			});
-
-		return () => {
-			disposed = true;
-		};
-	}, [identity]);
-	const running = overview.operations.some(active);
-	const scheduled = overview.policies.some((policy) => policy.enabled);
+		} catch (error) {
+			if (mounted.current) {
+				throw error;
+			}
+		}
+	}, [queryKey, queryTarget]);
 	useEffect(() => {
 		const operation = overview.operations.find(
 			(entry) => entry.id === trackedOperation
@@ -487,19 +526,15 @@ export function BackupSettings({
 		setTrackedOperation(null);
 	}, [overview.operations, trackedOperation]);
 	useEffect(() => {
-		if (!(running || scheduled)) {
-			return;
-		}
-		const timer = setInterval(
-			() => {
-				reload().catch((error: unknown) => setError(message(error)));
-			},
-			running ? 1500 : 15_000
-		);
-		return () => clearInterval(timer);
-	}, [running, scheduled, reload]);
-	useEffect(() => {
 		setRecords(null);
+		if (browseController.current) {
+			browseController.current.abort();
+			browseController.current = null;
+			setBusy(false);
+		}
+		return () => {
+			browseController.current?.abort();
+		};
 	}, [destinationId, selection]);
 	const policy = overview.policies.find(
 		(p) =>
@@ -534,20 +569,34 @@ export function BackupSettings({
 		}
 	}
 	async function browse() {
+		browseController.current?.abort();
+		const controller = new AbortController();
+		browseController.current = controller;
 		setBusy(true);
 		setError(null);
 		try {
-			setRecords(
-				await listBackups(
-					targetRef.current,
-					destinationId,
-					selection === "node" ? undefined : selection
-				)
+			const records = await listBackups(
+				targetRef.current,
+				destinationId,
+				selection === "node" ? undefined : selection,
+				controller.signal
 			);
+			if (!controller.signal.aborted && mounted.current) {
+				setRecords(records);
+			}
 		} catch (error) {
-			setError(message(error));
+			if (!controller.signal.aborted && mounted.current) {
+				setError(message(error));
+			}
 		} finally {
-			setBusy(false);
+			if (
+				browseController.current === controller &&
+				!controller.signal.aborted &&
+				mounted.current
+			) {
+				browseController.current = null;
+				setBusy(false);
+			}
 		}
 	}
 	const shownOperations = overview.operations

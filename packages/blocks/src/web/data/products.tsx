@@ -42,6 +42,7 @@ import type { ReactNode } from "react";
 import { BotAppVisual } from "../bot-visual.tsx";
 import { ConsoleWorkflowVisual } from "../console-workflow-visual.tsx";
 import { GatewayRequestPreview } from "../gateway-request-preview.tsx";
+import { PassportBook } from "../interactive-book.tsx";
 import type {
 	BentoItem,
 	CtaLink,
@@ -58,6 +59,7 @@ import {
 	CodePaneSplit,
 	ComputeExchangeVisual,
 	ConnectionsVisual,
+	ConnectVisual,
 	CoreVisual,
 	DesktopVisual,
 	DevicesVisual,
@@ -416,6 +418,249 @@ export const products: Product[] = [
 			primaryCta: EARLY_ACCESS,
 			secondaryCta: BOOK_DEMO,
 			note: "Open core · Self-hostable · Routing · DLP · Budgets · Audit",
+		},
+	},
+
+	{
+		slug: "passport",
+		name: "Ryu Passport",
+		navLabel: "Passport",
+		category: "Platform",
+		standalone: true,
+		tagline:
+			"An encrypted identity vault for agents and the sessions they are allowed to use.",
+		Icon: Key,
+		hero: {
+			eyebrow: "Ryu Passport · encrypted identity service",
+			title: "Give agents a safe way to stay signed in",
+			subtitle:
+				"Store per-domain sessions behind an encrypted, tenant-separated boundary. Passport keeps credentials out of model context and makes every re-authentication explicit.",
+			primaryCta: EARLY_ACCESS,
+			secondaryCta: {
+				label: "Read the docs",
+				href: "/docs/standalone/passport",
+			},
+			visual: <PassportBook />,
+		},
+		highlights: [
+			{
+				title: "Encrypted at rest",
+				description:
+					"Cookies, tokens, and session state are sealed before they touch the Passport store.",
+				icon: Shield,
+			},
+			{
+				title: "Never model-visible",
+				description:
+					"Credential state is read only at an allowed tool boundary, never returned in API responses.",
+				icon: Eye,
+			},
+			{
+				title: "Tenant-separated",
+				description:
+					"Each Passport tenant gets its own store, profile namespace, and bearer boundary.",
+				icon: Users,
+			},
+			{
+				title: "Explicit re-auth",
+				description:
+					"Stale connections become NEEDS_AUTH and return a clear human login path.",
+				icon: RefreshCw,
+			},
+		],
+		bento: {
+			eyebrow: "Identity without credential sprawl",
+			title: "A small service around a high-risk boundary.",
+			subtitle:
+				"Passport owns the durable identity state. Your agent and tool gateway only receive the capability they need for the current call.",
+			items: [
+				{
+					title: "Profiles and domains",
+					description:
+						"Group per-domain connections under one profile and bind that profile to an agent or workflow.",
+					icon: Key,
+					visual: <ConnectionsVisual />,
+				},
+				{
+					title: "Manual import today",
+					description:
+						"Complete login in the provider you trust, then import the resulting cookie or token state for sealing.",
+					icon: ArrowUpRight,
+				},
+				{
+					title: "Health sweeps",
+					description:
+						"Check that imported state is present. Re-import a session when its provider login expires.",
+					icon: RefreshCw,
+				},
+				{
+					title: "Governed reads",
+					description:
+						"Core and Gateway can audit the identity.read decision without exposing plaintext state.",
+					icon: Shield,
+				},
+			],
+		},
+		splits: [
+			{
+				eyebrow: "A clean handoff",
+				title: "Keep the secret out of the agent loop",
+				description:
+					"Passport is the identity service; Connect or another governed tool plane is the execution service. Their contracts meet at an explicit, auditable read rather than a copied cookie jar.",
+				bullets: [
+					"SQLite store with encrypted credential state",
+					"Metadata-only profile and connection responses",
+					"Human-in-the-loop login when a domain needs auth",
+				],
+				visual: <PassportBook />,
+			},
+		],
+		faq: [
+			{
+				q: "Does Passport send credentials to the model?",
+				a: "No. Passport never serializes encrypted or decrypted credential state in its API responses. A governed runtime reads state only at the tool boundary that needs it.",
+			},
+			{
+				q: "Is Passport a browser automation engine?",
+				a: "No. Passport owns identity storage and lifecycle. A browser or provider-specific capture surface can be connected through the credential-source seam.",
+			},
+			{
+				q: "Can Passport run without Ryu Core?",
+				a: "Yes. The standalone service runs over the same extracted encrypted vault primitive used by Core, with its own bearer tokens and data directory.",
+			},
+		],
+		cta: {
+			title: "Put identity behind a real boundary.",
+			subtitle:
+				"Run Passport beside your agent stack, or use it as the identity layer underneath Ryu Connect and Core.",
+			primaryCta: EARLY_ACCESS,
+			secondaryCta: {
+				label: "Read the docs",
+				href: "/docs/standalone/passport",
+			},
+			note: "Standalone · Encrypted at rest · Tenant-separated · Metadata-only API",
+		},
+	},
+
+	{
+		slug: "connect",
+		name: "Ryu Connect",
+		navLabel: "Connect",
+		category: "Platform",
+		standalone: true,
+		tagline:
+			"MCP hosting, Skills, governed tools, and Composio behind one integration edge.",
+		Icon: Cable,
+		hero: {
+			eyebrow: "Ryu Connect · standalone integration edge",
+			title: "One endpoint for every agent connection",
+			subtitle:
+				"Give your product one tenant-scoped boundary for hosted MCP, SKILL.md content, governed tool calls, and Composio actions—without moving provider secrets into your app.",
+			primaryCta: EARLY_ACCESS,
+			secondaryCta: {
+				label: "Read the docs",
+				href: "/docs/standalone/connect",
+			},
+			visual: <ConnectVisual />,
+		},
+		highlights: [
+			{
+				title: "MCP hosting",
+				description:
+					"Give any MCP client access to the Skills and tools assigned to its tenant.",
+				icon: Plug,
+			},
+			{
+				title: "Skill hosting",
+				description:
+					"Serve discoverable SKILL.md packages without inventing another instruction format.",
+				icon: Sparkles,
+			},
+			{
+				title: "Scoped tools",
+				description:
+					"Discover and call registered tools through one API with explicit tenant allowlists.",
+				icon: Shield,
+			},
+			{
+				title: "Composio-ready",
+				description:
+					"Use approved actions with a connected account and toolkit version assigned to your tenant.",
+				icon: Cable,
+			},
+		],
+		bento: {
+			eyebrow: "The integration edge",
+			title: "Give each tenant the tools it needs.",
+			subtitle:
+				"Host Skills, register MCP servers, and call Composio actions from one service. Keep credentials with Connect and choose exactly which tools each tenant can use.",
+			items: [
+				{
+					title: "MCP protocol edge",
+					description:
+						"Connect existing MCP clients to your hosted Skills and permitted tools through Streamable HTTP.",
+					icon: Plug,
+					visual: <McpVisual />,
+				},
+				{
+					title: "Skills as content",
+					description:
+						"List and serve the same SKILL.md packages agents already understand.",
+					icon: Sparkles,
+				},
+				{
+					title: "Tool search and execution",
+					description:
+						"Search, inspect, and execute the same tenant-scoped tools through MCP or REST.",
+					icon: Shield,
+					visual: <ToolGatewayVisual serviceName="Ryu Connect" />,
+				},
+				{
+					title: "Provider-backed actions",
+					description:
+						"Connect selects the permitted Composio account, tool, and version. Provider credentials stay out of client requests.",
+					icon: Cable,
+				},
+			],
+		},
+		splits: [
+			{
+				eyebrow: "One boundary, four lanes",
+				title: "Give products one integration contract",
+				description:
+					"Use Connect when your product needs MCP hosting, Skills, tool execution, and Composio but should not own four separate credential and policy integrations.",
+				bullets: [
+					"Tenant-scoped bearer auth at the edge",
+					"Upstream credentials stay operator-configured",
+					"Explicit unavailable states when a lane is not configured",
+				],
+				visual: <ConnectVisual />,
+			},
+		],
+		faq: [
+			{
+				q: "Does Connect replace Gateway or Core?",
+				a: "Connect can host and execute its registered tools independently. Core remains the agent runtime and Gateway provides model routing and policy. A separate compatibility mode forwards to an existing Core and Gateway setup.",
+			},
+			{
+				q: "Can I enable only one lane?",
+				a: "Yes. Native MCP registrations, Skill hosting, and Composio bindings can be configured independently. Legacy upstream forwarding uses a separate single-tenant mode.",
+			},
+			{
+				q: "Where does Composio state live?",
+				a: "Connected accounts remain with Composio. Connect holds the operator-supplied project credential in its process and binds permitted accounts and actions to each tenant. Client requests never choose another tenant's account.",
+			},
+		],
+		cta: {
+			title: "Connect your agent stack once.",
+			subtitle:
+				"Run Connect beside your product and keep MCP, Skills, tools, and Composio on their existing governed Ryu seams.",
+			primaryCta: EARLY_ACCESS,
+			secondaryCta: {
+				label: "Read the docs",
+				href: "/docs/standalone/connect",
+			},
+			note: "Standalone · Tenant-scoped · MCP · Skills · Tool gateway · Composio",
 		},
 	},
 

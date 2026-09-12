@@ -5,7 +5,6 @@ import { Logo } from "@ryu/ui/components/logo.tsx";
 import type { ReactNode } from "react";
 
 import Aurora from "./aurora.tsx";
-import BackedBy from "./backed-by.tsx";
 import FooterBuildInfo from "./footer-build-info.tsx";
 import { ThemeToggle } from "./theme-toggle.tsx";
 import "./footer.css";
@@ -45,7 +44,6 @@ export default function Footer({
 						<p className="max-w-md text-muted-foreground">
 							{localizedHeroDescription}
 						</p>
-						<BackedBy className="pt-2" />
 					</div>
 
 					<div className="grid grid-cols-2 gap-x-8 gap-y-8 sm:grid-cols-3 sm:gap-x-12 lg:gap-x-16">
@@ -142,7 +140,12 @@ export default function Footer({
 								>
 									<LocalizedFooterCopy value="Programs" />
 								</a>
-                                <a className="block text-muted-foreground transition-colors hover:text-foreground" href="/security"><LocalizedFooterCopy value="Security" /></a>
+								<a
+									className="block text-muted-foreground transition-colors hover:text-foreground"
+									href="/security"
+								>
+									<LocalizedFooterCopy value="Security" />
+								</a>
 								<a
 									className="block text-muted-foreground transition-colors hover:text-foreground"
 									href="/partners"

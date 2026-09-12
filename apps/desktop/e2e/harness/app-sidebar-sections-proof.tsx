@@ -4,13 +4,17 @@
 // contributions; only the Core reads are stubbed so this page stays hermetic.
 
 import type { SidebarSectionSpec } from "@ryu/app-host/views";
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { Button } from "@ryu/ui/components/button.tsx";
+import { QueryClientProvider } from "@tanstack/react-query";
+import { useState } from "react";
 import { createRoot } from "react-dom/client";
 import { DynamicSidebarSection } from "../../src/components/layout/AppSidebar.tsx";
 import {
 	TabsContext,
 	type TabsContextValue,
 } from "../../src/contexts/TabsContext.tsx";
+import { useSidebarSectionSources } from "../../src/hooks/useSidebarSectionSource.ts";
+import { queryClient } from "../../src/lib/query-client.ts";
 import "../../src/index.css";
 
 const APP_SECTIONS: Array<{
@@ -246,12 +250,25 @@ const noopMenu = {
 	onSetSort: () => undefined,
 };
 
+const measurePolling = new URLSearchParams(location.search).has("polling");
+if (measurePolling && APP_SECTIONS[0].spec.source) {
+	APP_SECTIONS[0].spec.source.refreshMs = 1000;
+}
+const sourceReadTimes: number[] = [];
 const realFetch = globalThis.fetch.bind(globalThis);
 globalThis.fetch = ((input: RequestInfo | URL, init?: RequestInit) => {
 	const url = typeof input === "string" ? input : input.toString();
 	const path = new URL(url, location.href).pathname;
 	const payload = PAYLOADS[path];
 	if (payload) {
+		if (path === "/api/blueprint/plans") {
+			sourceReadTimes.push(performance.now());
+			document.documentElement.dataset.sourceReadTimes =
+				JSON.stringify(sourceReadTimes);
+		}
+		document.documentElement.dataset.sectionReads = String(
+			Number(document.documentElement.dataset.sectionReads ?? 0) + 1
+		);
 		return Promise.resolve(
 			new Response(JSON.stringify(payload), {
 				headers: { "content-type": "application/json" },
@@ -262,14 +279,23 @@ globalThis.fetch = ((input: RequestInfo | URL, init?: RequestInit) => {
 	return realFetch(input as RequestInfo, init);
 }) as typeof fetch;
 
-const queryClient = new QueryClient({
-	defaultOptions: { queries: { retry: false } },
-});
+function SharedReader() {
+	useSidebarSectionSources(
+		APP_SECTIONS.map((section) => ({
+			...section,
+			approved_grants: ["ui:declarative-http"],
+			http_policy: "core",
+		}))
+	);
+	return null;
+}
 
 function Story() {
+	const [shared, setShared] = useState(!measurePolling);
 	return (
 		<QueryClientProvider client={queryClient}>
 			<TabsContext.Provider value={tabs}>
+				{shared && <SharedReader />}
 				<main
 					style={{
 						background: "#0b0d12",
@@ -279,6 +305,9 @@ function Story() {
 						padding: "24px 32px",
 					}}
 				>
+					{measurePolling && (
+						<Button onClick={() => setShared(true)}>Mount shared reader</Button>
+					)}
 					<h1 style={{ fontSize: 18, margin: "0 0 6px" }}>
 						App-contributed sidebar sections
 					</h1>

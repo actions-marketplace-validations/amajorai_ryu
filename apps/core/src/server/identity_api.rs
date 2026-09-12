@@ -31,6 +31,36 @@ use serde_json::{json, Value};
 use super::ServerState;
 use crate::identity::{CredentialBackend, CredentialSourceRegistry, LoginKind, SecretState};
 
+async fn passport_management(
+    method: reqwest::Method,
+    segments: &[&str],
+    body: Option<Value>,
+) -> Option<axum::response::Response> {
+    crate::identity::passport::manage(method, segments, body)
+        .await
+        .map(|result| match result {
+            Ok((status, value)) => {
+                // Preserve Core's existing create-success status for its clients.
+                let status = if status == 201 {
+                    StatusCode::OK
+                } else {
+                    StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_GATEWAY)
+                };
+                let mut response = (status, Json(value)).into_response();
+                response.headers_mut().insert(
+                    "cache-control",
+                    axum::http::HeaderValue::from_static("no-store"),
+                );
+                response
+            }
+            Err(_) => err(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "Passport management is unavailable or not configured",
+            )
+            .into_response(),
+        })
+}
+
 /// Uniform JSON error body for an operational failure (store unavailable,
 /// connection not found, bad request).
 fn err(status: StatusCode, e: impl std::fmt::Display) -> (StatusCode, Json<Value>) {
@@ -60,6 +90,9 @@ fn store() -> Result<&'static crate::identity::IdentityStore, (StatusCode, Json<
     responses((status = 200, description = "Profiles + connections", body = serde_json::Value))
 )]
 pub async fn list_identities(State(_state): State<ServerState>) -> impl IntoResponse {
+    if let Some(response) = passport_management(reqwest::Method::GET, &["profiles"], None).await {
+        return response;
+    }
     let store = match store() {
         Ok(s) => s,
         Err(e) => return e.into_response(),
@@ -96,6 +129,17 @@ pub async fn create_connection(
     State(_state): State<ServerState>,
     Json(body): Json<CreateConnectionBody>,
 ) -> impl IntoResponse {
+    if let Some(response) = passport_management(
+        reqwest::Method::POST,
+        &["connections"],
+        Some(
+            json!({ "profile_id": body.profile_id, "domain": body.domain, "source": body.source }),
+        ),
+    )
+    .await
+    {
+        return response;
+    }
     if body.profile_id.is_empty() || body.domain.is_empty() {
         return err(
             StatusCode::BAD_REQUEST,
@@ -135,6 +179,11 @@ pub async fn begin_login(
     State(_state): State<ServerState>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
+    if let Some(response) =
+        passport_management(reqwest::Method::POST, &["connections", &id, "login"], None).await
+    {
+        return response;
+    }
     let store = match store() {
         Ok(s) => s,
         Err(e) => return e.into_response(),
@@ -194,6 +243,11 @@ pub async fn poll_connection(
     State(_state): State<ServerState>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
+    if let Some(response) =
+        passport_management(reqwest::Method::GET, &["connections", &id], None).await
+    {
+        return response;
+    }
     let store = match store() {
         Ok(s) => s,
         Err(e) => return e.into_response(),
@@ -218,7 +272,7 @@ pub async fn poll_connection(
 /// Body for `POST /api/identities/connections/:id/import` — the user-provided
 /// credential plaintext (cookie/token/session JSON). Wrapped into a `SecretState`
 /// on receipt; never logged.
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 pub struct ImportConnectionBody {
     /// The raw credential state to seal. Accepted as a string (the cookie/token
     /// blob); the handler immediately wraps it in a redacted `SecretState`.
@@ -243,6 +297,15 @@ pub async fn import_connection(
     Path(id): Path<String>,
     Json(body): Json<ImportConnectionBody>,
 ) -> impl IntoResponse {
+    if let Some(response) = passport_management(
+        reqwest::Method::POST,
+        &["connections", &id, "import"],
+        Some(json!({ "state": body.state })),
+    )
+    .await
+    {
+        return response;
+    }
     if body.state.is_empty() {
         return err(StatusCode::BAD_REQUEST, "state is required").into_response();
     }
@@ -288,6 +351,11 @@ pub async fn delete_connection(
     State(_state): State<ServerState>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
+    if let Some(response) =
+        passport_management(reqwest::Method::DELETE, &["connections", &id], None).await
+    {
+        return response;
+    }
     let store = match store() {
         Ok(s) => s,
         Err(e) => return e.into_response(),

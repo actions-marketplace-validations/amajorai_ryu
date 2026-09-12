@@ -19,7 +19,6 @@ import {
 	updateDocument as apiUpdateDocument,
 	uploadSpaceFile as apiUploadSpaceFile,
 	fetchDocument,
-	fetchDocuments,
 	type RetrievalMode,
 	type RetrievalModeChange,
 	type RetrievalModeProgress,
@@ -33,6 +32,7 @@ import { useCoreRefresh } from "@/src/lib/core-refresh.ts";
 import { useEntityCap } from "@/src/lib/gating/useEntityCap.ts";
 import { queryClient } from "@/src/lib/query-client.ts";
 import type { ResourceVisibility } from "@/src/lib/resource-visibility.ts";
+import { fetchSpaceDocumentList } from "@/src/lib/space-document-list-query.ts";
 import { spaceListQueryOptions } from "@/src/lib/space-list-query.ts";
 import { useActiveNode } from "./useActiveNode.ts";
 
@@ -281,8 +281,16 @@ export function useSpaces(): UseSpacesResult {
 	);
 
 	const listDocuments = useCallback(
-		(spaceId: string) => fetchDocuments({ url, token, userJwt }, spaceId),
-		[url, token, userJwt]
+		(spaceId: string) =>
+			fetchSpaceDocumentList(
+				queryClient,
+				{ url, token, userJwt },
+				spaceId,
+				queryClient
+					.getQueryData<ReadonlyMap<string, number>>(revisionKey)
+					?.get(spaceId) ?? 0
+			),
+		[url, token, userJwt, revisionKey]
 	);
 
 	const ingest = useCallback(
@@ -291,9 +299,16 @@ export function useSpaces(): UseSpacesResult {
 			bumpDocumentRevision(spaceId);
 			// Refresh the list so the space's document count stays accurate.
 			await refreshAfterMutation();
-			return fetchDocuments({ url, token, userJwt }, spaceId);
+			return listDocuments(spaceId);
 		},
-		[url, token, userJwt, bumpDocumentRevision, refreshAfterMutation]
+		[
+			url,
+			token,
+			userJwt,
+			bumpDocumentRevision,
+			refreshAfterMutation,
+			listDocuments,
+		]
 	);
 
 	const search = useCallback(
