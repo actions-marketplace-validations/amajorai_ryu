@@ -204,7 +204,7 @@ export default function ConsentSettings({
 
 	return (
 		<div className="flex flex-col gap-4 p-4">
-			<h2 className="font-semibold text-sm">Companion Consent</h2>
+			<h2 className="font-medium text-sm">Companion Consent</h2>
 			<p className="text-muted-foreground text-xs">
 				All capabilities are off by default. Enable only what you need. Settings
 				are stored locally — no telemetry.
@@ -294,7 +294,7 @@ export default function ConsentSettings({
 				<button
 					className={`rounded-md border px-3 py-1.5 font-medium text-sm transition-colors ${
 						paused
-							? "border-warning/50 bg-warning/10 text-warning hover:bg-warning/20 dark:text-warning"
+							? "border-warning/50 bg-warning/10 text-status-warning hover:bg-warning/20 dark:text-status-warning"
 							: "hover:bg-accent hover:text-accent-foreground"
 					}`}
 					onClick={() => handlePauseToggle().catch(() => undefined)}

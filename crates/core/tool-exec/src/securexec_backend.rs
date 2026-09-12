@@ -48,14 +48,14 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::process::{ChildStdin, Command};
+use tokio::process::Command;
 
 use crate::win_process::NoWindow;
 
 use super::{
-    ExecOutcome, InvokeOutcome, ResumeDecision, SandboxToolInvoker, ToolInvocation,
-    DEFAULT_DEADLINE_SECS, MAX_PREVIEW_CHARS,
+    kill_and_reap, write_line_until, BoundedFrameReader, ExecOutcome, InvokeOutcome,
+    ResumeDecision, SandboxToolInvoker, ToolInvocation, DEFAULT_DEADLINE_SECS, MAX_LOG_LINES,
+    MAX_PREVIEW_CHARS,
 };
 
 /// The backend label used for audit.
@@ -198,27 +198,26 @@ async fn run_harness(
     };
 
     let mut stdin = child.stdin.take().expect("piped stdin");
-    let mut stdout = BufReader::new(child.stdout.take().expect("piped stdout"));
+    let mut stdout = BoundedFrameReader::new(child.stdout.take().expect("piped stdout"));
     let mut logs: Vec<String> = Vec::new();
     let deadline = Instant::now() + active_deadline;
 
     loop {
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
-            let _ = child.kill().await;
+            kill_and_reap(&mut child, deadline).await;
             return ExecOutcome::error("execution exceeded the wall-clock deadline and was killed");
         }
 
-        let mut line = String::new();
-        match tokio::time::timeout(remaining, stdout.read_line(&mut line)).await {
+        let line = match tokio::time::timeout(remaining, stdout.read_frame()).await {
             Err(_) => {
-                let _ = child.kill().await;
+                kill_and_reap(&mut child, deadline).await;
                 return ExecOutcome::error(
                     "execution exceeded the wall-clock deadline and was killed",
                 );
             }
-            Ok(Ok(0)) => {
-                let _ = child.wait().await;
+            Ok(Ok(None)) => {
+                kill_and_reap(&mut child, deadline).await;
                 return completed(
                     logs,
                     None,
@@ -226,30 +225,29 @@ async fn run_harness(
                     Some("securexec harness exited unexpectedly"),
                 );
             }
-            Ok(Ok(_)) => {}
+            Ok(Ok(Some(line))) => line,
             Ok(Err(e)) => {
-                let _ = child.kill().await;
+                kill_and_reap(&mut child, deadline).await;
                 return ExecOutcome::error(format!("error reading harness output: {e}"));
             }
-        }
-        let line = line.trim_end_matches(['\n', '\r']);
+        };
 
         if let Some(rest) = line.strip_prefix(TAG_LOG) {
             push_log(&mut logs, rest);
         } else if let Some(rest) = line.strip_prefix(TAG_ERROR) {
-            let _ = child.wait().await;
+            kill_and_reap(&mut child, deadline).await;
             return completed(logs, None, true, Some(rest));
         } else if let Some(rest) = line.strip_prefix(TAG_DONE) {
             let value = serde_json::from_str::<Value>(rest)
                 .ok()
                 .filter(|v| !v.is_null());
-            let _ = child.wait().await;
+            kill_and_reap(&mut child, deadline).await;
             return completed(logs, value, false, None);
         } else if let Some(rest) = line.strip_prefix(TAG_CALL) {
             let req: Value = match serde_json::from_str(rest) {
                 Ok(v) => v,
                 Err(e) => {
-                    let _ = child.kill().await;
+                    kill_and_reap(&mut child, deadline).await;
                     return ExecOutcome::error(format!("malformed tool-call from harness: {e}"));
                 }
             };
@@ -268,7 +266,7 @@ async fn run_harness(
             let outcome = match invoked {
                 Ok(o) => o,
                 Err(_) => {
-                    let _ = child.kill().await;
+                    kill_and_reap(&mut child, deadline).await;
                     return ExecOutcome::error(
                         "execution exceeded the wall-clock deadline and was killed",
                     );
@@ -290,12 +288,12 @@ async fn run_harness(
                     "error": "Composio elicitation is not supported on the secure-exec backend yet; use the Deno backend for connect/resume flows.",
                 }),
             };
-            if let Err(e) = write_line(&mut stdin, &reply.to_string()).await {
-                let _ = child.kill().await;
+            if let Err(e) = write_line_until(&mut stdin, &reply.to_string(), deadline).await {
+                kill_and_reap(&mut child, deadline).await;
                 return ExecOutcome::error(format!("failed to reply to harness: {e}"));
             }
         }
-        // Any other line is ignored — the protocol is tagged.
+        // Any other frame is ignored — the protocol is tagged.
     }
 }
 
@@ -310,12 +308,6 @@ pub async fn resume_parked(
 }
 
 // ── stdio + sanitization helpers (self-contained; mirror the Deno backend) ─────
-
-async fn write_line(stdin: &mut ChildStdin, line: &str) -> std::io::Result<()> {
-    stdin.write_all(line.as_bytes()).await?;
-    stdin.write_all(b"\n").await?;
-    stdin.flush().await
-}
 
 fn completed(
     logs: Vec<String>,
@@ -333,6 +325,9 @@ fn completed(
 
 /// Append a log line, capping total log volume at [`MAX_PREVIEW_CHARS`].
 fn push_log(logs: &mut Vec<String>, line: &str) {
+    if logs.len() >= MAX_LOG_LINES {
+        return;
+    }
     let used: usize = logs.iter().map(String::len).sum();
     if used >= MAX_PREVIEW_CHARS {
         return;
@@ -428,6 +423,15 @@ mod tests {
             "para one\n\npara two"
         );
         assert_eq!(strip_control("kept\r\ngone"), "kept\ngone");
+    }
+
+    #[test]
+    fn push_log_caps_empty_line_count() {
+        let mut logs = Vec::new();
+        for _ in 0..(MAX_LOG_LINES * 2) {
+            push_log(&mut logs, "");
+        }
+        assert_eq!(logs.len(), MAX_LOG_LINES);
     }
 
     #[tokio::test]

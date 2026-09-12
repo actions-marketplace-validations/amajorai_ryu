@@ -138,7 +138,7 @@ export function GoalBar({
 				<HugeiconsIcon
 					className={cn(
 						"size-4 shrink-0",
-						achieved ? "text-emerald-500" : "text-primary"
+						achieved ? "text-status-success" : "text-primary"
 					)}
 					icon={achieved ? CheckmarkCircle02Icon : Target01Icon}
 				/>

@@ -1,8 +1,4 @@
-import {
-	BACKEND_URL,
-	getActiveUserId,
-	listAccounts,
-} from "@/lib/auth-client.ts";
+import { BACKEND_URL, getActiveToken } from "@/lib/auth-client.ts";
 import { type ApiTarget, request } from "./client.ts";
 
 export type ConversationAccessRole = "participant" | "viewer";
@@ -54,14 +50,11 @@ interface PublicShareResponse {
 }
 
 function activeBearer(): string {
-	const activeUserId = getActiveUserId();
-	const account = listAccounts().find(
-		(candidate) => candidate.userId === activeUserId
-	);
-	if (!account?.token) {
+	const token = getActiveToken();
+	if (!token) {
 		throw new Error("Sign in to publish a public link.");
 	}
-	return account.token;
+	return token;
 }
 
 async function controlPlaneRequest<T>(

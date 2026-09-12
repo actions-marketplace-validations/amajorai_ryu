@@ -599,7 +599,7 @@ fn local_stem(filename: &str) -> String {
 /// unchecked `..`, path separator, or absolute path from the install endpoint
 /// would let a caller write the downloaded bytes anywhere on disk (path
 /// traversal / arbitrary file write).
-fn validate_gguf_filename(name: &str) -> Result<()> {
+pub fn validate_gguf_filename(name: &str) -> Result<()> {
     use std::ffi::OsStr;
     use std::path::{Component, Path};
 
@@ -616,6 +616,33 @@ fn validate_gguf_filename(name: &str) -> Result<()> {
         (Some(Component::Normal(only)), None) if only == OsStr::new(name) => Ok(()),
         _ => anyhow::bail!("unsafe filename: {name}"),
     }
+}
+
+/// Read-only projection of the files a GGUF uninstall would remove.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UninstallPlan {
+    pub repo_id: String,
+    pub filename: String,
+    pub model_path: String,
+    pub model_exists: bool,
+    pub adapter_path: String,
+    pub adapter_exists: bool,
+}
+
+pub fn plan_uninstall_file(repo_id: &str, filename: &str) -> Result<UninstallPlan> {
+    validate_gguf_filename(filename)?;
+    let stem = local_stem(filename);
+    let model_path = ryu_dir().join("models").join(format!("{stem}.gguf"));
+    let adapter_path = installed::mmproj_file_path(&stem);
+    Ok(UninstallPlan {
+        repo_id: repo_id.to_owned(),
+        filename: filename.to_owned(),
+        model_path: model_path.to_string_lossy().to_string(),
+        model_exists: model_path.exists(),
+        adapter_path: adapter_path.to_string_lossy().to_string(),
+        adapter_exists: adapter_path.exists(),
+    })
 }
 
 /// Validate a Hugging Face repo id (`author/name`). Both segments must be

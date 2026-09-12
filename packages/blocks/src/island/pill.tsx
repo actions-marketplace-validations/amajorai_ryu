@@ -13,7 +13,7 @@ import { ContextPill, type IslandActiveContext } from "./context-pill.tsx";
 export function IslandLogoCircle() {
 	return (
 		<div className="flex h-full w-full items-center justify-center">
-			<Logo className="text-neutral-100" size="34px" variant="eyes" />
+			<Logo className="text-foreground" size="34px" variant="eyes" />
 		</div>
 	);
 }
@@ -29,8 +29,8 @@ export function IslandDetailPill({
 }) {
 	return (
 		<div className="flex h-full w-full items-center gap-3 px-3">
-			<span className="flex size-9 shrink-0 items-center justify-center rounded-full bg-white/5 ring-1 ring-white/10">
-				<Logo className="text-neutral-100" size="22px" variant="eyes" />
+			<span className="flex size-9 shrink-0 items-center justify-center rounded-full bg-card ring-1 ring-border">
+				<Logo className="text-foreground" size="22px" variant="eyes" />
 			</span>
 			<ContextPill context={context} />
 		</div>

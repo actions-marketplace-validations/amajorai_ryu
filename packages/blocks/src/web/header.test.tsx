@@ -1,37 +1,64 @@
-import { expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
+import { expect, mock, test } from "bun:test";
+import { createElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
 
-const SOURCE = readFileSync(join(import.meta.dir, "header.tsx"), "utf8");
-const PRODUCTS_MENU = SOURCE.slice(
-	SOURCE.indexOf("function ProductsMenu"),
-	SOURCE.indexOf("function isHeaderLinkActive")
-);
-const MARKETING_LINKS = SOURCE.slice(
-	SOURCE.indexOf("function HeaderLinkList"),
-	SOURCE.indexOf("function PortalMobileNavigation")
-);
+mock.module("next/navigation", () => ({
+	usePathname: () => "/marketplace",
+}));
 
-test("marketing product menu participates in the shared hover morph", () => {
-	expect(PRODUCTS_MENU).toContain("<MotionNavigationMenuTrigger");
-	expect(PRODUCTS_MENU).toContain("<MotionNavigationMenuContent>");
-	expect(PRODUCTS_MENU).not.toContain("<DropdownMenu>");
+const { default: Header } = await import("./header.tsx");
+
+test("marketing header renders product/resource controls and Marketplace", () => {
+	const html = renderToStaticMarkup(createElement(Header));
+
+	expect(html.match(/data-slot="navigation-menu-trigger"/g)).toHaveLength(2);
+	expect(html).toContain("Products");
+	expect(html).toContain("Resources");
+	expect(html).toContain("bg-background");
+	expect(html).toContain("backdrop-blur-none");
+	expect(html).toContain("backdrop-saturate-100");
+	expect(html).toContain('href="/marketplace"');
+	expect(html).toContain('aria-current="page"');
 });
 
-test("marketing product labels avoid repeating the Ryu prefix", () => {
-	expect(SOURCE).toContain(
-		"map(({ href, shortLabel }) => ({ href, label: shortLabel }))"
+test("transparent marketing header leaves the landing visual visible", () => {
+	const html = renderToStaticMarkup(
+		createElement(Header, { transparent: true })
 	);
-	expect(SOURCE).toContain('{ href: "/marketplace/apps", label: "Apps" }');
-	expect(SOURCE).toContain('label: "Cloud"');
-	expect(SOURCE).toContain("Explore the platform →");
+
+	expect(html).toContain('data-transparent="true"');
+	expect(html).toContain("bg-background/20");
+	expect(html).not.toContain("backdrop-filter:blur(12px)");
 });
 
-test("marketing marketplace link keeps the readable header treatment", () => {
-	expect(MARKETING_LINKS).toContain(
-		'"text-foreground hover:bg-muted hover:text-foreground"'
+test("portal header orders account, organization, and utilities", () => {
+	const html = renderToStaticMarkup(
+		createElement(Header, {
+			inverse: true,
+			orgSlot: createElement("span", null, "Acme"),
+			portalContextNav: createElement("span", null, "Tabs"),
+			portalUtilityMenu: createElement("span", null, "Help"),
+			userMenu: createElement("span", null, "Account"),
+			variant: "portal",
+		})
 	);
-	expect(MARKETING_LINKS).not.toContain(
-		'"text-muted-foreground hover:bg-muted hover:text-foreground"'
+
+	expect(html.indexOf("Account")).toBeLessThan(html.indexOf("Acme"));
+	expect(html.indexOf("Acme")).toBeLessThan(html.indexOf("Help"));
+	expect(html).toContain('aria-label="Back to dashboard"');
+	expect(html).toContain('href="/dashboard"');
+	expect(html).not.toContain("Research Preview");
+});
+
+test("portal inverse header renders the inverted shell", () => {
+	const html = renderToStaticMarkup(
+		createElement(Header, {
+			inverse: true,
+			orgSlot: createElement("span", null, "Acme"),
+			variant: "portal",
+		})
 	);
+
+	expect(html).toContain("bg-foreground text-background");
+	expect(html).toContain("text-background/40");
 });

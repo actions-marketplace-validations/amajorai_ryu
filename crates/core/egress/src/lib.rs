@@ -70,7 +70,7 @@ pub fn is_blocked_ip(ip: std::net::IpAddr) -> bool {
     match ip {
         std::net::IpAddr::V4(v4) => is_blocked_ipv4(v4),
         std::net::IpAddr::V6(v6) => {
-            if v6.is_loopback() || v6.is_unspecified() {
+            if v6.is_loopback() || v6.is_unspecified() || v6.is_multicast() {
                 return true;
             }
             if let Some(embedded) = embedded_ipv4(v6) {
@@ -81,7 +81,7 @@ pub fn is_blocked_ip(ip: std::net::IpAddr) -> bool {
                 return true;
             }
             let first = words[0];
-            (first & 0xfe00) == 0xfc00 || (first & 0xffc0) == 0xfe80
+            (first & 0xfe00) == 0xfc00 || (first & 0xffc0) == 0xfe80 || (first & 0xffc0) == 0xfec0
         }
     }
 }
@@ -364,6 +364,22 @@ mod tests {
     fn allows_public_addresses() {
         for value in ["1.1.1.1", "8.8.8.8", "2606:4700:4700::1111"] {
             assert!(!is_blocked_ip(value.parse().expect("valid IP")), "{value}");
+        }
+    }
+
+    #[test]
+    fn blocks_ipv6_multicast_and_site_local_but_allows_neighboring_public_ranges() {
+        for value in ["ff00::1", "ff02::1", "fec0::1", "feff::1"] {
+            assert!(
+                is_blocked_ip(value.parse().expect("valid IPv6 address")),
+                "{value}"
+            );
+        }
+        for value in ["2001:4860:4860::8888", "2606:4700:4700::1111"] {
+            assert!(
+                !is_blocked_ip(value.parse().expect("valid public IPv6 address")),
+                "{value} must remain allowed"
+            );
         }
     }
 

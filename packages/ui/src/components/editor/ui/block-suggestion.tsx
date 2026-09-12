@@ -97,17 +97,17 @@ export function BlockSuggestionCard({
 						<AvatarImage alt={userInfo?.name} src={userInfo?.avatarUrl} />
 						<AvatarFallback>{userInfo?.name?.[0]}</AvatarFallback>
 					</Avatar>
-					<h4 className="mx-2 font-semibold text-sm leading-none">
+					<h4 className="mx-2 font-medium text-sm leading-none">
 						{userInfo?.name}
 					</h4>
 					<div className="text-muted-foreground/80 text-xs leading-none">
-						<span className="mr-1">
+						<span className="me-1">
 							{formatCommentDate(new Date(suggestion.createdAt))}
 						</span>
 					</div>
 				</div>
 
-				<div className="relative mt-1 mb-4 pl-[32px]">
+				<div className="relative mt-1 mb-4 ps-[32px]">
 					<div className="flex flex-col gap-2">
 						{suggestion.type === "remove" &&
 							getRemoveSummaryItems(suggestion.text!).map((text, index) => (
@@ -192,7 +192,7 @@ export function BlockSuggestionCard({
 				))}
 
 				{hovering && (
-					<div className="absolute top-4 right-4 flex gap-2">
+					<div className="absolute end-4 top-4 flex gap-2">
 						<Button
 							className="size-6 p-1 text-muted-foreground"
 							onClick={() => accept(suggestion)}

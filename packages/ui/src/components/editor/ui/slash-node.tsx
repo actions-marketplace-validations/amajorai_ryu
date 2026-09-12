@@ -256,7 +256,7 @@ export function SlashInputElement(
 										onClick={() => onSelect(editor, value)}
 										value={value}
 									>
-										<div className="mr-2 text-muted-foreground">{icon}</div>
+										<div className="me-2 text-muted-foreground">{icon}</div>
 										{label ?? value}
 									</InlineComboboxItem>
 								)

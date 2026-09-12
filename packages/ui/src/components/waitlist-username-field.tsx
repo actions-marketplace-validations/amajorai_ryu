@@ -228,7 +228,7 @@ export function WaitlistUsernameField({
 				</Button>
 			</div>
 			{error ? (
-				<p className="text-destructive text-xs" id={errorId}>
+				<p className="text-status-destructive text-xs" id={errorId}>
 					{error}
 				</p>
 			) : (

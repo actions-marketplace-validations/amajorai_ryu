@@ -77,7 +77,7 @@ export default function AcceptInvitation({
 					)}
 
 					{!loading && error && (
-						<p className="text-destructive text-sm">{error}</p>
+						<p className="text-sm text-status-destructive">{error}</p>
 					)}
 
 					{!(loading || error) && invitation && (

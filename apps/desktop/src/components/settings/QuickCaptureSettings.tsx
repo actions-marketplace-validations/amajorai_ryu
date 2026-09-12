@@ -199,7 +199,7 @@ export function QuickCaptureSettings() {
 						status.quests_enabled ? (
 							<span className="text-muted-foreground text-xs">On</span>
 						) : (
-							<span className="text-destructive text-xs">Off</span>
+							<span className="text-status-destructive text-xs">Off</span>
 						)
 					}
 					description={

@@ -32,26 +32,26 @@ export function fitStyle(fit: ModelFit): { className: string; dot: string } {
 	switch (fit) {
 		case "great":
 			return {
-				className: "text-emerald-600 dark:text-emerald-400",
-				dot: "bg-emerald-500",
+				className: "text-status-success",
+				dot: "bg-success",
 			};
 		case "ok":
 			return {
-				className: "text-green-600 dark:text-green-400",
-				dot: "bg-green-500",
+				className: "text-status-success",
+				dot: "bg-success",
 			};
 		case "partial":
 			return {
-				className: "text-amber-600 dark:text-amber-400",
-				dot: "bg-amber-500",
+				className: "text-status-warning",
+				dot: "bg-warning",
 			};
 		case "cpu":
 			return {
-				className: "text-sky-600 dark:text-sky-400",
-				dot: "bg-sky-500",
+				className: "text-status-info",
+				dot: "bg-info",
 			};
 		case "too_big":
-			return { className: "text-red-600 dark:text-red-400", dot: "bg-red-500" };
+			return { className: "text-status-destructive", dot: "bg-destructive" };
 		default:
 			return {
 				className: "text-muted-foreground",
@@ -147,7 +147,7 @@ export function ModelListRow({
 					<Badge variant="secondary">Added</Badge>
 				) : model.gated ? (
 					<HugeiconsIcon
-						className="size-3.5 shrink-0 text-amber-500"
+						className="size-3.5 shrink-0 text-status-warning"
 						icon={Search01Icon}
 					/>
 				) : null}

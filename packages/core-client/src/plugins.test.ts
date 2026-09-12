@@ -18,6 +18,7 @@ import {
 	installApp,
 	installPluginFromCatalog,
 	isSafeCommandPath,
+	previewAppLifecycle,
 	uninstallApp,
 	updateApp,
 } from "./plugins.ts";
@@ -134,4 +135,43 @@ test("catalog install forwards the plugin id without a purchase gate", async () 
 	expect(captured.url).toBe(
 		"http://127.0.0.1:7980/api/plugins/catalog/install"
 	);
+});
+
+test("lifecycle previews use the dry-run body/query without mutating verbs", async () => {
+	const requests: Array<{ body: string | undefined; url: string }> = [];
+	globalThis.fetch = Object.assign(
+		(input: RequestInfo | URL, init?: RequestInit) => {
+			requests.push({ body: init?.body?.toString(), url: String(input) });
+			return Promise.resolve(
+				Response.json({
+					action: "install",
+					dryRun: true,
+					success: true,
+				})
+			);
+		},
+		{ preconnect: realFetch.preconnect }
+	);
+	const target: ApiTarget = {
+		token: "node-token",
+		url: "http://127.0.0.1:7980",
+		userJwt: null,
+	};
+
+	await previewAppLifecycle(target, "@ryu/mail", "install");
+	await previewAppLifecycle(target, "@ryu/mail", "disable", {
+		cascade: true,
+		force: true,
+	});
+
+	expect(requests).toEqual([
+		{
+			body: JSON.stringify({ dryRun: true }),
+			url: "http://127.0.0.1:7980/api/plugins/%40ryu%2Fmail/install",
+		},
+		{
+			body: undefined,
+			url: "http://127.0.0.1:7980/api/plugins/%40ryu%2Fmail/disable?dryRun=true&cascade=true&force=true",
+		},
+	]);
 });

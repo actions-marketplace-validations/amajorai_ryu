@@ -267,7 +267,7 @@ const InlineComboboxInput = ({
 				<Combobox
 					autoSelect
 					className={cn(
-						"absolute top-0 left-0 size-full bg-transparent outline-none",
+						"absolute start-0 top-0 size-full bg-transparent outline-none",
 						className
 					)}
 					ref={ref}

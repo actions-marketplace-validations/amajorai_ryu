@@ -39,4 +39,47 @@ test("follows the selected source and morphs the live frame into a lightbox", as
 	await page.getByTestId("source-recording").click();
 	await expect(dock).toContainText("Evidence recording");
 	await expect(dock).toContainText("Recording is ready");
+	await dock.locator('[data-media-pip-preview="true"]').click();
+	const recording = page.getByRole("dialog", {
+		name: "Evidence recording fullscreen",
+	});
+	await expect(recording).toBeVisible();
+	await expect
+		.poll(() =>
+			recording.locator("video").evaluate((video) => video.videoWidth)
+		)
+		.toBe(960);
+	await page
+		.getByRole("button", { name: "Close fullscreen media", exact: true })
+		.focus();
+	await page.keyboard.press("Tab");
+	await expect
+		.poll(() =>
+			recording.evaluate((element) => element.contains(document.activeElement))
+		)
+		.toBe(true);
+	await expect
+		.poll(() =>
+			recording.locator("video").evaluate((video) => {
+				const transform = getComputedStyle(
+					video.parentElement ?? video
+				).transform;
+				if (transform === "none") {
+					return true;
+				}
+				const matrix = new DOMMatrixReadOnly(transform);
+				return (
+					Math.abs(matrix.e) < 0.5 &&
+					Math.abs(matrix.f) < 0.5 &&
+					Math.abs(matrix.a - 1) < 0.005
+				);
+			})
+		)
+		.toBe(true);
+	await page.screenshot({
+		path: "../../../artifacts/ui-design-audit/screenshots/recording-lightbox-verified.png",
+	});
+	await page.keyboard.press("Escape");
+	await expect(recording).toBeHidden();
+	await expect(dock.locator('[data-media-pip-preview="true"]')).toBeFocused();
 });

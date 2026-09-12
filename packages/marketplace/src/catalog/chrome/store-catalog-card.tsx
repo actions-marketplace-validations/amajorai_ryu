@@ -47,10 +47,12 @@ import {
 import { MarketplaceAccessBadge } from "@ryu/ui/components/marketplace-access-badge.tsx";
 import { UNAVAILABLE_ROW_CLASS } from "@ryu/ui/components/status-badge.tsx";
 import type { VerificationDetails } from "@ryu/ui/components/verification-popover.tsx";
+import { formatCount } from "@ryu/ui/lib/number-format.ts";
 import { cn } from "@ryu/ui/lib/utils.ts";
 import type { PublisherTrustLevel } from "@ryuhq/protocol/publisher-trust";
 import { createContext, type ReactNode, useContext } from "react";
 import ItemLikeButton from "../../likes/like-button.tsx";
+import type { MarketplaceCommunityStats } from "../bundle-types.ts";
 import { stabilityLabel } from "../stability.ts";
 import {
 	type CardDither,
@@ -95,14 +97,19 @@ export default function StoreCatalogCard({
 	brandIcon,
 	iconId,
 	iconUrl,
+	iconUrlDark,
 	iconBackground,
 	iconPadding,
+	iconAppearance,
 	dither,
 	themePreview,
 	name,
 	seedId,
 	seedPlate,
 	description,
+	bundleMemberCount,
+	communityStats,
+	publisher,
 	external = false,
 	layers,
 	stability,
@@ -144,10 +151,12 @@ export default function StoreCatalogCard({
 	iconId?: string | null;
 	/** A resolvable icon image (Iconify/icons0.dev/remote logo). Wins over `icon`. */
 	iconUrl?: string | null;
+	iconUrlDark?: string | null;
 	/** Optional CSS background for the icon square (e.g. a solid/gradient colour). */
 	iconBackground?: string;
 	/** The listing's declared inset for its logo (manifest `iconPadding`). */
 	iconPadding?: string | null;
+	iconAppearance?: "bare" | "monochrome";
 	/** Optional dithered-gradient background for the icon square. Validated before
 	 *  paint; a malformed spec is ignored and the flat/`img` path is used. Wins over
 	 *  `iconBackground` when valid. */
@@ -165,6 +174,12 @@ export default function StoreCatalogCard({
 	 *  wash — see {@link AppIcon.seedPlate}. */
 	seedPlate?: boolean;
 	description?: string | null;
+	/** Optional publisher identity/action row, supplied by the host surface. */
+	publisher?: ReactNode;
+	/** Number of child listings for a bundle. */
+	bundleMemberCount?: number;
+	/** Anonymous community totals; no identity or content is included. */
+	communityStats?: MarketplaceCommunityStats | null;
 	/** Mark a hosted provider and its public swappable capability layers. */
 	external?: boolean;
 	layers?: CatalogLayer[] | null;
@@ -294,10 +309,12 @@ export default function StoreCatalogCard({
 				className="pointer-events-none size-10 shrink-0"
 				dither={dither}
 				fallback={brandIcon}
+				iconAppearance={iconAppearance}
 				iconBackground={iconBackground}
 				iconId={iconId}
 				iconPadding={iconPadding}
 				iconUrl={iconUrl}
+				iconUrlDark={iconUrlDark}
 				name={name}
 				seedId={seedId}
 				seedPlate={seedPlate}
@@ -305,7 +322,9 @@ export default function StoreCatalogCard({
 			/>
 			<span className="pointer-events-none min-w-0 flex-1">
 				<span className="flex items-center gap-1.5">
-					<span className="truncate font-medium text-sm">{name}</span>
+					<span className="min-w-0 flex-1 truncate font-medium text-sm">
+						{name}
+					</span>
 					{/* Beside the NAME, not on the icon: the icon is the app's own
 					    identity, the check is a claim about who published it. `shrink-0`
 					    so a long name truncates and the badge survives. */}
@@ -320,7 +339,7 @@ export default function StoreCatalogCard({
 						membershipIncluded={membershipIncluded}
 					/>
 					{stabilityLabel(stability) ? (
-						<span className="shrink-0 rounded-sm border border-amber-500/40 px-1 py-px text-[10px] text-amber-600 leading-tight">
+						<span className="shrink-0 rounded-sm border border-warning/40 px-1 py-px text-[10px] text-status-warning leading-tight">
 							{stabilityLabel(stability)}
 						</span>
 					) : null}
@@ -346,9 +365,26 @@ export default function StoreCatalogCard({
 						/>
 					) : null}
 				</span>
+				{publisher ? (
+					<span className="pointer-events-auto relative z-10 mt-0.5 flex min-w-0 items-center gap-1.5 text-[11px] text-muted-foreground">
+						{publisher}
+					</span>
+				) : null}
 				<span className="block truncate text-muted-foreground text-xs">
 					{description || "No description provided."}
 				</span>
+				{bundleMemberCount ? (
+					<span className="mt-0.5 block truncate text-[11px] text-muted-foreground">
+						Bundle · {bundleMemberCount} items · one-click install
+					</span>
+				) : null}
+				{communityStats &&
+				(communityStats.downloads > 0 || communityStats.runs > 0) ? (
+					<span className="mt-0.5 block truncate text-[11px] text-muted-foreground">
+						Community · {formatCount(communityStats.downloads)} installs ·{" "}
+						{formatCount(communityStats.runs)} runs
+					</span>
+				) : null}
 			</span>
 			{action ? <div className="relative z-10 shrink-0">{action}</div> : null}
 		</div>

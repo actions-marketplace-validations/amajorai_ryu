@@ -1,12 +1,15 @@
 import { buttonVariants } from "@ryu/ui/components/button";
 import { cn } from "@ryu/ui/lib/utils";
 import {
+	ArrowUpRight,
+	Bell,
 	Blocks,
 	Bot,
 	Box,
 	Boxes,
 	Bug,
 	Cable,
+	Check,
 	Chrome,
 	Cloud,
 	Cpu,
@@ -17,21 +20,29 @@ import {
 	HeartHandshake,
 	Key,
 	Layers,
+	Mail as MailIcon,
 	Mic,
 	Monitor,
 	Plug,
 	Puzzle,
 	Radio,
 	RefreshCw,
+	Settings2,
+	Share2,
 	Shield,
 	Smartphone,
 	Sparkles,
 	Store,
 	Terminal as TerminalIcon,
 	Users,
+	Workflow,
 	Zap,
 } from "lucide-react";
 import type { ReactNode } from "react";
+import { BotAppVisual } from "../bot-visual.tsx";
+import { ConsoleWorkflowVisual } from "../console-workflow-visual.tsx";
+import { GatewayRequestPreview } from "../gateway-request-preview.tsx";
+import { PassportBook } from "../interactive-book.tsx";
 import type {
 	BentoItem,
 	CtaLink,
@@ -46,7 +57,9 @@ import {
 	CliVisual,
 	CloudVisual,
 	CodePaneSplit,
+	ComputeExchangeVisual,
 	ConnectionsVisual,
+	ConnectVisual,
 	CoreVisual,
 	DesktopVisual,
 	DevicesVisual,
@@ -54,9 +67,11 @@ import {
 	GatewayVisual,
 	HireVisual,
 	IslandVisual,
+	MailVisual,
 	MarketplaceVisual,
 	McpVisual,
 	MobileVisual,
+	NotifyVisual,
 	OsVisual,
 	RedTeamVisual,
 	SdkVisual,
@@ -143,6 +158,7 @@ export interface Product {
 	overviewVisual?: ReactNode;
 	slug: string;
 	splits?: FeatureSplit[];
+	standalone?: boolean;
 	tagline: string;
 }
 
@@ -157,7 +173,7 @@ export const products: Product[] = [
 		Icon: Cpu,
 		hero: {
 			eyebrow: "Ryu Core · open source",
-			title: "The runtime under every agent.",
+			title: "Run agents on your own infrastructure",
 			subtitle:
 				"One local binary that runs sessions, memory, tools, workflows, and sub-agents. The platform any agent can run on, headless and encrypted, no cloud required.",
 			primaryCta: DOWNLOAD,
@@ -227,7 +243,7 @@ export const products: Product[] = [
 					icon: Bot,
 				},
 				{
-					title: "Multi-node",
+					title: "Multi-server",
 					description:
 						"Run it on your laptop, your Pi, a Mac mini, a server. Agents live where they need to work.",
 					icon: Globe,
@@ -237,7 +253,7 @@ export const products: Product[] = [
 		splits: [
 			{
 				eyebrow: "Local-first",
-				title: "Your machine is the backend.",
+				title: "Keep the runtime on your machine",
 				description:
 					"Core is a single binary that downloads, verifies, and supervises engines and tools for you. No containers to babysit, no keys to leak, nothing leaves your device unless you say so.",
 				bullets: [
@@ -277,17 +293,18 @@ export const products: Product[] = [
 		name: "Ryu Gateway",
 		navLabel: "Gateway",
 		category: "Platform",
+		standalone: true,
 		tagline:
 			"The governed gateway for model, tool, and Skill calls from any system.",
 		Icon: Shield,
 		hero: {
 			eyebrow: "Ryu Gateway · the tool and model control plane",
-			title: "Call tools from anywhere. Keep control.",
+			title: "Control model and tool access",
 			subtitle:
 				"Give any product a single governed API for models, tools, and Skills. Route calls, enforce permissions, protect data, and keep an audit trail without rebuilding your agent loop.",
 			primaryCta: EARLY_ACCESS,
 			secondaryCta: BOOK_DEMO,
-			visual: <ToolGatewayVisual />,
+			visual: <GatewayRequestPreview />,
 		},
 		highlights: [
 			{
@@ -368,7 +385,7 @@ export const products: Product[] = [
 		splits: [
 			{
 				eyebrow: "Drop-in",
-				title: "Point any agent at it. Done.",
+				title: "Connect an existing agent",
 				description:
 					"The Gateway is an OpenAI-compatible proxy. Swap the base URL on an agent you already built and every call is governed, with no SDK changes and no refactor.",
 				bullets: [
@@ -405,6 +422,249 @@ export const products: Product[] = [
 	},
 
 	{
+		slug: "passport",
+		name: "Ryu Passport",
+		navLabel: "Passport",
+		category: "Platform",
+		standalone: true,
+		tagline:
+			"An encrypted identity vault for agents and the sessions they are allowed to use.",
+		Icon: Key,
+		hero: {
+			eyebrow: "Ryu Passport · encrypted identity service",
+			title: "Give agents a safe way to stay signed in",
+			subtitle:
+				"Store per-domain sessions behind an encrypted, tenant-separated boundary. Passport keeps credentials out of model context and makes every re-authentication explicit.",
+			primaryCta: EARLY_ACCESS,
+			secondaryCta: {
+				label: "Read the docs",
+				href: "/docs/standalone/passport",
+			},
+			visual: <PassportBook />,
+		},
+		highlights: [
+			{
+				title: "Encrypted at rest",
+				description:
+					"Cookies, tokens, and session state are sealed before they touch the Passport store.",
+				icon: Shield,
+			},
+			{
+				title: "Never model-visible",
+				description:
+					"Credential state is read only at an allowed tool boundary, never returned in API responses.",
+				icon: Eye,
+			},
+			{
+				title: "Tenant-separated",
+				description:
+					"Each Passport tenant gets its own store, profile namespace, and bearer boundary.",
+				icon: Users,
+			},
+			{
+				title: "Explicit re-auth",
+				description:
+					"Stale connections become NEEDS_AUTH and return a clear human login path.",
+				icon: RefreshCw,
+			},
+		],
+		bento: {
+			eyebrow: "Identity without credential sprawl",
+			title: "A small service around a high-risk boundary.",
+			subtitle:
+				"Passport owns the durable identity state. Your agent and tool gateway only receive the capability they need for the current call.",
+			items: [
+				{
+					title: "Profiles and domains",
+					description:
+						"Group per-domain connections under one profile and bind that profile to an agent or workflow.",
+					icon: Key,
+					visual: <ConnectionsVisual />,
+				},
+				{
+					title: "Manual import today",
+					description:
+						"Complete login in the provider you trust, then import the resulting cookie or token state for sealing.",
+					icon: ArrowUpRight,
+				},
+				{
+					title: "Health sweeps",
+					description:
+						"Check that imported state is present. Re-import a session when its provider login expires.",
+					icon: RefreshCw,
+				},
+				{
+					title: "Governed reads",
+					description:
+						"Core and Gateway can audit the identity.read decision without exposing plaintext state.",
+					icon: Shield,
+				},
+			],
+		},
+		splits: [
+			{
+				eyebrow: "A clean handoff",
+				title: "Keep the secret out of the agent loop",
+				description:
+					"Passport is the identity service; Connect or another governed tool plane is the execution service. Their contracts meet at an explicit, auditable read rather than a copied cookie jar.",
+				bullets: [
+					"SQLite store with encrypted credential state",
+					"Metadata-only profile and connection responses",
+					"Human-in-the-loop login when a domain needs auth",
+				],
+				visual: <PassportBook />,
+			},
+		],
+		faq: [
+			{
+				q: "Does Passport send credentials to the model?",
+				a: "No. Passport never serializes encrypted or decrypted credential state in its API responses. A governed runtime reads state only at the tool boundary that needs it.",
+			},
+			{
+				q: "Is Passport a browser automation engine?",
+				a: "No. Passport owns identity storage and lifecycle. A browser or provider-specific capture surface can be connected through the credential-source seam.",
+			},
+			{
+				q: "Can Passport run without Ryu Core?",
+				a: "Yes. The standalone service runs over the same extracted encrypted vault primitive used by Core, with its own bearer tokens and data directory.",
+			},
+		],
+		cta: {
+			title: "Put identity behind a real boundary.",
+			subtitle:
+				"Run Passport beside your agent stack, or use it as the identity layer underneath Ryu Connect and Core.",
+			primaryCta: EARLY_ACCESS,
+			secondaryCta: {
+				label: "Read the docs",
+				href: "/docs/standalone/passport",
+			},
+			note: "Standalone · Encrypted at rest · Tenant-separated · Metadata-only API",
+		},
+	},
+
+	{
+		slug: "connect",
+		name: "Ryu Connect",
+		navLabel: "Connect",
+		category: "Platform",
+		standalone: true,
+		tagline:
+			"MCP hosting, Skills, governed tools, and Composio behind one integration edge.",
+		Icon: Cable,
+		hero: {
+			eyebrow: "Ryu Connect · standalone integration edge",
+			title: "One endpoint for every agent connection",
+			subtitle:
+				"Give your product one tenant-scoped boundary for hosted MCP, SKILL.md content, governed tool calls, and Composio actions—without moving provider secrets into your app.",
+			primaryCta: EARLY_ACCESS,
+			secondaryCta: {
+				label: "Read the docs",
+				href: "/docs/standalone/connect",
+			},
+			visual: <ConnectVisual />,
+		},
+		highlights: [
+			{
+				title: "MCP hosting",
+				description:
+					"Give any MCP client access to the Skills and tools assigned to its tenant.",
+				icon: Plug,
+			},
+			{
+				title: "Skill hosting",
+				description:
+					"Serve discoverable SKILL.md packages without inventing another instruction format.",
+				icon: Sparkles,
+			},
+			{
+				title: "Scoped tools",
+				description:
+					"Discover and call registered tools through one API with explicit tenant allowlists.",
+				icon: Shield,
+			},
+			{
+				title: "Composio-ready",
+				description:
+					"Use approved actions with a connected account and toolkit version assigned to your tenant.",
+				icon: Cable,
+			},
+		],
+		bento: {
+			eyebrow: "The integration edge",
+			title: "Give each tenant the tools it needs.",
+			subtitle:
+				"Host Skills, register MCP servers, and call Composio actions from one service. Keep credentials with Connect and choose exactly which tools each tenant can use.",
+			items: [
+				{
+					title: "MCP protocol edge",
+					description:
+						"Connect existing MCP clients to your hosted Skills and permitted tools through Streamable HTTP.",
+					icon: Plug,
+					visual: <McpVisual />,
+				},
+				{
+					title: "Skills as content",
+					description:
+						"List and serve the same SKILL.md packages agents already understand.",
+					icon: Sparkles,
+				},
+				{
+					title: "Tool search and execution",
+					description:
+						"Search, inspect, and execute the same tenant-scoped tools through MCP or REST.",
+					icon: Shield,
+					visual: <ToolGatewayVisual serviceName="Ryu Connect" />,
+				},
+				{
+					title: "Provider-backed actions",
+					description:
+						"Connect selects the permitted Composio account, tool, and version. Provider credentials stay out of client requests.",
+					icon: Cable,
+				},
+			],
+		},
+		splits: [
+			{
+				eyebrow: "One boundary, four lanes",
+				title: "Give products one integration contract",
+				description:
+					"Use Connect when your product needs MCP hosting, Skills, tool execution, and Composio but should not own four separate credential and policy integrations.",
+				bullets: [
+					"Tenant-scoped bearer auth at the edge",
+					"Upstream credentials stay operator-configured",
+					"Explicit unavailable states when a lane is not configured",
+				],
+				visual: <ConnectVisual />,
+			},
+		],
+		faq: [
+			{
+				q: "Does Connect replace Gateway or Core?",
+				a: "Connect can host and execute its registered tools independently. Core remains the agent runtime and Gateway provides model routing and policy. A separate compatibility mode forwards to an existing Core and Gateway setup.",
+			},
+			{
+				q: "Can I enable only one lane?",
+				a: "Yes. Native MCP registrations, Skill hosting, and Composio bindings can be configured independently. Legacy upstream forwarding uses a separate single-tenant mode.",
+			},
+			{
+				q: "Where does Composio state live?",
+				a: "Connected accounts remain with Composio. Connect holds the operator-supplied project credential in its process and binds permitted accounts and actions to each tenant. Client requests never choose another tenant's account.",
+			},
+		],
+		cta: {
+			title: "Connect your agent stack once.",
+			subtitle:
+				"Run Connect beside your product and keep MCP, Skills, tools, and Composio on their existing governed Ryu seams.",
+			primaryCta: EARLY_ACCESS,
+			secondaryCta: {
+				label: "Read the docs",
+				href: "/docs/standalone/connect",
+			},
+			note: "Standalone · Tenant-scoped · MCP · Skills · Tool gateway · Composio",
+		},
+	},
+
+	{
 		slug: "cloud",
 		name: "Ryu Cloud",
 		navLabel: "Cloud",
@@ -413,7 +673,7 @@ export const products: Product[] = [
 		Icon: Cloud,
 		hero: {
 			eyebrow: "Ryu Cloud · managed",
-			title: "Enterprise agents without enterprise cost.",
+			title: "Run your agents on Ryu Cloud",
 			subtitle:
 				"We audit, build, deploy, and host agents for your business, and ship them into Telegram, Slack, WhatsApp, and Discord. End-to-end managed infrastructure for AI agents.",
 			primaryCta: BOOK_DEMO,
@@ -442,7 +702,7 @@ export const products: Product[] = [
 			{
 				title: "Cross-device fleet",
 				description:
-					"Run on cloud, a Mac mini, a Pi, or your laptop, with node selection and sync.",
+					"Run on cloud, a Mac mini, a Pi, or your laptop, with server selection and sync.",
 				icon: Globe,
 			},
 		],
@@ -471,9 +731,9 @@ export const products: Product[] = [
 					icon: Zap,
 				},
 				{
-					title: "Multi-node fleet",
+					title: "Multi-server fleet",
 					description:
-						"Cross-device sync and node selection: prefer a remote node, else compute locally.",
+						"Cross-device sync and server selection: prefer a remote server, else compute locally.",
 					icon: Globe,
 				},
 				{
@@ -493,7 +753,7 @@ export const products: Product[] = [
 		splits: [
 			{
 				eyebrow: "For businesses",
-				title: "We make agents work for your business.",
+				title: "Deploy a workflow for your team",
 				description:
 					"Most teams can't staff an AI platform team. Ryu Cloud is that team, plus the platform. We build the agent around your workflows and host it so it's reliable from the first day.",
 				bullets: [
@@ -533,11 +793,12 @@ export const products: Product[] = [
 		name: "Ryu Box",
 		navLabel: "Box",
 		category: "Platform",
+		standalone: true,
 		tagline: "A persistent, isolated workspace for agent runs and previews.",
 		Icon: Box,
 		hero: {
 			eyebrow: "Ryu Box · isolated execution",
-			title: "Give every run a clean room.",
+			title: "A workspace for each agent",
 			subtitle:
 				"Create a persistent workspace for an agent, let it work with the permissions you choose, and keep its files and previews around for the next step.",
 			primaryCta: EARLY_ACCESS,
@@ -605,7 +866,7 @@ export const products: Product[] = [
 		splits: [
 			{
 				eyebrow: "From request to preview",
-				title: "Keep the work and the result together.",
+				title: "Keep files and previews between runs",
 				description:
 					"A Box gives agents a durable place to edit, test, and preview without making your laptop the execution boundary. Pair it with Ryu Gateway when the run needs governed tools or Skills.",
 				bullets: [
@@ -637,6 +898,233 @@ export const products: Product[] = [
 	},
 
 	{
+		slug: "notify",
+		name: "Ryu Notify",
+		navLabel: "Notify",
+		category: "Platform",
+		standalone: true,
+		tagline:
+			"Durable events, live activities, and delivery for products and agents.",
+		Icon: Bell,
+		hero: {
+			eyebrow: "Ryu Notify · standalone notification API",
+			title: "One dependable edge for every important event",
+			subtitle:
+				"Publish rich events or simple topics, collect an approval, stream live work, and route durable deliveries without giving every producer a different notification contract.",
+			primaryCta: EARLY_ACCESS,
+			secondaryCta: { label: "Read the API", href: "/docs/standalone/notify" },
+			visual: <NotifyVisual />,
+		},
+		highlights: [
+			{
+				title: "Rich events or simple topics",
+				description:
+					"Publish structured JSON or plain text to a topic with priority, tags, actions, and safe metadata.",
+				icon: Cable,
+			},
+			{
+				title: "Durable delivery",
+				description:
+					"Events and destination attempts survive a restart, retry with backoff, and remain tenant-scoped.",
+				icon: RefreshCw,
+			},
+			{
+				title: "Live activities",
+				description:
+					"Start, update, and end progress activities over the same bounded Server-Sent Events edge.",
+				icon: Radio,
+			},
+			{
+				title: "Human controls",
+				description:
+					"Collect approval, yes/no, or text replies; mute recipients and silence noisy fingerprints when needed.",
+				icon: Shield,
+			},
+		],
+		bento: {
+			eyebrow: "The event contract",
+			title: "A small service around important moments.",
+			subtitle:
+				"Notify accepts the event, bounds the payload, redacts common credential-shaped keys, and gives consumers history, live state, channel delivery, and aggregates.",
+			items: [
+				{
+					title: "Structured events",
+					description:
+						"Keep source, type, fingerprint, recipient, action links, and JSON data together.",
+					icon: Bell,
+				},
+				{
+					title: "Cursor reads",
+					description:
+						"Page through bounded history with an opaque cursor instead of relying on offsets.",
+					icon: GitBranch,
+				},
+				{
+					title: "Tenant isolation",
+					description:
+						"Each bearer key maps to one tenant; event reads never cross that binding.",
+					icon: Key,
+				},
+				{
+					title: "Acknowledgements",
+					description:
+						"Mark an event handled without making it part of Core's workflow resume path.",
+					icon: Check,
+				},
+				{
+					title: "Channel adapters",
+					description:
+						"Use signed webhooks, ntfy-compatible headers, or a BuzzKit HTTP bridge while Mail and Core keep their own delivery boundaries.",
+					icon: Share2,
+				},
+				{
+					title: "Action links",
+					description:
+						"Attach up to three HTTPS links for the run, record, or dashboard a person needs.",
+					icon: ArrowUpRight,
+				},
+				{
+					title: "Service-owned state",
+					description:
+						"Run it beside your product with its own data directory and API credential.",
+					icon: Box,
+				},
+			],
+		},
+		splits: [
+			{
+				eyebrow: "Drop-in integration",
+				title: "Compose Box, Mail, and agent updates",
+				description:
+					"Ryu Notify does not reach into product databases. Agent Mail and Box remain the owners of their work; small adapters publish safe metadata to the same event, topic, and delivery contract so an operator can follow both from one consumer.",
+				bullets: [
+					"Use the same endpoint from any language",
+					"Keep service credentials separate",
+					"Use fingerprints, groups, and aggregates to see the shape of the work",
+				],
+				visual: <NotifyVisual />,
+			},
+		],
+		faq: [
+			{
+				q: "Is Ryu Notify the same as Core notifications?",
+				a: "No. Core owns the local user inbox, workflow acknowledgements, desktop stream, and node fan-out. Notify is a separately runnable event API for products and agents.",
+			},
+			{
+				q: "Does it send push, email, or SMS?",
+				a: "Notify delivers to signed webhooks, ntfy-compatible endpoints, and a BuzzKit HTTP bridge. Native Apple/Expo push, email/SMS transports, and Ryu user notifications remain owned by Core or Mail.",
+			},
+			{
+				q: "Can I call it from Box or Agent Mail?",
+				a: "Yes. The repository includes runnable examples that call Box or Agent Mail first and publish a metadata event to Notify with separate API keys.",
+			},
+		],
+		cta: {
+			title: "Put important events somewhere dependable.",
+			subtitle:
+				"Run Ryu Notify beside your product, or ask us about a hosted service built around the same API.",
+			primaryCta: EARLY_ACCESS,
+			secondaryCta: { label: "Read the API", href: "/docs/standalone/notify" },
+			note: "Standalone · Tenant-scoped · SQLite · REST + SSE · Durable delivery",
+		},
+	},
+
+	{
+		slug: "mail",
+		name: "Ryu Mail",
+		navLabel: "Mail",
+		category: "Platform",
+		standalone: true,
+		tagline: "API-first email inboxes for agents.",
+		Icon: MailIcon,
+		hero: {
+			eyebrow: "Ryu Mail · Agent Inboxes",
+			title: "Email inboxes for agents",
+			subtitle:
+				"Give an agent an inbox to receive, store, and send email through an API. Run it with Ryu or deploy the service separately.",
+			primaryCta: EARLY_ACCESS,
+			secondaryCta: { label: "Read the docs", href: "/docs/standalone/mail" },
+			visual: <MailVisual />,
+		},
+		highlights: [
+			{
+				title: "Real inboxes",
+				description:
+					"Create addresses agents can receive into and send from over an API.",
+				icon: MailIcon,
+			},
+			{
+				title: "Inbound verification",
+				description:
+					"Provider webhooks use a per-inbox HMAC secret before mail is accepted.",
+				icon: Shield,
+			},
+			{
+				title: "Stored messages",
+				description:
+					"Keep message metadata, bodies, and attachment records in the Mail-owned store.",
+				icon: Boxes,
+			},
+			{
+				title: "Notify-ready",
+				description:
+					"Publish a metadata-only event to Ryu Notify when an inbox needs attention.",
+				icon: Bell,
+			},
+		],
+		bento: {
+			eyebrow: "Agent Inboxes",
+			title: "The email boundary stays explicit.",
+			subtitle:
+				"Mail owns inbox state and SMTP hand-off. Your app decides when to notify a person or agent about a message.",
+			items: [
+				{
+					title: "Inbox API",
+					description:
+						"List, create, rename, rotate, and remove inboxes through the service contract.",
+					icon: MailIcon,
+				},
+				{
+					title: "Read messages",
+					description:
+						"Fetch message metadata and bodies only through an authenticated inbox path.",
+					icon: Boxes,
+				},
+				{
+					title: "Send with intent",
+					description:
+						"The send route makes the external side effect visible to the caller and UI.",
+					icon: Cable,
+				},
+				{
+					title: "Pair with Notify",
+					description:
+						"Use the included example to publish a small event without copying mail content into it.",
+					icon: Bell,
+				},
+			],
+		},
+		faq: [
+			{
+				q: "Is Ryu Mail the hosted Agent Inboxes feature?",
+				a: "Ryu has both a hosted control-plane Mail product and a self-host sidecar. Their ownership and request shapes differ; this page describes the standalone/node service path.",
+			},
+			{
+				q: "Does a Mail event include the email body?",
+				a: "The Notify example sends metadata such as the message id, inbox id, sender, recipient, and subject. The message body remains behind the authenticated Mail API.",
+			},
+		],
+		cta: {
+			title: "Give agents a real inbox.",
+			subtitle:
+				"Run Agent Inboxes with Ryu or deploy the service next to the workflow that owns the mail experience.",
+			primaryCta: EARLY_ACCESS,
+			secondaryCta: { label: "Read the docs", href: "/docs/standalone/mail" },
+			note: "Agent Inboxes · HMAC inbound · SMTP hand-off · API-first",
+		},
+	},
+
+	{
 		slug: "agents-as-a-service",
 		name: "Agents as a Service",
 		navLabel: "Agents as a Service",
@@ -645,9 +1133,9 @@ export const products: Product[] = [
 		Icon: HeartHandshake,
 		hero: {
 			eyebrow: "Agents as a Service · white-glove",
-			title: "We'll build your agents for you. Free.",
+			title: "Get help building your agents",
 			subtitle:
-				"Our business is shipping premade AI agents for businesses. We embed with your team and build them around your workflows, the way Palantir deploys engineers, but at no cost.",
+				"We work with your team to configure agents around your business workflows. Tell us the task, the tools it uses, and how you want to review the result.",
 			primaryCta: BOOK_DEMO,
 			secondaryCta: EARLY_ACCESS,
 			visual: <AgentsAsServiceVisual />,
@@ -713,7 +1201,7 @@ export const products: Product[] = [
 		splits: [
 			{
 				eyebrow: "Why free",
-				title: "The platform is how we build, fast.",
+				title: "Build on the shared runtime",
 				description:
 					"Because every agent runs on the same Ryu core, building a customized one is days, not months. That speed is our edge, so the build is free and the relationship is the business.",
 				bullets: [
@@ -753,13 +1241,14 @@ export const products: Product[] = [
 		name: "Ryu Hire",
 		navLabel: "Hire",
 		category: "Platform",
+		standalone: true,
 		tagline: "Recruit a specialist for one run and pay with credits.",
 		Icon: Zap,
 		hero: {
 			eyebrow: "Ryu Hire · pay per run",
-			title: "Recruit an agent for the job at hand.",
+			title: "Hire a specialist agent for a task",
 			subtitle:
-				"Pick a specialist, give it the context you approve, and run it once. No install, no subscription, and no new workspace to maintain.",
+				"Choose a specialist, review the estimated cost, and give it the context it needs. Pay for the run with Ryu credits.",
 			primaryCta: EARLY_ACCESS,
 			secondaryCta: BOOK_DEMO,
 			visual: <HireVisual />,
@@ -825,7 +1314,7 @@ export const products: Product[] = [
 		splits: [
 			{
 				eyebrow: "A store you do not have to install",
-				title: "Browse less. Get the job done.",
+				title: "Run a specialist from the catalog",
 				description:
 					"Ryu Hire is the service layer above Ryu Apps: the specialist stays managed, the run is scoped, and the payment follows the work. If you need the agent every day, bring it into Ryu OS or Console later.",
 				bullets: [
@@ -856,6 +1345,222 @@ export const products: Product[] = [
 		},
 	},
 
+	{
+		slug: "compute",
+		name: "Ryu Compute",
+		navLabel: "Compute",
+		category: "Surfaces",
+		tagline: "Rent governed compute for a bounded run.",
+		Icon: Cpu,
+		hero: {
+			eyebrow: "Ryu Compute · early access",
+			title: "Borrow the compute you need",
+			subtitle:
+				"Choose a CPU or GPU workcell for a bounded job. The provider supplies capacity, not access to its machine.",
+			primaryCta: EARLY_ACCESS,
+			secondaryCta: BOOK_DEMO,
+			visual: <ComputeExchangeVisual mode="compute" />,
+		},
+		highlights: [
+			{
+				title: "Choose the lane",
+				description:
+					"Match the job to CPU or GPU capacity instead of keeping another machine running.",
+				icon: Cpu,
+			},
+			{
+				title: "Bounded workcell",
+				description:
+					"A short-lived lease gives the run a clean workspace without a host login.",
+				icon: Box,
+			},
+			{
+				title: "Keep the receipt",
+				description:
+					"The intended run record carries the measured duration and cost together.",
+				icon: GitBranch,
+			},
+			{
+				title: "Ryu governed",
+				description:
+					"Identity, permissions, budgets, and audit stay in the Gateway policy path.",
+				icon: Shield,
+			},
+		],
+		bento: {
+			eyebrow: "The compute exchange",
+			title: "A workcell, not a remote desktop.",
+			subtitle:
+				"Compute is the demand-side surface for temporary capacity. The provider keeps the machine; the lease gets only the work boundary.",
+			items: [
+				{
+					title: "Filter for the job",
+					description:
+						"Choose a workload shape and a maximum lease length before a future provider search.",
+					icon: Cpu,
+				},
+				{
+					title: "No host access",
+					description:
+						"The contract is a Ryu workcell, not SSH, VNC, or a borrowed desktop session.",
+					icon: Shield,
+				},
+				{
+					title: "Use the active node",
+					description:
+						"Your own node stays visible and private while the next job looks for capacity.",
+					icon: Cloud,
+				},
+				{
+					title: "Pay for measured work",
+					description:
+						"The future lease receipt makes duration, status, and cost inspectable.",
+					icon: Zap,
+				},
+			],
+		},
+		splits: [
+			{
+				eyebrow: "The buyer boundary",
+				title: "Borrow capacity without borrowing a person's computer",
+				description:
+					"Ryu Compute is designed around short-lived, governed workcells. It should not expose the provider's files, credentials, network, or interactive desktop to the renter.",
+				bullets: [
+					"CPU and GPU lanes",
+					"Short, explicit lease lengths",
+					"No SSH, VNC, or node-token handoff",
+				],
+				visual: <ComputeExchangeVisual mode="compute" />,
+			},
+		],
+		faq: [
+			{
+				q: "Is Compute live today?",
+				a: "The Desktop Compute surface is early access. This build does not submit a lease or charge a wallet; the provider network and lease API are still being connected.",
+			},
+			{
+				q: "Does a renter get access to the provider's machine?",
+				a: "No. The intended contract is a scoped Ryu workcell. A provider should never hand out its node token, host files, private keys, or unrestricted remote session.",
+			},
+		],
+		cta: {
+			title: "Use capacity when you need it.",
+			subtitle:
+				"Join the early-access conversation for governed compute lanes and bounded agent workcells.",
+			primaryCta: EARLY_ACCESS,
+			secondaryCta: BOOK_DEMO,
+			note: "Early access · CPU/GPU lanes · Bounded workcells",
+		},
+	},
+
+	{
+		slug: "share",
+		name: "Ryu Share",
+		navLabel: "Share",
+		category: "Surfaces",
+		tagline: "Share idle Ryu capacity without giving up your machine.",
+		Icon: Share2,
+		hero: {
+			eyebrow: "Ryu Share · early access",
+			title: "Put an idle node to work",
+			subtitle:
+				"Offer a clean workcell or an approved agent on your schedule. You choose the boundary, the hours, and when to pause.",
+			primaryCta: EARLY_ACCESS,
+			secondaryCta: BOOK_DEMO,
+			visual: <ComputeExchangeVisual mode="share" />,
+		},
+		highlights: [
+			{
+				title: "Offer what you choose",
+				description:
+					"Share spare compute, a signed agent package, or both—not an open-ended machine login.",
+				icon: Share2,
+			},
+			{
+				title: "Protect active work",
+				description:
+					"Keep the node private while you use it and pause provider work instantly.",
+				icon: Shield,
+			},
+			{
+				title: "Keep keys local",
+				description:
+					"The node token, private files, and provider credentials stay on the host.",
+				icon: Key,
+			},
+			{
+				title: "Earn per run",
+				description:
+					"The intended payout follows verified usage, not an unbounded reservation.",
+				icon: Zap,
+			},
+		],
+		bento: {
+			eyebrow: "The provider exchange",
+			title: "Your node. Your hours. Your boundary.",
+			subtitle:
+				"Ryu Share is the supply-side surface for people with idle cloud or local capacity. It makes availability and safety visible before a listing can exist.",
+			items: [
+				{
+					title: "When idle",
+					description:
+						"Refuse new work whenever the machine is doing your work or its capacity is full.",
+					icon: RefreshCw,
+				},
+				{
+					title: "On a schedule",
+					description:
+						"Publish a predictable window instead of leaving a node available all day.",
+					icon: Radio,
+				},
+				{
+					title: "Approved agents",
+					description:
+						"Hosted-agent offers use signed packages with declared tools and limits.",
+					icon: Bot,
+				},
+				{
+					title: "Meter before payout",
+					description:
+						"A future control plane verifies the run before releasing provider earnings.",
+					icon: Zap,
+				},
+			],
+		},
+		splits: [
+			{
+				eyebrow: "The host boundary",
+				title: "Share a workcell, never your whole computer",
+				description:
+					"The provider experience should feel like switching on a safe operating window—not opening a port and hoping a stranger behaves.",
+				bullets: [
+					"Local and cloud nodes use one policy shape",
+					"A kill switch stays with the provider",
+					"No renter access to host credentials or files",
+				],
+				visual: <ComputeExchangeVisual mode="share" />,
+			},
+		],
+		faq: [
+			{
+				q: "Can I share my laptop while I am using it?",
+				a: "The intended provider policy is opt-in availability. Choose When idle or a schedule, and the node should refuse new leases while active work needs its capacity.",
+			},
+			{
+				q: "Is provider enrollment live?",
+				a: "Not yet. The Desktop Share surface currently previews the offer and safety controls; it does not publish a node, accept a lease, meter a renter, or release a payout.",
+			},
+		],
+		cta: {
+			title: "Make idle compute useful.",
+			subtitle:
+				"Join the early-access conversation for provider enrollment, safe workcells, and transparent payouts.",
+			primaryCta: EARLY_ACCESS,
+			secondaryCta: BOOK_DEMO,
+			note: "Early access · Provider control · Safe workcells",
+		},
+	},
+
 	/* ============================= BUILD =========================== */
 	{
 		slug: "agents",
@@ -866,9 +1571,9 @@ export const products: Product[] = [
 		Icon: Bot,
 		hero: {
 			eyebrow: "Agents · Pokémon cards",
-			title: "Build an agent like a card.",
+			title: "Configure an agent for your workflow",
 			subtitle:
-				"Independently swappable slots for chat, voice, image, memory, tools, persona, and policy. No two cards alike, none locked in.",
+				"Choose the models, tools, memory, and instructions your agent uses. Change each part as your workflow develops.",
 			primaryCta: EARLY_ACCESS,
 			secondaryCta: DOWNLOAD,
 			visual: <AgentsVisual />,
@@ -976,9 +1681,9 @@ export const products: Product[] = [
 		Icon: GitBranch,
 		hero: {
 			eyebrow: "Workflows",
-			title: "Chain agents, no glue code.",
+			title: "Build workflows with agents and tools",
 			subtitle:
-				"Compose agents, tools, and sub-agents into a DAG. Branch, fan out, and synthesize on a canvas, not in custom orchestration code.",
+				"Connect steps on a visual canvas. Add branches, run tasks in parallel, and choose when the workflow starts.",
 			primaryCta: EARLY_ACCESS,
 			secondaryCta: DOWNLOAD,
 			visual: <WorkflowsVisual />,
@@ -1082,9 +1787,9 @@ export const products: Product[] = [
 		Icon: Sparkles,
 		hero: {
 			eyebrow: "Skills · open standard",
-			title: "Give agents new skills, instantly.",
+			title: "Add skills to your agents",
 			subtitle:
-				"Inside Ryu: search skills.sh and install in one click. Outside: ship SKILL.md files that teach Cursor, Claude Code, and any SKILL.md client how to set up and drive your node.",
+				"Inside Ryu: search skills.sh and install in one click. Outside: ship SKILL.md files that teach Cursor, Claude Code, and any SKILL.md client how to set up and drive your server.",
 			primaryCta: { label: "Browse Skills", href: "/products/marketplace" },
 			secondaryCta: SKILLS_GITHUB,
 			visual: <SkillsVisual />,
@@ -1119,7 +1824,7 @@ export const products: Product[] = [
 			eyebrow: "Two directions",
 			title: "Skills in the app, and skills for the app.",
 			subtitle:
-				"Install Agent Skills into Ryu from skills.sh, or publish SKILL.md instructions that teach external coding agents how to operate a Ryu node.",
+				"Install Agent Skills into Ryu from skills.sh, or publish SKILL.md instructions that teach external coding agents how to operate a Ryu server.",
 			items: [
 				{
 					title: "Browse skills.sh",
@@ -1170,9 +1875,9 @@ export const products: Product[] = [
 			},
 			{
 				eyebrow: "From Cursor & Claude Code",
-				title: "Teach your coding agent to drive Ryu.",
+				title: "Use Ryu from your coding agent",
 				description:
-					"apps/skills is a separate bundle of external skills—not installed into Ryu's registry. They are instructions an outside agent loads to set up a node and drive it through ryu-mcp.",
+					"apps/skills is a separate bundle of external skills—not installed into Ryu's registry. They are instructions an outside agent loads to set up a server and drive it through ryu-mcp.",
 				bullets: [
 					"setup-ryu walks end-to-end install and MCP wiring",
 					"ryu-mcp, ryu-build-agent, and ryu-local-model cover day-two ops",
@@ -1200,7 +1905,7 @@ export const products: Product[] = [
 		cta: {
 			title: "Give your agents a new skill.",
 			subtitle:
-				"Install skills inside Ryu, or ship SKILL.md files that teach external agents how to drive your node.",
+				"Install skills inside Ryu, or ship SKILL.md files that teach external agents how to drive your server.",
 			primaryCta: { label: "Browse Skills", href: "/products/marketplace" },
 			secondaryCta: SKILLS_GITHUB,
 			note: "skills.sh in-app · apps/skills outward · Hot-reload",
@@ -1216,9 +1921,9 @@ export const products: Product[] = [
 		Icon: Plug,
 		hero: {
 			eyebrow: "MCP · Model Context Protocol",
-			title: "Every tool, zero wiring.",
+			title: "Connect agents and tools through MCP",
 			subtitle:
-				"Inside Ryu: a 250+ tool registry bridged into agent sessions with Gateway governance. Outside: ryu-mcp exposes your Core node to Claude Desktop, Cursor, and any MCP host.",
+				"Inside Ryu: a 250+ tool registry bridged into agent sessions with Gateway governance. Outside: ryu-mcp exposes your Core server to Claude Desktop, Cursor, and any MCP host.",
 			primaryCta: EARLY_ACCESS,
 			secondaryCta: MCP_GITHUB,
 			visual: <McpVisual />,
@@ -1253,7 +1958,7 @@ export const products: Product[] = [
 			eyebrow: "Two directions",
 			title: "Tools in the app, and Ryu as a tool.",
 			subtitle:
-				"Wire MCP servers into Ryu agent sessions, or expose a running Core node to external MCP hosts through ryu-mcp.",
+				"Wire MCP servers into Ryu agent sessions, or expose a running Core server to external MCP hosts through ryu-mcp.",
 			items: [
 				{
 					title: "250+ tool registry",
@@ -1288,7 +1993,7 @@ export const products: Product[] = [
 				{
 					title: "ryu-mcp server",
 					description:
-						"apps/mcp exposes a running Core node to Claude Desktop, Cursor, and other MCP hosts—with OAuth sign-in and 20+ tools.",
+						"apps/mcp exposes a running Core server to Claude Desktop, Cursor, and other MCP hosts—with OAuth sign-in and 20+ tools.",
 					icon: TerminalIcon,
 					action: githubBentoAction(MCP_GITHUB),
 					span: "md:col-span-2",
@@ -1310,9 +2015,9 @@ export const products: Product[] = [
 			},
 			{
 				eyebrow: "From Claude Desktop & Cursor",
-				title: "Let outside agents drive your node.",
+				title: "Connect an MCP client to your server",
 				description:
-					"apps/mcp is an MCP server that points any host at a running Core node—agents, models, skills, workflows, and registered MCP tools over stdio JSON-RPC.",
+					"apps/mcp is an MCP server that points any host at a running Core server—agents, models, skills, workflows, and registered MCP tools over stdio JSON-RPC.",
 				bullets: [
 					"OAuth device grant shares sign-in with desktop and CLI",
 					"ryu_ask, ryu_list_agents, ryu_call_mcp_tool, and 17 more tools",
@@ -1334,13 +2039,13 @@ export const products: Product[] = [
 			},
 			{
 				q: "How do I connect Ryu to Claude Desktop or Cursor?",
-				a: "Add apps/mcp to your host's MCP config. It exposes your Core node over stdio—health, agents, models, skills, workflows, and bridged MCP tools. See the README in apps/mcp for the exact JSON snippet.",
+				a: "Add apps/mcp to your host's MCP config. It exposes your Core server over stdio—health, agents, models, skills, workflows, and bridged MCP tools. See the README in apps/mcp for the exact JSON snippet.",
 			},
 		],
 		cta: {
 			title: "Plug your agents into everything.",
 			subtitle:
-				"Turn on tools inside Ryu, or expose your node to any MCP host with ryu-mcp.",
+				"Turn on tools inside Ryu, or expose your server to any MCP host with ryu-mcp.",
 			primaryCta: EARLY_ACCESS,
 			secondaryCta: MCP_GITHUB,
 			note: "In-app registry · apps/mcp outward · Gateway-governed",
@@ -1356,9 +2061,9 @@ export const products: Product[] = [
 		Icon: Cable,
 		hero: {
 			eyebrow: "Connections · Composio",
-			title: "Connect every app your agent needs.",
+			title: "Connect the apps your team uses",
 			subtitle:
-				"Authenticate Gmail, Slack, Notion, GitHub, Stripe, and hundreds more through Composio. One consent, and your agents can act, governed on every call.",
+				"Connect services such as Gmail, Slack, Notion, and GitHub through Composio. Choose the accounts and actions your agents can access.",
 			primaryCta: EARLY_ACCESS,
 			secondaryCta: DOWNLOAD,
 			visual: <ConnectionsVisual />,
@@ -1423,7 +2128,7 @@ export const products: Product[] = [
 		splits: [
 			{
 				eyebrow: "Tools for agents",
-				title: "Built for the agentic internet.",
+				title: "Use connected tools",
 				description:
 					"Instead of building another app for humans to click, expose what your product does as actions an agent can take for its user. Connections make that reach instant.",
 				bullets: [
@@ -1460,13 +2165,13 @@ export const products: Product[] = [
 		name: "CLI",
 		navLabel: "CLI",
 		category: "Developers",
-		tagline: "The full runtime in your terminal: chat, runs, and nodes.",
+		tagline: "The full runtime in your terminal: chat, runs, and servers.",
 		Icon: TerminalIcon,
 		hero: {
 			eyebrow: "Ryu CLI",
-			title: "Ryu, in your terminal.",
+			title: "Use Ryu from your terminal",
 			subtitle:
-				"A fast TUI for chat, sidecar management, sessions, and LAN node discovery. The same Core path the desktop uses, from the command line.",
+				"A fast TUI for chat, sidecar management, sessions, and LAN server discovery. The same Core path the desktop uses, from the command line.",
 			primaryCta: DOWNLOAD,
 			secondaryCta: EARLY_ACCESS,
 			visual: <CliVisual />,
@@ -1484,9 +2189,9 @@ export const products: Product[] = [
 				icon: TerminalIcon,
 			},
 			{
-				title: "Node discovery",
+				title: "Server discovery",
 				description:
-					"Finds Ryu nodes on your LAN and lets you pick where compute runs.",
+					"Finds Ryu servers on your LAN and lets you pick where compute runs.",
 				icon: Globe,
 			},
 			{
@@ -1499,7 +2204,7 @@ export const products: Product[] = [
 			eyebrow: "Headless-first",
 			title: "Built for people who live in a shell.",
 			subtitle:
-				"Routes to Core for real agent runs, manages sidecars, and finds nodes on your network automatically.",
+				"Routes to Core for real agent runs, manages sidecars, and finds servers on your network automatically.",
 			items: [
 				{
 					title: "Chat & runs",
@@ -1514,9 +2219,9 @@ export const products: Product[] = [
 					icon: Cpu,
 				},
 				{
-					title: "Node discovery",
+					title: "Server discovery",
 					description:
-						"Auto-discover Ryu nodes on your LAN and pick where compute runs.",
+						"Auto-discover Ryu servers on your LAN and pick where compute runs.",
 					icon: Globe,
 				},
 				{
@@ -1538,7 +2243,7 @@ export const products: Product[] = [
 			subtitle: "Install the CLI and get the full runtime, no window required.",
 			primaryCta: DOWNLOAD,
 			secondaryCta: BOOK_DEMO,
-			note: "TUI · Core-native · LAN node discovery",
+			note: "TUI · Core-native · LAN server discovery",
 		},
 	},
 
@@ -1551,7 +2256,7 @@ export const products: Product[] = [
 		Icon: Blocks,
 		hero: {
 			eyebrow: "Ryu SDK",
-			title: "Define agents in a few lines.",
+			title: "Build agents with the Ryu SDK",
 			subtitle:
 				"defineAgent, defineWorkflow, defineTool, defineSkill. Ryu's own Runnable-native SDK where every model call routes through the Gateway.",
 			primaryCta: EARLY_ACCESS,
@@ -1646,6 +2351,234 @@ export const products: Product[] = [
 
 	/* =========================== SURFACES ========================== */
 	{
+		slug: "bot",
+		name: "Ryu Bot",
+		navLabel: "Bot",
+		category: "Surfaces",
+		tagline: "Managed AI you can give real work to without setting up a stack.",
+		Icon: Bot,
+		hero: {
+			eyebrow: "Ryu Bot · managed work",
+			title: "Ask Ryu Bot to handle a task",
+			subtitle:
+				"Describe what your team needs done. Ryu Bot uses its own computer and connected tools, then returns a result for you to review.",
+			primaryCta: DOWNLOAD,
+			secondaryCta: BOOK_DEMO,
+			visual: <BotAppVisual />,
+		},
+		highlights: [
+			{
+				title: "Start with a task",
+				description:
+					"Send a request in plain language and keep the same thread going.",
+				icon: Workflow,
+			},
+			{
+				title: "It has a computer",
+				description:
+					"Ryu Bot works in a private computer and sandbox while you are away.",
+				icon: Monitor,
+			},
+			{
+				title: "Approve the important parts",
+				description: "Choose what it can read, change, or send before it acts.",
+				icon: Shield,
+			},
+			{
+				title: "Keep the result",
+				description:
+					"The thread keeps the context, output, and review state together.",
+				icon: Check,
+			},
+		],
+		bento: {
+			eyebrow: "A managed computer for work",
+			title: "Give the task. Keep the result.",
+			subtitle:
+				"Bot handles the repetitive work in a private workspace while your team stays in control of the important decisions.",
+			items: [
+				{
+					title: "Plain-language requests",
+					description:
+						"Describe the outcome you need instead of wiring another workflow by hand.",
+					icon: Workflow,
+				},
+				{
+					title: "Private computer",
+					description:
+						"Each task gets a bounded computer and sandbox for the work it needs to do.",
+					icon: Monitor,
+				},
+				{
+					title: "Review before sending",
+					description:
+						"Pause before the task reaches an important app, person, or external system.",
+					icon: Shield,
+				},
+				{
+					title: "A thread you can follow",
+					description:
+						"See what happened and pick the work back up without losing the context.",
+					icon: Check,
+				},
+			],
+		},
+		splits: [
+			{
+				eyebrow: "The managed path",
+				title: "Review results in the conversation",
+				description:
+					"Ryu Bot takes on the steps between a request and a usable result, then brings the decision back to your team when it matters.",
+				bullets: [
+					"Works with the tools your team already uses",
+					"Keeps access and review points explicit",
+					"Returns a result your team can inspect",
+				],
+				visual: <BotAppVisual />,
+			},
+		],
+		faq: [
+			{
+				q: "Do I need to configure a model or provider?",
+				a: "No. Ryu Bot is the managed path. It keeps provider and runtime setup out of the everyday work surface.",
+			},
+			{
+				q: "Can Bot act without asking me?",
+				a: "Bot can work through the task, but your configured access and review points still govern what it can read, change, or send.",
+			},
+		],
+		cta: {
+			title: "Give the next task to Ryu Bot.",
+			subtitle:
+				"Download the managed workspace or talk with us about the workflows your team wants off its plate.",
+			primaryCta: DOWNLOAD,
+			secondaryCta: BOOK_DEMO,
+			note: "Managed · Private computer · Reviewable work",
+		},
+	},
+
+	{
+		slug: "console",
+		name: "Ryu Console",
+		navLabel: "Console",
+		category: "Surfaces",
+		tagline:
+			"Operate Ryu with the models, tools, permissions, and records you choose.",
+		Icon: Settings2,
+		hero: {
+			eyebrow: "Ryu Console · operator workspace",
+			title: "Manage your agents in Ryu Console",
+			subtitle:
+				"Ryu Console is the workspace for power users and admins. Use Ryu's AI or bring your own, then configure the server, tools, and access your team relies on.",
+			primaryCta: DOWNLOAD,
+			secondaryCta: BOOK_DEMO,
+			visual: <ConsoleWorkflowVisual />,
+		},
+		highlights: [
+			{
+				title: "Bring your model",
+				description:
+					"Use Ryu's AI, a local model, or a provider your team already pays for.",
+				icon: Cpu,
+			},
+			{
+				title: "Keep tools close",
+				description:
+					"Choose the tools, Skills, and connections each workflow can use.",
+				icon: Blocks,
+			},
+			{
+				title: "Set the review points",
+				description:
+					"Make sensitive actions visible and require a decision before they happen.",
+				icon: Shield,
+			},
+			{
+				title: "Leave a record",
+				description:
+					"Inspect runs, cost, access, and the audit trail left by the work.",
+				icon: GitBranch,
+			},
+		],
+		bento: {
+			eyebrow: "The operator surface",
+			title: "Make your setup reusable.",
+			subtitle:
+				"Console keeps configuration and execution in one place, so teams can improve the next run without rebuilding the stack around it.",
+			items: [
+				{
+					title: "Models and routing",
+					description:
+						"Choose local, managed, or bring-your-own model paths without changing the workflow.",
+					icon: Cpu,
+				},
+				{
+					title: "Tools and Skills",
+					description:
+						"Keep the capabilities a run needs visible and allowlisted.",
+					icon: Blocks,
+				},
+				{
+					title: "Permissions and approvals",
+					description:
+						"Decide what the work may reach and where a person must take over.",
+					icon: Shield,
+				},
+				{
+					title: "Runs and workspaces",
+					description:
+						"Keep active work, background runs, and their outputs easy to find.",
+					icon: Workflow,
+				},
+				{
+					title: "Cost and context",
+					description:
+						"See what a workflow used and what it cost while it was running.",
+					icon: Zap,
+				},
+				{
+					title: "Reusable setup",
+					description:
+						"Capture the tools and preferences that make a good run repeatable.",
+					icon: RefreshCw,
+				},
+			],
+		},
+		splits: [
+			{
+				eyebrow: "One place to operate",
+				title: "Review the steps of a run",
+				description:
+					"Console keeps the request, context, actions, and handoff visible so a team can tune a workflow and trust the next run.",
+				bullets: [
+					"Use local models, Ryu models, or your own provider",
+					"Keep tools and approvals close to the work",
+					"Capture a workflow and run it again next time",
+				],
+				visual: <CodePaneSplit />,
+			},
+		],
+		faq: [
+			{
+				q: "Is Console a separate runtime?",
+				a: "No. Console is the operator surface for the same Ryu Core and Gateway contracts used by the other Ryu products.",
+			},
+			{
+				q: "Can I use my own model and server?",
+				a: "Yes. Console can operate managed or self-hosted nodes and can use local, Ryu-managed, or provider models according to your configuration.",
+			},
+		],
+		cta: {
+			title: "Operate the work you care about.",
+			subtitle:
+				"Download Ryu Console and keep models, tools, permissions, and the run record in one workspace.",
+			primaryCta: DOWNLOAD,
+			secondaryCta: BOOK_DEMO,
+			note: "Operator workspace · Models · Tools · Approvals · Audit",
+		},
+	},
+
+	{
 		slug: "os",
 		name: "Ryu OS",
 		navLabel: "OS",
@@ -1654,9 +2587,9 @@ export const products: Product[] = [
 		Icon: Monitor,
 		hero: {
 			eyebrow: "Ryu OS · desktop workspace",
-			title: "Your agent work, in one desktop.",
+			title: "Work across your Ryu apps",
 			subtitle:
-				"Ryu OS turns the desktop into a calm workspace for agent Apps: open them from a dock, switch with Mission Control, and keep each task in its own window.",
+				"Open apps from the dock, switch with App Launcher, and keep each task in its own window.",
 			primaryCta: DOWNLOAD,
 			secondaryCta: EARLY_ACCESS,
 			visual: <OsVisual />,
@@ -1675,7 +2608,7 @@ export const products: Product[] = [
 				icon: Monitor,
 			},
 			{
-				title: "Mission Control",
+				title: "App Launcher",
 				description:
 					"Press ⌘K to find an App or jump back to an open window immediately.",
 				icon: Zap,
@@ -1691,7 +2624,7 @@ export const products: Product[] = [
 			eyebrow: "A desktop for agent work",
 			title: "The tools you need, arranged like a place.",
 			subtitle:
-				"Ryu OS gives the growing App ecosystem a home: windows for active work, a dock for muscle memory, and Mission Control for everything else.",
+				"Ryu OS gives the growing App ecosystem a home: windows for active work, a dock for muscle memory, and App Launcher for everything else.",
 			items: [
 				{
 					title: "Open from the dock",
@@ -1706,8 +2639,9 @@ export const products: Product[] = [
 					icon: Monitor,
 				},
 				{
-					title: "Find with Mission Control",
-					description: "Search Apps and open windows from one command dialog.",
+					title: "Find with App Launcher",
+					description:
+						"Browse current Apps and open windows from one searchable grid.",
 					icon: Sparkles,
 				},
 				{
@@ -1721,12 +2655,12 @@ export const products: Product[] = [
 		splits: [
 			{
 				eyebrow: "Made for switching",
-				title: "Open the app you need. Keep the work you started.",
+				title: "Switch between apps",
 				description:
-					"Ryu OS puts the workspace model in the foreground: windows are live views into the same Core session system, while the dock and Mission Control make the next move obvious.",
+					"Ryu OS puts the workspace model in the foreground: windows are live views into the same Core session system, while the dock and App Launcher make the next move obvious.",
 				bullets: [
 					"Dock shortcuts for the everyday Apps",
-					"⌘K / Ctrl K opens Mission Control",
+					"⌘K / Ctrl K opens App Launcher",
 					"Uses the existing Ryu tabs, permissions, and runtime",
 				],
 				visual: <OsVisual />,
@@ -1739,16 +2673,16 @@ export const products: Product[] = [
 			},
 			{
 				q: "What can I open in Ryu OS?",
-				a: "The dock starts with Chat, Spaces, Tools, Skills, Apps, and Review. Installed Apps can add their own surfaces to the same workspace over time.",
+				a: "The dock starts with App Launcher, Mission Control, Chat, Spaces, Tools, Skills, Apps, and Review. Installed Apps can add their own surfaces to the same workspace over time.",
 			},
 		],
 		cta: {
 			title: "Make Ryu feel like a place to work.",
 			subtitle:
-				"Download the desktop workspace and open the next App from the dock or Mission Control.",
+				"Download the desktop workspace and open the next App from the dock or App Launcher.",
 			primaryCta: DOWNLOAD,
 			secondaryCta: BOOK_DEMO,
-			note: "Desktop workspace · Dock · Mission Control · Live windows",
+			note: "Desktop workspace · Dock · App Launcher · Live windows",
 		},
 	},
 
@@ -1761,9 +2695,9 @@ export const products: Product[] = [
 		Icon: Monitor,
 		hero: {
 			eyebrow: "Ryu App · desktop",
-			title: "Pick an agent, go.",
+			title: "Use Ryu on your desktop",
 			subtitle:
-				"The flagship app. Chat, councils, runs, models, spaces, and the Gateway, in one clean window. No terminal, no API keys, no MCP wiring.",
+				"Chat with agents, connect tools, manage models, and review runs in the desktop app.",
 			primaryCta: DOWNLOAD,
 			secondaryCta: EARLY_ACCESS,
 			visual: <DesktopVisual />,
@@ -1841,7 +2775,7 @@ export const products: Product[] = [
 		splits: [
 			{
 				eyebrow: "Parity first",
-				title: "Codex and Cursor parity, then more.",
+				title: "Use coding agents from the desktop",
 				description:
 					"Active working folder, git branch, per-run worktree, diff, review, and apply, plus a runs list and a clean information architecture. Table stakes done right, then the app store and companion on top.",
 				bullets: [
@@ -1881,9 +2815,9 @@ export const products: Product[] = [
 		Icon: Radio,
 		hero: {
 			eyebrow: "Ryu Island · context companion",
-			title: "The background agent that helps.",
+			title: "Get help with what is on your screen",
 			subtitle:
-				"A dynamic-island overlay that reads your screen context on-device and offers the next step as a chip, behind a per-capability consent gate.",
+				"Ryu Island can use screen context to suggest actions and answer questions. You choose which capabilities it can access.",
 			primaryCta: EARLY_ACCESS,
 			secondaryCta: DOWNLOAD,
 			visual: <IslandVisual />,
@@ -1988,13 +2922,13 @@ export const products: Product[] = [
 		name: "Mobile App",
 		navLabel: "Mobile App",
 		category: "Surfaces",
-		tagline: "Ryu in your pocket: on-device, with node selection.",
+		tagline: "Ryu in your pocket: on-device, with server selection.",
 		Icon: Smartphone,
 		hero: {
 			eyebrow: "Ryu Mobile",
-			title: "Your agent, in your pocket.",
+			title: "Use Ryu on your phone",
 			subtitle:
-				"Chat with your agents on the go. On-device inference with Cactus Compute, or reach a node at home for heavier work.",
+				"Chat with your agents on the go. On-device inference with Cactus Compute, or reach a server at home for heavier work.",
 			primaryCta: EARLY_ACCESS,
 			secondaryCta: BOOK_DEMO,
 			visual: <MobileVisual />,
@@ -2007,9 +2941,9 @@ export const products: Product[] = [
 				icon: Smartphone,
 			},
 			{
-				title: "Node selection",
+				title: "Server selection",
 				description:
-					"Reach a home or cloud node for heavy runs, else compute locally.",
+					"Reach a home or cloud server for heavy runs, else compute locally.",
 				icon: Globe,
 			},
 			{
@@ -2037,9 +2971,9 @@ export const products: Product[] = [
 					icon: Smartphone,
 				},
 				{
-					title: "Node selection",
+					title: "Server selection",
 					description:
-						"Prefer a reachable home or cloud node for heavy runs, else compute locally.",
+						"Prefer a reachable home or cloud server for heavy runs, else compute locally.",
 					icon: Globe,
 				},
 				{
@@ -2059,7 +2993,7 @@ export const products: Product[] = [
 		faq: [
 			{
 				q: "Does it work offline?",
-				a: "Yes, for on-device models via Cactus Compute. For heavier work it can reach a node at home or in the cloud, your choice.",
+				a: "Yes, for on-device models via Cactus Compute. For heavier work it can reach a server at home or in the cloud, your choice.",
 			},
 		],
 		cta: {
@@ -2068,7 +3002,7 @@ export const products: Product[] = [
 				"Join early access for the mobile app and bring your agents everywhere.",
 			primaryCta: EARLY_ACCESS,
 			secondaryCta: BOOK_DEMO,
-			note: "iOS · Android · On-device · Node selection",
+			note: "iOS · Android · On-device · Server selection",
 		},
 	},
 
@@ -2081,7 +3015,7 @@ export const products: Product[] = [
 		Icon: Chrome,
 		hero: {
 			eyebrow: "Chrome Extension",
-			title: "An agent that sees your tab.",
+			title: "Use Ryu with the page you are reading",
 			subtitle:
 				"A side-panel companion that reads the page you're on, runs quick actions, and chats, with the Gateway's DLP guarding everything that leaves.",
 			primaryCta: EARLY_ACCESS,
@@ -2170,9 +3104,9 @@ export const products: Product[] = [
 		Icon: Gem,
 		hero: {
 			eyebrow: "Ryu Devices · coming soon",
-			title: "Always-aware AI you can wear.",
+			title: "Ryu devices are in development",
 			subtitle:
-				"Rings, pendants, and ambient devices with on-device context and local AI. The companion off your screen and into the world. Coming soon.",
+				"We are developing wearable devices with local AI. They are not available to purchase yet.",
 			primaryCta: EARLY_ACCESS,
 			secondaryCta: BOOK_DEMO,
 			visual: <DevicesVisual />,
@@ -2257,9 +3191,9 @@ export const products: Product[] = [
 		Icon: Box,
 		hero: {
 			eyebrow: "Customize",
-			title: "We made an app store for AI agents.",
+			title: "Find apps, agents, and skills",
 			subtitle:
-				"Browse a catalog of agents, tools, and skills. Install with permission grants, enable on the fly, no terminal, no API keys, no wiring.",
+				"Browse the Marketplace, review the permissions each item requests, and install what your workflow needs.",
 			primaryCta: EARLY_ACCESS,
 			secondaryCta: DOWNLOAD,
 			visual: <MarketplaceVisual />,
@@ -2346,9 +3280,9 @@ export const products: Product[] = [
 		Icon: Puzzle,
 		hero: {
 			eyebrow: "Extensions · plugins",
-			title: "Extensible at every level.",
+			title: "Extend Ryu with plugins",
 			subtitle:
-				"Ryu sits above every provider and harness, and the plugin runtime lives in open-source Core, so the app stays extensible the way VS Code and Codex are.",
+				"Add tools, providers, and app features through the plugin runtime in open-source Ryu Core.",
 			primaryCta: EARLY_ACCESS,
 			secondaryCta: { label: "Read the SDK", href: "/products/sdk" },
 			visual: <ExtensionsVisual />,
@@ -2435,9 +3369,9 @@ export const products: Product[] = [
 		Icon: Bug,
 		hero: {
 			eyebrow: "Red Teaming · service + product",
-			title: "Hacking as a service, for agents.",
+			title: "Test your agents for security failures",
 			subtitle:
-				"We attack your AI agents the way an adversary would, prompt injection, data exfiltration, tool abuse, jailbreaks, so you find the holes before anyone else does.",
+				"Test for prompt injection, data leaks, tool misuse, and jailbreaks. Review the findings and use them to improve your controls.",
 			primaryCta: BOOK_DEMO,
 			secondaryCta: EARLY_ACCESS,
 			visual: <RedTeamVisual />,
@@ -2513,7 +3447,7 @@ export const products: Product[] = [
 		splits: [
 			{
 				eyebrow: "Self-improving AI",
-				title: "Every attack makes you stronger.",
+				title: "Use findings to update controls",
 				description:
 					"Red teaming isn't a one-off audit. Findings flow into the Gateway as guardrails and evals, so each engagement hardens your agents against the next attack automatically.",
 				bullets: [

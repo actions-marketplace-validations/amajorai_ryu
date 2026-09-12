@@ -16,6 +16,7 @@ import { ActivationRecommendationsStep } from "@/src/components/onboarding/Activ
 import { ActivationTaskStep } from "@/src/components/onboarding/ActivationTaskStep.tsx";
 import { ActivationValueStep } from "@/src/components/onboarding/ActivationValueStep.tsx";
 import { ColorStep } from "@/src/components/onboarding/ColorStep.tsx";
+import { NodePersonalizationStep } from "@/src/components/onboarding/NodePersonalizationStep.tsx";
 import {
 	type OnboardingOrganization,
 	type OnboardingSetupKind,
@@ -33,6 +34,7 @@ import { useAppSurface } from "@/src/contexts/app-surface-context.tsx";
 import { useAutoImportThreads } from "@/src/hooks/useAutoImportThreads.ts";
 import { useCreditsWallet } from "@/src/hooks/useCreditsWallet.ts";
 import { AgentCatalogLogo } from "@/src/lib/agent-catalog-logo.tsx";
+import { buildSuggestedAgentInput } from "@/src/lib/agent-suggestion.ts";
 import { track } from "@/src/lib/analytics.ts";
 import {
 	importAgentThread,
@@ -40,11 +42,14 @@ import {
 } from "@/src/lib/api/agent-threads.ts";
 import {
 	type AgentCatalogEntry,
+	createAgent,
 	fetchAgentCatalog,
+	fetchAgents,
 	installAgent,
 } from "@/src/lib/api/agents.ts";
 import {
 	CheckoutError,
+	createCheckout,
 	fetchEntitlementStatus,
 } from "@/src/lib/api/billing.ts";
 import { type ChannelConfig, listChannels } from "@/src/lib/api/channels.ts";
@@ -69,7 +74,12 @@ import {
 	fetchGatewayOnboardingAccess,
 	fetchProfileAvailability,
 	getProfileJobStatus,
+	type NodeOnboardingSnapshot,
+	type NodeSetupKind,
+	type OnboardingAgentSuggestion,
 	type ProfileJobStatus,
+	type SaveNodeOnboardingStateInput,
+	saveNodeOnboardingState,
 	startProfileJob,
 } from "@/src/lib/api/onboarding-profile.ts";
 import {
@@ -85,19 +95,30 @@ import {
 } from "@/src/lib/api/pi-config.ts";
 import {
 	type AgentSelection,
+	DEFAULT_USER_PERSONALIZATION,
 	defaultCloudAgentSelection,
 	defaultLocalAgentSelection,
 	EMPTY_AGENT_SELECTION,
 	getLaneAgentSelection,
+	getPreference,
 	setLaneAgentSelection,
+	setPreference,
+	USER_PERSONALIZATION_PREF_KEY,
+	type UserPersonalization,
 } from "@/src/lib/api/preferences.ts";
 import { createQuest } from "@/src/lib/api/quests.ts";
 import { checkoutTeamsOnboarding } from "@/src/lib/api/teams-billing.ts";
 // # 0.1.0: Island disabled — uncomment with the onboarding install below
 // import { installAndLaunchIsland } from "@/src/lib/api/island.ts";
 import { ensureMicPermission } from "@/src/lib/audio/devices.ts";
+import type { ConnectionAccessLevel } from "@/src/lib/connection-permissions.ts";
 import { triggerAgentsRefresh } from "@/src/lib/core-refresh.ts";
+import {
+	isDesktopOnboardingComplete,
+	markDesktopOnboardingComplete,
+} from "@/src/lib/desktop-onboarding-state.ts";
 import { setFeatureEnabled, TOGGLEABLE_FEATURES } from "@/src/lib/features.ts";
+import { useEntityCap } from "@/src/lib/gating/useEntityCap.ts";
 import {
 	type InstallerProgress,
 	installerComponentLabel,
@@ -160,6 +181,7 @@ type Phase =
 	| "connect"
 	| "installing"
 	| "agents"
+	| "node-setup"
 	| "local-default"
 	| "organization"
 	| "providers"
@@ -167,6 +189,7 @@ type Phase =
 	| "cloud-default"
 	| "imports"
 	| "profile"
+	| "agent-suggestions"
 	| "telegram"
 	| "features"
 	| "mic"
@@ -188,6 +211,7 @@ const PHASE_TITLES: Partial<Record<Phase, string>> = {
 	choose: "Where should Ryu do the work?",
 	connect: "Connect the place where work runs",
 	agents: "Choose what you want to run",
+	"node-setup": "Set up this node",
 	"local-default": "Choose your local starting point",
 	organization: "Choose the workspace you work in",
 	providers: "Choose how cloud work connects",
@@ -195,6 +219,7 @@ const PHASE_TITLES: Partial<Record<Phase, string>> = {
 	"cloud-default": "Choose your cloud starting point",
 	imports: "Bring your work with you",
 	profile: "Give Ryu a starting point",
+	"agent-suggestions": "Suggested agents for your work",
 	telegram: "Take the work to Telegram",
 	features: "Choose what Ryu can do",
 	mic: "Choose how you talk to Ryu",
@@ -213,6 +238,8 @@ const PHASE_SUBTITLES: Partial<Record<Phase, string>> = {
 		"Want the easiest setup? Start with Ryu Cloud. You can also run Ryu here or use a server your team already has.",
 	connect: "Use an existing Ryu node as the place your work runs",
 	agents: "Start with one capability; add more when a workflow needs it",
+	"node-setup":
+		"Choose whether this node is for private work or a shared team workspace",
 	"local-default":
 		"This is the default lane for local work, plugins, and offline fallback",
 	organization: "Choose the shared workspace that owns your work and access",
@@ -223,6 +250,8 @@ const PHASE_SUBTITLES: Partial<Record<Phase, string>> = {
 	imports: "Bring existing conversations into the workspace",
 	profile:
 		"Give Ryu a starting point; approve the result before it becomes your profile",
+	"agent-suggestions":
+		"Review focused agent drafts from the workflows Ryu found in your approved sources",
 	telegram: "Use the same default agent from Telegram",
 	features: "Turn capabilities on or off; change them later",
 	mic: "Talk to Ryu when typing is not the fastest way",
@@ -230,6 +259,27 @@ const PHASE_SUBTITLES: Partial<Record<Phase, string>> = {
 	welcome: "Ready when you are",
 	done: "Ready to finish real work",
 };
+
+interface OnboardingPageProps {
+	nodeOnboardingState: NodeOnboardingSnapshot | null;
+	nodeOnboardingStateAvailable: boolean;
+}
+
+function initialPhaseForOnboarding({
+	desktopPending,
+	nodePending,
+}: {
+	desktopPending: boolean;
+	nodePending: boolean;
+}): Phase {
+	if (nodePending && !desktopPending) {
+		return "node-setup";
+	}
+	if (!nodePending && desktopPending) {
+		return "mic";
+	}
+	return isTauriReady() ? "updates" : "starting";
+}
 
 // The auto-advancing phases (`starting`/`installing`/`finishing`) can sit for a
 // long time — `waitForLocalStack` polls the bundled inference install for up to
@@ -783,12 +833,16 @@ function failReason(err: unknown): "unauthorized" | "timeout" | "unreachable" {
 	return "unreachable";
 }
 
-export default function OnboardingPage() {
+export default function OnboardingPage({
+	nodeOnboardingState: initialNodeOnboardingState,
+	nodeOnboardingStateAvailable,
+}: OnboardingPageProps) {
 	const { isDesktop } = useAppSurface();
 	const navigate = useNavigate();
 	const stepUp = useStepUp();
 	const coreStatus = useAppStore((s) => s.coreStatus);
-	const { getActiveNode, hydrateCloudNodes, setDefault } = useNodeStore();
+	const { getActiveNode, hydrateCloudNodes, setDefault, updateNodeToken } =
+		useNodeStore();
 	// The exact entitlement read NodeSelector's managed surfaces use (WS8): gates
 	// the managed (Ryu Cloud) option on the plan's managed-inference flag.
 	const {
@@ -796,11 +850,23 @@ export default function OnboardingPage() {
 		loading: entitlementLoading,
 		refresh: refreshCredits,
 	} = useCreditsWallet();
+	const { guard: guardAgentCreation } = useEntityCap();
+	const desktopOnboardingPending = !isDesktopOnboardingComplete();
+	const [nodeOnboardingState, setNodeOnboardingState] = useState(
+		initialNodeOnboardingState
+	);
+	const nodeOnboardingPending =
+		nodeOnboardingStateAvailable &&
+		nodeOnboardingState?.canConfigure !== false &&
+		nodeOnboardingState?.completed !== true;
 	// The browser builds reuse this page, but a browser deployment is not a
 	// desktop bundle and must not present a native-app update verdict. In Tauri,
 	// the update check is the first screen after device auth succeeds.
 	const [phase, setPhase] = useState<Phase>(() =>
-		isTauriReady() ? "updates" : "starting"
+		initialPhaseForOnboarding({
+			desktopPending: desktopOnboardingPending,
+			nodePending: nodeOnboardingPending,
+		})
 	);
 	// The line currently on screen for an auto-advancing phase. It is set by the
 	// rotation tick below, which alternates the flavour copy with whatever is
@@ -854,6 +920,33 @@ export default function OnboardingPage() {
 		};
 	}, []);
 
+	const activateOnboardingNode = useCallback(
+		async (node: Node): Promise<Node> => {
+			try {
+				await setDefault(node.name);
+			} catch {
+				// Browser onboarding has no Tauri persistence bridge. Keep the selected
+				// node active for this session instead of continuing against a stale
+				// cloud/default node.
+				useNodeStore.setState({
+					activeNodeOnline: null,
+					autoSelectedNode: null,
+					defaultNode: node.name,
+				});
+			}
+			// A deliberate onboarding choice must win over any stale auto-selection.
+			useNodeStore.setState({ autoSelectedNode: null, activeNodeOnline: null });
+			const active = useNodeStore.getState().getActiveNode();
+			const sameUrl =
+				active.url.replace(/\/+$/u, "") === node.url.replace(/\/+$/u, "");
+			if (active.name !== node.name || !sameUrl) {
+				throw new Error("Ryu could not activate the selected node. Try again.");
+			}
+			return active;
+		},
+		[setDefault]
+	);
+
 	// The stages the installer events cannot see — preparing, Core booting, the
 	// local engine install, agent detection. A fixed bar position rather than a
 	// fraction; null hands the bar back to the phase's own placeholder.
@@ -888,6 +981,35 @@ export default function OnboardingPage() {
 		setOnboardingActive(true);
 		return () => setOnboardingActive(false);
 	}, []);
+
+	// Preserve a previously entered personal profile when node onboarding is
+	// resumed. This preference is only written for the personal-node path; team
+	// context stays in the node state and is visible to everyone on that node.
+	useEffect(() => {
+		if (!(nodeOnboardingStateAvailable && nodeOnboardingPending)) {
+			return;
+		}
+		let cancelled = false;
+		void getPreference(toTarget(getActiveNode()), USER_PERSONALIZATION_PREF_KEY)
+			.then((raw) => {
+				if (cancelled || !raw) {
+					return;
+				}
+				try {
+					const parsed = JSON.parse(raw) as Partial<UserPersonalization>;
+					setUserPersonalization((current) => ({
+						...current,
+						...parsed,
+					}));
+				} catch {
+					// Keep the empty defaults when an older client left corrupt data.
+				}
+			})
+			.catch(() => undefined);
+		return () => {
+			cancelled = true;
+		};
+	}, [getActiveNode, nodeOnboardingPending, nodeOnboardingStateAvailable]);
 
 	// Mirror the public installer's versioned progress envelope. The stream covers
 	// Core, Gateway, CLI, Core boot, and the bundled defaults; agent detection and
@@ -961,6 +1083,40 @@ export default function OnboardingPage() {
 	const [agentsNode, setAgentsNode] = useState<Node | null>(null);
 	const [agentsRetrying, setAgentsRetrying] = useState(false);
 	const [submitting, setSubmitting] = useState(false);
+	const [nodeSetupKind, setNodeSetupKind] = useState<NodeSetupKind | null>(
+		() => nodeOnboardingState?.setupKind ?? null
+	);
+	const [companyContext, setCompanyContext] = useState(
+		() => nodeOnboardingState?.personalization.companyContext ?? ""
+	);
+	const [companyKnowledgeEnabled, setCompanyKnowledgeEnabled] = useState(() =>
+		nodeOnboardingState?.setupKind === "team"
+			? nodeOnboardingState.personalization.companyKnowledgeEnabled
+			: true
+	);
+	const [userPersonalization, setUserPersonalization] =
+		useState<UserPersonalization>(DEFAULT_USER_PERSONALIZATION);
+	const [nodeSetupError, setNodeSetupError] = useState<string | null>(null);
+	const lastExternalNodeState = useRef<
+		NodeOnboardingSnapshot | null | undefined
+	>(undefined);
+	useEffect(() => {
+		if (lastExternalNodeState.current === initialNodeOnboardingState) {
+			return;
+		}
+		lastExternalNodeState.current = initialNodeOnboardingState;
+		setNodeOnboardingState(initialNodeOnboardingState);
+		setNodeSetupKind(initialNodeOnboardingState?.setupKind ?? null);
+		setCompanyContext(
+			initialNodeOnboardingState?.personalization.companyContext ?? ""
+		);
+		setCompanyKnowledgeEnabled(
+			initialNodeOnboardingState?.setupKind === "team"
+				? initialNodeOnboardingState.personalization.companyKnowledgeEnabled
+				: true
+		);
+		setNodeSetupError(null);
+	}, [initialNodeOnboardingState]);
 	// Agents chosen on the picker, held while the later steps are shown.
 	const [allowedAgentIds, setAllowedAgentIds] = useState<string[]>(["ryu"]);
 	const [localSelection, setLocalSelection] = useState<AgentSelection>(
@@ -1004,6 +1160,20 @@ export default function OnboardingPage() {
 		boolean | null
 	>(null);
 	const [profileStartedAt, setProfileStartedAt] = useState<number | null>(null);
+	const [agentSuggestions, setAgentSuggestions] = useState<
+		OnboardingAgentSuggestion[]
+	>([]);
+	const [selectedAgentSuggestions, setSelectedAgentSuggestions] = useState<
+		Set<string>
+	>(new Set());
+	const [reviewedAgentSuggestions, setReviewedAgentSuggestions] = useState<
+		Set<string>
+	>(new Set());
+	const [agentSuggestionsSubmitting, setAgentSuggestionsSubmitting] =
+		useState(false);
+	const [agentSuggestionsError, setAgentSuggestionsError] = useState<
+		string | null
+	>(null);
 	const [autoImport, setAutoImport] = useAutoImportThreads();
 	const [activationSourceError, setActivationSourceError] = useState<
 		string | null
@@ -1043,6 +1213,14 @@ export default function OnboardingPage() {
 		() => buildActivationTaskDraft(activationRecommendations),
 		[activationRecommendations]
 	);
+	// The activation offer follows the workspace selected during onboarding. A
+	// personal workspace must never be shown the five-seat Teams price or sent to
+	// the organization checkout route; an organization workspace uses the Teams
+	// seat offer. When no workspace has been selected yet, the safe default is the
+	// one-person Pro offer.
+	const activationUsesOrganizationPlan = Boolean(
+		selectedOrganization && !selectedOrganization.isPersonal
+	);
 	const entitlementStateRef = useRef({
 		loading: entitlementLoading,
 		paid: paidPlan,
@@ -1061,16 +1239,31 @@ export default function OnboardingPage() {
 
 	const finish = useCallback(
 		async (
-			_target: ApiTarget,
+			target: ApiTarget,
 			routeState: unknown = ONBOARDING_CHAT_ROUTE_STATE
 		) => {
+			if (nodeOnboardingPending) {
+				if (!nodeSetupKind) {
+					setPhase("node-setup");
+					throw new Error(
+						"Choose personal or team use before finishing setup."
+					);
+				}
+				const saved = await saveNodeOnboardingState(target, {
+					companyContext,
+					companyKnowledgeEnabled,
+					completed: true,
+					setupKind: nodeSetupKind,
+				});
+				setNodeOnboardingState(saved);
+			}
 			setPhase("finishing");
 			// Memory is enabled before the profile turn and long-term recall is on for
 			// the first chat. Existing explicit disables are respected by Core's app
 			// seeder; this only opts a fresh onboarding flow into its first build.
 			localStorage.setItem("ryu_long_term_memory", "true");
 
-			localStorage.setItem("ryu_onboarding_complete", "true");
+			markDesktopOnboardingComplete();
 			track({ event: "onboarding_completed" });
 			localStorage.setItem("ryu_default_agent", "ryu");
 
@@ -1082,7 +1275,95 @@ export default function OnboardingPage() {
 				state: routeState,
 			});
 		},
-		[navigate]
+		[
+			companyContext,
+			companyKnowledgeEnabled,
+			navigate,
+			nodeOnboardingPending,
+			nodeSetupKind,
+		]
+	);
+
+	const finishNodeOnly = useCallback(() => {
+		if (submitting) {
+			return;
+		}
+		setSubmitting(true);
+		const active = getActiveNode();
+		const node = isLocalNode(active)
+			? refreshLocalNode()
+			: Promise.resolve(active);
+		void node
+			.then((resolved) => finish(toTarget(resolved)))
+			.catch((error: unknown) => {
+				setSubmitting(false);
+				sileo.error({
+					title: "Node setup could not be completed",
+					description:
+						error instanceof Error
+							? error.message
+							: "Try again from this step.",
+				});
+			});
+	}, [finish, getActiveNode, submitting]);
+
+	const handleNodeSetupContinue = useCallback(
+		async (
+			input: SaveNodeOnboardingStateInput & {
+				personalization: UserPersonalization;
+			}
+		) => {
+			if (submitting) {
+				return;
+			}
+			setSubmitting(true);
+			setNodeSetupError(null);
+			try {
+				const target = toTarget(getActiveNode());
+				const saved = await saveNodeOnboardingState(target, {
+					companyContext: input.companyContext,
+					companyKnowledgeEnabled: input.companyKnowledgeEnabled,
+					completed: false,
+					setupKind: input.setupKind,
+				});
+				if (input.setupKind === "personal") {
+					await setPreference(
+						target,
+						USER_PERSONALIZATION_PREF_KEY,
+						JSON.stringify(input.personalization)
+					);
+				}
+				const [local, cloud] = await Promise.all([
+					getLaneAgentSelection(target, "local").catch(() =>
+						defaultLocalAgentSelection()
+					),
+					getLaneAgentSelection(target, "cloud").catch(
+						() => EMPTY_AGENT_SELECTION
+					),
+				]);
+				setNodeOnboardingState(saved);
+				setNodeSetupKind(input.setupKind);
+				setCompanyContext(saved.personalization.companyContext);
+				setCompanyKnowledgeEnabled(
+					saved.personalization.companyKnowledgeEnabled
+				);
+				setUserPersonalization(input.personalization);
+				setLocalSelection(
+					local.agent_id || local.model ? local : defaultLocalAgentSelection()
+				);
+				setCloudSelection(cloud);
+				setPhase("local-default");
+			} catch (error) {
+				setNodeSetupError(
+					error instanceof Error
+						? error.message
+						: "Ryu couldn't save this node setup. Try again."
+				);
+			} finally {
+				setSubmitting(false);
+			}
+		},
+		[getActiveNode, submitting]
 	);
 
 	// Install the user's Add Agents choices before the lane pickers render. This
@@ -1110,13 +1391,13 @@ export default function OnboardingPage() {
 				);
 				setCloudSelection(cloud);
 				setSubmitting(false);
-				setPhase("local-default");
+				setPhase(nodeOnboardingPending ? "node-setup" : "local-default");
 			})().catch(() => {
 				setSubmitting(false);
-				setPhase("local-default");
+				setPhase(nodeOnboardingPending ? "node-setup" : "local-default");
 			});
 		},
-		[getActiveNode]
+		[getActiveNode, nodeOnboardingPending]
 	);
 
 	const loadProviderCatalog = useCallback(async (target: ApiTarget) => {
@@ -1291,33 +1572,43 @@ export default function OnboardingPage() {
 	);
 
 	const connectOnboardingToolkit = useCallback(
-		(toolkit: ComposioToolkit) => {
+		async (toolkit: ComposioToolkit, accessLevel: ConnectionAccessLevel) => {
 			if (connectingToolkit) {
 				return;
 			}
 			setConnectingToolkit(toolkit.slug);
 			const target = toTarget(getActiveNode());
-			void (async () => {
-				try {
-					const result = await initiateComposioConnection(target, toolkit.slug);
-					if (result.redirectUrl) {
-						await openExternal(result.redirectUrl);
-					}
-					await sleep(1800);
-					const connection = await fetchComposioConnectionStatus(
-						target,
-						result.connectionId
-					).catch(() => null);
-					if (connection) {
-						setConnections((current) => [
-							...current.filter((item) => item.id !== connection.id),
-							connection,
-						]);
-					}
-				} finally {
-					setConnectingToolkit(null);
+			try {
+				const result = await initiateComposioConnection(
+					target,
+					toolkit.slug,
+					accessLevel
+				);
+				if (result.redirectUrl) {
+					await openExternal(result.redirectUrl);
 				}
-			})();
+				await sleep(1800);
+				const connection = await fetchComposioConnectionStatus(
+					target,
+					result.connectionId
+				).catch(() => null);
+				if (connection) {
+					setConnections((current) => [
+						...current.filter((item) => item.id !== connection.id),
+						connection,
+					]);
+				}
+			} catch (error) {
+				sileo.error({
+					title:
+						error instanceof Error
+							? error.message
+							: "Could not start the connection.",
+				});
+				throw error;
+			} finally {
+				setConnectingToolkit(null);
+			}
 		},
 		[connectingToolkit, getActiveNode]
 	);
@@ -1385,12 +1676,21 @@ export default function OnboardingPage() {
 		);
 		const role = selectedOrg?.role?.toLowerCase();
 		const ownerOrAdmin = role === "owner" || role === "admin";
+		const companyKnowledgeReady =
+			nodeSetupKind !== "team" || companyKnowledgeEnabled;
 		// A paid owner/admin can build a useful first draft even before connecting
 		// a source: the agent can use imported sessions and the agent group itself.
 		// Connected source ids are still passed when available, and Core performs
 		// the authoritative paid-plan/role/consent check before materialising.
-		return entitlementStateRef.current.paid && ownerOrAdmin;
-	}, [organizations, selectedOrganizationId]);
+		return (
+			entitlementStateRef.current.paid && ownerOrAdmin && companyKnowledgeReady
+		);
+	}, [
+		companyKnowledgeEnabled,
+		nodeSetupKind,
+		organizations,
+		selectedOrganizationId,
+	]);
 
 	// Advance to the optional microphone step. Voice input is opt-in, so this
 	// never blocks finishing — it just gives the OS mic prompt a controlled moment
@@ -1399,13 +1699,21 @@ export default function OnboardingPage() {
 		setPhase("mic");
 	}, []);
 
+	const continueAfterNode = useCallback(() => {
+		if (desktopOnboardingPending) {
+			goToMic();
+			return;
+		}
+		finishNodeOnly();
+	}, [desktopOnboardingPending, finishNodeOnly, goToMic]);
+
 	const goToTelegram = useCallback(() => {
-		if (gatewaySetupAllowed) {
+		if (nodeOnboardingPending && gatewaySetupAllowed) {
 			setPhase("telegram");
 			return;
 		}
-		goToMic();
-	}, [gatewaySetupAllowed, goToMic]);
+		continueAfterNode();
+	}, [continueAfterNode, gatewaySetupAllowed, nodeOnboardingPending]);
 
 	const continueAfterImports = useCallback(() => {
 		if (gatewaySetupAllowed && eligibleForProfile()) {
@@ -1414,6 +1722,139 @@ export default function OnboardingPage() {
 		}
 		goToTelegram();
 	}, [eligibleForProfile, gatewaySetupAllowed, goToTelegram]);
+
+	const continueAfterProfile = useCallback(() => {
+		const suggestions = profileJob?.agentSuggestions ?? [];
+		if (suggestions.length > 0) {
+			setAgentSuggestions(suggestions);
+			setSelectedAgentSuggestions(new Set());
+			setReviewedAgentSuggestions(new Set());
+			setAgentSuggestionsError(null);
+			setPhase("agent-suggestions");
+			return;
+		}
+		goToTelegram();
+	}, [goToTelegram, profileJob]);
+
+	const toggleAgentSuggestion = useCallback((id: string) => {
+		setSelectedAgentSuggestions((current) => {
+			const next = new Set(current);
+			if (next.has(id)) {
+				next.delete(id);
+			} else {
+				next.add(id);
+			}
+			return next;
+		});
+	}, []);
+
+	const reviewAgentSuggestion = useCallback((id: string, reviewed: boolean) => {
+		setReviewedAgentSuggestions((current) => {
+			const next = new Set(current);
+			if (reviewed) {
+				next.add(id);
+			} else {
+				next.delete(id);
+			}
+			return next;
+		});
+	}, []);
+
+	const createOnboardingAgents = useCallback(async () => {
+		if (agentSuggestionsSubmitting || selectedAgentSuggestions.size === 0) {
+			return;
+		}
+		const unreviewed = agentSuggestions.filter(
+			(suggestion) =>
+				selectedAgentSuggestions.has(suggestion.id) &&
+				!reviewedAgentSuggestions.has(suggestion.id)
+		);
+		if (unreviewed.length > 0) {
+			setAgentSuggestionsError(
+				`Review ${unreviewed.length} selected draft${unreviewed.length === 1 ? "" : "s"} before adding it.`
+			);
+			return;
+		}
+		setAgentSuggestionsSubmitting(true);
+		setAgentSuggestionsError(null);
+		const target = toTarget(getActiveNode());
+		const chosen = agentSuggestions.filter((suggestion) =>
+			selectedAgentSuggestions.has(suggestion.id)
+		);
+		const existingAgents = await fetchAgents(target).catch(() => null);
+		if (!existingAgents) {
+			setAgentSuggestionsError(
+				"Ryu couldn't verify your current agents. Try again or skip for now."
+			);
+			setAgentSuggestionsSubmitting(false);
+			return;
+		}
+		const failed: OnboardingAgentSuggestion[] = [];
+		let blockedByLimit = false;
+		let createdCount = 0;
+
+		for (const [index, suggestion] of chosen.entries()) {
+			if (
+				!guardAgentCreation("maxAgents", existingAgents.length + createdCount)
+			) {
+				blockedByLimit = true;
+				failed.push(...chosen.slice(index));
+				break;
+			}
+			try {
+				await createAgent(
+					target,
+					buildSuggestedAgentInput(suggestion, cloudSelection)
+				);
+				createdCount++;
+			} catch {
+				failed.push(suggestion);
+			}
+		}
+
+		if (createdCount > 0) {
+			triggerAgentsRefresh();
+			sileo.success({
+				title: `${createdCount} suggested agent${createdCount === 1 ? "" : "s"} added`,
+				description:
+					createdCount === 1
+						? "It is ready for your next task."
+						: "They are ready for your next task.",
+			});
+		}
+
+		if (failed.length > 0) {
+			setAgentSuggestions((current) =>
+				current.filter((suggestion) =>
+					failed.some((item) => item.id === suggestion.id)
+				)
+			);
+			setSelectedAgentSuggestions(
+				new Set(failed.map((suggestion) => suggestion.id))
+			);
+			setAgentSuggestionsError(
+				blockedByLimit
+					? "Your plan's agent limit prevented the remaining drafts from being added."
+					: createdCount > 0
+						? `Added ${createdCount}. Couldn't add ${failed.map((suggestion) => suggestion.name).join(", ")}. Try again or skip.`
+						: "Ryu couldn't add those agents yet. Try again or skip for now."
+			);
+		} else {
+			setSelectedAgentSuggestions(new Set());
+			setReviewedAgentSuggestions(new Set());
+			goToTelegram();
+		}
+		setAgentSuggestionsSubmitting(false);
+	}, [
+		agentSuggestions,
+		agentSuggestionsSubmitting,
+		cloudSelection,
+		guardAgentCreation,
+		getActiveNode,
+		goToTelegram,
+		reviewedAgentSuggestions,
+		selectedAgentSuggestions,
+	]);
 
 	const importOnboardingThreads = useCallback(async () => {
 		if (importing) {
@@ -1449,7 +1890,7 @@ export default function OnboardingPage() {
 			cloudSelection,
 			importedConversationIds,
 			recentDays: 90,
-			shareUserOrg: true,
+			shareUserOrg: nodeSetupKind === "team",
 			sourceIds: connections
 				.filter((connection) => connection.active)
 				.map((connection) => connection.id),
@@ -1465,6 +1906,7 @@ export default function OnboardingPage() {
 		getActiveNode,
 		goToTelegram,
 		importedConversationIds,
+		nodeSetupKind,
 		profileJob,
 	]);
 
@@ -1478,7 +1920,7 @@ export default function OnboardingPage() {
 			setProfileJob(null);
 			goToTelegram();
 		});
-	}, [getActiveNode, goToTelegram, profileJob]);
+	}, [getActiveNode, profileJob]);
 
 	const backgroundOnboardingProfile = useCallback(() => {
 		if (!profileJob) {
@@ -1487,9 +1929,7 @@ export default function OnboardingPage() {
 		void continueProfileJobInBackground(
 			toTarget(getActiveNode()),
 			profileJob.id
-		)
-			.then(setProfileJob)
-			.finally(() => goToTelegram());
+		).then(setProfileJob);
 	}, [getActiveNode, goToTelegram, profileJob]);
 
 	const skipCloudDefault = useCallback(async () => {
@@ -1704,7 +2144,7 @@ export default function OnboardingPage() {
 			const node = await refreshLocalNode();
 			// Point the app at the node we just verified, so the rest of onboarding
 			// and the app itself talk to it rather than a stale cloud default.
-			await setDefault(node.name).catch(() => undefined);
+			await activateOnboardingNode(node);
 			await beginLocalSetup().catch(() => undefined);
 		})().catch(() => {
 			if (!cancelledRef.current) {
@@ -1713,7 +2153,7 @@ export default function OnboardingPage() {
 				setPhase("choose");
 			}
 		});
-	}, [beginLocalSetup, localChecking, localReport, setDefault]);
+	}, [activateOnboardingNode, beginLocalSetup, localChecking, localReport]);
 
 	// The only in-product path to a local node: the desktop app hosts it.
 	const handleDownloadDesktop = useCallback(() => {
@@ -1773,6 +2213,27 @@ export default function OnboardingPage() {
 					(n) => n.url.replace(/\/+$/, "") === url
 				);
 				let name = existing?.name;
+				const normalizedToken = token.trim() || null;
+				if (
+					existing &&
+					!existing.managed &&
+					normalizedToken !== existing.token
+				) {
+					try {
+						await updateNodeToken(existing.name, normalizedToken);
+					} catch (err) {
+						if (cancelledRef.current) {
+							return;
+						}
+						setRemoteChecking(false);
+						setRemoteError(
+							err instanceof Error
+								? err.message
+								: "Couldn't update this node's token. Try again."
+						);
+						return;
+					}
+				}
 				if (!name) {
 					name = nodeNameForUrl(
 						url,
@@ -1797,22 +2258,19 @@ export default function OnboardingPage() {
 					return;
 				}
 				// Route the rest of onboarding — and the app — at the node we just
-				// verified. A cloud-shaped node isn't in nodes.json, so fall back to an
-				// in-memory default exactly as the managed path does.
-				try {
-					await setDefault(name);
-				} catch {
-					useNodeStore.setState({ defaultNode: name });
-				}
+				// verified. A cloud-shaped node isn't in nodes.json, so the shared
+				// activation helper falls back to an in-memory default when needed.
+				const activeNode = await activateOnboardingNode({
+					name,
+					token: normalizedToken,
+					url,
+				});
 				setRemoteChecking(false);
 
-				const node = useNodeStore
-					.getState()
-					.nodes.find((n) => n.name === name) ?? {
-					name,
-					token: token === "" ? null : token,
-					url,
-				};
+				const node =
+					useNodeStore
+						.getState()
+						.nodes.find((n) => n.name === activeNode.name) ?? activeNode;
 				const result = await loadOnboardingAgents(toTarget(node));
 				if (cancelledRef.current) {
 					return;
@@ -1825,7 +2283,7 @@ export default function OnboardingPage() {
 				}
 			});
 		},
-		[remoteChecking, setDefault, showAgentsStep]
+		[activateOnboardingNode, remoteChecking, showAgentsStep, updateNodeToken]
 	);
 
 	// Managed (Ryu Cloud) pick. Gated on the plan entitlement: if not entitled
@@ -1859,11 +2317,7 @@ export default function OnboardingPage() {
 			// Rust set_default_node rejects their name. Try the persisted path for
 			// parity, then fall back to an in-memory default so chat routes to the
 			// adopted node this session.
-			try {
-				await setDefault(adopted.name);
-			} catch {
-				useNodeStore.setState({ defaultNode: adopted.name });
-			}
+			await activateOnboardingNode(adopted);
 			// A managed node runs its own inference; skip local CLI-agent detection
 			// and go straight to the feature wizard.
 			goToFeatures([]);
@@ -1903,16 +2357,18 @@ export default function OnboardingPage() {
 					setPhase("choose");
 					return undefined;
 				}
-				// No node argument: `beginLocalSetup` re-reads the store itself, after
-				// the boot that mints the local node's token.
-				return beginLocalSetup();
+				// Re-read and activate the local node after the boot that mints its
+				// token; the managed node may still be the previous default.
+				return refreshLocalNode()
+					.then((node) => activateOnboardingNode(node))
+					.then(() => beginLocalSetup());
 			})
 			.catch(() => undefined);
 	}, [
 		entitlement,
 		managedBusy,
 		hydrateCloudNodes,
-		setDefault,
+		activateOnboardingNode,
 		goToFeatures,
 		beginLocalSetup,
 		localReport,
@@ -2044,8 +2500,8 @@ export default function OnboardingPage() {
 			return;
 		}
 		setSubmitting(false);
-		setPhase("safety");
-	}, [submitting]);
+		setPhase(nodeOnboardingPending ? "safety" : "preferences");
+	}, [nodeOnboardingPending, submitting]);
 
 	// The safety step applies Gateway + Core controls explicitly, then hands off
 	// to the general desktop preferences step.
@@ -2089,7 +2545,16 @@ export default function OnboardingPage() {
 				const active = getActiveNode();
 				const node = isLocalNode(active) ? await refreshLocalNode() : active;
 				await finish(toTarget(node), routeState);
-			})().catch(() => setSubmitting(false));
+			})().catch((error: unknown) => {
+				setSubmitting(false);
+				sileo.error({
+					title: "Onboarding could not be completed",
+					description:
+						error instanceof Error
+							? error.message
+							: "Try again from this step.",
+				});
+			});
 		},
 		[submitting, getActiveNode, finish]
 	);
@@ -2125,7 +2590,10 @@ export default function OnboardingPage() {
 	);
 
 	const handleActivationConnect = useCallback(
-		(recommendation: ActivationRecommendation) => {
+		async (
+			recommendation: ActivationRecommendation,
+			accessLevel: ConnectionAccessLevel
+		) => {
 			const appSlug = recommendation.appSlug;
 			if (!appSlug || activationBusySlug) {
 				return;
@@ -2133,54 +2601,57 @@ export default function OnboardingPage() {
 			setActivationBusySlug(appSlug);
 			setActivationError(null);
 			const target = toTarget(getActiveNode());
-			void (async () => {
-				try {
-					const result = await initiateComposioConnection(target, appSlug);
-					if (result.redirectUrl) {
-						await openExternal(result.redirectUrl);
-					}
-					await sleep(1800);
-					const connection = await fetchComposioConnectionStatus(
-						target,
-						result.connectionId
-					);
-					if (!connection.active) {
-						throw new Error("The app connection is not active yet.");
-					}
-					const nextConnections = [
-						...connections.filter((item) => item.id !== connection.id),
-						connection,
-					];
-					setConnections(nextConnections);
-					setActivationRecommendations(
-						buildActivationRecommendations({
-							connections: nextConnections,
-							toolkits,
-						})
-					);
-					if (activationEligibility.rewardAllowed) {
-						try {
-							const reward = await claimActivationReward({
-								appSlug,
-								connectionId: connection.id,
-							});
-							setActivationRewardCount(reward.completed);
-						} catch {
-							setActivationError(
-								"Connected. Your bonus credit is pending and can be retried from this step."
-							);
-						}
-					}
-				} catch (error) {
-					setActivationError(
-						error instanceof Error
-							? error.message
-							: "The app connection could not be completed."
-					);
-				} finally {
-					setActivationBusySlug(null);
+			try {
+				const result = await initiateComposioConnection(
+					target,
+					appSlug,
+					accessLevel
+				);
+				if (result.redirectUrl) {
+					await openExternal(result.redirectUrl);
 				}
-			})();
+				await sleep(1800);
+				const connection = await fetchComposioConnectionStatus(
+					target,
+					result.connectionId
+				);
+				if (!connection.active) {
+					throw new Error("The app connection is not active yet.");
+				}
+				const nextConnections = [
+					...connections.filter((item) => item.id !== connection.id),
+					connection,
+				];
+				setConnections(nextConnections);
+				setActivationRecommendations(
+					buildActivationRecommendations({
+						connections: nextConnections,
+						toolkits,
+					})
+				);
+				if (activationEligibility.rewardAllowed) {
+					try {
+						const reward = await claimActivationReward({
+							appSlug,
+							connectionId: connection.id,
+						});
+						setActivationRewardCount(reward.completed);
+					} catch {
+						setActivationError(
+							"Connected. Your bonus credit is pending and can be retried from this step."
+						);
+					}
+				}
+			} catch (error) {
+				setActivationError(
+					error instanceof Error
+						? error.message
+						: "The app connection could not be completed."
+				);
+				throw error;
+			} finally {
+				setActivationBusySlug(null);
+			}
 		},
 		[
 			activationBusySlug,
@@ -2238,13 +2709,16 @@ export default function OnboardingPage() {
 		setActivationCheckoutPending(true);
 		setActivationError(null);
 		try {
-			const checkout = await stepUp.guard("billing", () =>
-				checkoutTeamsOnboarding(selectedOrganizationId)
-			);
+			const checkout = await stepUp.guard("billing", async () => {
+				if (activationUsesOrganizationPlan) {
+					return (await checkoutTeamsOnboarding(selectedOrganizationId)).url;
+				}
+				return await createCheckout("pro-monthly");
+			});
 			if (checkout === null) {
 				return;
 			}
-			await openExternal(checkout.url);
+			await openExternal(checkout);
 			setActivationCheckoutOpened(true);
 			setActivationError(
 				"Checkout is open in your browser. Finish there, return to Ryu, then confirm."
@@ -2258,7 +2732,12 @@ export default function OnboardingPage() {
 		} finally {
 			setActivationCheckoutPending(false);
 		}
-	}, [activationCheckoutPending, selectedOrganizationId, stepUp]);
+	}, [
+		activationCheckoutPending,
+		activationUsesOrganizationPlan,
+		selectedOrganizationId,
+		stepUp,
+	]);
 
 	const continueActivationOffer = useCallback(() => {
 		if (paidPlan) {
@@ -2363,6 +2842,11 @@ export default function OnboardingPage() {
 		: configuredProviderIds;
 	const setupProps = {
 		allowedAgentIds,
+		agentSuggestions,
+		agentSuggestionsError,
+		agentSuggestionsReviewed: reviewedAgentSuggestions,
+		agentSuggestionsSelected: selectedAgentSuggestions,
+		agentSuggestionsSubmitting,
 		allowedProviderIds:
 			phase === "local-default" ? ["local"] : setupProviderIds,
 		autoImport,
@@ -2379,6 +2863,7 @@ export default function OnboardingPage() {
 		localSelection,
 		organizations,
 		piProviders,
+		nodeSetupKind,
 		profileJob,
 		profileStartedAt,
 		providerBusyId,
@@ -2388,6 +2873,9 @@ export default function OnboardingPage() {
 		toolkits,
 		onBackgroundProfile: backgroundOnboardingProfile,
 		onCancelProfile: cancelOnboardingProfile,
+		onCreateAgentSuggestions: () => {
+			void createOnboardingAgents();
+		},
 		onChooseOrganization: setSelectedOrganizationId,
 		onConfigureProvider: configureOnboardingProvider,
 		onConnectToolkit: connectOnboardingToolkit,
@@ -2406,6 +2894,7 @@ export default function OnboardingPage() {
 									? importOnboardingThreads
 									: startOnboardingProfile,
 		onImportThreads: importOnboardingThreads,
+		onContinueBackgroundProfile: goToTelegram,
 		onLocalSelectionChange: setLocalSelection,
 		onCloudSelectionChange: setCloudSelection,
 		onSearchConnections: setConnectionQuery,
@@ -2414,14 +2903,34 @@ export default function OnboardingPage() {
 				? skipCloudDefault
 				: phase === "imports"
 					? continueAfterImports
-					: goToTelegram,
+					: phase === "profile"
+						? continueAfterProfile
+						: goToTelegram,
 		onToggleAutoImport: setAutoImport,
+		onToggleAgentSuggestion: toggleAgentSuggestion,
+		onReviewAgentSuggestion: reviewAgentSuggestion,
 	};
 
 	if (phase === "updates") {
 		return (
 			<div className="size-full" data-tauri-drag-region="true">
 				<UpdateStep onContinue={() => setPhase("choose")} />
+			</div>
+		);
+	}
+
+	if (phase === "node-setup") {
+		return (
+			<div className="size-full" data-tauri-drag-region="true">
+				<NodePersonalizationStep
+					busy={submitting}
+					canConfigure={nodeOnboardingState?.canConfigure ?? true}
+					companyContext={companyContext}
+					error={nodeSetupError}
+					initialPersonalization={userPersonalization}
+					initialSetupKind={nodeSetupKind}
+					onContinue={handleNodeSetupContinue}
+				/>
 			</div>
 		);
 	}
@@ -2433,7 +2942,8 @@ export default function OnboardingPage() {
 		phase === "connections" ||
 		phase === "cloud-default" ||
 		phase === "imports" ||
-		phase === "profile"
+		phase === "profile" ||
+		phase === "agent-suggestions"
 	) {
 		return (
 			<div className="size-full" data-tauri-drag-region="true">
@@ -2450,8 +2960,8 @@ export default function OnboardingPage() {
 			<div className="size-full" data-tauri-drag-region="true">
 				<TelegramOnboardingStep
 					existingChannelCount={channelConfigs?.length ?? null}
-					onContinue={goToMic}
-					onSkip={goToMic}
+					onContinue={continueAfterNode}
+					onSkip={continueAfterNode}
 					onUseTelegramLogin={openTelegramLogin}
 				/>
 			</div>
@@ -2536,7 +3046,10 @@ export default function OnboardingPage() {
 	if (phase === "activation-value") {
 		return (
 			<div className="size-full" data-tauri-drag-region="true">
-				<ActivationValueStep onContinue={continueActivationValue} />
+				<ActivationValueStep
+					onContinue={continueActivationValue}
+					organizationPlan={activationUsesOrganizationPlan}
+				/>
 			</div>
 		);
 	}
@@ -2554,6 +3067,7 @@ export default function OnboardingPage() {
 					onStartCheckout={() => {
 						void startActivationCheckout();
 					}}
+					organizationPlan={activationUsesOrganizationPlan}
 					pending={activationCheckoutPending}
 					subscribed={paidPlan}
 				/>

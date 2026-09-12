@@ -136,7 +136,7 @@ export function MessageInput({
 				>
 					{attachments.map((attachment) => (
 						<div
-							className="flex shrink-0 items-center gap-1.5 rounded-lg bg-white/10 py-1 pr-1 pl-1"
+							className="flex shrink-0 items-center gap-1.5 rounded-lg bg-muted py-1 pr-1 pl-1"
 							key={attachment.id}
 						>
 							{/** biome-ignore lint/performance/noImgElement: island is plain React/Electron, no next/image */}
@@ -145,12 +145,12 @@ export function MessageInput({
 								className="size-6 shrink-0 rounded object-cover"
 								src={attachment.dataUrl}
 							/>
-							<span className="max-w-[90px] truncate text-neutral-200 text-xs">
+							<span className="max-w-[90px] truncate text-foreground text-xs">
 								{attachment.name}
 							</span>
 							<button
 								aria-label={`Remove ${attachment.name}`}
-								className="flex size-4 shrink-0 items-center justify-center rounded-full text-neutral-400 transition-colors hover:bg-white/10 hover:text-neutral-100"
+								className="flex size-4 shrink-0 items-center justify-center rounded-full text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
 								onClick={() => onRemoveAttachment?.(attachment.id)}
 								type="button"
 							>
@@ -180,7 +180,7 @@ export function MessageInput({
 				<textarea
 					aria-label="Message Ryu"
 					autoFocus
-					className="min-h-0 flex-1 resize-none overflow-y-auto bg-transparent text-neutral-100 text-sm leading-relaxed outline-none placeholder:text-neutral-500"
+					className="min-h-0 flex-1 resize-none overflow-y-auto bg-transparent text-foreground text-sm leading-relaxed outline-none placeholder:text-muted-foreground"
 					disabled={disabled}
 					onChange={(event) => setValue(event.target.value)}
 					onKeyDown={(event) => {
@@ -200,7 +200,7 @@ export function MessageInput({
 				{sending ? (
 					<button
 						aria-label="Stop"
-						className="flex size-7 shrink-0 items-center justify-center self-end rounded-full text-neutral-400 transition-colors hover:bg-white/10 hover:text-neutral-100"
+						className="flex size-7 shrink-0 items-center justify-center self-end rounded-full text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
 						onClick={onStop}
 						type="button"
 					>

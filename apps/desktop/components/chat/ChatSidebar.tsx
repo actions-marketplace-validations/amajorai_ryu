@@ -96,7 +96,7 @@ export function ChatSidebar({
 						}
 						return (
 							<div className="mb-3" key={groupName}>
-								<p className="px-2 py-1 font-semibold text-muted-foreground text-xs uppercase tracking-wider">
+								<p className="px-2 py-1 font-medium text-muted-foreground text-xs uppercase tracking-wider">
 									{groupName}
 								</p>
 								{convs.map((conv) => (
@@ -132,7 +132,7 @@ export function ChatSidebar({
 											</DropdownMenuTrigger>
 											<DropdownMenuContent align="end">
 												<DropdownMenuItem
-													className="text-destructive"
+													className="text-status-destructive"
 													onClick={(e) => {
 														e.stopPropagation();
 														onDeleteConversation(conv.id);

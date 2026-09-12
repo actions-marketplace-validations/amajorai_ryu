@@ -789,12 +789,10 @@ impl MarketplacePlugin {
             layers: scrub_marketplace_layers(&self.layers),
             requires: self.requires.clone(),
             targets: self.targets.clone(),
-            surface_support: super::manifest_surface::project_surface_support(
-                &serde_json::json!({
-                    "surfaces": self.surfaces.clone(),
-                    "targets": self.targets.clone(),
-                }),
-            ),
+            surface_support: super::manifest_surface::project_surface_support(&serde_json::json!({
+                "surfaces": self.surfaces.clone(),
+                "targets": self.targets.clone(),
+            })),
         }
     }
 }
@@ -2537,29 +2535,53 @@ fn ryu_marketplace_base() -> String {
         .unwrap_or_else(|| RYU_MARKETPLACE_DEFAULT_BASE.to_owned())
 }
 
+const MAX_RYU_PACKAGE_DETAIL_BYTES: usize = 16 * 1024 * 1024;
+const MAX_RYU_PACKAGE_ARCHIVE_BYTES: usize = 64 * 1024 * 1024;
+
+async fn read_bounded_reqwest_body(
+    mut response: reqwest::Response,
+    max_bytes: usize,
+    label: &str,
+) -> Result<Vec<u8>> {
+    if response
+        .content_length()
+        .is_some_and(|length| length > max_bytes as u64)
+    {
+        bail!("{label} exceeds the configured size limit");
+    }
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response.chunk().await? {
+        if chunk.len() > max_bytes.saturating_sub(bytes.len()) {
+            bail!("{label} exceeds the configured size limit");
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    Ok(bytes)
+}
+
 /// Fetch the detail envelope for a portable GitHub-backed package. Portable
 /// package kinds intentionally do not expand `CatalogKind`: they are a package
 /// transport, not one of Core's legacy catalog adapters. The returned detail is
 /// still the signed marketplace handoff, so the caller can verify the manifest
 /// before asking for the archive.
 pub async fn fetch_ryu_package_detail(
-	client: &reqwest::Client,
-	kind: &str,
-	id: &str,
-	update: bool,
-	version: Option<&str>,
+    client: &reqwest::Client,
+    kind: &str,
+    id: &str,
+    update: bool,
+    version: Option<&str>,
 ) -> Result<Value> {
-	let version_param = version
-		.map(|value| format!("&version={}", urlencoding::encode(value)))
-		.unwrap_or_default();
-	let url = format!(
-		"{}/api/marketplace/catalog/detail?kind={}&id={}{}{}",
-		ryu_marketplace_base(),
-		urlencoding::encode(kind),
-		urlencoding::encode(id.trim()),
-		if update { "&operation=update" } else { "" },
-		version_param,
-	);
+    let version_param = version
+        .map(|value| format!("&version={}", urlencoding::encode(value)))
+        .unwrap_or_default();
+    let url = format!(
+        "{}/api/marketplace/catalog/detail?kind={}&id={}{}{}",
+        ryu_marketplace_base(),
+        urlencoding::encode(kind),
+        urlencoding::encode(id.trim()),
+        if update { "&operation=update" } else { "" },
+        version_param,
+    );
     let mut request = client.get(&url);
     if let Some(token) = marketplace_buyer_token() {
         request = request.bearer_auth(token);
@@ -2577,9 +2599,10 @@ pub async fn fetch_ryu_package_detail(
             response.status()
         );
     }
-    let detail = response
-        .json::<Value>()
-        .await
+    let detail_bytes =
+        read_bounded_reqwest_body(response, MAX_RYU_PACKAGE_DETAIL_BYTES, "Ryu package detail")
+            .await?;
+    let detail = serde_json::from_slice::<Value>(&detail_bytes)
         .context("Ryu package detail was not valid JSON")?;
     let descriptor = detail
         .get("descriptor")
@@ -2628,10 +2651,12 @@ pub async fn fetch_ryu_package_archive(
     if !response.status().is_success() {
         bail!("Ryu package archive returned {}", response.status());
     }
-    let bytes = response.bytes().await?.to_vec();
-    if bytes.len() > 64 * 1024 * 1024 {
-        bail!("Ryu package archive exceeds the 64 MiB limit");
-    }
+    let bytes = read_bounded_reqwest_body(
+        response,
+        MAX_RYU_PACKAGE_ARCHIVE_BYTES,
+        "Ryu package archive",
+    )
+    .await?;
     Ok(bytes)
 }
 
@@ -3779,7 +3804,8 @@ impl RyuMarketplaceSource {
         channel: Option<&str>,
     ) -> Result<InstallDescriptor> {
         let detail = self.fetch_detail_on_channel(client, id, channel).await?;
-        self.install_descriptor_from_detail(client, id, detail).await
+        self.install_descriptor_from_detail(client, id, detail)
+            .await
     }
 
     /// Resolve one exact historical release selected from the Versions tab.
@@ -3791,7 +3817,8 @@ impl RyuMarketplaceSource {
         version: &str,
     ) -> Result<InstallDescriptor> {
         let detail = self.fetch_detail_on_version(client, id, version).await?;
-        self.install_descriptor_from_detail(client, id, detail).await
+        self.install_descriptor_from_detail(client, id, detail)
+            .await
     }
 
     async fn install_descriptor_from_detail(

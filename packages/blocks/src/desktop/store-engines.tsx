@@ -269,11 +269,11 @@ export function EngineFootnote({
 	children: ReactNode;
 }) {
 	if (tone === "destructive") {
-		return <p className="text-destructive text-xs">{children}</p>;
+		return <p className="text-status-destructive text-xs">{children}</p>;
 	}
 	const className =
 		tone === "amber"
-			? "flex items-center gap-1.5 text-amber-600 text-xs dark:text-amber-500"
+			? "flex items-center gap-1.5 text-status-warning text-xs"
 			: "flex items-center gap-1.5 text-muted-foreground text-xs";
 	return (
 		<p className={className}>

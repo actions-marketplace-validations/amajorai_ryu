@@ -277,9 +277,9 @@ export function PublishDialog({
 						<div className="rounded-2xl bg-secondary/60 p-4 text-sm">
 							<p className="font-medium">Submitted for review</p>
 							<p className="mt-1 text-muted-foreground">
-								<span className="font-mono">{published.id}</span> (
-								{published.kind} {published.version}) is pending moderation.
-								Future releases stay in the linked GitHub repository.
+								<span className="font-mono">{published.id}</span> ({kindLabel}{" "}
+								{published.version}) is pending moderation. Future releases stay
+								in the linked GitHub repository.
 							</p>
 						</div>
 						<DialogFooter>
@@ -289,16 +289,17 @@ export function PublishDialog({
 				) : (
 					<div className="flex flex-col gap-4 py-1">
 						{signedIn ? null : (
-							<p className="rounded-xl bg-destructive/10 p-3 text-destructive text-sm">
+							<p className="rounded-xl bg-destructive/10 p-3 text-sm text-status-destructive">
 								Sign in to your Ryu account to publish to the marketplace.
 							</p>
 						)}
 
 						<div className="rounded-xl bg-secondary/50 p-3 text-muted-foreground text-sm">
 							The repository must use the <code>ryu-app</code>,{" "}
-							<code>ryu-plugin</code>, or <code>ryu-marketplace</code> topic and
-							contain a <code>ryu.package.json</code>. Buyers install through
-							Ryu; they do not need GitHub access.
+							<code>ryu-plugin</code>, <code>ryu-language-pack</code>, or{" "}
+							<code>ryu-marketplace</code> topic and contain a{" "}
+							<code>ryu.package.json</code>. Buyers install through Ryu; they do
+							not need GitHub access.
 						</div>
 
 						{disclosure ? (
@@ -472,7 +473,9 @@ export function PublishDialog({
 							</div>
 						) : null}
 
-						{error ? <p className="text-destructive text-sm">{error}</p> : null}
+						{error ? (
+							<p className="text-sm text-status-destructive">{error}</p>
+						) : null}
 
 						<DialogFooter>
 							<Button onClick={() => handleOpenChange(false)} variant="ghost">

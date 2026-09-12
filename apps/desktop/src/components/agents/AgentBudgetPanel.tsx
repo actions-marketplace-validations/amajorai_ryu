@@ -221,7 +221,9 @@ export function AgentBudgetPanel({
 							permission to change this rule.
 						</p>
 					)}
-					{error ? <p className="text-destructive text-sm">{error}</p> : null}
+					{error ? (
+						<p className="text-sm text-status-destructive">{error}</p>
+					) : null}
 					{saved ? (
 						<p className="text-muted-foreground text-xs">
 							Budget updated. Changes take effect immediately.

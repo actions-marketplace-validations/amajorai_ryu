@@ -62,18 +62,6 @@ fn job_id_for(monitor_id: &str) -> String {
     format!("monitor-{monitor_id}")
 }
 
-/// Resolve the `ryu-monitors` sidecar's loopback port from the loaded manifests,
-/// profile-shifted the same way the ext-proxy forwards ([`crate::profile::port`]). The
-/// port comes from the manifest and ONLY the manifest — see
-/// [`crate::sidecar::ext_proxy::sidecar_port`] for why a built-in absence is a
-/// build-time invariant rather than a runtime fallback.
-pub fn sidecar_port(manifests: &[crate::plugin_manifest::PluginManifest]) -> u16 {
-    crate::sidecar::ext_proxy::sidecar_port(manifests, MONITORS_PLUGIN_ID, MONITORS_SIDECAR).expect(
-        "built-in monitors.manifest.json must declare the ryu-monitors sidecar (see \
-             plugin_manifest::BUILTIN_MANIFESTS)",
-    )
-}
-
 /// Process-global monitors client, so the state-free scheduler (`JobTarget::Monitor`)
 /// can reach the sidecar without carrying `ServerState`. Set once from `main.rs`,
 /// mirroring the `quests_client` pattern.
@@ -90,21 +78,24 @@ pub fn global_client() -> Option<&'static MonitorsClient> {
 }
 
 /// Typed loopback client for the `ryu-monitors` sidecar. Cheap to clone (holds only
-/// the resolved port); the bearer is minted per call so it always tracks the current
+/// the manager); the bearer is minted per call so it always tracks the current
 /// node token.
 #[derive(Clone)]
 pub struct MonitorsClient {
-    port: u16,
+    manager: std::sync::Arc<crate::sidecar::SidecarManager>,
 }
 
 impl MonitorsClient {
-    /// Build a client bound to the sidecar's resolved loopback port.
-    pub fn new(port: u16) -> Self {
-        Self { port }
+    /// Build a client that resolves the manager's live target before each request.
+    pub fn new(manager: std::sync::Arc<crate::sidecar::SidecarManager>) -> Self {
+        Self { manager }
     }
 
-    fn base_url(&self) -> String {
-        format!("http://127.0.0.1:{}/api/monitors", self.port)
+    fn base_url(&self) -> std::result::Result<String, String> {
+        self.manager
+            .sidecar_base_url(MONITORS_PLUGIN_ID, MONITORS_SIDECAR)
+            .map(|url| format!("{url}/api/monitors"))
+            .map_err(|denied| denied.reason())
     }
 
     /// The per-plugin minted bearer the sidecar was spawned with — the same value the
@@ -118,7 +109,7 @@ impl MonitorsClient {
     /// `Err` on a transport error or non-2xx so the scheduler records the outcome.
     pub async fn run(&self, monitor_id: &str) -> Result<Value, String> {
         let resp = reqwest::Client::new()
-            .post(format!("{}/{monitor_id}/run", self.base_url()))
+            .post(format!("{}/{monitor_id}/run", self.base_url()?))
             .bearer_auth(self.bearer())
             .json(&json!({}))
             .send()
@@ -144,7 +135,7 @@ impl MonitorsClient {
     /// job-leak fix — mirrors `quests_client::list_quests`).
     pub async fn list_monitors(&self) -> Result<Vec<Value>, String> {
         let resp = reqwest::Client::new()
-            .get(self.base_url())
+            .get(self.base_url()?)
             .bearer_auth(self.bearer())
             .send()
             .await
@@ -165,7 +156,7 @@ impl MonitorsClient {
     /// sidecar's `remove_backing_job` is a stub) — see [`clear_backing_job`].
     pub async fn delete_monitor(&self, monitor_id: &str) -> Result<bool, String> {
         let resp = reqwest::Client::new()
-            .delete(format!("{}/{monitor_id}", self.base_url()))
+            .delete(format!("{}/{monitor_id}", self.base_url()?))
             .bearer_auth(self.bearer())
             .send()
             .await
@@ -219,6 +210,8 @@ fn sync_backing_job(monitor_id: &str, name: &str, interval: &str, enabled: bool)
         require_approval: false,
         // Core-owned (reconciled by Core itself), not an App-created job.
         owner_app: None,
+        owner_user_id: None,
+        org_id: None,
         created_at: existing
             .as_ref()
             .map(|j| j.created_at.clone())

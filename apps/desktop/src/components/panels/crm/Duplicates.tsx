@@ -130,7 +130,7 @@ export function Duplicates({
 		<div className="flex h-full min-h-0 flex-col">
 			<header className="flex items-start justify-between gap-2 border-b px-4 py-3">
 				<div>
-					<h2 className="font-semibold text-base capitalize">
+					<h2 className="font-medium text-base capitalize">
 						Duplicate {subject.object.plural}
 					</h2>
 					<p className="text-muted-foreground text-xs">
@@ -151,7 +151,7 @@ export function Duplicates({
 			</header>
 
 			{error && (
-				<div className="flex items-start gap-2 border-b bg-destructive/10 px-4 py-2 text-destructive text-xs">
+				<div className="flex items-start gap-2 border-b bg-destructive/10 px-4 py-2 text-status-destructive text-xs">
 					<HugeiconsIcon icon={Alert01Icon} size={14} />
 					<span>{error}</span>
 				</div>

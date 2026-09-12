@@ -52,7 +52,7 @@ use serde::Serialize;
 /// `1.y` (y ≥ x) kernel unchanged. The `ryu-plugin-ready` handshake carries this
 /// value as `hostApiVersion`; the host accepts a missing value (legacy) this
 /// major and only annotates it (no rejection).
-pub const HOST_API_VERSION: &str = "1.8.0";
+pub const HOST_API_VERSION: &str = "1.15.0";
 
 /// One method in the host↔plugin RPC surface — the row type of the single-sourced
 /// `method → capability → grant` table.
@@ -95,13 +95,32 @@ const fn m(
 }
 
 /// The canonical host-API method table. The union of the TS app host's
-/// `METHOD_CAPABILITY` (137 methods) and the Rust bridge's `view.action`
+/// `METHOD_CAPABILITY` (142 methods) and the Rust bridge's `view.action`
 /// (Rust-only). Serialised to `schemas/host-api.json` for the TS host to consume.
 pub const HOST_API_METHODS: &[HostApiMethod] = &[
+    // Verified current caller only; no caller-chosen identity or roster lookup.
+    m("identity.current", "identity.read", Some("identity:read"), false, false),
+    m("security.check", "security.check", Some("security:check"), false, false),
+    m("backups.destinations", "backups.app", Some("backups:app"), false, true),
+    m("backups.create", "backups.app", Some("backups:app"), false, true),
+    m("backups.list", "backups.app", Some("backups:app"), false, true),
+    m("backups.get", "backups.app", Some("backups:app"), false, true),
+    m("backups.restore", "backups.app", Some("backups:app"), false, true),
     // Local browser/native host capabilities. These rows are intentionally
     // grant-free; the host decides whether the concrete surface can provide
     // them, while the contract still keeps the method vocabulary closed.
     m("host.capabilities", "host.capabilities", None, false, true),
+    // Read-only locale and translation primitives. These are local host
+    // capabilities: a plugin can ask how the shell is speaking, translate its
+    // own namespaced messages with an explicit English fallback, and subscribe
+    // to locale changes. No user data, network, or manifest grant is involved.
+    m("i18n.get", "i18n", None, false, true),
+    m("i18n.translate", "i18n", None, false, true),
+    m("i18n.subscribe", "i18n", None, true, true),
+    // Secret-free active-node origins for apps that need to create a link to
+    // the node. The host filters loopback/wildcard addresses and never returns
+    // node credentials, user JWTs, or cookies.
+    m("node.shareOrigins", "node.shareOrigins", None, false, true),
     m(
         "native.haptics",
         "native.haptics",
@@ -204,6 +223,43 @@ pub const HOST_API_METHODS: &[HostApiMethod] = &[
     // from the owning plugin id and Core's ext-proxy still enforces the manifest
     // route allowlist, so the frame supplies only a relative path/method/body.
     m("app.request", "app.http", Some("app:http"), false, true),
+    // Generic application-room realtime. The trusted host owns the node token
+    // and WebSocket URL; the companion receives only an opaque room connection.
+    m(
+        "realtime.connect",
+        "app.realtime",
+        Some("app:realtime"),
+        false,
+        true,
+    ),
+    m(
+        "realtime.publish",
+        "app.realtime",
+        Some("app:realtime"),
+        false,
+        true,
+    ),
+    m(
+        "realtime.presence",
+        "app.realtime",
+        Some("app:realtime"),
+        false,
+        true,
+    ),
+    m(
+        "realtime.subscribe",
+        "app.realtime",
+        Some("app:realtime"),
+        true,
+        true,
+    ),
+    m(
+        "realtime.close",
+        "app.realtime",
+        Some("app:realtime"),
+        false,
+        true,
+    ),
     m("ui.requestDisplayMode", "ui.displayMode", None, false, true),
     m("ui.requestModal", "ui.displayMode", None, false, true),
     m("ui.notifyHeight", "ui.displayMode", None, false, true),
@@ -375,6 +431,25 @@ pub const HOST_API_METHODS: &[HostApiMethod] = &[
         false,
         false,
     ),
+    // Read the Gateway-owned live charged-spend counters and configured caps.
+    // Rust-bridge-only: Core keeps the Gateway admin credential out of app and
+    // Companion processes and returns only the redacted budget snapshot.
+    m(
+        "gateway.budgetSpend",
+        "gateway.budgetSpend",
+        Some("usage:read"),
+        false,
+        false,
+    ),
+    // Read redacted Gateway audit rows for provider receipts and usage review.
+    // Rust-bridge-only: Core keeps the Gateway admin credential out of apps.
+    m(
+        "gateway.audit",
+        "gateway.audit",
+        Some("usage:read"),
+        false,
+        false,
+    ),
     // Record a thumbs vote on an assistant turn — the `message_actions` seam's
     // dispatch verb for the Learning app's rating toggle. Wraps Core's
     // `apply_message_feedback` (learning reward + RAG-memory sinks). Rust-bridge-only.
@@ -505,6 +580,13 @@ pub const HOST_API_METHODS: &[HostApiMethod] = &[
         true,
     ),
     m(
+        "media.recording",
+        "media.recording",
+        Some("media:record"),
+        false,
+        true,
+    ),
+    m(
         "registry.engineModels",
         "core.listAgents",
         Some("core:list_agents"),
@@ -527,6 +609,13 @@ pub const HOST_API_METHODS: &[HostApiMethod] = &[
     ),
     m(
         "assets.searchGifs",
+        "core.listAgents",
+        Some("core:list_agents"),
+        false,
+        true,
+    ),
+    m(
+        "assets.searchImages",
         "core.listAgents",
         Some("core:list_agents"),
         false,
@@ -784,6 +873,17 @@ pub const HOST_API_METHODS: &[HostApiMethod] = &[
         false,
         true,
     ),
+    // The scoped organization roster behind the NotifyUser workflow recipient
+    // picker. It is read-only and carries the same workflows:catalogs grant as
+    // the other node-config pickers; Core still authorizes and re-validates the
+    // final member set when the workflow runs.
+    m(
+        "workflows.notifyTargets",
+        "workflows.catalogs",
+        Some("workflows:catalogs"),
+        false,
+        true,
+    ),
     m(
         "workflows.composio",
         "workflows.catalogs",
@@ -1012,6 +1112,13 @@ pub const HOST_API_METHODS: &[HostApiMethod] = &[
         true,
     ),
     m(
+        "timeline.transcripts",
+        "timeline.speech",
+        Some("timeline:speech"),
+        false,
+        true,
+    ),
+    m(
         "timeline.frame",
         "timeline.read",
         Some("timeline:read"),
@@ -1051,6 +1158,7 @@ pub const HOST_API_METHODS: &[HostApiMethod] = &[
         false,
         true,
     ),
+    m("mail.request", "mail.crud", Some("mail:crud"), false, true),
     m(
         "calendar.jobs",
         "calendar.crud",
@@ -1435,6 +1543,13 @@ pub const HOST_API_METHODS: &[HostApiMethod] = &[
     ),
     m(
         "skills.restore",
+        "skills.crud",
+        Some("skills:crud"),
+        false,
+        true,
+    ),
+    m(
+        "skills.distribute",
         "skills.crud",
         Some("skills:crud"),
         false,

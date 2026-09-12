@@ -18,7 +18,6 @@ import {
 	BACKEND_URL,
 	getActiveUserId,
 	listAccounts,
-	type StoredAccount,
 	switchAccount,
 } from "@/lib/auth-client.ts";
 import { openExternal } from "@/lib/tauri-bridge.ts";
@@ -35,9 +34,11 @@ import {
 	useNodeStore,
 } from "../../store/useNodeStore.ts";
 
+type AccountView = ReturnType<typeof listAccounts>[number];
+
 type StartupStep = "account" | "node";
 
-function accountLabel(account: StoredAccount): string {
+function accountLabel(account: AccountView): string {
 	if (account.isAnonymous) {
 		return "Guest";
 	}
@@ -101,7 +102,7 @@ export function DesktopStartupChooser() {
 	const [step, setStep] = useState<StartupStep>(
 		accountStepEnabled ? "account" : "node"
 	);
-	const [accounts, setAccounts] = useState<StoredAccount[]>(initialAccounts);
+	const [accounts, setAccounts] = useState<AccountView[]>(initialAccounts);
 	const [selectedAccountId, setSelectedAccountId] = useState<string | null>(
 		() => getActiveUserId() ?? initialAccounts[0]?.userId ?? null
 	);

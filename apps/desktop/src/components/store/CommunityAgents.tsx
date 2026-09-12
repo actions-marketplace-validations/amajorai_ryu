@@ -1,19 +1,20 @@
 // apps/desktop/src/components/store/CommunityAgents.tsx
 //
-// Community agents: the shelf and detail panel for agents PUBLISHED by other
-// users, shown inside the Store's Agents tab next to the ACP runtimes.
+// Agent Templates: the shelf and detail panel for customized agent definitions
+// PUBLISHED by other users, shown inside the Store's Agents tab next to the ACP
+// runtimes.
 //
 // The two are not the same thing and the tab must not let them read as the same
 // thing. A runtime (Claude Code, Codex, the flagship Ryu) is a vendor program
-// this app knows how to drive. A community agent is a CONFIGURATION someone
-// wrote — instructions, a model preference, and a list of things it expects the
-// installer to already have. So the shelf sits under its own heading, every card
-// carries a "Community" chip, and the detail panel leads with a trust notice
+// this app knows how to drive. An Agent Template is a CONFIGURATION someone
+// customized — instructions, a model preference, and a list of things it expects
+// the installer to already have. So the shelf sits under its own heading, every
+// card carries a "Community" chip, and the detail panel leads with a trust notice
 // BEFORE the install control (that is what `ListingDetailShell`'s `notice` slot
 // exists for).
 //
 // Installing never grants anything. Core creates a new local agent from the
-// published definition and strips the privilege-bearing bindings — identities,
+// published template and strips the privilege-bearing bindings — identities,
 // Composio actions, memory/Spaces, the Gateway policy — returning them as
 // `requires`. Those come back here as "Set this up yourself", which is the whole
 // point: the agent asked, the user decides, in their own editor, on their own
@@ -26,7 +27,11 @@ import {
 	Target01Icon,
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
-import { StoreCardGrid } from "@ryu/marketplace/catalog/chrome/store-catalog-layout";
+import StoreCatalogCard from "@ryu/marketplace/catalog/chrome/store-catalog-card";
+import {
+	StoreCardGrid,
+	useStoreViewMode,
+} from "@ryu/marketplace/catalog/chrome/store-catalog-layout";
 import { storeItemContextMenu } from "@ryu/marketplace/catalog/chrome/store-item-action";
 import StoreShelfHeading from "@ryu/marketplace/catalog/chrome/store-shelf-heading";
 import {
@@ -138,6 +143,7 @@ export function CommunityAgentsShelf({
 	onSelect,
 	selectedId,
 }: CommunityAgentsShelfProps) {
+	const view = useStoreViewMode()?.mode ?? "showcase";
 	if (error || (agents.length === 0 && !loading)) {
 		return null;
 	}
@@ -150,38 +156,57 @@ export function CommunityAgentsShelf({
 					) : null
 				}
 				className="mb-3"
-				description="Agents other people wrote and published — instructions and settings, not programs. Adding one puts it in your agents; it turns nothing on."
+				description="Customized Agent Templates written and published by other people — instructions and settings, not programs. Adding one creates a new agent from the template; it turns nothing on."
 			>
-				From the community
+				Agent Templates
 			</StoreShelfHeading>
 			<StoreCardGrid>
-				{agents.map((card) => (
-					<AgentBadgeCard
-						action={
-							<CommunityAgentAction
-								busy={busyId === card.id}
-								card={card}
-								onBuy={() => onBuy(card)}
-								onInstall={() => onInstall(card)}
+				{agents.map((card) => {
+					const action = (
+						<CommunityAgentAction
+							busy={busyId === card.id}
+							card={card}
+							onBuy={() => onBuy(card)}
+							onInstall={() => onInstall(card)}
+						/>
+					);
+					const contextMenu = storeItemContextMenu({
+						installed: false,
+						onInstall: () => onInstall(card),
+					});
+					if (view === "showcase") {
+						return (
+							<AgentBadgeCard
+								action={action}
+								contextMenu={contextMenu}
+								employeeId={card.id}
+								footer={
+									<Badge className="font-normal" variant="outline">
+										{card.author ?? "Community"}
+									</Badge>
+								}
+								key={card.id}
+								name={card.name}
+								onOpen={() => onSelect(card)}
+								role={card.description}
+								selected={card.id === selectedId}
 							/>
-						}
-						contextMenu={storeItemContextMenu({
-							installed: false,
-							onInstall: () => onInstall(card),
-						})}
-						employeeId={card.id}
-						footer={
-							<Badge className="font-normal" variant="outline">
-								{card.author ?? "Community"}
-							</Badge>
-						}
-						key={card.id}
-						name={card.name}
-						onOpen={() => onSelect(card)}
-						role={card.description}
-						selected={card.id === selectedId}
-					/>
-				))}
+						);
+					}
+					return (
+						<StoreCatalogCard
+							action={action}
+							contextMenu={contextMenu}
+							description={card.description}
+							iconUrl={card.iconUrl}
+							key={card.id}
+							name={card.name}
+							onClick={() => onSelect(card)}
+							seedId={card.id}
+							selected={card.id === selectedId}
+						/>
+					);
+				})}
 			</StoreCardGrid>
 		</section>
 	);
@@ -277,7 +302,7 @@ export function CommunityAgentDetail({
 			hero={
 				<ListingHero
 					badges={[
-						"Community agent",
+						"Agent Template",
 						card.category,
 						verification,
 						card.firstParty ? "First party" : null,
@@ -296,10 +321,11 @@ export function CommunityAgentDetail({
 						icon={Alert01Icon}
 					/>
 					<p className="text-muted-foreground">
-						Written by another user, not by Ryu. Adding it copies its
-						instructions and model preference into a new agent of your own. It
-						never gains your credentials, your Spaces, or your connected
-						accounts — anything it needs, you grant yourself afterwards.
+						Written by another user, not by Ryu. Adding this Agent Template
+						copies its instructions and model preference into a new agent of
+						your own. It never gains your credentials, your Spaces, or your
+						connected accounts — anything it needs, you grant yourself
+						afterwards.
 					</p>
 				</div>
 			}
@@ -315,7 +341,7 @@ export function CommunityAgentDetail({
 								card.ratingCount > 0 ? card.ratingAverage.toFixed(1) : "New",
 						},
 						{ label: "Price", value: priceLabel(card) },
-						{ label: "Kind", value: "Agent" },
+						{ label: "Kind", value: "Agent Template" },
 					]}
 				/>
 			}

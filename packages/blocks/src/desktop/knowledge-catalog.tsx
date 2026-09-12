@@ -90,7 +90,7 @@ function RowStatus({
 	return (
 		<HugeiconsIcon
 			aria-label="Added"
-			className="size-3.5 shrink-0 text-emerald-500"
+			className="size-3.5 shrink-0 text-status-success"
 			icon={CheckmarkCircle02Icon}
 		/>
 	);
@@ -166,7 +166,7 @@ export function KnowledgeInstallControl({
 		<div className="flex shrink-0 items-center gap-3">
 			<Badge className="gap-1" variant="secondary">
 				<HugeiconsIcon
-					className="size-3.5 text-emerald-500"
+					className="size-3.5 text-status-success"
 					icon={CheckmarkCircle02Icon}
 				/>
 				Added
@@ -242,7 +242,7 @@ export function KnowledgeCard({
 					<>
 						<Badge className="gap-1" variant="secondary">
 							<HugeiconsIcon
-								className="size-3.5 text-emerald-500"
+								className="size-3.5 text-status-success"
 								icon={CheckmarkCircle02Icon}
 							/>
 							Added

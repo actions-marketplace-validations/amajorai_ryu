@@ -108,50 +108,6 @@ fn fire_lazy_activation(state: &ServerState, event: &'static str) {
     });
 }
 
-// ── Sidecar port resolution ───────────────────────────────────────────────────
-
-/// Resolve a manifest-declared sidecar's loopback port, profile-shifted EXACTLY the
-/// way [`ext_proxy`] forwards ([`crate::profile::port`]) — so a Core-side loopback
-/// driver hits the same shifted port the sidecar was told to bind under a dev/custom
-/// profile.
-///
-/// This is the single seam every Core-side reverse-coupling (`*_client.rs`) resolves
-/// its port through. It exists so no Core module re-declares an app's port: AGENTS.md
-/// forbids baking a `com.ryu.<app>` fallback port into Core, and each of those clients
-/// used to carry its own `*_FALLBACK_PORT` const that could silently drift from the
-/// fixture it claimed to mirror.
-///
-/// **This is a bind-time answer, not a dial-time one — and its callers still treat it as
-/// dial-time.** The ext-proxy, the capability broker and `document.parse` no longer
-/// resolve a port this way: they go through
-/// [`crate::sidecar::SidecarManager::forward_target`], which returns only a port the
-/// manager holds a live claim on, so a sidecar whose `claim_port` was refused is refused
-/// rather than handed Core-authenticated traffic and its minted `RYU_EXT_TOKEN` (see
-/// [`ForwardTarget`]). The legacy `*_client.rs` drivers listed above have NOT been moved
-/// onto that gate; each caches the manifest port at construction and dials it directly
-/// with the plugin's ext token, so each is still exposed to a port squatted before Core
-/// registered the sidecar. Moving them is a follow-on: the fix is to resolve
-/// `forward_target` per call instead of caching a port, not to add a check here (this
-/// function cannot see the manager). Do not add new callers.
-///
-/// `None` means the manifest does not declare that sidecar at all. For a **built-in**
-/// that is a build-time invariant, not a runtime condition — the fixture is
-/// `include_str!`d into `BUILTIN_MANIFESTS` and `load()` always parses it — so built-in
-/// callers `expect` rather than invent a port. (The runtime fail-open those clients
-/// document is a separate failure mode: an *unreachable* sidecar, still handled per
-/// call.)
-pub fn sidecar_port(
-    manifests: &[crate::plugin_manifest::PluginManifest],
-    plugin_id: &str,
-    sidecar_name: &str,
-) -> Option<u16> {
-    manifests
-        .iter()
-        .find(|m| m.id == plugin_id)
-        .and_then(|m| m.sidecars.iter().find(|s| s.name == sidecar_name))
-        .map(|s| crate::profile::port(s.port))
-}
-
 // ── Token derivation ──────────────────────────────────────────────────────────
 
 /// The node token (`RYU_TOKEN`), trimmed + non-empty, or `None` (loopback dev with
@@ -1334,7 +1290,11 @@ fn tungstenite_to_axum(msg: TsMessage) -> WsMessage {
 pub fn host_routes() -> Router<ServerState> {
     Router::new()
         .route("/api/host/model/complete", post(host_model_complete))
-        .route("/api/host/rpc", post(host_rpc))
+        .route(
+            "/api/host/model/stream",
+            post(crate::server::model_stream::host_model_stream),
+        )
+        .route("/api/host/rpc", post(host_rpc).layer(axum::extract::DefaultBodyLimit::max(crate::backups::MAX_APP_BYTES + 64 * 1024)))
         .route("/api/host/capability/:cap", post(host_capability))
 }
 
@@ -1394,7 +1354,7 @@ pub(crate) async fn authenticate_sidecar(
     Ok((plugin_id, approved))
 }
 
-async fn authorize_host_call(
+pub(crate) async fn authorize_host_call(
     state: &ServerState,
     headers: &HeaderMap,
     required_grant: &str,
@@ -1499,7 +1459,8 @@ async fn host_rpc(
         Err((status, msg)) => return (status, Json(json!({ "error": msg }))).into_response(),
     };
 
-    let bridge = crate::plugin_host::PluginHookBridge::new(plugin_id, grants, state);
+    let caller = crate::server::verified_caller_from_headers(&headers).await;
+    let bridge = crate::plugin_host::PluginHookBridge::new_for_request(plugin_id, grants, state, caller, None);
     use crate::tool_exec::{InvokeOutcome, SandboxBridge};
     match bridge.handle(bridge_path.to_owned(), body.args).await {
         InvokeOutcome::Result(r) if r.is_error => {
@@ -2044,12 +2005,14 @@ async fn dispatch_kernel_capability(
             .await
         }
         "email.status" => crate::server::app_email::host_email_status(State(state), headers).await,
-        "egress.fetch" => crate::server::app_egress::host_egress_fetch(
-            State(state),
-            headers,
-            body!(crate::server::app_egress::FetchBody),
-        )
-        .await,
+        "egress.fetch" => {
+            crate::server::app_egress::host_egress_fetch(
+                State(state),
+                headers,
+                body!(crate::server::app_egress::FetchBody),
+            )
+            .await
+        }
         "billing.recordToolCharge" => {
             crate::server::app_tool_usage::host_tool_usage_record(
                 State(state),
@@ -2466,10 +2429,12 @@ mod tests {
         broad.auth = crate::plugin_manifest::schema::RouteAuth::Public;
         http.routes = vec![broad, route("/admin", None, None)];
 
-        let (_, _, matched) =
-            resolve_route(&manifest, "/admin", "GET").expect("a route resolves");
+        let (_, _, matched) = resolve_route(&manifest, "/admin", "GET").expect("a route resolves");
         assert_eq!(matched.path, "/admin");
-        assert_eq!(matched.auth, crate::plugin_manifest::schema::RouteAuth::Protected);
+        assert_eq!(
+            matched.auth,
+            crate::plugin_manifest::schema::RouteAuth::Protected
+        );
     }
 
     #[test]
@@ -2498,11 +2463,7 @@ mod tests {
         let mut second = manifest.sidecars[0].clone();
         second.name = "other".to_owned();
         second.port = 9100;
-        second
-            .http
-            .as_mut()
-            .expect("provider http")
-            .routes = vec![route("/:slug", None, None)];
+        second.http.as_mut().expect("provider http").routes = vec![route("/:slug", None, None)];
         manifest.sidecars.push(second);
 
         assert!(resolve_route(&manifest, "/admin", "GET").is_none());
@@ -2697,8 +2658,8 @@ mod tests {
             "an un-annotated route must not inherit a sibling's rule"
         );
 
-        let (_, _, close) = resolve_route(&manifest, "/tabs/t-42/close", "POST")
-            .expect("declared route resolves");
+        let (_, _, close) =
+            resolve_route(&manifest, "/tabs/t-42/close", "POST").expect("declared route resolves");
         assert_eq!(
             required_permission_for(close, "/tabs/t-42/close", &manifest.id),
             Some(("tabs.close".to_owned(), "t-42".to_owned()))
@@ -2712,11 +2673,7 @@ mod tests {
     #[test]
     fn one_path_resolves_different_permissions_by_http_method() {
         let mut manifest = provider_manifest(9099, None);
-        manifest.sidecars[0]
-            .http
-            .as_mut()
-            .expect("http")
-            .routes = vec![
+        manifest.sidecars[0].http.as_mut().expect("http").routes = vec![
             route_for_method("/items", "GET", "items.view"),
             route_for_method("/items", "POST", "items.edit"),
         ];
@@ -3216,8 +3173,9 @@ mod tests {
             other => panic!("mail process must be Local, got {other:?}"),
         }
         assert_eq!(sc.port, 7996);
-        // Health probes the bearer-gated status route (ryu-mail has no /health).
-        assert_eq!(sc.health_path, "/api/mail/status");
+        // Health probes the public process liveness route; the bearer-gated
+        // `/api/mail/status` remains the service-level status endpoint.
+        assert_eq!(sc.health_path, "/health");
         let http = sc.http.as_ref().expect("mail declares http");
         assert_eq!(http.public_mount.as_deref(), Some("/api/mail"));
         assert_eq!(http.mount.as_deref(), Some("/api/mail"));
@@ -3343,35 +3301,39 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::NOT_IMPLEMENTED);
     }
 
-    /// Every Core-side loopback driver resolves its port from the built-in manifest
-    /// ALONE — no `*_FALLBACK_PORT` const survives in Core (AGENTS.md: never bake a
-    /// `com.ryu.<app>` port into Core outside the fixture).
-    ///
-    /// This locks the invariant those `expect`s rest on. Each `sidecar_port` panics
-    /// when its fixture stops declaring the sidecar, so without this test that
-    /// regression would first surface as a Core **boot panic** on a developer's
-    /// machine; here it is a red build. `load_builtins` (not `load`) so the assertion
-    /// does not depend on whatever the developer happens to have in `~/.ryu/plugins`.
+    /// Built-in sidecars need distinct nonzero bind ports. Dialing clients use
+    /// the manager registry, so a missing app is unavailable rather than a boot panic.
     #[test]
-    fn every_loopback_driver_resolves_its_port_from_the_builtin_manifest() {
+    fn builtin_app_sidecars_declare_distinct_bind_ports() {
         let manifests = crate::plugin_manifest::PluginManifestLoader::load_builtins();
         let resolved = [
-            (
-                "dashboards",
-                crate::dashboards_client::sidecar_port(&manifests),
-            ),
-            ("finetune", crate::finetune_client::sidecar_port(&manifests)),
-            ("healing", crate::healing_client::sidecar_port(&manifests)),
-            ("meetings", crate::meetings_client::sidecar_port(&manifests)),
-            ("monitors", crate::monitors_client::sidecar_port(&manifests)),
-            ("quests", crate::quests_client::sidecar_port(&manifests)),
-            ("teams", crate::teams_client::sidecar_port(&manifests)),
-        ];
+            "dashboards",
+            "finetune",
+            "healing",
+            "meetings",
+            "monitors",
+            "quests",
+            "teams",
+        ]
+        .map(|app| {
+            let plugin_id = format!("@ryu/{app}");
+            let sidecar_name = format!("ryu-{app}");
+            let manifest = manifests
+                .iter()
+                .find(|manifest| manifest.id == plugin_id)
+                .unwrap_or_else(|| panic!("missing built-in manifest {plugin_id}"));
+            let spec = manifest
+                .sidecars
+                .iter()
+                .find(|spec| spec.name == sidecar_name)
+                .unwrap_or_else(|| panic!("missing sidecar {sidecar_name} in {plugin_id}"));
+            (app, crate::profile::port(spec.port))
+        });
         for (app, port) in resolved {
             assert_ne!(port, 0, "{app}: manifest must declare a real sidecar port");
         }
         // Two sidecars sharing a port means whichever binds second dies and its
-        // driver silently talks to the wrong app — worth catching at fixture-edit
+        // driver becomes unavailable — worth catching at fixture-edit
         // time rather than at runtime.
         let mut ports: Vec<u16> = resolved.iter().map(|(_, p)| *p).collect();
         ports.sort_unstable();
@@ -3382,16 +3344,6 @@ mod tests {
             before,
             "two built-in sidecars declare the same port: {resolved:?}"
         );
-    }
-
-    /// An app whose manifest does not declare the named sidecar resolves to `None`
-    /// rather than to an invented port — the property that lets the built-in callers
-    /// treat absence as a build-time invariant instead of carrying a fallback.
-    #[test]
-    fn sidecar_port_is_none_for_an_undeclared_sidecar() {
-        let m = provider_manifest(9099, None);
-        assert!(sidecar_port(std::slice::from_ref(&m), &m.id, "no-such-sidecar").is_none());
-        assert!(sidecar_port(&[], "@ryu/teams", "ryu-teams").is_none());
     }
 
     // ── Kernel capabilities (the retired per-app /api/host/<app>/* rows) ─────────
@@ -3527,7 +3479,7 @@ mod tests {
     /// sidecar never declared in `host_api.grants` is not a licence to use it.
     #[test]
     fn host_api_grant_needs_both_declaration_and_approval() {
-        let manifest = fixture(include_str!("../../../../apps-store/recipes/manifest.json"));
+        let manifest = fixture(include_str!("../../../../generated/ryu-runtime/apps-store/recipes/manifest.json"));
         let approved: HashSet<String> = ["ghost:record".to_owned()].into_iter().collect();
         assert!(host_api_grant_usable(&manifest, &approved, "ghost:record"));
 
@@ -3560,35 +3512,35 @@ mod tests {
                 "mcp.callTool",
                 "monitors",
                 &fixture(include_str!(
-                    "../../../../apps-store/monitors/manifest.json"
+                    "../../../../generated/ryu-runtime/apps-store/monitors/manifest.json"
                 )),
             ),
             (
                 "spaces.fileNotes",
                 "meetings",
                 &fixture(include_str!(
-                    "../../../../apps-store/meetings/manifest.json"
+                    "../../../../generated/ryu-runtime/apps-store/meetings/manifest.json"
                 )),
             ),
             (
                 "ghost.recordStart",
                 "recipes",
-                &fixture(include_str!("../../../../apps-store/recipes/manifest.json")),
+                &fixture(include_str!("../../../../generated/ryu-runtime/apps-store/recipes/manifest.json")),
             ),
             (
                 "email.send",
                 "mail",
-                &fixture(include_str!("../../../../apps-store/mail/manifest.json")),
+                &fixture(include_str!("../../../../generated/ryu-runtime/apps-store/mail/manifest.json")),
             ),
             (
                 "email.status",
                 "mail",
-                &fixture(include_str!("../../../../apps-store/mail/manifest.json")),
+                &fixture(include_str!("../../../../generated/ryu-runtime/apps-store/mail/manifest.json")),
             ),
             (
                 "egress.fetch",
                 "mpp",
-                &fixture(include_str!("../../../../apps-store/mpp/manifest.json")),
+                &fixture(include_str!("../../../../generated/ryu-runtime/apps-store/mpp/manifest.json")),
             ),
         ];
         for (cap, app, manifest) in cases {

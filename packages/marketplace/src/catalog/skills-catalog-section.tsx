@@ -221,6 +221,7 @@ export default function SkillsCatalogSection({
 	initialSelectedId?: string;
 } = {}) {
 	const host = useCatalogHost();
+	const auditNode = host.useActiveNode();
 	// One resolver for the section (a host implementation reads live node state to
 	// answer it), threaded to the cards. Null for a plain SKILL.md, which is most.
 	const usePluginSettingsOpener =
@@ -330,8 +331,10 @@ export default function SkillsCatalogSection({
 					<div className="grid h-full min-w-0 grid-cols-[minmax(0,1fr)_minmax(280px,36%)] overflow-hidden">
 						<div className="min-h-0 overflow-auto border-r">
 							<SkillDetailPanel
+								auditScope={auditNode.url}
 								canAuthor={canAuthor}
 								detail={detail}
+								distributeSkill={host.distributeSkill}
 								enabledByKey={enabledByKey}
 								error={detailError}
 								friendly={friendly}
@@ -342,6 +345,7 @@ export default function SkillsCatalogSection({
 								Markdown={host.Markdown}
 								onCreate={openNewSkill}
 								onEdit={openEditSkill}
+								onOpenAuditConversation={host.openAuditConversation}
 								onSelectOrg={setOrg}
 								onToggleEnabled={setSkillEnabled}
 								renderAffordance={host.renderAffordance}
@@ -730,7 +734,7 @@ function SkillSourcePicker({
 								/>
 							</div>
 							{addError && (
-								<p className="text-destructive text-xs">{addError}</p>
+								<p className="text-status-destructive text-xs">{addError}</p>
 							)}
 							<Button
 								disabled={sourceActionId !== null}
@@ -989,6 +993,7 @@ function SkillCardAction({
 function SkillDetailPanel({
 	selectedId,
 	detail,
+	distributeSkill,
 	loading,
 	error,
 	install,
@@ -1003,11 +1008,14 @@ function SkillDetailPanel({
 	canAuthor,
 	installLayer,
 	renderAffordance,
+	auditScope,
 	runCatalogScan,
+	onOpenAuditConversation,
 	Markdown,
 }: {
 	selectedId: string | null;
 	detail: SkillDetail | null;
+	distributeSkill: CatalogHost["distributeSkill"];
 	loading: boolean;
 	error: string | null;
 	install: () => Promise<void>;
@@ -1022,7 +1030,9 @@ function SkillDetailPanel({
 	canAuthor: boolean;
 	installLayer: CatalogInstall | null;
 	renderAffordance: CatalogHost["renderAffordance"];
+	auditScope: string;
 	runCatalogScan: CatalogHost["runCatalogScan"];
+	onOpenAuditConversation?: (id: string) => void;
 	Markdown: ComponentType<CatalogMarkdownProps>;
 }) {
 	if (!selectedId) {
@@ -1058,7 +1068,7 @@ function SkillDetailPanel({
 	}
 	if (error) {
 		return (
-			<div className="p-4 text-destructive text-sm">
+			<div className="p-4 text-sm text-status-destructive">
 				Couldn't load this skill: {error}
 			</div>
 		);
@@ -1115,6 +1125,7 @@ function SkillDetailPanel({
 					<SkillDetailAction
 						canAuthor={canAuthor}
 						card={card}
+						distributeSkill={distributeSkill}
 						install={install}
 						installing={installing}
 						installLayer={installLayer}
@@ -1183,7 +1194,8 @@ function SkillDetailPanel({
 			<ListingSection title="Health">
 				<ScorecardPanel
 					agentScan={agentScan}
-					key={card.id}
+					key={JSON.stringify([auditScope, detail])}
+					onOpenConversation={onOpenAuditConversation}
 					scorecard={scorecard}
 				/>
 			</ListingSection>
@@ -1316,6 +1328,7 @@ function SkillLink({ href, label }: { href: string; label: string }) {
  *  affordance where `installLayer` is null (web). */
 function SkillDetailAction({
 	card,
+	distributeSkill,
 	install,
 	installing,
 	installLayer,
@@ -1328,6 +1341,7 @@ function SkillDetailAction({
 	canAuthor,
 }: {
 	card: SkillCard;
+	distributeSkill: CatalogHost["distributeSkill"];
 	install: () => Promise<void>;
 	installing: string | null;
 	installLayer: CatalogInstall | null;
@@ -1369,6 +1383,18 @@ function SkillDetailAction({
 
 	return (
 		<div className="flex shrink-0 items-center gap-3">
+			{distributeSkill ? (
+				<Button
+					onClick={() => {
+						distributeSkill(card.id).catch(() => undefined);
+					}}
+					size="sm"
+					variant="ghost"
+				>
+					<HugeiconsIcon className="size-4" icon={Download01Icon} />
+					Use with agents
+				</Button>
+			) : null}
 			{canAuthor && skillKey !== null ? (
 				<Button onClick={() => onEdit(skillKey)} size="sm" variant="ghost">
 					<HugeiconsIcon className="size-4" icon={PencilEdit01Icon} />
@@ -1377,7 +1403,7 @@ function SkillDetailAction({
 			) : null}
 			<Badge className="gap-1" variant="secondary">
 				<HugeiconsIcon
-					className="size-3.5 text-success"
+					className="size-3.5 text-status-success"
 					icon={CheckmarkCircle02Icon}
 				/>
 				Added
@@ -1434,8 +1460,8 @@ function SkillAuditList({
 							<span
 								className={
 									audit.status.toLowerCase() === "pass"
-										? "font-mono text-success uppercase"
-										: "font-mono text-warning uppercase"
+										? "font-mono text-status-success uppercase"
+										: "font-mono text-status-warning uppercase"
 								}
 							>
 								{audit.status}

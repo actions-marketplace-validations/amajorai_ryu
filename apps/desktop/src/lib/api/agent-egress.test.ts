@@ -391,6 +391,13 @@ describe("classifyAgentEgress mirrors Core's agent_route order", () => {
 		expect(row.control).toBeNull();
 	});
 
+	it("FreeToken is classified as a local engine", () => {
+		const row = classify({ id: "agt_freetoken", engine: "freetoken" });
+		expect(row.mechanism).toBe("local-engine");
+		expect(row.governed).toBeNull();
+		expect(row.control).toBeNull();
+	});
+
 	it("a local-engine agent is neither governed nor direct", () => {
 		const row = classify({ id: "agt_local", engine: "llamacpp" });
 		expect(row.mechanism).toBe("local-engine");
@@ -489,7 +496,7 @@ const AGENT_EDIT_TSX = "packages/blocks/src/desktop/agent-edit.tsx";
 const repoSource = rustSource;
 
 describe("the spawn-time premise the timing caveat rests on", () => {
-	it("each family's routing is baked into a SPAWN COMMAND, not signalled", () => {
+	it("each family's routing is baked into its spawn configuration", () => {
 		// If any of these stopped returning a *different command string* — say one
 		// started writing a config file a live agent re-reads — that family would no
 		// longer need the caveat, and a caveat nobody needs is the fastest way to
@@ -503,20 +510,26 @@ describe("the spawn-time premise the timing caveat rests on", () => {
 		expect(
 			anchor(
 				"apps/core/src/sidecar/adapters/acp.rs",
-				'"OPENAI_BASE_URL={gateway_v1} OPENAI_API_KEY={token} {spawn_cmd}"'
+				`acp_spawn_with_env(
+                    spawn_cmd,
+                    vec![
+                        ("OPENAI_BASE_URL".to_owned(), gateway_v1),
+                        ("OPENAI_API_KEY".to_owned(), token),
+                    ],
+                )`
 			)
 		).toBe(PRESENT);
 		expect(
 			anchor(
 				"apps/core/src/sidecar/adapters/acp.rs",
-				'"CODEX_HOME={home} npx -y @zed-industries/codex-acp"'
+				"\"CODEX_HOME='{}' npx -y @zed-industries/codex-acp\""
 			)
 		).toBe(PRESENT);
-		// The flagship's own injection, inline in `ryu_agent_route`.
+		// The flagship injects the Gateway into the structured spawn environment.
 		expect(
 			anchor(
 				"apps/core/src/sidecar/adapters/mod.rs",
-				'"OPENAI_BASE_URL={gateway_v1} OPENAI_API_KEY={token} "'
+				'env.push(("OPENAI_BASE_URL".to_owned(), gateway_v1));'
 			)
 		).toBe(PRESENT);
 	});
@@ -789,12 +802,12 @@ describe("the tool bridge's two terms, mirrored from Core", () => {
 		const calls = adapters.match(/ensure_managed_defaults\(\)/g) ?? [];
 		expect(calls).toHaveLength(2);
 		expect(
-			anchor(ACP_RS, "ryu_pi_acp_cmd: could not write managed Pi defaults")
+			anchor(ACP_RS, "ryu_pi_acp_cmd: refusing stale managed Pi configuration")
 		).toBe(PRESENT);
 		expect(
 			anchor(
 				"apps/core/src/sidecar/adapters/mod.rs",
-				"ryu fallback: could not write managed Pi defaults"
+				"ryu fallback: refusing stale managed Pi configuration"
 			)
 		).toBe(PRESENT);
 	});
@@ -944,6 +957,9 @@ describe("who has a tool control, which is NOT who has an egress control", () =>
 		for (const [id, engine] of [
 			["zeroclaw", "zeroclaw"],
 			["agt_local", "ollama"],
+			["agt_lemonade", "lemonade"],
+			["agt_llama_swap", "llama-swap"],
+			["agt_freetoken", "freetoken"],
 			["agt_x", "nope"],
 		] as const) {
 			const row = classify({ id, engine });

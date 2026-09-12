@@ -166,10 +166,10 @@ export function InstallingStep({
 		<div className="flex flex-col gap-5">
 			<div className="flex items-center gap-3">
 				{doneCount >= total ? (
-					<SuccessCheck className="size-8 shrink-0 text-success" />
+					<SuccessCheck className="size-8 shrink-0 text-status-success" />
 				) : null}
 				<div>
-					<h2 className="mb-1 font-semibold text-xl">Setting up Ryu</h2>
+					<h2 className="mb-1 font-medium text-xl">Setting up Ryu</h2>
 					<p className="text-muted-foreground text-sm">
 						{doneCount < total ? (
 							<>
@@ -198,7 +198,7 @@ export function InstallingStep({
 									b={CheckmarkCircle01Icon}
 									className={
 										item.status === "done"
-											? "h-4 w-4 text-success"
+											? "h-4 w-4 text-status-success"
 											: "h-4 w-4 animate-spin text-primary"
 									}
 									state={item.status === "done" ? "b" : "a"}
@@ -206,7 +206,7 @@ export function InstallingStep({
 							)}
 							{item.status === "failed" && (
 								<HugeiconsIcon
-									className="h-4 w-4 text-warning"
+									className="h-4 w-4 text-status-warning"
 									icon={AlertCircleIcon}
 								/>
 							)}
@@ -219,7 +219,7 @@ export function InstallingStep({
 										? "font-medium text-sm"
 										: item.status === "done"
 											? "text-sm"
-											: "text-sm text-warning"
+											: "text-sm text-status-warning"
 							}
 						>
 							{item.status === "installing"

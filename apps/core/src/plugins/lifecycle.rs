@@ -381,6 +381,31 @@ pub async fn install_app_with_provenance(
 /// one `set_enabled`, and an [`EnableOutcome`] whose `dependencies` is empty.
 ///
 /// Fails closed on Gateway errors — the app stays disabled with a clear error.
+/// Plan an enable without changing the plugin store.
+///
+/// The plan runs the same dependency, capability, and Gateway-grant validation
+/// as a live enable. The returned records are projected post-enable records;
+/// callers must not treat them as persisted state.
+pub async fn plan_enable_app(
+    store: &PluginStore,
+    manifest: &PluginManifest,
+    all_manifests: &[PluginManifest],
+    gateway_base_url: &str,
+    gateway_token: Option<&str>,
+    http_client: &reqwest::Client,
+) -> Result<EnableOutcome, EnableError> {
+    enable_app_inner(
+        store,
+        manifest,
+        all_manifests,
+        gateway_base_url,
+        gateway_token,
+        http_client,
+        true,
+    )
+    .await
+}
+
 pub async fn enable_app(
     store: &PluginStore,
     manifest: &PluginManifest,
@@ -388,6 +413,27 @@ pub async fn enable_app(
     gateway_base_url: &str,
     gateway_token: Option<&str>,
     http_client: &reqwest::Client,
+) -> Result<EnableOutcome, EnableError> {
+    enable_app_inner(
+        store,
+        manifest,
+        all_manifests,
+        gateway_base_url,
+        gateway_token,
+        http_client,
+        false,
+    )
+    .await
+}
+
+async fn enable_app_inner(
+    store: &PluginStore,
+    manifest: &PluginManifest,
+    all_manifests: &[PluginManifest],
+    gateway_base_url: &str,
+    gateway_token: Option<&str>,
+    http_client: &reqwest::Client,
+    dry_run: bool,
 ) -> Result<EnableOutcome, EnableError> {
     // The ACL vocabulary is assembled from installed manifests and cached, so a
     // change to the installed set must drop it — otherwise an app's newly
@@ -534,19 +580,34 @@ pub async fn enable_app(
     let mut flipped: Vec<String> = Vec::new();
 
     for p in &pending {
-        let result = store.set_enabled(&p.id, &p.approved).await;
+        let result = if dry_run {
+            match records.iter().find(|record| record.id == p.id).cloned() {
+                Some(mut record) => {
+                    record.enabled = true;
+                    record.approved_grants = p.approved.clone();
+                    Ok(Some(record))
+                }
+                None => Ok(None),
+            }
+        } else {
+            store.set_enabled(&p.id, &p.approved).await
+        };
 
         let record = match result {
             Ok(Some(record)) => record,
             Ok(None) => {
-                rollback_enabled(store, &flipped).await;
+                if !dry_run {
+                    rollback_enabled(store, &flipped).await;
+                }
                 return Err(EnableError::Other(anyhow::anyhow!(
                     "app '{}' disappeared during enable",
                     p.id
                 )));
             }
             Err(e) => {
-                rollback_enabled(store, &flipped).await;
+                if !dry_run {
+                    rollback_enabled(store, &flipped).await;
+                }
                 return Err(EnableError::Other(e));
             }
         };
@@ -703,12 +764,36 @@ pub async fn set_app_grants(
 /// relies on, so it takes an explicit override. The check is on the **target**
 /// only (the id the caller asked to disable), before anything is touched, so a
 /// refused disable changes nothing.
+/// Plan a disable without changing the plugin store or tearing down runtime
+/// contributions. The returned records describe the records that would be
+/// disabled, in the same reverse-topological order as a live disable.
+pub async fn plan_disable_app(
+    store: &PluginStore,
+    id: &str,
+    all_manifests: &[PluginManifest],
+    cascade: bool,
+    force: bool,
+) -> Result<DisableOutcome, DisableError> {
+    disable_app_inner(store, id, all_manifests, cascade, force, true).await
+}
+
 pub async fn disable_app(
     store: &PluginStore,
     id: &str,
     all_manifests: &[PluginManifest],
     cascade: bool,
     force: bool,
+) -> Result<DisableOutcome, DisableError> {
+    disable_app_inner(store, id, all_manifests, cascade, force, false).await
+}
+
+async fn disable_app_inner(
+    store: &PluginStore,
+    id: &str,
+    all_manifests: &[PluginManifest],
+    cascade: bool,
+    force: bool,
+    dry_run: bool,
 ) -> Result<DisableOutcome, DisableError> {
     // RAW: same reason as `enable_app` — a disable must resolve dependents against
     // what the user actually has enabled, not against the Safe Mode mask.
@@ -806,10 +891,14 @@ pub async fn disable_app(
 
     let mut disabled: Vec<PluginRecord> = Vec::new();
     for plugin_id in &order {
-        let record = store
-            .set_disabled(plugin_id)
-            .await
-            .map_err(DisableError::Other)?;
+        let record = if dry_run {
+            records.iter().find(|record| record.id == *plugin_id).cloned()
+        } else {
+            store
+                .set_disabled(plugin_id)
+                .await
+                .map_err(DisableError::Other)?
+        };
         match record {
             Some(r) => disabled.push(r),
             // A dependent that vanished between the list and the disable is not
@@ -908,11 +997,33 @@ impl From<anyhow::Error> for UninstallError {
 ///    is removed; cascaded dependents are left installed-but-disabled (a user who
 ///    wants them gone uninstalls each explicitly, mirroring `disable_app`'s "only
 ///    the target is the subject" shape).
+/// Plan an uninstall without changing the plugin store, scheduler, plugin
+/// directory, or runtime contributions. The target and cascade checks are the
+/// same as a live uninstall.
+pub async fn plan_uninstall_app(
+    store: &PluginStore,
+    id: &str,
+    all_manifests: &[PluginManifest],
+    cascade: bool,
+) -> Result<UninstallOutcome, UninstallError> {
+    uninstall_app_inner(store, id, all_manifests, cascade, true).await
+}
+
 pub async fn uninstall_app(
     store: &PluginStore,
     id: &str,
     all_manifests: &[PluginManifest],
     cascade: bool,
+) -> Result<UninstallOutcome, UninstallError> {
+    uninstall_app_inner(store, id, all_manifests, cascade, false).await
+}
+
+async fn uninstall_app_inner(
+    store: &PluginStore,
+    id: &str,
+    all_manifests: &[PluginManifest],
+    cascade: bool,
+    dry_run: bool,
 ) -> Result<UninstallOutcome, UninstallError> {
     // The ACL vocabulary is assembled from installed manifests and cached, so a
     // change to the installed set must drop it — otherwise an app's newly
@@ -939,7 +1050,7 @@ pub async fn uninstall_app(
     // dependents refusal, cascade order, and idempotent teardown of the bits.
     // `force = false`: any load-bearing plugin is pre-installed and already refused at
     // step 2, so this can never be a forced disable of a core subsystem.
-    let disabled = match disable_app(store, id, all_manifests, cascade, false).await {
+    let disabled = match disable_app_inner(store, id, all_manifests, cascade, false, dry_run).await {
         Ok(outcome) => outcome.disabled,
         Err(DisableError::NotInstalled { id }) => return Err(UninstallError::NotInstalled { id }),
         Err(DisableError::Dependency(e)) => return Err(UninstallError::Dependency(e)),
@@ -952,6 +1063,13 @@ pub async fn uninstall_app(
         Err(DisableError::Mandatory { id }) => return Err(UninstallError::Protected { id }),
         Err(DisableError::Other(e)) => return Err(UninstallError::Other(e)),
     };
+
+    if dry_run {
+        return Ok(UninstallOutcome {
+            removed: id.to_owned(),
+            disabled,
+        });
+    }
 
     // 4. Remove the record (wires the previously-unused PluginStore::remove).
     store.remove(id).await.map_err(UninstallError::Other)?;
@@ -1407,11 +1525,7 @@ mod tests {
         };
 
         let s = store();
-        let manifest = make_manifest(
-            "@ryu/__test-verified-official-lifecycle",
-            "1.0.0",
-            vec![],
-        );
+        let manifest = make_manifest("@ryu/__test-verified-official-lifecycle", "1.0.0", vec![]);
         s.insert(&manifest.id, &manifest.version).await.unwrap();
 
         let provenance = capture_provenance(
@@ -1588,6 +1702,71 @@ mod tests {
             Some(v) => std::env::set_var(super::ENV_STUB_GRANTS, v),
             None => std::env::remove_var(super::ENV_STUB_GRANTS),
         }
+    }
+
+    #[tokio::test]
+    async fn dry_run_plans_leave_plugin_state_unchanged() {
+        let _stub = StubGrants::on();
+        let store = store();
+        let manifest = make_manifest("com.test.preview", "1.0.0", vec!["mcp:web_search"]);
+        install_app(&store, &manifest).await.unwrap();
+        let client = reqwest::Client::new();
+
+        let enable = plan_enable_app(
+            &store,
+            &manifest,
+            std::slice::from_ref(&manifest),
+            "http://127.0.0.1:7981",
+            None,
+            &client,
+        )
+        .await
+        .unwrap();
+        assert!(enable.target.enabled);
+        assert_eq!(
+            store.get("com.test.preview").await.unwrap().unwrap().enabled,
+            false,
+            "an enable plan must not flip the store bit"
+        );
+
+        enable_app(
+            &store,
+            &manifest,
+            std::slice::from_ref(&manifest),
+            "http://127.0.0.1:7981",
+            None,
+            &client,
+        )
+        .await
+        .unwrap();
+        let disable = plan_disable_app(
+            &store,
+            &manifest.id,
+            std::slice::from_ref(&manifest),
+            false,
+            false,
+        )
+        .await
+        .unwrap();
+        assert_eq!(disable.target().id, manifest.id);
+        assert!(
+            store.get("com.test.preview").await.unwrap().unwrap().enabled,
+            "a disable plan must not clear the live enabled bit"
+        );
+
+        let uninstall = plan_uninstall_app(
+            &store,
+            &manifest.id,
+            std::slice::from_ref(&manifest),
+            false,
+        )
+        .await
+        .unwrap();
+        assert_eq!(uninstall.removed, manifest.id);
+        assert!(
+            store.get("com.test.preview").await.unwrap().is_some(),
+            "an uninstall plan must not remove the lifecycle row"
+        );
     }
 
     // ── set_app_grants (per-grant revocation) ──────────────────────────────────

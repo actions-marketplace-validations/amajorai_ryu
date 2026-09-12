@@ -1096,6 +1096,14 @@
       },
       "type": "object"
     },
+    "HookMode": {
+      "description": "How Core composes a contributed hook.\n\nThe historical `directive` mode runs each hook independently and preserves\nthe existing first-writer-wins behavior at each phase. `middleware` mode\ncomposes hooks as an onion: the hook receives a `next(ctx)` continuation and\nmay short-circuit, rewrite the context passed downstream, or inspect the\ndownstream directive before returning its own result.",
+      "enum": [
+        "directive",
+        "middleware"
+      ],
+      "type": "string"
+    },
     "HostApiSpec": {
       "description": "Declares the host-API grant subset a sidecar *process* may exercise via the\nauthenticated `/api/host/*` callback into Core. The listed grants are the ceiling;\nCore still intersects them with the plugin's *approved* grants (post-Gateway\nvalidation) at call time, so a manifest can never widen its own authority here.",
       "properties": {
@@ -2751,6 +2759,17 @@
           ],
           "default": null,
           "description": "Optional cheap pre-gate. When present, Core's `plugin_host` evaluates it\nin Rust **before** spawning the sandbox, so an idle hook (e.g. double-check\nwith its toggle off, or goal with no active condition) costs a flag/prefix\ncheck or one KV read instead of a Deno process. This is what makes it safe\nto ship these hooks **enabled by default** on every surface. Absent (or all\nfields empty) → the hook always runs, preserving prior behaviour."
+        },
+        "mode": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/HookMode"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Optional composition mode. Omitted means the backwards-compatible\nindependent directive hook. `middleware` enables the `next(ctx)` chain."
         },
         "on": {
           "description": "The turn boundary this hook fires on. Today only `\"post_assistant_turn\"`.",

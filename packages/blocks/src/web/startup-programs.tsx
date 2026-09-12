@@ -171,7 +171,7 @@ const wordmarkClass = "h-4 w-auto max-w-none shrink-0 select-none sm:h-5";
 const monoWordmarkClass = `${wordmarkClass} brightness-0 dark:invert`;
 
 const programLinkClass =
-	"inline-flex shrink-0 items-center opacity-80 transition-opacity hover:opacity-100";
+	"inline-flex shrink-0 items-center opacity-80 transition-opacity hover:opacity-100 focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-ring";
 
 function ProgramWordmark({ program }: { program: Program }) {
 	const { logo, name } = program;
@@ -224,16 +224,26 @@ function ProgramWordmark({ program }: { program: Program }) {
 	);
 }
 
-export default function StartupPrograms() {
+export default function StartupPrograms({ className }: { className?: string }) {
 	return (
-		<section className="container mx-auto mt-10 px-4 pb-32 md:mt-14 md:pb-44">
+		<section
+			aria-labelledby="backed-by-heading"
+			className={cn(
+				"container mx-auto mt-10 px-4 pb-32 md:mt-14 md:pb-44",
+				className
+			)}
+			data-testid="backed-by-carousel"
+		>
 			<div className="mx-auto max-w-6xl text-center">
-				<h2 className="font-medium text-muted-foreground text-sm">
+				<h2
+					className="font-medium text-muted-foreground text-sm"
+					id="backed-by-heading"
+				>
 					Backed by leading startup programs
 				</h2>
 
 				<div className="group relative mt-4 overflow-hidden [mask-image:linear-gradient(to_right,transparent,black_4%,black_96%,transparent)]">
-					<div className="flex w-max animate-marquee items-center gap-10 py-1 sm:gap-14 md:gap-16 group-hover:[animation-play-state:paused]">
+					<div className="flex w-max animate-marquee items-center gap-10 py-1 sm:gap-14 md:gap-16 group-focus-within:[animation-play-state:paused] group-hover:[animation-play-state:paused] motion-reduce:[animation-play-state:paused]">
 						{[...PROGRAMS, ...PROGRAMS].map((program, i) => (
 							<a
 								aria-label={program.label}

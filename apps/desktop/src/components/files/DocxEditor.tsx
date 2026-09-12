@@ -81,11 +81,6 @@ export const DocxEditor = forwardRef<FileEditorHandle, DocxEditorProps>(
 
 		return (
 			<div className="flex min-h-0 flex-1 flex-col bg-background">
-				<div className="border-border/60 border-b px-2 py-1">
-					<FixedToolbar>
-						<FixedToolbarButtons placement="inline" />
-					</FixedToolbar>
-				</div>
 				<Plate
 					editor={editor}
 					onChange={() => {
@@ -94,6 +89,11 @@ export const DocxEditor = forwardRef<FileEditorHandle, DocxEditorProps>(
 						}
 					}}
 				>
+					<div className="border-border/60 border-b px-2 py-1">
+						<FixedToolbar>
+							<FixedToolbarButtons placement="inline" />
+						</FixedToolbar>
+					</div>
 					<EditorContainer className="min-h-0 flex-1 overflow-y-auto">
 						<Editor placeholder="Start writing…" />
 					</EditorContainer>

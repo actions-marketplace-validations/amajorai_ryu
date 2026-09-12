@@ -4,7 +4,7 @@ import { Button } from "@ryu/ui/components/button";
 import { Spinner } from "@ryu/ui/components/spinner";
 import { useCallback, useEffect, useState } from "react";
 import { KnowledgeGraph } from "@/src/components/spaces/KnowledgeGraph.tsx";
-import { useTabsContext } from "@/src/contexts/TabsContext.tsx";
+import { useTabSelector } from "@/src/contexts/TabsContext.tsx";
 import { useActiveNode } from "@/src/hooks/useActiveNode.ts";
 import {
 	createPage as apiCreatePage,
@@ -23,7 +23,7 @@ export default function KnowledgeGraphPage({ spaceId }: { spaceId?: string }) {
 	const { url } = node;
 	const token = node.token ?? null;
 	const userJwt = node.userJwt ?? null;
-	const { openTab } = useTabsContext();
+	const openTab = useTabSelector((state) => state.openTab);
 	const [graph, setGraph] = useState<DocGraph | null>(null);
 	const [loading, setLoading] = useState(true);
 

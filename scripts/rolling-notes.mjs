@@ -1,8 +1,9 @@
 #!/usr/bin/env node
-// Changelog for a ROLLING build (canary / nightly), generated ON THE PUBLIC
-// REPO with no access to private history.
+// Changelog for a public stable or ROLLING build, generated ON THE PUBLIC REPO
+// with no access to private history.
 //
-//   node scripts/rolling-notes.mjs --channel nightly [--repo owner/name]
+//   node scripts/rolling-notes.mjs --tag v0.2.3 --channel release \
+//     --prev v0.2.2 [--repo owner/name] [--require-ai]
 //
 // Why this can exist at all. The long-standing rule is that a changelog
 // computed from this repo's history is meaningless, because that history is
@@ -12,19 +13,21 @@
 // So the material for a rolling changelog is already here — it just was not
 // being read.
 //
-// That matters because rolling builds are the one channel nothing can fill in
-// afterwards. A stable release gets its notes from the private repo by hand
-// (tools/publish-release-notes.sh); canary and nightly have no such step, so
-// whatever this prints is what they ship with, forever. Before this they shipped
-// with a banner and nothing else.
+// A stable release produced by the private train can still use the richer,
+// package-scoped generator in tools/ai-release-notes.mjs. This generator is the
+// public-safe path for a direct public stable fallback, and remains the only
+// path for canary/nightly releases because nothing fills those bodies later.
 //
 // With OPENCODE_API_KEY set as a repo secret the bodies are merged into a short
 // Highlights section; without it they are concatenated as-is. Either way the
 // content is real. Never fails the build: on any error it prints a minimal
 // fallback and exits 0, because a rolling release with thin notes is better
-// than a rolling release that did not publish.
+// than a rolling release that did not publish. `--require-ai` changes that
+// contract for a stable public release: missing credentials or a failed model
+// call exits non-zero instead of silently shipping fallback notes.
 
 import { execFileSync } from "node:child_process";
+import { opencodeHeaders } from "./opencode-session.mjs";
 
 const args = new Map();
 for (let i = 2; i < process.argv.length; i++) {
@@ -40,6 +43,13 @@ for (let i = 2; i < process.argv.length; i++) {
 
 const channel = args.get("channel") || "canary";
 const repo = args.get("repo") || "amajorai/ryu";
+const tag = typeof args.get("tag") === "string" ? args.get("tag") : "";
+const requireAi = args.get("require-ai") === true;
+const releaseKind =
+	channel === "release" ? "stable release" : `rolling ${channel} build`;
+const sessionContext = ["rolling-notes", repo, tag || "head", channel].join(
+	":"
+);
 
 const git = (...a) => {
 	try {
@@ -61,7 +71,8 @@ const git = (...a) => {
 const pickPrev = () => {
 	const tags = git("tag", "--list", "--sort=-v:refname")
 		.split("\n")
-		.filter(Boolean);
+		.filter(Boolean)
+		.filter((candidate) => candidate !== tag);
 	const sameChannel = tags.find((t) => t.includes(`-${channel}.`));
 	if (sameChannel) {
 		return sameChannel;
@@ -71,7 +82,12 @@ const pickPrev = () => {
 
 const prev =
 	typeof args.get("prev") === "string" ? args.get("prev") : pickPrev();
-const head = git("rev-parse", "HEAD");
+const taggedHead = tag ? git("rev-parse", `${tag}^{commit}`) : "";
+if (tag && !taggedHead) {
+	process.stderr.write(`rolling-notes: tag does not resolve: ${tag}\n`);
+	process.exit(1);
+}
+const head = taggedHead || git("rev-parse", "HEAD");
 const range = prev ? `${prev}..${head}` : head;
 
 const SEP = "\\x1e";
@@ -137,29 +153,34 @@ const plain = () => {
 	return lines;
 };
 
+const fallback = (reason) => {
+	if (requireAi) {
+		process.stderr.write(`rolling-notes: ${reason}\n`);
+		process.exit(1);
+	}
+	emit(plain());
+};
+
 const key = process.env.OPENCODE_API_KEY;
 if (!key) {
-	emit(plain());
+	fallback("OPENCODE_API_KEY is not set");
 }
 
-try {
+const requestAiNotes = async () => {
 	const res = await fetch(
 		`${process.env.OPENCODE_API_BASE || "https://opencode.ai/zen/go/v1"}/chat/completions`,
 		{
 			method: "POST",
-			headers: {
-				Authorization: `Bearer ${key}`,
-				"Content-Type": "application/json",
-			},
+			headers: opencodeHeaders(key, sessionContext),
 			body: JSON.stringify({
-				model: process.env.OPENCODE_MODEL || "mimo-v2.5",
+				model: process.env.OPENCODE_MODEL || "deepseek-v4.1-flash",
 				temperature: 0.2,
 				max_tokens: Number(process.env.OPENCODE_MAX_TOKENS || 16_000),
 				messages: [
 					{
 						role: "system",
 						content: [
-							`You write the notes for a rolling ${channel} build of Ryu, a local-first agent platform.`,
+							`You write the notes for a ${releaseKind} of Ryu, a local-first agent platform.`,
 							"Input is the set of change descriptions already written for the syncs in this range.",
 							"Return STRICT JSON only — no prose, no markdown fence.",
 							'Schema: {"highlights":[{"title":string,"body":string}],"bullets":[string]}',
@@ -184,15 +205,20 @@ try {
 		}
 	);
 	if (!res.ok) {
-		throw new Error(`HTTP ${res.status}`);
+		const detail = (await res.text()).slice(0, 200);
+		throw new Error(`HTTP ${res.status}${detail ? `: ${detail}` : ""}`);
 	}
 	const json = await res.json();
-	const text = json?.choices?.[0]?.message?.content;
-	if (!text) {
-		throw new Error("no content");
+	const choice = json?.choices?.[0];
+	const content = choice?.message?.content;
+	if (!content) {
+		throw new Error(
+			`no content (finish_reason=${choice?.finish_reason ?? "?"}, ` +
+				`completion_tokens=${json?.usage?.completion_tokens ?? "?"})`
+		);
 	}
 	const parsed = JSON.parse(
-		text
+		content
 			.trim()
 			.replace(/^```(?:json)?\s*/i, "")
 			.replace(/\s*```$/, "")
@@ -212,8 +238,30 @@ try {
 	if (compare) {
 		lines.push("", compare);
 	}
-	emit(lines);
-} catch {
-	// Any failure at all falls back to the real, unpolished bullets.
-	emit(plain());
+	return lines;
+};
+
+const configuredAttempts = Number(process.env.AI_NOTES_ATTEMPTS || 3);
+const attempts = Number.isFinite(configuredAttempts)
+	? Math.max(1, Math.floor(configuredAttempts))
+	: 3;
+let lines;
+let failure = "AI generation failed";
+for (let attempt = 1; attempt <= attempts; attempt++) {
+	try {
+		lines = await requestAiNotes();
+		break;
+	} catch (error) {
+		failure = error instanceof Error ? error.message : "AI generation failed";
+		if (attempt < attempts) {
+			await new Promise((resolve) => setTimeout(resolve, attempt * 1000));
+		}
+	}
 }
+
+if (!lines) {
+	// Any failure at all falls back to the real, unpolished bullets unless the
+	// caller explicitly requires AI output for a stable release.
+	fallback(failure);
+}
+emit(lines);

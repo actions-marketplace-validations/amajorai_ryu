@@ -128,7 +128,15 @@ export async function fetchComposioTriggers(
 }
 
 /** One of the user's Composio connected accounts. */
+export type ConnectionAccessLevel =
+	| "risk_based"
+	| "read_only"
+	| "write"
+	| "full";
+
 export interface ComposioConnection {
+	/** Ryu's per-connection action ceiling; unknown values use the safe default. */
+	accessLevel: ConnectionAccessLevel;
 	/** Whether the connection is active (ready for tool execution). */
 	active: boolean;
 	/** The connected-account id (poll this after the OAuth redirect). */
@@ -140,6 +148,7 @@ export interface ComposioConnection {
 }
 
 interface ConnectionWire {
+	access_level?: unknown;
 	active?: boolean;
 	id?: string;
 	status?: string;
@@ -156,9 +165,64 @@ export async function fetchComposioConnections(
 		: "/api/composio/connections";
 	const json = await request<{ data?: ConnectionWire[] }>(target, path);
 	return (json.data ?? []).map((c) => ({
+		accessLevel: normalizeAccessLevel(c.access_level),
 		id: c.id ?? "",
 		toolkit: c.toolkit ?? toolkit,
 		status: c.status ?? "",
 		active: c.active ?? false,
 	}));
+}
+
+function normalizeAccessLevel(value: unknown): ConnectionAccessLevel {
+	if (
+		value === "risk_based" ||
+		value === "read_only" ||
+		value === "write" ||
+		value === "full"
+	) {
+		return value;
+	}
+	return "risk_based";
+}
+
+/** Completion metadata only; refresh the connection list for its access policy. */
+export interface ComposioConnectionCompletion {
+	active: true;
+	id: string;
+	status: "ACTIVE";
+	toolkit: string;
+}
+
+export async function completeComposioConnection(
+	target: ApiTarget,
+	sessionUri: string,
+	send: typeof request = request
+): Promise<ComposioConnectionCompletion> {
+	if (!sessionUri || new TextEncoder().encode(sessionUri).byteLength > 4096) {
+		throw new Error("Invalid callback session URI");
+	}
+	const value = await send<Record<string, unknown>>(
+		target,
+		"/api/composio/connections/complete",
+		{
+			method: "POST",
+			body: { sessionUri },
+			signal: AbortSignal.timeout(45_000),
+		}
+	);
+	if (
+		typeof value.id !== "string" ||
+		!value.id ||
+		typeof value.toolkit !== "string" ||
+		value.status !== "ACTIVE" ||
+		value.active !== true
+	) {
+		throw new Error("Core did not confirm an active connection");
+	}
+	return {
+		id: value.id,
+		toolkit: value.toolkit,
+		status: "ACTIVE",
+		active: true,
+	};
 }

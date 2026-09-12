@@ -4,6 +4,7 @@ import {
 	BrainIcon,
 	Chat01Icon,
 	ComputerIcon,
+	CpuIcon,
 	DeliverySecure01Icon,
 	DollarCircleIcon,
 	Download01Icon,
@@ -17,6 +18,8 @@ import {
 	PotionIcon,
 	Settings01Icon,
 	Settings02Icon,
+	Share01Icon,
+	ShieldKeyIcon,
 	Sun01Icon,
 	Target01Icon,
 	Tv01Icon,
@@ -27,6 +30,7 @@ import { renderTemplate } from "@ryu/app-host/views";
 import { CommandPalette as SharedCommandPalette } from "@ryu/command/CommandPalette";
 import type { CommandAction, CommandPaletteTab } from "@ryu/command/types";
 import { useHotkey } from "@ryu/hotkeys/react";
+import { marketplaceBrowseKindLabel } from "@ryu/marketplace/catalog/chrome/marketplace-sections";
 import {
 	AlertDialog,
 	AlertDialogAction,
@@ -63,8 +67,8 @@ import {
 	type MarketplaceCard,
 	searchMarketplaceCatalog,
 } from "@/src/lib/api/marketplace.ts";
+import { createMemory } from "@/src/lib/api/memory.ts";
 import { fireActivationEvent } from "@/src/lib/api/plugins.ts";
-import { indexChunk } from "@/src/lib/api/retrieval.ts";
 import { type ShadowSearchResult, searchShadow } from "@/src/lib/api/shadow.ts";
 import {
 	type SpaceLexicalHit,
@@ -73,7 +77,7 @@ import {
 import { toggleFullscreen } from "@/src/lib/fullscreen.ts";
 import { listenWhenReady } from "@/src/lib/tauri-ready.ts";
 import { compactAge } from "@/src/lib/time.ts";
-import { SettingsDialog } from "../settings/SettingsDialog.tsx";
+import { SettingsDialog } from "../settings/LazySettingsDialog.tsx";
 
 /** Safely read a string field off an opaque plugin-contribution record. */
 function contribString(
@@ -112,18 +116,18 @@ type SettingsSection =
  * companion mints. Same reasoning, and the same fix, as the sidebar's
  * `CHROME_ORDER`: the App declares itself; the shell does not enumerate Apps.
  *
- * Inbox and Memory were the last two survivors of that rule, and both were live
- * dead ends: `@ryu/approvals` and `@ryu/memory` are BOTH absent from Core's
- * `CORE_PREINSTALLED`, so on a fresh install "Inbox" opened a tab reading "App not
- * enabled" and "Memory" opened a Memory Library whose `/api/memory` reads 503
- * behind the same app gate. Neither needs a row here: an enabled approvals app is
- * listed by the data-driven sidebar-section index, and an enabled memory app contributes a
- * `sidebar_buttons` entry targeting `/library/memory` that the contributed-button
- * loop lists. Note the dedupe below reads `navTargets` — while a target sat in
+ * Inbox and Memory were the last two survivors of that rule. Approvals remains
+ * opt-in, while Memory is pre-installed so its authenticated Library route is
+ * reachable on a fresh install. Neither needs a row here: an enabled approvals
+ * app is listed by the data-driven sidebar-section index, and the enabled Memory
+ * app contributes a `sidebar_buttons` entry targeting `/library/memory` that the
+ * contributed-button loop lists. Note the dedupe below reads `navTargets` — while a target sat in
  * NAV_ITEMS the shell's dumb copy actively SUPPRESSED the app's own declaration.
  */
 const NAV_ITEMS = [
 	{ to: "/chat", label: "Chat", icon: Chat01Icon },
+	{ to: "/compute", label: "Compute", icon: CpuIcon },
+	{ to: "/share", label: "Share", icon: Share01Icon },
 	{ to: "/library/agent", label: "Agents", icon: Target01Icon },
 	{ to: "/engines", label: "Engines", icon: LayerIcon },
 	{ to: "/models", label: "Models", icon: BrainIcon },
@@ -441,7 +445,7 @@ export function CommandPalette() {
 			return;
 		}
 		try {
-			await indexChunk(target, { id: crypto.randomUUID(), content });
+			await createMemory(target, { content });
 			toast.success("Saved to memory", { description: content });
 		} catch {
 			toast.error("Couldn't save to memory", {
@@ -806,6 +810,15 @@ export function CommandPalette() {
 		});
 
 		items.push({
+			id: "nav-vault",
+			group: "Navigation",
+			title: "Vault",
+			value: "navigate vault secrets variables credentials mcp",
+			icon: ShieldKeyIcon,
+			onSelect: () => handleNavigate("/vault", "Vault"),
+		});
+
+		items.push({
 			id: "nav-credits",
 			group: "Navigation",
 			title: "Credits",
@@ -957,7 +970,9 @@ export function CommandPalette() {
 					title: card.name,
 					value: `${q} marketplace ${card.kind} ${card.id} ${card.description ?? ""} ${card.author ?? ""}`,
 					resultType: "marketplace",
-					trailing: card.pricing ? formatPricingLabel(card.pricing) : card.kind,
+					trailing: card.pricing
+						? formatPricingLabel(card.pricing)
+						: marketplaceBrowseKindLabel(card.kind),
 					icon: Package01Icon,
 					onSelect: () => handleSelectMarketplace(card, q),
 				});

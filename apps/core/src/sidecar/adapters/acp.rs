@@ -6,24 +6,25 @@ use std::time::Duration;
 use agent_client_protocol::schema::{
     AuthMethodId, AuthenticateRequest, AvailableCommandInput, CancelNotification,
     ClientCapabilities, CloseSessionRequest, ContentBlock, CreateTerminalRequest,
-    CreateTerminalResponse, EmbeddedResourceResource, ImageContent, InitializeRequest,
+    CreateTerminalResponse, EmbeddedResourceResource, EnvVariable, ImageContent, InitializeRequest,
     InitializeResponse, KillTerminalRequest, KillTerminalResponse, ListSessionsRequest,
-    ListSessionsResponse, LoadSessionRequest, LogoutRequest, NewSessionRequest, NewSessionResponse,
-    PromptRequest, PromptResponse, ProtocolVersion, ReadTextFileRequest, ReadTextFileResponse,
-    ReleaseTerminalRequest, ReleaseTerminalResponse, RequestPermissionOutcome,
-    RequestPermissionRequest, RequestPermissionResponse, SelectedPermissionOutcome,
-    SessionConfigOption, SessionConfigOptionCategory, SessionConfigOptionValue,
-    SessionConfigSelectOption, SessionId, SessionNotification, SessionUpdate,
-    SetSessionConfigOptionRequest, SetSessionConfigOptionResponse, SetSessionModeRequest,
-    SetSessionModelRequest, TerminalId, TerminalOutputRequest, TerminalOutputResponse, ToolCall,
-    ToolCallContent, ToolCallLocation, ToolCallStatus, ToolCallUpdate, ToolKind,
-    WaitForTerminalExitRequest, WaitForTerminalExitResponse, WriteTextFileRequest,
-    WriteTextFileResponse,
+    ListSessionsResponse, LoadSessionRequest, LogoutRequest, McpServer, McpServerStdio,
+    NewSessionRequest, NewSessionResponse, PromptRequest, PromptResponse, ProtocolVersion,
+    ReadTextFileRequest, ReadTextFileResponse, ReleaseTerminalRequest, ReleaseTerminalResponse,
+    RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
+    SelectedPermissionOutcome, SessionConfigOption, SessionConfigOptionCategory,
+    SessionConfigOptionValue, SessionConfigSelectOption, SessionId, SessionNotification,
+    SessionUpdate, SetSessionConfigOptionRequest, SetSessionConfigOptionResponse,
+    SetSessionModeRequest, SetSessionModelRequest, TerminalId, TerminalOutputRequest,
+    TerminalOutputResponse, ToolCall, ToolCallContent, ToolCallLocation, ToolCallStatus,
+    ToolCallUpdate, ToolKind, WaitForTerminalExitRequest, WaitForTerminalExitResponse,
+    WriteTextFileRequest, WriteTextFileResponse,
 };
 use agent_client_protocol::schema::{ResumeSessionRequest, ResumeSessionResponse};
 use agent_client_protocol::util::MatchDispatch;
 use agent_client_protocol::{Agent, Client, ConnectionTo, SessionMessage};
 use agent_client_protocol_tokio::AcpAgent;
+use anyhow::Context;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use tokio::sync::mpsc;
@@ -672,8 +673,12 @@ async fn terminal_create(
         .cwd
         .as_deref()
         .map(|path| {
-            scoped_path(session_roots, path)
-                .ok_or_else(|| anyhow::anyhow!("terminal cwd is outside the session workspaces"))
+            let cwd = scoped_existing_path(session_roots, std::path::Path::new(path))
+                .ok_or_else(|| anyhow::anyhow!("terminal cwd is outside the session workspaces"))?;
+            if !cwd.is_dir() {
+                return Err(anyhow::anyhow!("terminal cwd is not a directory"));
+            }
+            Ok(cwd)
         })
         .transpose()?
         .unwrap_or_else(|| session_roots[0].clone());
@@ -869,50 +874,123 @@ impl<T, E: std::fmt::Display> WithContextMsg<T> for Result<T, E> {
 // `~/.ssh/id_ed25519` or write `~/.zshrc` through the client seam), not process
 // containment. Read honours ACP's 1-based `line` + `limit` window.
 
-/// True when `path` stays inside `root` after LEXICAL normalization (`.`/`..`
-/// resolved without touching the filesystem, so a not-yet-created target still
-/// checks). A relative path is joined to `root` first. Symlink-following escapes
-/// are out of scope here — this is the accident-prevention layer; the gateway
-/// exec-scan's path deny rules govern the exec plane separately.
-fn path_within_root(root: &std::path::Path, path: &std::path::Path) -> bool {
+/// Normalize `.`/`..` without touching the filesystem. This keeps checks for
+/// not-yet-created write targets lexical while the existing-target helpers below
+/// add canonical and symlink checks before any read or write.
+fn normalize_path(path: &std::path::Path) -> std::path::PathBuf {
     use std::path::Component;
-    fn normalize(p: &std::path::Path) -> std::path::PathBuf {
-        let mut out = std::path::PathBuf::new();
-        for c in p.components() {
-            match c {
-                Component::CurDir => {}
-                Component::ParentDir => {
-                    out.pop();
-                }
-                other => out.push(other),
+    let mut out = std::path::PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                out.pop();
             }
+            other => out.push(other),
         }
-        out
     }
+    out
+}
+
+/// True when `path` stays inside `root` after lexical normalization. A relative
+/// path is joined to `root` first. The filesystem is not consulted here because
+/// this helper also governs a not-yet-created write target.
+fn path_within_root(root: &std::path::Path, path: &std::path::Path) -> bool {
     let abs = if path.is_absolute() {
         path.to_path_buf()
     } else {
         root.join(path)
     };
-    normalize(&abs).starts_with(normalize(root))
+    normalize_path(&abs).starts_with(normalize_path(root))
 }
 
 /// Serve `fs/read_text_file`, applying the optional 1-based `line` offset and
 /// `limit`. Confined to the session workspace root: an out-of-root path returns
 /// `""` (the ACP response carries only `content`; degrading to empty matches how
 /// a missing file behaves, and never feeds out-of-workspace secrets to the
-/// model). Returns `""` on any read error likewise.
+/// model). Existing targets are canonicalized, checked for symlink components,
+/// and checked against protected host paths before the read. Returns `""` on any
+/// read error likewise.
 fn scoped_path(roots: &[std::path::PathBuf], path: &std::path::Path) -> Option<std::path::PathBuf> {
     roots.iter().find_map(|root| {
         if path_within_root(root, path) {
-            Some(if path.is_absolute() {
+            let candidate = if path.is_absolute() {
                 path.to_path_buf()
             } else {
                 root.join(path)
-            })
+            };
+            Some(normalize_path(&candidate))
         } else {
             None
         }
+    })
+}
+
+fn path_has_symlink_component_below_root(path: &std::path::Path, root: &std::path::Path) -> bool {
+    let Ok(relative) = path.strip_prefix(root) else {
+        return false;
+    };
+    let mut current = root.to_path_buf();
+    for component in relative.components() {
+        current.push(component.as_os_str());
+        match std::fs::symlink_metadata(&current) {
+            Ok(metadata) if metadata.file_type().is_symlink() => return true,
+            Ok(_) => {}
+            Err(_) => break,
+        }
+    }
+    false
+}
+
+/// Resolve an existing client-hosted path only when both its lexical and
+/// canonical forms stay within one session root. The canonical result prevents
+/// the child filesystem from following a workspace symlink after the check, and
+/// the explicit component check rejects symlink aliases that still point inside
+/// the workspace.
+fn scoped_existing_path(
+    roots: &[std::path::PathBuf],
+    path: &std::path::Path,
+) -> Option<std::path::PathBuf> {
+    roots.iter().find_map(|root| {
+        let candidate = scoped_path(std::slice::from_ref(root), path)?;
+        let canonical_root = std::fs::canonicalize(root).ok()?;
+        let canonical = std::fs::canonicalize(&candidate).ok()?;
+        if !path_within_root(&canonical_root, &canonical)
+            || path_has_symlink_component_below_root(&candidate, root)
+            || crate::tool_exec::is_protected_host_path(&canonical)
+        {
+            return None;
+        }
+        Some(canonical)
+    })
+}
+
+/// Validate a write target without requiring the target itself to exist. Every
+/// existing ancestor must be a real, in-root directory; a missing suffix may be
+/// created, but a symlink anywhere below the session root is refused.
+fn scoped_write_path(
+    roots: &[std::path::PathBuf],
+    path: &std::path::Path,
+) -> Option<std::path::PathBuf> {
+    roots.iter().find_map(|root| {
+        let candidate = scoped_path(std::slice::from_ref(root), path)?;
+        let canonical_root = std::fs::canonicalize(root).ok()?;
+        let mut existing = candidate.clone();
+        while !existing.exists() {
+            if !existing.pop() {
+                return None;
+            }
+        }
+        let canonical_existing = std::fs::canonicalize(&existing).ok()?;
+        if !path_within_root(&canonical_root, &canonical_existing)
+            || path_has_symlink_component_below_root(&existing, root)
+            || path_has_symlink_component_below_root(&candidate, root)
+            || crate::tool_exec::is_protected_host_path(&canonical_existing)
+            || crate::tool_exec::is_protected_host_path(&candidate)
+        {
+            return None;
+        }
+        Some(candidate)
     })
 }
 
@@ -920,7 +998,7 @@ fn read_text_file_scoped_in_roots(
     req: &ReadTextFileRequest,
     roots: &[std::path::PathBuf],
 ) -> String {
-    let Some(path) = scoped_path(roots, &req.path) else {
+    let Some(path) = scoped_existing_path(roots, &req.path) else {
         tracing::warn!(
             path = %req.path.display(),
             "fs/read_text_file refused: path is outside the session workspaces"
@@ -952,7 +1030,7 @@ fn write_text_file_scoped_in_roots(
     req: &WriteTextFileRequest,
     roots: &[std::path::PathBuf],
 ) -> anyhow::Result<()> {
-    let Some(path) = scoped_path(roots, &req.path) else {
+    let Some(path) = scoped_write_path(roots, &req.path) else {
         return Err(anyhow::anyhow!(
             "refusing write outside the session workspaces: {}",
             req.path.display()
@@ -1514,13 +1592,28 @@ fn refresh_acp_config_in_background(
 /// The probe itself: spawn the agent, `initialize` + `session/new`, read what it
 /// advertises, drop the session. Always hits the subprocess — every caller goes
 /// through [`probe_acp_config`], which is what owns the caching.
+fn acp_agent_from_spawn(spawn_cmd: &str) -> anyhow::Result<AcpAgent> {
+    let agent =
+        AcpAgent::from_str(spawn_cmd).map_err(|e| anyhow::anyhow!("ACP spawn parse: {e}"))?;
+    let server = match agent.into_server() {
+        agent_client_protocol::schema::McpServer::Stdio(stdio) => {
+            agent_client_protocol::schema::McpServer::Stdio(
+                crate::agent_sandbox::confine_codex_stdio(stdio).map_err(|error| {
+                    anyhow::anyhow!("preparing the managed Codex OS deletion boundary: {error}")
+                })?,
+            )
+        }
+        other => other,
+    };
+    Ok(AcpAgent::new(server))
+}
+
 async fn probe_acp_config_uncached(
     spawn_cmd: String,
     cwd: PathBuf,
     selections: SessionSelections,
 ) -> anyhow::Result<serde_json::Value> {
-    let agent =
-        AcpAgent::from_str(&spawn_cmd).map_err(|e| anyhow::anyhow!("ACP spawn parse: {e}"))?;
+    let agent = acp_agent_from_spawn(&spawn_cmd)?;
     // Which road Ryu's tools take to this agent, resolved from the spawn command
     // BEFORE the subprocess answers anything. Reported alongside the agent's own
     // capabilities because clients must NOT derive it from `mcpCapabilities`: the
@@ -1634,8 +1727,7 @@ async fn probe_acp_config_uncached(
 /// Invalidates the probe cache for this spawn command on success so the next
 /// `acp-config` read reflects the now-authenticated state.
 pub async fn authenticate_acp(spawn_cmd: String, method_id: String) -> anyhow::Result<()> {
-    let agent =
-        AcpAgent::from_str(&spawn_cmd).map_err(|e| anyhow::anyhow!("ACP spawn parse: {e}"))?;
+    let agent = acp_agent_from_spawn(&spawn_cmd)?;
     let cache_key = spawn_cmd.clone();
     tokio::time::timeout(
         std::time::Duration::from_secs(300),
@@ -1675,8 +1767,7 @@ pub async fn authenticate_acp(spawn_cmd: String, method_id: String) -> anyhow::R
 /// auth state. A no-op error surfaces to the caller for agents that don't
 /// implement it.
 pub async fn logout_acp(spawn_cmd: String) -> anyhow::Result<()> {
-    let agent =
-        AcpAgent::from_str(&spawn_cmd).map_err(|e| anyhow::anyhow!("ACP spawn parse: {e}"))?;
+    let agent = acp_agent_from_spawn(&spawn_cmd)?;
     let cache_key = spawn_cmd.clone();
     tokio::time::timeout(
         ACP_PROBE_TIMEOUT,
@@ -1713,8 +1804,7 @@ pub async fn load_acp_session(
     session_id: String,
     cwd: PathBuf,
 ) -> anyhow::Result<serde_json::Value> {
-    let agent =
-        AcpAgent::from_str(&spawn_cmd).map_err(|e| anyhow::anyhow!("ACP spawn parse: {e}"))?;
+    let agent = acp_agent_from_spawn(&spawn_cmd)?;
     // The resumed session's advertised config feeds the same composer pickers the
     // cold probe does, so it gets the same synthesized plan-mode option. Omitting
     // it here would make the pill disappear on exactly the sessions a user resumed.
@@ -1785,8 +1875,7 @@ pub async fn load_acp_session(
 /// `session/new`) returns `{ sessions: [], unsupported: true }` rather than an
 /// error. Returns `{ sessions: [...], nextCursor? }` on success.
 pub async fn list_acp_sessions(spawn_cmd: String) -> anyhow::Result<serde_json::Value> {
-    let agent =
-        AcpAgent::from_str(&spawn_cmd).map_err(|e| anyhow::anyhow!("ACP spawn parse: {e}"))?;
+    let agent = acp_agent_from_spawn(&spawn_cmd)?;
     let value = tokio::time::timeout(
         ACP_PROBE_TIMEOUT,
         Client
@@ -1821,8 +1910,7 @@ pub async fn list_acp_sessions(spawn_cmd: String) -> anyhow::Result<serde_json::
 /// Delete/close an ACP agent session (ACP `session/close`). Best-effort — an
 /// agent that doesn't implement it returns an error the caller can surface.
 pub async fn close_acp_session(spawn_cmd: String, session_id: String) -> anyhow::Result<bool> {
-    let agent =
-        AcpAgent::from_str(&spawn_cmd).map_err(|e| anyhow::anyhow!("ACP spawn parse: {e}"))?;
+    let agent = acp_agent_from_spawn(&spawn_cmd)?;
     let closed = tokio::time::timeout(
         ACP_PROBE_TIMEOUT,
         Client
@@ -2181,6 +2269,10 @@ pub fn spawn_acp_task(
     // Per-agent bound Identity Vault profiles (epic #517), threaded into the MCP
     // bridge for the tool-call-time vault consult. Empty = no consult.
     identity_profile_ids: Vec<String>,
+    // Optional server-validated Composio connections and conversation scope
+    // used by the onboarding profile builder.
+    composio_connection_scope: Option<Vec<crate::sidecar::adapters::ComposioConnectionBinding>>,
+    conversation_scope: Option<Vec<String>>,
     // User-chosen ACP session controls (permission mode / reasoning effort /
     // model) applied to this turn's session. All agent-reported; see
     // [`AcpTurnConfig`].
@@ -2208,6 +2300,8 @@ pub fn spawn_acp_task(
         &composio_actions,
         &agent_id,
         &identity_profile_ids,
+        &composio_connection_scope,
+        &conversation_scope,
         &permission_scope_id,
     );
     let acp_turn = AcpTurn {
@@ -2220,6 +2314,8 @@ pub fn spawn_acp_task(
         composio_actions,
         agent_id,
         identity_profile_ids,
+        composio_connection_scope,
+        conversation_scope,
         permission_scope_id: permission_scope_id.clone(),
         events: events_tx,
     };
@@ -2351,6 +2447,8 @@ fn acp_security_key(
     composio_actions: &[String],
     agent_id: &str,
     identity_profile_ids: &[String],
+    composio_connection_scope: &Option<Vec<crate::sidecar::adapters::ComposioConnectionBinding>>,
+    conversation_scope: &Option<Vec<String>>,
     permission_scope_id: &Option<String>,
 ) -> String {
     let mut allowlist = allowlist.clone();
@@ -2361,12 +2459,26 @@ fn acp_security_key(
     composio_actions.sort();
     let mut identity_profile_ids = identity_profile_ids.to_vec();
     identity_profile_ids.sort();
+    let mut composio_connection_scope = composio_connection_scope.clone();
+    if let Some(values) = composio_connection_scope.as_mut() {
+        values.sort_by(|left, right| {
+            left.toolkit
+                .cmp(&right.toolkit)
+                .then(left.id.cmp(&right.id))
+        });
+    }
+    let mut conversation_scope = conversation_scope.clone();
+    if let Some(values) = conversation_scope.as_mut() {
+        values.sort();
+    }
     serde_json::json!({
         "mcp": mcp.as_ref().map(|registry| format!("{:p}", Arc::as_ptr(registry))),
         "allowlist": allowlist,
         "composioActions": composio_actions,
         "agentId": agent_id,
         "identityProfileIds": identity_profile_ids,
+        "composioConnectionScope": composio_connection_scope,
+        "conversationScope": conversation_scope,
         "permissionScopeId": permission_scope_id,
     })
     .to_string()
@@ -2441,6 +2553,8 @@ impl AgentAdapter for AcpAdapter {
                 vec![],
                 agent_id.clone(),
                 vec![],
+                None,
+                None,
                 AcpTurnConfig::default(),
                 None,
             );
@@ -2647,6 +2761,8 @@ struct AcpTurn {
     composio_actions: Vec<String>,
     agent_id: String,
     identity_profile_ids: Vec<String>,
+    composio_connection_scope: Option<Vec<crate::sidecar::adapters::ComposioConnectionBinding>>,
+    conversation_scope: Option<Vec<String>>,
     permission_scope_id: Option<String>,
     events: mpsc::UnboundedSender<AcpEvent>,
 }
@@ -2890,8 +3006,7 @@ pub async fn run_acp_instance(
         crate::pi_config::app_extensions::ensure_pi_extensions_materialized().await;
     }
 
-    let parsed_agent =
-        AcpAgent::from_str(&spawn_cmd).map_err(|e| anyhow::anyhow!("ACP spawn parse: {e}"))?;
+    let parsed_agent = acp_agent_from_spawn(&spawn_cmd)?;
     let server = match parsed_agent.into_server() {
         agent_client_protocol::schema::McpServer::Stdio(mut stdio) => {
             for (name, value) in environment {
@@ -3026,6 +3141,8 @@ pub async fn run_acp_instance(
                                 first_turn.composio_actions.clone(),
                                 first_turn.agent_id.clone(),
                                 first_turn.identity_profile_ids.clone(),
+                                first_turn.composio_connection_scope.clone(),
+                                first_turn.conversation_scope.clone(),
                                 Some(instance_tx.clone()),
                                 first_turn.permission_scope_id.clone(),
                             )
@@ -3323,7 +3440,22 @@ pub async fn run_acp_instance(
                     // populated by the time `stop_rx` can win.
                     let message = tokio::select! {
                         biased;
-                        update = session.read_update() => update?,
+                        update = session.read_update() => match update {
+                            Ok(update) => update,
+                            Err(error) => {
+                                let detail = error.to_string();
+                                tracing::error!(error = %detail, "ACP session update stream failed");
+                                let _ = tx.send(AcpEvent::Error(AcpFailure {
+                                    code: "acp_transport_error".to_owned(),
+                                    title: "Agent connection lost".to_owned(),
+                                    message: format!("The agent connection ended before the turn completed: {detail}"),
+                                }));
+                                if let Ok(mut g) = sink.lock() {
+                                    *g = None;
+                                }
+                                return Err(error);
+                            }
+                        },
                         // `Err` means the prompt callback errored and dropped the
                         // sender; either way the turn is over.
                         _ = &mut stop_rx => break,
@@ -4188,12 +4320,42 @@ fn extract_file_write(tool_call: &serde_json::Value) -> Option<String> {
     None
 }
 
+fn patch_deletes_file_in_value(value: &serde_json::Value) -> bool {
+    match value {
+        serde_json::Value::Object(object) => {
+            for key in ["patch", "diff"] {
+                if object
+                    .get(key)
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(ryu_deletion_guard::patch_deletes_file)
+                {
+                    return true;
+                }
+            }
+            object.values().any(patch_deletes_file_in_value)
+        }
+        serde_json::Value::Array(items) => items.iter().any(patch_deletes_file_in_value),
+        _ => false,
+    }
+}
+
 /// Run an ACP tool call through the gateway command-approval scanner. Scans the
 /// shell command for exec tools, else a synthesized `"write <path>"` for
 /// file-mutating tools, so native file tools are governed too (not just shell
-/// exec). `Allow` when nothing scannable is recoverable; `check_exec_scan` itself
-/// short-circuits to `Allow` when `RYU_EXEC_APPROVAL_MODE` is unset or `off`.
+/// exec). An explicit `apply_patch` deletion marker is checked locally before
+/// extraction because it may not carry a path/content shape the generic write
+/// synthesizer recognizes. `Allow` means no scannable mutation was recovered;
+/// the permanent-deletion guard remains active even when pattern approval is off.
 async fn acp_exec_scan_verdict(tool_call: &serde_json::Value, agent: &str) -> ExecScanOutcome {
+    if patch_deletes_file_in_value(tool_call)
+        || extract_exec_command(tool_call)
+            .as_deref()
+            .is_some_and(ryu_deletion_guard::patch_deletes_file)
+    {
+        return ExecScanOutcome::Deny(
+            "permanent file deletion through apply_patch is blocked by Ryu; use the host Trash or Recycle Bin command instead".to_owned(),
+        );
+    }
     match extract_exec_command(tool_call).or_else(|| extract_file_write(tool_call)) {
         Some(scannable) => check_exec_scan("acp", &scannable, None, Some(agent)).await,
         None => ExecScanOutcome::Allow,
@@ -4668,7 +4830,7 @@ pub async fn update_managed_pi() -> anyhow::Result<()> {
 /// is false) the injection is skipped so Pi talks straight to that provider — a
 /// deliberate, user-chosen egress bypass.
 pub fn ryu_pi_acp_cmd(user_jwt: Option<&str>) -> Option<String> {
-    ryu_pi_acp_cmd_for_agent(user_jwt, None)
+    ryu_pi_acp_cmd_for_agent(user_jwt, None, None, None, None)
 }
 
 /// Build the managed Pi command with an agent-scoped OpenAI base URL.
@@ -4676,7 +4838,17 @@ pub fn ryu_pi_acp_cmd(user_jwt: Option<&str>) -> Option<String> {
 /// ACP agents own their HTTP client, so the agent id is carried in the
 /// Gateway path and bound to `x-ryu-agent-id` at ingress. `None` preserves the
 /// legacy unscoped endpoint for callers without an agent identity.
-pub fn ryu_pi_acp_cmd_for_agent(user_jwt: Option<&str>, agent_id: Option<&str>) -> Option<String> {
+pub fn ryu_pi_acp_cmd_for_agent(
+    user_jwt: Option<&str>,
+    agent_id: Option<&str>,
+    composio_connection_scope: Option<&[crate::sidecar::adapters::ComposioConnectionBinding]>,
+    conversation_scope: Option<&[String]>,
+    host_conversation_id: Option<&str>,
+) -> Option<String> {
+    if host_conversation_id.is_some_and(|id| !is_safe_host_conversation_id(id)) {
+        tracing::warn!("ryu Pi route refused an invalid host conversation id");
+        return None;
+    }
     let bin = managed_pi_binary();
     if !bin.exists() {
         return None;
@@ -4690,10 +4862,11 @@ pub fn ryu_pi_acp_cmd_for_agent(user_jwt: Option<&str>, agent_id: Option<&str>) 
     // its skill manifest instead of answering; QA B1), and the models.json pin
     // that routes Pi's `openai` provider through the Gateway (Pi ignores
     // `OPENAI_BASE_URL`, so the env injection below is not enough on its own).
-    // Best-effort — a write failure is logged, and Pi still launches (it just
-    // won't route / keeps its previous defaults).
+    // Refuse stale configuration: its old literal bearer could override the
+    // per-process identity and silently defeat the selected agent's budget.
     if let Err(e) = crate::pi_config::ensure_managed_defaults() {
-        tracing::warn!(error = %e, "ryu_pi_acp_cmd: could not write managed Pi defaults");
+        tracing::error!(error = %e, "ryu_pi_acp_cmd: refusing stale managed Pi configuration");
+        return None;
     }
     let gateway_v1 = openai_gateway_v1(agent_id);
     // Fail closed on a remote data plane (WS1): a hosted multi-tenant gateway must
@@ -4701,7 +4874,11 @@ pub fn ryu_pi_acp_cmd_for_agent(user_jwt: Option<&str>, agent_id: Option<&str>) 
     // present it. Only needed when gateway routing is on — otherwise the token is
     // unused (Pi talks straight to its own provider) and no bearer is resolved.
     let token = if gateway {
-        match crate::sidecar::gateway::gateway_bearer() {
+        match crate::sidecar::gateway::gateway_bearer_for_agent(
+            agent_id,
+            None,
+            host_conversation_id,
+        ) {
             Ok(t) => t,
             Err(e) => {
                 tracing::error!(error = %e, "ryu_pi_acp_cmd: no gateway bearer, refusing to route Pi through the gateway");
@@ -4712,56 +4889,37 @@ pub fn ryu_pi_acp_cmd_for_agent(user_jwt: Option<&str>, agent_id: Option<&str>) 
         String::new()
     };
 
-    // Ryu-MCP extension wiring (widget path for the DEFAULT agent). The managed Pi
-    // has NO in-process MCP bridge (pi-acp advertises no MCP-server support), so it
-    // reaches Core's tools — including widget-bearing ones — via the `ryu-mcp`
-    // extension (shipped by `pi_config::ensure_pi_mcp_extension`), which POSTs to
-    // Core's HTTP tool API. These env vars tell that extension where Core is, which
-    // agent id to attribute the call to (for the per-agent allowlist + widget
-    // identity), and — on an exposed node — the bearer to present. `RYU_TOKEN` is
-    // omitted on loopback dev (Core then requires no token). Mirrors how the gateway
-    // sidecar learns `CORE_URL`/`CORE_TOKEN`.
-    let core_url = crate::sidecar::gateway::core_self_url();
-    let mcp_agent_id = crate::registry::DEFAULT_AGENT_ID;
-    let core_token = crate::node_token::active_token()
-        .map(|v| v.trim().to_owned())
-        .filter(|s| !s.is_empty());
+    let mut env = Vec::new();
+    if gateway {
+        env.push(("OPENAI_BASE_URL".to_owned(), gateway_v1));
+        env.push(("OPENAI_API_KEY".to_owned(), token));
+    }
+    env.push(("PI_CODING_AGENT_DIR".to_owned(), config_dir));
+    env.push(("PI_ACP_PI_COMMAND".to_owned(), pi_path));
+    env.extend(pi_mcp_extension_env(
+        user_jwt,
+        composio_connection_scope,
+        conversation_scope,
+        host_conversation_id,
+    ));
 
-    #[cfg(target_os = "windows")]
-    {
-        // CRITICAL (Windows): this whole command string is re-parsed by
-        // `AcpAgent::from_str` via `shell_words`, which treats `\` as an escape
-        // character and STRIPS it. A Windows path like
-        // `C:\Users\…\pi.cmd` therefore becomes `C:Users…pi.cmd`, so cmd.exe can't
-        // find pi, the engine never starts, and the ACP turn dies with the opaque
-        // "Cannot call write after a stream was destroyed" (pi-acp writing to the
-        // exited child's stdin). Double every backslash so shell_words collapses it
-        // back to a single one and cmd.exe receives the real path. (The gateway URL
-        // and token contain no backslashes, so they need no escaping.)
-        let config_dir = config_dir.replace('\\', "\\\\");
-        let pi_path = pi_path.replace('\\', "\\\\");
-        let gateway_env = if gateway {
-            format!("set OPENAI_BASE_URL={gateway_v1}&& set OPENAI_API_KEY={token}&& ")
-        } else {
-            String::new()
-        };
-        let mcp_env = pi_mcp_extension_env(true, user_jwt);
-        Some(format!(
-            "cmd /c {gateway_env}{mcp_env}set PI_CODING_AGENT_DIR={config_dir}&& set PI_ACP_PI_COMMAND={pi_path}&& npx -y pi-acp"
-        ))
-    }
-    #[cfg(not(target_os = "windows"))]
-    {
-        let gateway_env = if gateway {
-            format!("OPENAI_BASE_URL={gateway_v1} OPENAI_API_KEY={token} ")
-        } else {
-            String::new()
-        };
-        let mcp_env = pi_mcp_extension_env(false, user_jwt);
-        Some(format!(
-            "{gateway_env}{mcp_env}PI_CODING_AGENT_DIR={config_dir} PI_ACP_PI_COMMAND={pi_path} npx -y pi-acp"
-        ))
-    }
+    let (command, args) = if cfg!(target_os = "windows") {
+        (
+            PathBuf::from("cmd"),
+            vec![
+                "/d".to_owned(),
+                "/s".to_owned(),
+                "/c".to_owned(),
+                "npx -y pi-acp".to_owned(),
+            ],
+        )
+    } else {
+        (
+            PathBuf::from("npx"),
+            vec!["-y".to_owned(), "pi-acp".to_owned()],
+        )
+    };
+    acp_stdio_spawn_json("ryu-pi", command, args, env).ok()
 }
 
 /// Build the spawn command for an OpenAI-compatible ACP subprocess (Codex) with
@@ -4791,22 +4949,47 @@ fn codex_acp_cmd() -> String {
     codex_acp_cmd_for_agent(None)
 }
 
-#[cfg(target_os = "windows")]
 fn codex_acp_cmd_for_agent(agent_id: Option<&str>) -> String {
-    let gateway_v1 = openai_gateway_v1(agent_id);
-    // On a remote data plane (WS1) the shared "ryu-local" literal is rejected by
-    // the hosted multi-tenant gateway; log + degrade here (this is the rarely-used
-    // Codex API-key path, and the call site is a registry-entry builder that cannot
-    // propagate a Result) — the fleet's 401 is the fail-closed backstop.
-    let token = crate::sidecar::gateway::gateway_bearer().unwrap_or_else(|e| {
-        tracing::error!(error = %e, "codex_acp_cmd: no gateway bearer on remote data plane; hosted gateway will reject");
-        "ryu-local".to_owned()
-    });
-    // Windows: inject env vars via `cmd /c set VAR=val&& ...` so the AcpAgent
-    // subprocess inherits them. This mirrors pi_acp_cmd()'s approach.
-    format!(
-        "cmd /c set OPENAI_BASE_URL={gateway_v1}&& set OPENAI_API_KEY={token}&& npx -y @agentclientprotocol/codex-acp@latest"
-    )
+    let token = match crate::sidecar::gateway::gateway_bearer_for_agent(agent_id, None, None) {
+        Ok(token) => token,
+        Err(error) => {
+            tracing::error!(%error, "cannot provision Codex inference credential");
+            return String::new();
+        }
+    };
+    let env = vec![
+        (
+            "CODEX_HOME".to_owned(),
+            crate::codex_config::safety_home()
+                .to_string_lossy()
+                .into_owned(),
+        ),
+        ("OPENAI_BASE_URL".to_owned(), openai_gateway_v1(agent_id)),
+        ("OPENAI_API_KEY".to_owned(), token),
+    ];
+    let (command, args) = if cfg!(target_os = "windows") {
+        (
+            PathBuf::from("cmd"),
+            vec![
+                "/d".to_owned(),
+                "/s".to_owned(),
+                "/c".to_owned(),
+                "npx -y @agentclientprotocol/codex-acp@latest".to_owned(),
+            ],
+        )
+    } else {
+        (
+            PathBuf::from("npx"),
+            vec![
+                "-y".to_owned(),
+                "@agentclientprotocol/codex-acp@latest".to_owned(),
+            ],
+        )
+    };
+    acp_stdio_spawn_json("codex", command, args, env).unwrap_or_else(|error| {
+        tracing::error!(%error, "cannot construct Codex spawn configuration");
+        String::new()
+    })
 }
 
 #[cfg(not(target_os = "windows"))]
@@ -4814,23 +4997,7 @@ fn codex_acp_cmd() -> String {
     codex_acp_cmd_for_agent(None)
 }
 
-#[cfg(not(target_os = "windows"))]
-fn codex_acp_cmd_for_agent(agent_id: Option<&str>) -> String {
-    let gateway_v1 = openai_gateway_v1(agent_id);
-    // On a remote data plane (WS1) the shared "ryu-local" literal is rejected by
-    // the hosted multi-tenant gateway; log + degrade here (this is the rarely-used
-    // Codex API-key path, and the call site is a registry-entry builder that cannot
-    // propagate a Result) — the fleet's 401 is the fail-closed backstop.
-    let token = crate::sidecar::gateway::gateway_bearer().unwrap_or_else(|e| {
-        tracing::error!(error = %e, "codex_acp_cmd: no gateway bearer on remote data plane; hosted gateway will reject");
-        "ryu-local".to_owned()
-    });
-    // POSIX: prefix the command with inline env var assignments.
-    format!("OPENAI_BASE_URL={gateway_v1} OPENAI_API_KEY={token} npx -y @agentclientprotocol/codex-acp@latest")
-}
-
-/// The three env vars the managed Pi's extensions need to reach Core, rendered for
-/// the target shell (`windows` ⇒ `set VAR=…&& ` chaining, else POSIX inline).
+/// The environment values the managed Pi's extensions need to reach Core.
 ///
 /// **Two consumers now, not one.** `ryu-mcp.ts` calls `/api/mcp/tools/call` with
 /// them, and `ryu-plan.ts` calls `/api/exec/scan` — the gateway command gate for
@@ -4850,35 +5017,111 @@ fn codex_acp_cmd_for_agent(agent_id: Option<&str>) -> String {
 /// `RYU_PROFILE`) and an empty bearer. The agent still started and answered; it just
 /// never had a tool.
 ///
-/// Keeping the rendering here, rather than the values, is deliberate: a caller that
-/// re-derives `core_url` itself is free to derive it differently, which is how the
-/// drift happened. Both callers now emit the same bytes or neither does.
-pub(crate) fn pi_mcp_extension_env(windows: bool, user_jwt: Option<&str>) -> String {
+/// The values are returned as structured name/value pairs. ACP's stdio/process
+/// environment API consumes them directly; they must never be rendered into shell
+/// command text because `host_conversation_id` originates at an HTTP boundary.
+pub(crate) fn pi_mcp_extension_env(
+    user_jwt: Option<&str>,
+    composio_connection_scope: Option<&[crate::sidecar::adapters::ComposioConnectionBinding]>,
+    conversation_scope: Option<&[String]>,
+    host_conversation_id: Option<&str>,
+) -> Vec<(String, String)> {
     let core_url = crate::sidecar::gateway::core_self_url();
     let mcp_agent_id = crate::registry::DEFAULT_AGENT_ID;
     let core_token = crate::node_token::active_token()
         .map(|v| v.trim().to_owned())
         .filter(|s| !s.is_empty());
-    let mut env = if windows {
-        format!("set RYU_MCP_CORE_URL={core_url}&& set RYU_MCP_AGENT_ID={mcp_agent_id}&& ")
-    } else {
-        format!("RYU_MCP_CORE_URL={core_url} RYU_MCP_AGENT_ID={mcp_agent_id} ")
-    };
+    let mut env = vec![
+        ("RYU_MCP_CORE_URL".to_owned(), core_url),
+        ("RYU_MCP_AGENT_ID".to_owned(), mcp_agent_id.to_owned()),
+    ];
     if let Some(t) = &core_token {
-        if windows {
-            env.push_str(&format!("set RYU_MCP_CORE_TOKEN={t}&& "));
-        } else {
-            env.push_str(&format!("RYU_MCP_CORE_TOKEN={t} "));
-        }
+        env.push(("RYU_MCP_CORE_TOKEN".to_owned(), t.clone()));
     }
     if let Some(jwt) = user_jwt.map(str::trim).filter(|value| !value.is_empty()) {
-        if windows {
-            env.push_str(&format!("set RYU_MCP_USER_JWT={jwt}&& "));
-        } else {
-            env.push_str(&format!("RYU_MCP_USER_JWT={jwt} "));
+        env.push(("RYU_MCP_USER_JWT".to_owned(), jwt.to_owned()));
+    }
+    if let Some(conversation_id) =
+        host_conversation_id.filter(|value| is_safe_host_conversation_id(value))
+    {
+        env.push((
+            "RYU_MCP_HOST_CONVERSATION_ID".to_owned(),
+            conversation_id.to_owned(),
+        ));
+    }
+    if composio_connection_scope.is_some() || conversation_scope.is_some() {
+        use base64::Engine as _;
+
+        let payload = serde_json::json!({
+            "profile_composio_connection_scope": composio_connection_scope,
+            "profile_conversation_scope": conversation_scope,
+        });
+        if let Ok(encoded) = serde_json::to_vec(&payload)
+            .map(|bytes| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes))
+        {
+            env.push(("RYU_MCP_PROFILE_SCOPE".to_owned(), encoded));
         }
     }
     env
+}
+
+/// Conversation ids are carried into the Pi extension through a structured
+/// environment value and are also accepted by a few legacy internal call paths.
+/// Keep the portable identifier grammar bounded so an old text-rendering caller
+/// cannot reintroduce shell syntax or oversized log/request values.
+pub(crate) fn is_safe_host_conversation_id(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+}
+
+fn set_stdio_env(env: &mut Vec<EnvVariable>, name: String, value: String) {
+    if let Some(existing) = env.iter_mut().find(|entry| entry.name == name) {
+        existing.value = value;
+    } else {
+        env.push(EnvVariable::new(name, value));
+    }
+}
+
+/// Serialize an ACP stdio configuration as JSON. ACP's structured transport
+/// carries executable, argv, and environment separately, so values containing
+/// shell metacharacters remain data and cannot alter process creation.
+pub(crate) fn acp_stdio_spawn_json(
+    name: &str,
+    command: PathBuf,
+    args: Vec<String>,
+    env: Vec<(String, String)>,
+) -> anyhow::Result<String> {
+    let mut variables = Vec::with_capacity(env.len());
+    for (name, value) in env {
+        set_stdio_env(&mut variables, name, value);
+    }
+    serde_json::to_string(&McpServer::Stdio(
+        McpServerStdio::new(name, command).args(args).env(variables),
+    ))
+    .context("serializing structured ACP stdio configuration")
+}
+
+/// Parse an existing ACP spawn declaration and add environment values through
+/// the ACP stdio structure. Legacy string commands are parsed once, but the
+/// added values are never concatenated into that command string.
+pub(crate) fn acp_spawn_with_env(
+    spawn_cmd: &str,
+    env: Vec<(String, String)>,
+) -> anyhow::Result<String> {
+    let agent = AcpAgent::from_str(spawn_cmd)
+        .map_err(|error| anyhow::anyhow!("ACP spawn parse: {error}"))?;
+    let mut stdio = match agent.into_server() {
+        McpServer::Stdio(stdio) => stdio,
+        _ => anyhow::bail!("ACP spawn declaration is not a stdio process"),
+    };
+    for (name, value) in env {
+        set_stdio_env(&mut stdio.env, name, value);
+    }
+    serde_json::to_string(&McpServer::Stdio(stdio))
+        .context("serializing structured ACP stdio configuration")
 }
 
 /// The gateway URL Claude Code is pointed at via `ANTHROPIC_BASE_URL`. Claude Code
@@ -4937,9 +5180,8 @@ pub fn claude_gateway_cmd(spawn_cmd: &str) -> String {
 /// gateway token) because the target is an API-key OpenAI-compatible client, not a
 /// subscription login.
 ///
-/// Mirrors [`claude_gateway_cmd`]'s shell handling: on Windows it re-emits the
-/// command inside a single `cmd /c set VAR=val&& …` (stripping a leading `cmd /c`
-/// so it isn't doubled); on POSIX it prefixes inline `VAR=val` assignments.
+/// Uses the native structured ACP environment so a pre-existing unscoped key
+/// cannot override the issued identity and credentials never become shell code.
 pub fn openai_gateway_cmd(spawn_cmd: &str) -> anyhow::Result<String> {
     openai_gateway_cmd_for_agent(spawn_cmd, None)
 }
@@ -4950,23 +5192,14 @@ pub fn openai_gateway_cmd_for_agent(
     agent_id: Option<&str>,
 ) -> anyhow::Result<String> {
     let gateway_v1 = openai_gateway_v1(agent_id);
-    // Fail closed on a remote data plane (WS1): refuse to point a BYO/registry ACP
-    // agent at a hosted multi-tenant gateway with the shared "ryu-local" bearer.
-    // On the normal local path this still yields the local gateway's dev bearer.
-    let token = crate::sidecar::gateway::gateway_bearer()?;
-    #[cfg(target_os = "windows")]
-    {
-        Ok(format!(
-            "cmd /c set OPENAI_BASE_URL={gateway_v1}&& set OPENAI_API_KEY={token}&& {}",
-            spawn_cmd.trim_start_matches("cmd /c ")
-        ))
-    }
-    #[cfg(not(target_os = "windows"))]
-    {
-        Ok(format!(
-            "OPENAI_BASE_URL={gateway_v1} OPENAI_API_KEY={token} {spawn_cmd}"
-        ))
-    }
+    let token = crate::sidecar::gateway::gateway_bearer_for_agent(agent_id, None, None)?;
+    acp_spawn_with_env(
+        spawn_cmd,
+        vec![
+            ("OPENAI_BASE_URL".to_owned(), gateway_v1),
+            ("OPENAI_API_KEY".to_owned(), token),
+        ],
+    )
 }
 
 /// Return the OpenAI-compatible Gateway base URL, optionally scoped to an
@@ -5008,22 +5241,23 @@ pub fn openai_gateway_v1(agent_id: Option<&str>) -> String {
 ///
 /// Applied only when [`crate::codex_config::is_gateway_routing`] is on (the default
 /// for new/routable ACP agents; explicit direct-egress opt-out).
-pub fn codex_acp_gateway_cmd() -> String {
+pub fn codex_acp_gateway_cmd() -> anyhow::Result<String> {
     // (Re)write the isolated CODEX_HOME (provider config + refreshed auth) and
-    // resolve its path. On any IO failure fall back to the user's default home so
-    // Codex still starts (ungoverned) rather than failing the turn.
-    let home = crate::codex_config::ensure_gateway_home().unwrap_or_else(|_| {
-        crate::codex_config::codex_home()
-            .to_string_lossy()
-            .into_owned()
-    });
+    // resolve its path. Failure is returned so the route refuses to start Codex
+    // instead of falling back to the user's ungoverned CODEX_HOME.
+    let home = crate::codex_config::ensure_gateway_home()?;
     #[cfg(target_os = "windows")]
     {
-        format!("cmd /c set CODEX_HOME={home}&& npx -y @zed-industries/codex-acp")
+        Ok(format!(
+            "cmd /c set \"CODEX_HOME={home}\"&& npx -y @zed-industries/codex-acp"
+        ))
     }
     #[cfg(not(target_os = "windows"))]
     {
-        format!("CODEX_HOME={home} npx -y @zed-industries/codex-acp")
+        Ok(format!(
+            "CODEX_HOME='{}' npx -y @zed-industries/codex-acp",
+            home.replace('\'', "'\\''")
+        ))
     }
 }
 
@@ -5765,6 +5999,28 @@ impl Default for AcpAgentRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn codex_acp_spawns_through_the_os_runner() {
+        let agent = acp_agent_from_spawn("npx -y @zed-industries/codex-acp@latest")
+            .expect("Codex must have a supported OS runner");
+        match agent.server() {
+            agent_client_protocol::schema::McpServer::Stdio(stdio) => {
+                assert_eq!(
+                    stdio.command,
+                    std::env::current_exe().expect("current executable")
+                );
+                assert_eq!(
+                    stdio.args.first().map(String::as_str),
+                    Some(crate::agent_sandbox::AGENT_SANDBOX_RUNNER_ARG)
+                );
+                assert_eq!(stdio.args.get(1).map(String::as_str), Some("--"));
+                assert_eq!(stdio.args.get(2).map(String::as_str), Some("npx"));
+            }
+            _ => panic!("Codex ACP must use stdio transport"),
+        }
+    }
 
     #[test]
     fn managed_openrouter_credit_failure_has_managed_recovery_copy() {
@@ -6896,6 +7152,46 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn fs_handlers_refuse_symlink_escapes() {
+        let base = std::env::temp_dir().join(format!("ryu-acp-symlink-{}", std::process::id()));
+        let root = base.join("workspace");
+        let outside = base.join("outside");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        let secret = outside.join("secret.txt");
+        std::fs::write(&secret, "not for the agent").unwrap();
+        let link = root.join("linked-secret.txt");
+        std::os::unix::fs::symlink(&secret, &link).unwrap();
+
+        let read_request: ReadTextFileRequest = serde_json::from_value(serde_json::json!({
+            "sessionId": "s",
+            "path": link,
+        }))
+        .expect("valid symlink read request");
+        assert_eq!(
+            read_text_file_scoped_in_roots(&read_request, std::slice::from_ref(&root)),
+            ""
+        );
+
+        let write_request: WriteTextFileRequest = serde_json::from_value(serde_json::json!({
+            "sessionId": "s",
+            "path": root.join("linked-secret.txt"),
+            "content": "must not overwrite the target",
+        }))
+        .expect("valid symlink write request");
+        assert!(
+            write_text_file_scoped_in_roots(&write_request, std::slice::from_ref(&root)).is_err()
+        );
+        assert_eq!(
+            std::fs::read_to_string(secret).unwrap(),
+            "not for the agent"
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
     #[test]
     fn fs_confinement_rejects_escapes_lexically() {
         let root = std::path::Path::new("/ws/project");
@@ -7151,6 +7447,30 @@ mod tests {
         assert!(extract_file_write(&tc).is_none());
     }
 
+    #[tokio::test]
+    async fn acp_patch_deletion_is_denied_before_gateway_scan() {
+        let _lock = crate::sidecar::gateway::lock_gateway_env();
+        let tool_call = serde_json::json!({
+            "kind": "edit",
+            "rawInput": { "command": "*** Delete File: src/old.ts\n" }
+        });
+        let outcome = acp_exec_scan_verdict(&tool_call, "acp:codex").await;
+        assert!(
+            matches!(&outcome, ExecScanOutcome::Deny(reason) if reason.contains("apply_patch")),
+            "ACP file deletion must be denied before any gateway fallback: {outcome:?}"
+        );
+
+        let nested_patch = serde_json::json!({
+            "kind": "edit",
+            "rawInput": { "patch": "*** Delete File: src/nested-old.ts\n" }
+        });
+        let nested_outcome = acp_exec_scan_verdict(&nested_patch, "acp:codex").await;
+        assert!(
+            matches!(&nested_outcome, ExecScanOutcome::Deny(reason) if reason.contains("apply_patch")),
+            "nested apply_patch deletion must be denied before any gateway fallback: {nested_outcome:?}"
+        );
+    }
+
     // ── Pi as default-installed+enabled agent (U041) ──────────────────────────
 
     #[test]
@@ -7282,6 +7602,96 @@ mod tests {
         assert!(
             !cmd.contains("OPENAI_BASE_URL") && !cmd.contains("OPENAI_API_KEY"),
             "bare pi spawn cmd should not inject gateway env, got: {cmd}"
+        );
+    }
+
+    #[test]
+    fn host_conversation_ids_are_bounded_and_shell_safe() {
+        for valid in [
+            "550e8400-e29b-41d4-a716-446655440000",
+            "island-550e8400-e29b-41d4-a716-446655440000",
+            "conv_550e8400e29b41d4a716446655440000",
+            "conversation.v2",
+        ] {
+            assert!(is_safe_host_conversation_id(valid), "{valid}");
+            let env = pi_mcp_extension_env(None, None, None, Some(valid));
+            assert!(env
+                .iter()
+                .any(|(name, value)| { name == "RYU_MCP_HOST_CONVERSATION_ID" && value == valid }));
+        }
+
+        for invalid in [
+            "",
+            "with space",
+            "x&whoami",
+            "x;whoami",
+            "$(whoami)",
+            "x\nwhoami",
+        ] {
+            assert!(
+                !is_safe_host_conversation_id(invalid),
+                "accepted {invalid:?}"
+            );
+            let env = pi_mcp_extension_env(None, None, None, Some(invalid));
+            assert!(!env
+                .iter()
+                .any(|(name, _)| name == "RYU_MCP_HOST_CONVERSATION_ID"));
+        }
+        assert!(!is_safe_host_conversation_id(&"a".repeat(129)));
+    }
+
+    #[test]
+    fn structured_acp_env_keeps_metacharacters_out_of_process_arguments() {
+        let serialized = acp_spawn_with_env(
+            "sh -c true",
+            vec![(
+                "RYU_MCP_HOST_CONVERSATION_ID".to_owned(),
+                "x&whoami>%TEMP%/ryu-pwned&rem".to_owned(),
+            )],
+        )
+        .expect("structured ACP environment serializes");
+        let agent = AcpAgent::from_str(&serialized).expect("structured ACP parses");
+        let McpServer::Stdio(stdio) = agent.into_server() else {
+            panic!("expected stdio ACP process")
+        };
+        assert_eq!(stdio.command, PathBuf::from("sh"));
+        assert_eq!(stdio.args, vec!["-c", "true"]);
+        assert_eq!(
+            stdio
+                .env
+                .iter()
+                .find(|entry| entry.name == "RYU_MCP_HOST_CONVERSATION_ID")
+                .map(|entry| entry.value.as_str()),
+            Some("x&whoami>%TEMP%/ryu-pwned&rem")
+        );
+    }
+
+    #[test]
+    fn scoped_gateway_spawn_replaces_embedded_bearer_without_exporting_signer() {
+        let _env_guard = crate::sidecar::gateway::lock_gateway_env();
+        let original = codex_acp_cmd();
+        let scoped = openai_gateway_cmd_for_agent(&original, Some("agent-a")).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&scoped).unwrap();
+        let token = value["env"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|entry| entry["name"] == "OPENAI_API_KEY")
+            .unwrap()["value"]
+            .as_str()
+            .unwrap();
+        let signer = crate::sidecar::gateway::required_gateway_core_token().unwrap();
+        let scope = ryu_gw_credentials::InferenceScope::verify(token, &signer).unwrap();
+        assert_eq!(scope.agent_id, "agent-a");
+        assert!(!scoped.contains(&signer));
+        assert_eq!(
+            value["env"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|entry| entry["name"] == "OPENAI_API_KEY")
+                .count(),
+            1
         );
     }
 
@@ -7955,13 +8365,24 @@ mod tests {
 
     #[test]
     fn acp_pool_key_separates_security_contexts() {
-        let no_tools = acp_security_key(&None, &None, &[], "agent", &[], &Some("conv".into()));
+        let no_tools = acp_security_key(
+            &None,
+            &None,
+            &[],
+            "agent",
+            &[],
+            &None,
+            &None,
+            &Some("conv".into()),
+        );
         let explicit_no_tools = acp_security_key(
             &None,
             &Some(Vec::new()),
             &[],
             "agent",
             &[],
+            &None,
+            &None,
             &Some("conv".into()),
         );
         let different_action = acp_security_key(
@@ -7970,6 +8391,8 @@ mod tests {
             &["composio:write".into()],
             "agent",
             &["vault-profile".into()],
+            &None,
+            &None,
             &Some("conv".into()),
         );
         assert_ne!(no_tools, explicit_no_tools);

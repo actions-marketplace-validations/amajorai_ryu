@@ -14,7 +14,7 @@
 //! kebab-case strategy table — which both sides depend on and neither owns.
 //!
 //! Security mirrors the ext-proxy hop exactly: loopback target on the sidecar's
-//! declared port ([`crate::profile::port`]-shifted for dev profiles), with the
+//! live manager-owned port, with the
 //! per-plugin minted bearer ([`crate::sidecar::ext_proxy::ext_token`]) the sidecar
 //! was spawned with — nothing hardcoded.
 
@@ -29,35 +29,25 @@ use crate::sidecar::ext_proxy::{ext_token, node_token};
 /// `(plugin id, sidecar name)` key the port resolves through.
 const TEAMS_SIDECAR: &str = "ryu-teams";
 
-/// Resolve the `ryu-teams` sidecar's loopback port from the loaded manifests,
-/// profile-shifted the same way the ext-proxy forwards (`crate::profile::port`), so
-/// dev/custom profiles hit the same shifted port the sidecar was told to bind. The
-/// port comes from the manifest and ONLY the manifest — see
-/// [`crate::sidecar::ext_proxy::sidecar_port`] for why a built-in absence is a
-/// build-time invariant rather than a runtime fallback.
-pub fn sidecar_port(manifests: &[crate::plugin_manifest::PluginManifest]) -> u16 {
-    crate::sidecar::ext_proxy::sidecar_port(manifests, TEAMS_PLUGIN_ID, TEAMS_SIDECAR).expect(
-        "built-in teams.manifest.json must declare the ryu-teams sidecar (see \
-         plugin_manifest::BUILTIN_MANIFESTS)",
-    )
-}
-
 /// Typed loopback client for the `ryu-teams` sidecar. Cheap to clone (holds only the
-/// resolved port); the bearer is minted per call so it always tracks the current
+/// manager); the bearer is minted per call so it always tracks the current
 /// node token.
 #[derive(Clone)]
 pub struct TeamsClient {
-    port: u16,
+    manager: std::sync::Arc<crate::sidecar::SidecarManager>,
 }
 
 impl TeamsClient {
-    /// Build a client bound to the sidecar's resolved loopback port.
-    pub fn new(port: u16) -> Self {
-        Self { port }
+    /// Build a client that resolves the manager's live target before each request.
+    pub fn new(manager: std::sync::Arc<crate::sidecar::SidecarManager>) -> Self {
+        Self { manager }
     }
 
-    fn base_url(&self) -> String {
-        format!("http://127.0.0.1:{}/api/teams", self.port)
+    fn base_url(&self) -> std::result::Result<String, String> {
+        self.manager
+            .sidecar_base_url(TEAMS_PLUGIN_ID, TEAMS_SIDECAR)
+            .map(|url| format!("{url}/api/teams"))
+            .map_err(|denied| denied.reason())
     }
 
     /// The per-plugin minted bearer the sidecar was spawned with — the same value
@@ -71,7 +61,10 @@ impl TeamsClient {
     /// old `TeamStore::get` contract the chat path consumes.
     pub async fn get(&self, id: &str) -> Result<Option<TeamRecord>> {
         let resp = reqwest::Client::new()
-            .get(format!("{}/{id}", self.base_url()))
+            .get(format!(
+                "{}/{id}",
+                self.base_url().map_err(anyhow::Error::msg)?
+            ))
             .bearer_auth(self.bearer())
             .send()
             .await
@@ -95,7 +88,7 @@ impl TeamsClient {
     /// sidecar without anyone remembering to widen a hand-built `json!` here.
     pub async fn create(&self, input: CreateTeam) -> Result<TeamRecord> {
         let resp = reqwest::Client::new()
-            .post(self.base_url())
+            .post(self.base_url().map_err(anyhow::Error::msg)?)
             .bearer_auth(self.bearer())
             .json(&input)
             .send()

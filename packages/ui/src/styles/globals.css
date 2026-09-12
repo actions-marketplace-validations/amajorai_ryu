@@ -1,8 +1,17 @@
+@import "./status-colors.css";
+@import "./overlays.css";
 @import "tailwindcss";
 @import "tw-animate-css";
 @import "shadcn/tailwind.css";
+@plugin "@toolwind/corner-shape";
 @source "../../../apps/**/*.{ts,tsx}";
 @source "../**/*.{ts,tsx}";
+
+/* Keep interface emphasis readable without allowing browser-default bold to
+   reintroduce a heavier weight where a surface omits an explicit utility. */
+:where(h1, h2, h3, h4, h5, h6, strong, b) {
+	font-weight: 500;
+}
 
 /* Sileo's bundled title rule capitalizes every word. Toast titles are sentence
    copy, so the shared toaster opts into this more-specific rule to preserve the
@@ -34,7 +43,7 @@
 .ryu-welcome-wordmark {
 	position: relative;
 	display: inline-block;
-	font-weight: 650;
+	font-weight: 500;
 }
 
 .ryu-welcome-wordmark__sweep {
@@ -367,62 +376,6 @@
 	--sidebar-ring: oklch(0.708 0 0);
 	--background: oklch(1 0 0);
 	--foreground: oklch(0.145 0 0);
-	--ryu-popup-overlay-background: rgb(0 0 0 / 18%);
-	--ryu-popup-overlay-blur: 8px;
-	--ryu-dialog-overlay-background: rgb(0 0 0 / 30%);
-	--ryu-dialog-overlay-blur: 8px;
-}
-
-/* Popup backdrops are opt-in on desktop. The Base UI backdrop parts stay in the
-   DOM while a popup is open so outside-click and keyboard dismissal keep their
-   normal behavior; this class only supplies the visual treatment. */
-.ryu-popup-overlay {
-	position: fixed;
-	inset: 0;
-	z-index: 40;
-	background-color: var(--ryu-popup-overlay-background);
-	border-radius: var(--ryu-window-radius, 0px);
-	-webkit-backdrop-filter: blur(var(--ryu-popup-overlay-blur));
-	backdrop-filter: blur(var(--ryu-popup-overlay-blur));
-}
-
-html:not([data-popup-overlay-blur="on"]) .ryu-popup-overlay {
-	display: none;
-}
-
-.ryu-dialog-overlay {
-	background-color: var(--ryu-dialog-overlay-background);
-	-webkit-backdrop-filter: blur(var(--ryu-dialog-overlay-blur));
-	backdrop-filter: blur(var(--ryu-dialog-overlay-blur));
-}
-
-/* Dialog transparent mode is OPT-OUT — the dimmed, blurred backdrop above is the
-   CSS base state, so it is what a surface paints on the very first frame with no
-   JS involved. `apps/web` has no toggle and never bootstraps the store, so the
-   base state is exactly what it ships.
-
-   The DESKTOP default is the opposite: "Blur dialog backgrounds" is OFF, and the
-   desktop reaches that by stamping data-dialog-overlay-blur="off" on <html> from
-   `apps/desktop/src/main.tsx` module scope, before the first render
-   (hooks/use-dialog-overlay-blur.ts). The off branch drops the backdrop and the
-   panel shadow for a flat transparent look.
-
-   Do NOT invert this to an "on"-gated rule to match the desktop default: that
-   would unblur every apps/web dialog, since nothing there stamps an attribute. */
-html[data-dialog-overlay-blur="off"] .ryu-dialog-overlay {
-	display: none;
-}
-
-html[data-dialog-overlay-blur="off"] [data-slot="dialog-content"],
-html[data-dialog-overlay-blur="off"] [data-slot="alert-dialog-content"],
-html[data-dialog-overlay-blur="off"] [data-slot="sheet-content"],
-html[data-dialog-overlay-blur="off"] [data-slot="drawer-content"] {
-	border: 1px solid color-mix(in oklch, var(--border) 50%, transparent) !important;
-	box-shadow: none !important;
-}
-
-html[data-dialog-overlay-blur="off"] [data-slot="drawer-content"]::before {
-	box-shadow: none !important;
 }
 
 .dark {
@@ -762,11 +715,6 @@ html[data-dialog-overlay-blur="off"] [data-slot="drawer-content"]::before {
 	--badge-slide-ease: cubic-bezier(0.22, 1, 0.36, 1);
 	--badge-pop-ease: cubic-bezier(0.34, 1.36, 0.64, 1);
 	--badge-close-ease: cubic-bezier(0.4, 0, 0.2, 1);
-	/* Text states swap */
-	--text-swap-dur: 150ms;
-	--text-swap-translate-y: 4px;
-	--text-swap-blur: 2px;
-	--text-swap-ease: ease-in-out;
 	/* Staggered text reveal */
 	--stagger-dur: 500ms;
 	--stagger-distance: 12px;
@@ -813,9 +761,6 @@ html[data-dialog-overlay-blur="off"] [data-slot="drawer-content"]::before {
 	--icon-swap-blur: 2px;
 	--icon-swap-start-scale: 0.25;
 	--icon-swap-ease: ease-in-out;
-	/* Tabs sliding */
-	--tabs-dur: 250ms;
-	--tabs-ease: cubic-bezier(0.22, 1, 0.36, 1);
 	/* Shimmer text */
 	--shimmer-dur: 2000ms;
 	--shimmer-band: 400%;
@@ -992,30 +937,6 @@ html[data-dialog-overlay-blur="off"] [data-slot="drawer-content"]::before {
 	animation-delay: calc(var(--digit-stagger) * 2);
 }
 
-/* --- Text states swap (04) --- */
-.t-text-swap {
-	display: inline-block;
-	opacity: 1;
-	filter: blur(0);
-	transform: translateY(0);
-	transition:
-		transform var(--text-swap-dur) var(--text-swap-ease),
-		filter var(--text-swap-dur) var(--text-swap-ease),
-		opacity var(--text-swap-dur) var(--text-swap-ease);
-	will-change: transform, filter, opacity;
-}
-.t-text-swap.is-exit {
-	opacity: 0;
-	filter: blur(var(--text-swap-blur));
-	transform: translateY(calc(var(--text-swap-translate-y) * -1));
-}
-.t-text-swap.is-enter-start {
-	opacity: 0;
-	filter: blur(var(--text-swap-blur));
-	transform: translateY(var(--text-swap-translate-y));
-	transition: none;
-}
-
 /* --- Progress marquee — a low-alpha foreground band that sweeps inside the
    filled portion (onboarding clips it to the primary fill; indeterminate tray
    lines mount it on the full track). Keeps long waits from reading as stuck. --- */
@@ -1092,23 +1013,6 @@ html[data-dialog-overlay-blur="off"] [data-slot="drawer-content"]::before {
 		filter var(--panel-open-dur) var(--panel-ease);
 }
 
-/* --- Tabs sliding (16) — Base UI Tabs.Indicator drives the position via
-   --active-tab-* CSS vars; we own only the tween + resting look. --- */
-.t-tabs-indicator {
-	position: absolute;
-	top: var(--active-tab-top);
-	left: var(--active-tab-left);
-	width: var(--active-tab-width);
-	height: var(--active-tab-height);
-	pointer-events: none;
-	transition:
-		top var(--tabs-dur) var(--tabs-ease),
-		left var(--tabs-dur) var(--tabs-ease),
-		width var(--tabs-dur) var(--tabs-ease),
-		height var(--tabs-dur) var(--tabs-ease);
-	will-change: top, left, width, height;
-}
-
 /* --- Plan badge shimmer — a diagonal highlight sweeping left to right,
    looping, across the tier badge's gradient face and its edge. Both layers
    share one keyframe so the face sheen and the border catch light in sync. */
@@ -1154,6 +1058,25 @@ html[data-dialog-overlay-blur="off"] [data-slot="drawer-content"]::before {
 	mask-composite: exclude;
 	animation: t-plan-badge-shimmer var(--shimmer-dur, 2000ms)
 		var(--shimmer-ease, linear) infinite;
+}
+
+/* Business has fourteen stops, so give the face more runway and drift the
+   enlarged field gently across the plinth instead of flashing every colour at
+   once. Pro keeps its own still gradient and sheen treatment. */
+@keyframes t-plan-badge-business-drift {
+	0%,
+	100% {
+		background-position: 0% 50%;
+	}
+	50% {
+		background-position: 100% 50%;
+	}
+}
+.t-plan-badge-business {
+	background-repeat: no-repeat;
+	background-position: 0% 50%;
+	background-size: 300% 100%;
+	animation: t-plan-badge-business-drift 8s ease-in-out infinite;
 }
 
 /* --- Pro pricing card animated gradient border — the Pro badge's holographic
@@ -1438,10 +1361,10 @@ html[data-dialog-overlay-blur="off"] [data-slot="drawer-content"]::before {
 	.t-digit-group .t-digit,
 	.t-progress-marquee,
 	.t-panel-slide,
-	.t-tabs-indicator,
 	.t-toggle-thumb,
 	.t-plan-badge-sheen,
 	.t-plan-badge-border,
+	.t-plan-badge-business,
 	.t-pro-card-border,
 	.t-card-border-spin,
 	.t-stagger-line,
@@ -1464,12 +1387,6 @@ html[data-dialog-overlay-blur="off"] [data-slot="drawer-content"]::before {
 	}
 	.t-badge[data-open="false"] .t-badge-dot {
 		transform: scale(1) !important;
-	}
-	.t-text-swap {
-		filter: none !important;
-		transform: none !important;
-		transition: opacity var(--text-swap-dur) var(--text-swap-ease) !important;
-		animation: none !important;
 	}
 	.t-icon-swap .t-icon {
 		filter: none !important;
@@ -1840,7 +1757,7 @@ html {
 	display: block;
 	margin-bottom: 0.5rem;
 	font-size: 0.75rem;
-	font-weight: 600;
+	font-weight: 500;
 	line-height: 1rem;
 	color: var(--primary);
 	text-align: center;

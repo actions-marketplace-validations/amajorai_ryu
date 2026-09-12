@@ -160,7 +160,7 @@ const REPLACEABLE_TOOLS: readonly ReplaceableTool[] = [
 		monthlyUsd: 19,
 		perSeat: false,
 		defaultOn: false,
-		replacedBy: "Workflow apps on your Ryu node",
+		replacedBy: "Workflow apps on your Ryu server",
 	},
 	{
 		id: "midjourney",
@@ -337,7 +337,7 @@ const DISPLACED_COSTS: readonly DisplacedCost[] = [
 		defaultMonthlyUsd: 800,
 		defaultOn: false,
 		hint: "Sequencer, dialler and deliverability stack",
-		replacedBy: "Sales workflows on your Ryu node",
+		replacedBy: "Sales workflows on your Ryu server",
 	},
 	{
 		id: "data-enrichment",
@@ -873,7 +873,7 @@ export function PricingSavingsCalculator({
 								<>
 									<div className="mt-6 flex items-baseline">
 										<NumberTicker
-											className="font-heading font-semibold text-4xl tabular-nums"
+											className="font-heading font-medium text-4xl tabular-nums"
 											prefix={savings < 0 ? "-$" : "$"}
 											value={Math.abs(savings)}
 										/>

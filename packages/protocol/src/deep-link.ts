@@ -16,6 +16,7 @@
 //     ryu://models/<source>/<id…>?node=…      install/switch a model
 //     ryu://skills/<source>/<id…>?node=…      install a skill
 //     ryu://apps/<id…>?node=…                 install an app (plugin id)
+//     ryu://bundles/<id…>?node=…              install a Marketplace bundle
 //     ryu://nodes/connect?url=…&token=…&name=…  connect to a Core node
 //
 // The node link is also the CONNECTION STRING: one line carrying everything a
@@ -56,6 +57,7 @@ export type DeepLinkIntent =
 	| { kind: "model"; source: string; id: string; node: string | null }
 	| { kind: "skill"; source: string; id: string; node: string | null }
 	| { kind: "app"; id: string; node: string | null }
+	| { kind: "bundle"; id: string; node: string | null }
 	| { kind: "node"; name: string; url: string; token: string | null }
 	| {
 			kind: "handoff";
@@ -81,6 +83,7 @@ export type DeepLinkBuildInput =
 	| { kind: "model"; source: string; id: string; node?: string | null }
 	| { kind: "skill"; source: string; id: string; node?: string | null }
 	| { kind: "app"; id: string; node?: string | null }
+	| { kind: "bundle"; id: string; node?: string | null }
 	| { kind: "node"; name: string; url: string; token?: string | null }
 	| {
 			kind: "handoff";
@@ -332,12 +335,11 @@ export function parseRyuDeepLink(raw: string): DeepLinkIntent | null {
 		}
 		return { kind: "app", id, node: parseNodeHint(params) };
 	}
+	if (category === "bundles") {
+		const id = pathSegments.join("/");
+		return id ? { kind: "bundle", id, node: parseNodeHint(params) } : null;
+	}
 	return null;
-}
-
-/** Percent-encode the reserved characters of a query value (space → `%20`). */
-function encodeQueryValue(value: string): string {
-	return encodeURIComponent(value);
 }
 
 /** Build a `ryu://` deep link from an intent (used to render "Open in Ryu"). */
@@ -347,7 +349,7 @@ export function buildRyuDeepLink(intent: DeepLinkBuildInput): string {
 		if (!sourceNodeUrl) {
 			throw new Error("A handoff link requires a safe HTTP source node URL.");
 		}
-		return `ryu://handoff/${encodeURIComponent(intent.conversationId)}?source=${encodeQueryValue(sourceNodeUrl)}&v=0`;
+		return `ryu://handoff/${encodeURIComponent(intent.conversationId)}?source=${encodeURIComponent(sourceNodeUrl)}&v=0`;
 	}
 	if (intent.kind === "node") {
 		// The node link doubles as the CONNECTION STRING a user copies, pastes into
@@ -359,10 +361,10 @@ export function buildRyuDeepLink(intent: DeepLinkBuildInput): string {
 		// valid.
 		const params = [
 			`url=${intent.url}`,
-			`name=${encodeQueryValue(intent.name)}`,
+			`name=${encodeURIComponent(intent.name)}`,
 		];
 		if (intent.token) {
-			params.push(`token=${encodeQueryValue(intent.token)}`);
+			params.push(`token=${encodeURIComponent(intent.token)}`);
 		}
 		return `ryu://nodes/connect?${params.join("&")}`;
 	}
@@ -372,13 +374,13 @@ export function buildRyuDeepLink(intent: DeepLinkBuildInput): string {
 	if (intent.kind === "chat") {
 		const params: string[] = [];
 		if (intent.prompt) {
-			params.push(`prompt=${encodeQueryValue(intent.prompt)}`);
+			params.push(`prompt=${encodeURIComponent(intent.prompt)}`);
 		}
 		if (intent.agent) {
-			params.push(`agent=${encodeQueryValue(intent.agent)}`);
+			params.push(`agent=${encodeURIComponent(intent.agent)}`);
 		}
 		if (intent.project) {
-			params.push(`project=${encodeQueryValue(intent.project)}`);
+			params.push(`project=${encodeURIComponent(intent.project)}`);
 		}
 		const path = intent.conversationId
 			? encodeURIComponent(intent.conversationId)
@@ -396,11 +398,68 @@ export function buildRyuDeepLink(intent: DeepLinkBuildInput): string {
 	const base =
 		intent.kind === "app"
 			? `ryu://apps/${idPath}`
-			: `ryu://${intent.kind === "model" ? "models" : "skills"}/${encodeURIComponent(intent.source)}/${idPath}`;
+			: intent.kind === "bundle"
+				? `ryu://bundles/${idPath}`
+				: `ryu://${intent.kind === "model" ? "models" : "skills"}/${encodeURIComponent(intent.source)}/${idPath}`;
 	// Only an http(s) node url is emitted, matching what the parser will accept —
 	// a builder that emitted more than the parser reads would drift immediately.
 	const node = intent.node?.trim();
 	return node && HTTP_PREFIX.test(node)
-		? `${base}?node=${encodeQueryValue(node.replace(TRAILING_SLASHES, ""))}`
+		? `${base}?node=${encodeURIComponent(node.replace(TRAILING_SLASHES, ""))}`
 		: base;
+}
+
+function validConnectSession(sessionUri: string): boolean {
+	if (!sessionUri) {
+		return false;
+	}
+	for (const character of sessionUri) {
+		const code = character.charCodeAt(0);
+		if (code <= 32 || code === 127) {
+			return false;
+		}
+	}
+	try {
+		// Count UTF-8 bytes without relying on TextEncoder in native runtimes.
+		return (
+			encodeURIComponent(sessionUri).replace(/%[\dA-F]{2}/gu, "x").length <=
+			4096
+		);
+	} catch {
+		return false;
+	}
+}
+
+/** Opaque callback handoff only. The receiving surface must confirm a configured
+ * node and use its authenticated user; the link cannot select either identity.
+ * Kept separate from install/navigation intents so unsupported surfaces ignore it.
+ */
+export function parseConnectCallbackDeepLink(
+	raw: string
+): { sessionUri: string } | null {
+	if (raw.length > 16_384 || raw.includes("#")) {
+		return null;
+	}
+	const parts = splitDeepLink(raw);
+	if (
+		parts?.category !== "connect" ||
+		parts.pathStr !== "complete" ||
+		!hasExactQueryKeys(parts.query, ["session_uri"])
+	) {
+		return null;
+	}
+	try {
+		decodeURIComponent(parts.query.replace(PLUS, " "));
+	} catch {
+		return null;
+	}
+	const sessionUri = parseQuery(parts.query).get("session_uri") ?? "";
+	return validConnectSession(sessionUri) ? { sessionUri } : null;
+}
+
+export function buildConnectCallbackDeepLink(sessionUri: string): string {
+	if (!validConnectSession(sessionUri)) {
+		throw new Error("Invalid Connect callback session");
+	}
+	return `ryu://connect/complete?session_uri=${encodeURIComponent(sessionUri)}`;
 }

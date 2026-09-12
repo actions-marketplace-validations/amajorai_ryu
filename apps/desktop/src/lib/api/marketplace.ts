@@ -24,6 +24,11 @@
 // granted asynchronously by the server webhook, so the UI re-fetches licenses on
 // window focus (mirrors useCreditsWallet).
 
+import type { LanguagePackSummary } from "@ryu/i18n/core";
+import type {
+	MarketplaceBundleMember,
+	MarketplaceCommunityStats,
+} from "@ryu/marketplace/catalog/bundle-types";
 import { MARKETPLACE_BROWSE_KINDS } from "@ryu/marketplace/catalog/chrome/marketplace-sections";
 import type { CatalogBanner } from "@ryu/marketplace/catalog/types";
 import type { VerificationDetails } from "@ryu/ui/components/verification-popover.tsx";
@@ -42,9 +47,9 @@ import {
 
 /** The catalog kinds, matching the server's `MarketplaceKind`.
  *
- * `agent` is a user-PUBLISHED agent definition (instructions + model preference
+ * `agent` is a user-PUBLISHED Agent Template (instructions + model preference
  * + declared dependencies), not an ACP runtime like Claude Code — those live in
- * Core's own agent catalog and never reach this client. */
+ * Core's own Agents catalog and never reach this client. */
 export type MarketplaceKind =
 	| "app"
 	| "plugin"
@@ -55,6 +60,7 @@ export type MarketplaceKind =
 	| "stack_template"
 	| "workflow"
 	| "theme"
+	| "language_pack"
 	| "space"
 	| "profile"
 	| "output_style"
@@ -107,8 +113,10 @@ export type VerificationStatus =
 export interface MarketplaceCard {
 	artifactKinds: string[];
 	author: string | null;
+	bundleMemberCount: number;
 	/** Store-taxonomy category label (e.g. "Productivity"), or null. */
 	category: string | null;
+	communityStats: MarketplaceCommunityStats;
 	description: string | null;
 	downloadUrl: string | null;
 	firstParty: boolean;
@@ -119,7 +127,11 @@ export interface MarketplaceCard {
 	installedVersion: string | null;
 	installSource: string | null;
 	kind: MarketplaceKind;
+	languagePack: LanguagePackSummary | null;
 	latestVersion: string | null;
+	/** Public like total and current viewer state from the catalog read. */
+	likeCount: number;
+	likedByMe: boolean;
 	/** True when the publisher's supported paid offer is covered by A Major Pass. */
 	membershipIncluded: boolean;
 	name: string;
@@ -153,6 +165,10 @@ interface MarketplaceCardWire
 	extends Omit<
 		MarketplaceCard,
 		| "verification"
+		| "bundleMemberCount"
+		| "communityStats"
+		| "likeCount"
+		| "likedByMe"
 		| "orgVerified"
 		| "orgVerifiedTier"
 		| "membershipIncluded"
@@ -165,6 +181,7 @@ interface MarketplaceCardWire
 		| "packageChecksum"
 		| "packageSecurity"
 		| "githubSource"
+		| "languagePack"
 		| "downloadUrl"
 		| "targets"
 		| "scopes"
@@ -175,10 +192,15 @@ interface MarketplaceCardWire
 		| "updatePreview"
 	> {
 	artifactKinds?: string[] | null;
+	bundleMemberCount?: number | null;
+	communityStats?: Partial<MarketplaceCommunityStats> | null;
 	downloadUrl?: string | null;
 	githubSource?: Record<string, unknown> | null;
 	installedVersion?: string | null;
+	languagePack?: LanguagePackSummary | null;
 	latestVersion?: string | null;
+	likeCount?: number | null;
+	likedByMe?: boolean | null;
 	membershipIncluded?: boolean | null;
 	orgVerified?: boolean | null;
 	orgVerifiedTier?: string | null;
@@ -231,8 +253,26 @@ function toMarketplaceCard(card: MarketplaceCardWire): MarketplaceCard {
 	return {
 		...rest,
 		artifactKinds: rest.artifactKinds ?? [],
+		bundleMemberCount:
+			typeof card.bundleMemberCount === "number" ? card.bundleMemberCount : 0,
 		iconUrl: rest.iconUrl ?? null,
 		category: rest.category ?? null,
+		communityStats: {
+			downloads:
+				typeof card.communityStats?.downloads === "number"
+					? card.communityStats.downloads
+					: 0,
+			instances:
+				typeof card.communityStats?.instances === "number"
+					? card.communityStats.instances
+					: 0,
+			runs:
+				typeof card.communityStats?.runs === "number"
+					? card.communityStats.runs
+					: 0,
+		},
+		likeCount: typeof card.likeCount === "number" ? card.likeCount : 0,
+		likedByMe: card.likedByMe === true,
 		orgVerified: Boolean(card.orgVerified),
 		orgVerifiedTier: card.orgVerifiedTier ?? null,
 		publisherTrust:
@@ -253,6 +293,7 @@ function toMarketplaceCard(card: MarketplaceCardWire): MarketplaceCard {
 		packageChecksum: rest.packageChecksum ?? null,
 		packageSecurity: rest.packageSecurity ?? null,
 		githubSource: rest.githubSource ?? null,
+		languagePack: rest.languagePack ?? null,
 		downloadUrl: rest.downloadUrl ?? null,
 		pricing: rest.pricing
 			? {
@@ -758,6 +799,19 @@ export async function fetchInstalledPortablePackages(
 	return result.packages ?? [];
 }
 
+/** Record one Core-verified Marketplace install action for anonymous community
+ * usage. Core owns the increment; this client never sends a caller-supplied
+ * counter and failures are intentionally ignored by bundle orchestration. */
+export async function recordMarketplaceUsage(
+	target: ApiTarget,
+	input: { event: "download"; id: string; kind: MarketplaceKind }
+): Promise<void> {
+	await request(target, "/api/marketplace/usage", {
+		method: "POST",
+		body: input,
+	});
+}
+
 /**
  * Install or update a GitHub-backed `.ryupack` through the selected node.
  *
@@ -1060,7 +1114,10 @@ export async function startPurchase(input: {
 }): Promise<PurchaseResult> {
 	const resp = await fetch(`${BASE}/purchase`, {
 		method: "POST",
-		headers: authHeaders(),
+		headers: {
+			...authHeaders(),
+			"Idempotency-Key": crypto.randomUUID(),
+		},
 		body: JSON.stringify(input),
 	});
 	if (!resp.ok) {
@@ -1135,10 +1192,13 @@ export interface MarketplaceDetail {
 	/** Optional manifest banner used by the compact prompt preview. */
 	banner: CatalogBanner | null;
 	bannerUrl: string | null;
+	bundleMembers: MarketplaceBundleMember[];
+	bundleSourceUrl: string | null;
 	/** Human-readable capability labels; derived from permission grants when the
 	 *  source omits an explicit list. Empty when neither is present. */
 	capabilities: string[];
 	category: string | null;
+	communityStats: MarketplaceCommunityStats;
 	/** Long plain/markdown description (Ryu ext / Claude `description`). */
 	description: string | null;
 	/** Publisher name (from Claude `author`; `author.name` when an object). */
@@ -1149,6 +1209,7 @@ export interface MarketplaceDetail {
 	iconUrl: string | null;
 	id: string;
 	kind: MarketplaceKind;
+	languagePack: LanguagePackSummary | null;
 	name: string;
 	orgVerified: boolean;
 	orgVerifiedTier: string | null;
@@ -1214,6 +1275,52 @@ function toStringArray(value: unknown): string[] {
 	return value.filter(
 		(v): v is string => typeof v === "string" && v.length > 0
 	);
+}
+
+function resolveBundleMembers(value: unknown): MarketplaceBundleMember[] {
+	if (!Array.isArray(value)) {
+		return [];
+	}
+	const kinds = new Set<MarketplaceBundleMember["kind"]>([
+		"app",
+		"plugin",
+		"skill",
+		"model",
+		"mcp",
+		"agent",
+		"stack_template",
+		"workflow",
+		"theme",
+		"language_pack",
+		"space",
+		"profile",
+		"output_style",
+	]);
+	const members: MarketplaceBundleMember[] = [];
+	const seen = new Set<string>();
+	for (const entry of value.slice(0, 64)) {
+		if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+			continue;
+		}
+		const raw = entry as Record<string, unknown>;
+		const id = typeof raw.id === "string" ? raw.id.trim() : "";
+		const kind = typeof raw.kind === "string" ? raw.kind.trim() : "";
+		if (
+			!(id && kinds.has(kind as MarketplaceBundleMember["kind"])) ||
+			seen.has(`${kind}:${id}`)
+		) {
+			continue;
+		}
+		seen.add(`${kind}:${id}`);
+		members.push({
+			id,
+			kind: kind as MarketplaceBundleMember["kind"],
+			name: typeof raw.name === "string" ? raw.name : null,
+			required: raw.required !== false,
+			source: typeof raw.source === "string" ? raw.source : null,
+		});
+	}
+	return members;
 }
 
 /** Defense-in-depth href allowlist: return the value only if it is a string with
@@ -1392,8 +1499,25 @@ export async function fetchDetail(
 	};
 	return {
 		banner: resolveCatalogBanner(json.banner),
+		bundleMembers: resolveBundleMembers(json.bundleMembers),
+		bundleSourceUrl: safeHttpUrl(json.bundleSourceUrl),
+		communityStats: {
+			downloads:
+				typeof json.communityStats?.downloads === "number"
+					? json.communityStats.downloads
+					: 0,
+			instances:
+				typeof json.communityStats?.instances === "number"
+					? json.communityStats.instances
+					: 0,
+			runs:
+				typeof json.communityStats?.runs === "number"
+					? json.communityStats.runs
+					: 0,
+		},
 		id: json.id ?? id,
 		kind: (json.kind as MarketplaceKind) ?? kind,
+		languagePack: json.languagePack ?? null,
 		name: json.name ?? "",
 		firstParty: Boolean(json.firstParty),
 		version: json.version ?? "",

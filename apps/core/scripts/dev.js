@@ -54,7 +54,7 @@ if (process.platform === "win32") {
 
 // Dev-mode sidecar-app ergonomics: the out-of-process sidecar-app bins (ryu-mail
 // + the wave 2-4 conversions: teams/research/clips/finetune/quests/healing/
-// meetings/recipes/dashboards/monitors) and the browser (electron) app aren't
+// meetings/recipes/dashboards/monitors/anydoc) and the browser (electron) app aren't
 // auto-built/downloaded in dev the way ryu-core is, so enabling any of them would
 // fail to spawn. Wire them all up here, best-effort — a failure warns but never
 // blocks Core. Core inherits the RYU_*_BIN overrides via env, which the kind:local
@@ -83,12 +83,14 @@ const sidecarBins = [
 	"tuition",
 	"news",
 	"blueprint",
+	"rooms",
 	"mission-control",
 	"crm",
 	"drafts",
 	"feedback-board",
 	"expenses",
 	"subtitles",
+	"anydoc",
 ];
 
 // Build ALL sidecar bins in a SINGLE cargo invocation so the shared dependency
@@ -119,6 +121,18 @@ for (const name of sidecarBins) {
 	} else {
 		console.warn(`[dev] ryu-${name} build produced no binary at ${bin}`);
 	}
+}
+
+// Core starts its local Gateway as a managed child. Prefer the Gateway built in
+// the same shared target directory so `bun dev` cannot silently launch an older
+// release binary from `~/.ryu/bin` with a stale grant policy or route contract.
+const gatewayBin = path.join(sharedTarget, "debug", `ryu-gateway${binExt}`);
+if (existsSync(gatewayBin)) {
+	process.env.RYU_GATEWAY_BIN = gatewayBin;
+} else {
+	console.warn(
+		`[dev] shared ryu-gateway binary not found at ${gatewayBin}; Core will resolve it from PATH`
+	);
 }
 
 // Browser: point RYU_BROWSER_BIN at the dev launcher that runs the electron-vite

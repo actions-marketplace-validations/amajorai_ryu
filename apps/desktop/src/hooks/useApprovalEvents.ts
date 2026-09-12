@@ -1,12 +1,13 @@
 import { toast } from "@ryu/ui/components/sileo";
 import { useQueryClient } from "@tanstack/react-query";
-import { useEffect } from "react";
+import { useEffect, useRef } from "react";
 import {
 	type ApprovalEvent,
 	streamApprovalEvents,
 } from "@/src/lib/api/approvals.ts";
 import type { ApiTarget } from "@/src/lib/api/client.ts";
 import { useActiveNode } from "./useActiveNode.ts";
+import { useUserAvailability } from "./useUserAvailability.ts";
 
 /** Raise a native OS notification (best-effort; requests permission once). */
 function osNotify(title: string, body: string, tag: string): void {
@@ -36,8 +37,8 @@ function osNotify(title: string, body: string, tag: string): void {
 
 /**
  * Subscribe to the Core approval-event SSE stream for the active node. A newly
- * created request raises an in-app toast + a native OS notification so the user
- * can act on a pending decision without hunting for the inbox. Every event
+ * created request raises an in-app toast + a native OS notification while the
+ * user is Online, so Away and Do not disturb do not interrupt them. Every event
  * refreshes the approval queries. Auto-reconnects on drop and re-subscribes when
  * the active node changes. Mount once high in the tree (the app shell).
  */
@@ -47,13 +48,16 @@ export function useApprovalEvents(): void {
 	const token = node.token ?? null;
 	const userJwt = node.userJwt ?? null;
 	const qc = useQueryClient();
+	const { status } = useUserAvailability();
+	const statusRef = useRef(status);
+	statusRef.current = status;
 
 	useEffect(() => {
 		const controller = new AbortController();
 		const target: ApiTarget = { url, token, userJwt };
 
 		const onEvent = (event: ApprovalEvent) => {
-			if (event.type === "created") {
+			if (event.type === "created" && statusRef.current === "online") {
 				toast.info({
 					title: "Approval needed",
 					description: event.request.title,

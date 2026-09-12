@@ -163,6 +163,7 @@ function toSnapshot(wire: WireSnapshot): UsageSnapshot {
 const USAGE_ENGINE_HINTS = [
 	"claude",
 	"codex",
+	"chatgpt",
 	"copilot",
 	"grok",
 	"glm",

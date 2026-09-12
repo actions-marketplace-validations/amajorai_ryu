@@ -33,7 +33,7 @@ const suggestionPlugin = SuggestionPlugin as WithRequiredKey<SuggestionConfig>;
 
 export const suggestionVariants = cva(
 	cn(
-		"bg-emerald-100 text-emerald-700 no-underline transition-colors duration-200"
+		"bg-success/10 text-status-success no-underline transition-colors duration-200"
 	),
 	{
 		defaultVariants: {
@@ -44,15 +44,15 @@ export const suggestionVariants = cva(
 		variants: {
 			insertActive: {
 				false: "",
-				true: "bg-emerald-200/80",
+				true: "bg-success/20",
 			},
 			remove: {
 				false: "",
-				true: "bg-red-100 text-red-700",
+				true: "bg-destructive/10 text-status-destructive",
 			},
 			removeActive: {
 				false: "",
-				true: "bg-red-200/80 no-underline",
+				true: "bg-destructive/20 no-underline",
 			},
 		},
 	}
@@ -293,10 +293,13 @@ export function SuggestionLineBreakContent({
 	const { setOption } = useEditorPlugin(suggestionPlugin);
 	const lineBreakBadgeClassName = cn(
 		isInsert &&
-			"bg-transparent! text-emerald-700! transition-colors duration-200",
-		isInsert && (isActive || isHover) && "bg-transparent! text-emerald-700!",
-		isRemove && "bg-transparent! text-red-700! transition-colors duration-200",
-		isRemove && (isActive || isHover) && "bg-transparent! text-red-700!"
+			"bg-transparent! text-status-success! transition-colors duration-200",
+		isInsert && (isActive || isHover) && "bg-transparent! text-status-success!",
+		isRemove &&
+			"bg-transparent! text-status-destructive! transition-colors duration-200",
+		isRemove &&
+			(isActive || isHover) &&
+			"bg-transparent! text-status-destructive!"
 	);
 
 	return (

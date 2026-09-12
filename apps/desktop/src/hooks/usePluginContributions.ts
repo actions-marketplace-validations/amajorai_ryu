@@ -96,13 +96,16 @@ export const DECLARATIVE_VIEW_HARNESS_PATH = "/dev/declarative-view";
 export function usePluginContributionsQuery() {
 	const node = useActiveNode();
 	return useQuery({
-		queryKey: ["plugin-contributions", node.url, node.token],
-		queryFn: () =>
-			getPluginContributions({
-				url: node.url,
-				token: node.token,
-				userJwt: node.userJwt ?? null,
-			}),
+		queryKey: ["plugin-contributions", node.url, node.token, node.userJwt],
+		queryFn: ({ signal }) =>
+			getPluginContributions(
+				{
+					url: node.url,
+					token: node.token,
+					userJwt: node.userJwt ?? null,
+				},
+				signal
+			),
 		// Best-effort surface: a stale window avoids hammering Core, and any error
 		// simply leaves `data` undefined → the stable EMPTY payload below. `retry`
 		// is off so an older Core lacking this endpoint fails once, quietly, rather
@@ -134,7 +137,7 @@ const PLUGINS_ROOM = "system:plugins";
  */
 export function usePluginContributionsLiveRefresh(): void {
 	const queryClient = useQueryClient();
-	// Prefix invalidation (the full key is ["plugin-contributions", url, token])
+	// Prefix invalidation (the full key is ["plugin-contributions", url, token, userJwt])
 	// so a node switch mid-flight can't strand a stale cache entry.
 	useRealtimeRoom(PLUGINS_ROOM, "conversation", {
 		onEvent: (data: unknown) => {

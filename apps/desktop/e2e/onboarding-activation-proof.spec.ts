@@ -6,16 +6,20 @@ test.describe("onboarding activation proof", () => {
 	test("keeps the first task behind checkout and rewards new connections", async ({
 		page,
 	}) => {
-		await page.goto(STORY_URL);
+		await page.goto(`${STORY_URL}?organization=true`);
 		await page.getByRole("radio", { name: "Search" }).click();
-		await page.getByRole("button", { name: "Continue" }).click();
+		await page.getByRole("button", { exact: true, name: "Continue" }).click();
 		await expect(page.getByText("Recommended for you")).toBeVisible();
 		await page
 			.getByRole("button", { name: /Connect · \+\$0\.50/ })
 			.first()
 			.click();
+		await page
+			.getByTestId("connection-permission-dialog")
+			.getByRole("button", { name: "Continue to connect" })
+			.click();
 		await expect(page.getByText("2/20 · $1.00")).toBeVisible();
-		await page.getByRole("button", { name: "Continue" }).click();
+		await page.getByRole("button", { exact: true, name: "Continue" }).click();
 		await page.getByRole("button", { name: "See your first task" }).click();
 		await page
 			.getByRole("button", { name: /Start first month for \$50/ })
@@ -28,6 +32,19 @@ test.describe("onboarding activation proof", () => {
 		).toBeVisible();
 		await page.getByRole("button", { name: "Start task" }).click();
 		await expect(page.getByTestId("task-started")).toBeVisible();
+	});
+
+	test("shows the individual plan in a personal workspace", async ({
+		page,
+	}) => {
+		await page.goto(STORY_URL);
+		await page.getByRole("radio", { name: "Search" }).click();
+		await page.getByRole("button", { exact: true, name: "Continue" }).click();
+		await page.getByRole("button", { exact: true, name: "Continue" }).click();
+		await page.getByRole("button", { name: "See your first task" }).click();
+		await expect(
+			page.getByRole("button", { name: "Start Pro for $49/month" })
+		).toBeVisible();
 	});
 
 	test("skips checkout for an existing subscriber", async ({ page }) => {

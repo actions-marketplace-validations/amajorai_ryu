@@ -10,6 +10,8 @@
 //     OUTPUT, not the input, so a query-only implementation fails here);
 //   • a `dynamic-tool` MCP call is attributed to its server rather than dropped,
 //     which is how MCP tools arrive over the ACP bridge;
+//   • app-qualified and Composio-qualified tool calls are visible in both the
+//     pinned summary and the complete workspace inventory;
 //   • expanding a group grows the enclosing accordion section instead of
 //     clipping — the reason this is a browser spec at all.
 
@@ -35,22 +37,95 @@ test("connector rows carry a count and expand to what was touched", async ({
 	await expect(group).toHaveAttribute("aria-expanded", "false");
 	await group.click();
 	await expect(group).toHaveAttribute("aria-expanded", "true");
+	const pinned = page.getByTestId("pinned-summary");
 
 	await expect(
-		page.getByText("effort-slider-row.tsx", { exact: true })
+		pinned.getByText("effort-slider-row.tsx", { exact: true })
 	).toBeVisible();
 	await expect(
-		page.getByText("effort-colors.ts", { exact: true })
+		pinned.getByText("effort-colors.ts", { exact: true })
 	).toBeVisible();
 	await expect(
-		page.getByText("bun test src/lib/effort-colors.test.ts")
+		pinned.getByText("bun test src/lib/effort-colors.test.ts")
 	).toBeVisible();
-	await expect(page.getByText("effortFillColor")).toBeVisible();
+	await expect(pinned.getByText("effortFillColor")).toBeVisible();
 	// The full path is the secondary line, so the row is unambiguous when two
 	// files share a basename.
 	await expect(
-		page.getByText("/repo/apps/desktop/src/lib/effort-colors.ts")
+		pinned.getByText("/repo/apps/desktop/src/lib/effort-colors.ts")
 	).toBeVisible();
+});
+
+test("summary headers keep counts beside the title and actions on the right", async ({
+	page,
+}) => {
+	const sources = await openSources(page);
+	const action = page.getByRole("button", { name: "Open all sources" });
+	await expect(action).toBeVisible();
+	await expect(
+		page.locator(
+			'[data-testid="pinned-summary"] [data-slot="bouncy-accordion-item-icon"]'
+		)
+	).toHaveCount(0);
+	await expect(
+		page.locator(
+			'[data-testid="pinned-summary"] [data-slot="cowork-section-count"]'
+		)
+	).toHaveCount(1);
+	await expect(page.getByRole("button", { name: /^Sources 8/ })).toBeVisible();
+
+	const header = await sources.boundingBox();
+	const actionBox = await action.boundingBox();
+	expect(header).not.toBeNull();
+	expect(actionBox).not.toBeNull();
+	if (!(header && actionBox)) {
+		return;
+	}
+	expect(actionBox.x).toBeGreaterThan(header.x + header.width - 80);
+	await action.click();
+	await expect(page.locator("body")).toHaveAttribute(
+		"data-sources-opened",
+		"true"
+	);
+	await expect(sources).toHaveAttribute("aria-expanded", "false");
+});
+
+test("pinned and workspace source lists use colored file-format icons", async ({
+	page,
+}) => {
+	await openSources(page);
+	const attachmentGroup = page.getByRole("button", {
+		name: /^Chat attachments/,
+	});
+	await attachmentGroup.click();
+
+	const pinned = page.getByTestId("pinned-summary");
+	await expect(
+		pinned.locator(
+			'[data-file-path="Startup Runway v2.0.pdf"] svg.text-red-500'
+		)
+	).toHaveCount(1);
+	await expect(
+		pinned.locator(
+			'[data-file-path="Startup_Runway_Weekly_Template_v2_Original.pptx"] svg.text-orange-600'
+		)
+	).toHaveCount(1);
+
+	const workspace = page.getByTestId("workspace-sources-proof");
+	await expect(
+		workspace.locator(
+			'[data-file-path="Startup Runway v2.0.pdf"] svg.text-red-500'
+		)
+	).toHaveCount(1);
+	await expect(
+		workspace.locator(
+			'[data-file-path="Startup_Runway_Weekly_Template_v2_Original.pptx"] svg.text-orange-600'
+		)
+	).toHaveCount(1);
+	await page.screenshot({
+		fullPage: true,
+		path: "test-results/cowork-sources-file-icons-proof.png",
+	});
 });
 
 test("web sources list the links a search returned, not just the query", async ({
@@ -59,21 +134,22 @@ test("web sources list the links a search returned, not just the query", async (
 	await openSources(page);
 	const web = page.getByRole("button", { name: /^Web search/ });
 	await web.click();
+	const pinned = page.getByTestId("pinned-summary");
 
-	await expect(page.getByText("Colour interpolation in CSS")).toBeVisible();
-	await expect(page.getByText("Gamut mapping explained")).toBeVisible();
+	await expect(pinned.getByText("Colour interpolation in CSS")).toBeVisible();
+	await expect(pinned.getByText("Gamut mapping explained")).toBeVisible();
 	await expect(
-		page.getByText("https://evilmartians.com/gamut-mapping")
+		pinned.getByText("https://evilmartians.com/gamut-mapping")
 	).toBeVisible();
 	// The fetched page and the query itself are both still accounted for.
-	await expect(page.getByText("https://oklch.com/")).toBeVisible();
+	await expect(pinned.getByText("https://oklch.com/")).toBeVisible();
 	await expect(
-		page.getByText("oklch interpolation gamut clipping")
+		pinned.getByText("oklch interpolation gamut clipping")
 	).toBeVisible();
 	// The pinned summary stops at five rows and provides the route to the complete
 	// workspace-tab inventory rather than becoming an unbounded sidebar.
-	await expect(page.getByText("+1 more items")).toBeVisible();
-	await expect(page.getByText("OKLCH browser support")).not.toBeVisible();
+	await expect(pinned.getByText("+1 more items")).toBeVisible();
+	await expect(pinned.getByText("OKLCH browser support")).not.toBeVisible();
 });
 
 test("an MCP call arriving as a dynamic tool is attributed to its server", async ({
@@ -83,8 +159,52 @@ test("an MCP call arriving as a dynamic tool is attributed to its server", async
 	const linear = page.getByRole("button", { name: /^Linear/ });
 	await expect(linear).toBeVisible();
 	await linear.click();
-	await expect(page.getByText("create issue")).toBeVisible();
-	await expect(page.getByText("Brighten the dark-mode ramp")).toBeVisible();
+	const pinned = page.getByTestId("pinned-summary");
+	await expect(pinned.getByText("create issue")).toBeVisible();
+	await expect(pinned.getByText("Brighten the dark-mode ramp")).toBeVisible();
+});
+
+test("MCP, app, and Composio calls appear in both source surfaces", async ({
+	page,
+}) => {
+	await page.setViewportSize({ height: 1200, width: 1280 });
+	await openSources(page);
+	const pinned = page.getByTestId("pinned-summary");
+	const workspace = page.getByTestId("workspace-sources-proof");
+
+	await expect(page.getByRole("button", { name: /^Composio 1/ })).toBeVisible();
+	await expect(page.getByRole("button", { name: /^Tauri 1/ })).toBeVisible();
+	await expect(page.getByRole("button", { name: /^Sentry 1/ })).toBeVisible();
+	await expect(page.getByRole("button", { name: /^Expect 1/ })).toBeVisible();
+
+	await page.getByRole("button", { name: /^Composio 1/ }).click();
+	await expect(
+		pinned.getByText("Slack send message", { exact: true })
+	).toBeVisible();
+	await page.getByRole("button", { name: /^Tauri 1/ }).click();
+	await expect(
+		pinned.getByText("Driver session", { exact: true })
+	).toBeVisible();
+	await page.getByRole("button", { name: /^Sentry 1/ }).click();
+	await expect(
+		pinned.getByText("search issues", { exact: true })
+	).toBeVisible();
+
+	await expect(workspace.getByText("Composio", { exact: true })).toBeVisible();
+	await expect(
+		workspace.getByText("Slack send message", { exact: true })
+	).toBeVisible();
+	await expect(workspace.getByText("Tauri", { exact: true })).toBeVisible();
+	await expect(
+		workspace.getByText("Driver session", { exact: true })
+	).toBeVisible();
+	await expect(workspace.getByText("Sentry", { exact: true })).toBeVisible();
+	await expect(workspace.getByText("Expect", { exact: true })).toBeVisible();
+
+	await page.screenshot({
+		fullPage: true,
+		path: "/Users/jiawei/.codex/visualizations/2026/08/31/01a05665-d52a-72a0-8ad4-c4e4d69d2277/cowork-sources-mcp-app-integrations-proof.png",
+	});
 });
 
 test("expanding a group grows the section instead of clipping the list", async ({
@@ -95,7 +215,9 @@ test("expanding a group grows the section instead of clipping the list", async (
 	const before = await section.boundingBox();
 	await group.click();
 	await expect(
-		page.getByText("effort-colors.ts", { exact: true })
+		page
+			.getByTestId("pinned-summary")
+			.getByText("effort-colors.ts", { exact: true })
 	).toBeVisible();
 	// The accordion measures its open height with a ResizeObserver; a nested
 	// scroller would pin it and the new rows would be invisible below the fold.

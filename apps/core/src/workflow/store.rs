@@ -35,11 +35,7 @@ fn source_history_path(workflow_id: &str) -> String {
 /// Record the Git audit projection without turning a successful live workflow
 /// write into a reported failure. The JSON definition is authoritative and Git
 /// history can be repaired after a transient disk or repository failure.
-fn checkpoint_source_history_best_effort(
-    relative_path: &str,
-    content: &str,
-    label: Option<&str>,
-) {
+fn checkpoint_source_history_best_effort(relative_path: &str, content: &str, label: Option<&str>) {
     if let Err(error) = source_history().checkpoint(relative_path, content, label) {
         tracing::warn!(
             path = relative_path,
@@ -108,6 +104,10 @@ pub struct NodeRunState {
 pub struct WorkflowRun {
     pub run_id: String,
     pub workflow_id: String,
+    /// True when this is an in-memory read-only dry-run projection. Dry runs
+    /// are never checkpointed and are not resumable run history.
+    #[serde(default, rename = "dryRun", alias = "dry_run")]
+    pub dry_run: bool,
     pub status: RunStatus,
     /// Initial run input map (key → value).
     #[serde(default)]
@@ -143,6 +143,7 @@ impl WorkflowRun {
         Self {
             run_id,
             workflow_id,
+            dry_run: false,
             status: RunStatus::Running,
             input,
             output: HashMap::new(),
@@ -444,9 +445,15 @@ fn is_git_version_id(version_id: &str) -> bool {
 /// the `ryu-durable` [`FileCheckpointStore`](ryu_durable::FileCheckpointStore) —
 /// the extracted durable-execution primitive — so a crash mid-write can never
 /// leave a torn/half-written run file. This thin wrapper only supplies the run
-/// directory and run-id key; the executor consumes the durable primitive through
-/// it after every node.
+/// directory and run-id key; dry-run projections are rejected before reaching
+/// the durable primitive.
 pub fn save_run(run: &WorkflowRun) -> std::io::Result<()> {
+    if run.dry_run {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "dry-run projections cannot be persisted",
+        ));
+    }
     ryu_durable::FileCheckpointStore::new(runs_dir()).save(&run.run_id, run)
 }
 

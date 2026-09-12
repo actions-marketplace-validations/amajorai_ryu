@@ -33,6 +33,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Badge } from "@/components/ui/badge.tsx";
 import { Card } from "@/components/ui/card.tsx";
 import { useTheme } from "@/components/ui/theme-provider.tsx";
+import { startAccountPolling } from "../core/account-polling.ts";
 import { useCore } from "../core/CoreContext.tsx";
 import { ErrorView } from "../ui/ErrorView.tsx";
 import { Loading } from "../ui/Loading.tsx";
@@ -179,18 +180,28 @@ type LoadResult =
 	| { kind: "loggedOut" };
 
 // One device-status probe: true once Core reports authenticated with a token.
-async function pollOnce(target: ApiTarget): Promise<boolean> {
-	const status = await request<CoreAuthStatus>(target, "/api/auth/status");
+async function pollOnce(
+	target: ApiTarget,
+	signal?: AbortSignal
+): Promise<boolean> {
+	const status = await request<CoreAuthStatus>(target, "/api/auth/status", {
+		signal,
+	});
 	return Boolean(status.authenticated && status.token);
 }
 
 // Resolve the full account state in one pass (no setState - the caller applies it
 // once, guarded by mountedRef). get-session gates logged-in (parity with
 // auth.rs::fetch_auth_info); password/billing/sessions degrade independently.
-async function fetchAuth(target: ApiTarget): Promise<LoadResult> {
+async function fetchAuth(
+	target: ApiTarget,
+	signal?: AbortSignal
+): Promise<LoadResult> {
 	let status: CoreAuthStatus;
 	try {
-		status = await request<CoreAuthStatus>(target, "/api/auth/status");
+		status = await request<CoreAuthStatus>(target, "/api/auth/status", {
+			signal,
+		});
 	} catch (err) {
 		return { kind: "coreDown", message: errText(err) };
 	}
@@ -202,7 +213,9 @@ async function fetchAuth(target: ApiTarget): Promise<LoadResult> {
 	const authTarget: ApiTarget = { url: AUTH_BACKEND_URL, token };
 	let session: SessionWire;
 	try {
-		session = await request<SessionWire>(authTarget, "/api/auth/get-session");
+		session = await request<SessionWire>(authTarget, "/api/auth/get-session", {
+			signal,
+		});
 	} catch {
 		return { kind: "loggedOut" };
 	}
@@ -212,14 +225,17 @@ async function fetchAuth(target: ApiTarget): Promise<LoadResult> {
 	}
 
 	const [pw, sub, sessions] = await Promise.all([
-		request<PasswordWire>(authTarget, "/api/user/password-status").catch(
-			() => null
-		),
+		request<PasswordWire>(authTarget, "/api/user/password-status", {
+			signal,
+		}).catch(() => null),
 		request<Record<string, unknown>>(
 			authTarget,
-			"/api/billing/subscription-status"
+			"/api/billing/subscription-status",
+			{ signal }
 		).catch(() => null),
-		request<SessionsWire>(authTarget, "/api/sessions").catch(() => null),
+		request<SessionsWire>(authTarget, "/api/sessions", { signal }).catch(
+			() => null
+		),
 	]);
 
 	return {
@@ -239,9 +255,14 @@ async function fetchAuth(target: ApiTarget): Promise<LoadResult> {
 
 // List the signed-in accounts from Core's local vault. Degrades to an empty
 // list so a vault/read failure never blocks the profile view.
-async function fetchAccounts(target: ApiTarget): Promise<Account[]> {
+async function fetchAccounts(
+	target: ApiTarget,
+	signal?: AbortSignal
+): Promise<Account[]> {
 	try {
-		const wire = await request<AccountsWire>(target, "/api/auth/accounts");
+		const wire = await request<AccountsWire>(target, "/api/auth/accounts", {
+			signal,
+		});
 		return Array.isArray(wire.accounts) ? wire.accounts : [];
 	} catch {
 		return [];
@@ -289,17 +310,34 @@ export function AccountTab({ active }: TabProps) {
 	const [loginPrompt, setLoginPrompt] = useState<LoginPrompt | null>(null);
 
 	const mountedRef = useRef(true);
-	// Active poll context; `stop` flips true on unmount/logout/success/timeout so a
-	// queued tick is a no-op (the shell unmounts inactive tabs, so a tab switch
-	// mid-login cancels the poll - acceptable, the code/URL live on this tab).
-	const pollRef = useRef<{ deadline: number; stop: boolean } | null>(null);
+	const scopeRef = useRef({ target, active });
+	scopeRef.current = { target, active };
+	const pollRef = useRef<(() => void) | null>(null);
+	const loginRequestRef = useRef<AbortController | null>(null);
+	const profileRequestRef = useRef<AbortController | null>(null);
 
 	const loadAuth = useCallback(async () => {
+		if (
+			!(mountedRef.current && scopeRef.current.active) ||
+			scopeRef.current.target !== target
+		) {
+			return;
+		}
+		profileRequestRef.current?.abort();
+		const controller = new AbortController();
+		profileRequestRef.current = controller;
 		const [result, accts] = await Promise.all([
-			fetchAuth(target),
-			fetchAccounts(target),
+			fetchAuth(target, controller.signal),
+			fetchAccounts(target, controller.signal),
 		]);
-		if (!mountedRef.current) {
+		if (profileRequestRef.current === controller) {
+			profileRequestRef.current = null;
+		}
+		if (
+			!mountedRef.current ||
+			controller.signal.aborted ||
+			scopeRef.current.target !== target
+		) {
 			return;
 		}
 		setAccounts(accts);
@@ -322,52 +360,38 @@ export function AccountTab({ active }: TabProps) {
 	}, [loadAuth]);
 
 	const stopPolling = useCallback(() => {
-		if (pollRef.current) {
-			pollRef.current.stop = true;
-		}
+		pollRef.current?.();
 		pollRef.current = null;
+		loginRequestRef.current?.abort();
+		loginRequestRef.current = null;
 	}, []);
 
 	const startPolling = useCallback(() => {
 		stopPolling();
-		const ctx = { stop: false, deadline: Date.now() + LOGIN_TIMEOUT_MS };
-		pollRef.current = ctx;
-
-		const finish = (signedIn: boolean) => {
-			ctx.stop = true;
-			if (!mountedRef.current) {
-				return;
-			}
-			setLoginPending(false);
-			setLoginPrompt(null);
-			if (signedIn) {
-				notify("Signed in", "success");
-				loadAuth();
-			} else {
-				notify("Sign-in timed out", "error");
-			}
-		};
-
-		const tick = async () => {
-			if (ctx.stop) {
-				return;
-			}
-			if (Date.now() > ctx.deadline) {
-				finish(false);
-				return;
-			}
-			// Swallow transient probe errors - keep polling until the deadline.
-			const done = await pollOnce(target).catch(() => false);
-			if (ctx.stop) {
-				return;
-			}
-			if (done) {
-				finish(true);
-				return;
-			}
-			setTimeout(tick, POLL_INTERVAL_MS);
-		};
-		setTimeout(tick, POLL_INTERVAL_MS);
+		if (
+			!(mountedRef.current && scopeRef.current.active) ||
+			scopeRef.current.target !== target
+		) {
+			return;
+		}
+		pollRef.current = startAccountPolling(
+			(signal) => pollOnce(target, signal),
+			(signedIn) => {
+				pollRef.current = null;
+				if (!mountedRef.current || scopeRef.current.target !== target) {
+					return;
+				}
+				setLoginPending(false);
+				setLoginPrompt(null);
+				if (signedIn) {
+					notify("Signed in", "success");
+					loadAuth();
+				} else {
+					notify("Sign-in timed out", "error");
+				}
+			},
+			{ intervalMs: POLL_INTERVAL_MS, timeoutMs: LOGIN_TIMEOUT_MS }
+		);
 	}, [target, notify, loadAuth, stopPolling]);
 
 	// Device flow, shared by first sign-in AND "add account". Unlike the old
@@ -377,9 +401,17 @@ export function AccountTab({ active }: TabProps) {
 	// after success loadAuth reloads the accounts list. Only guarded so a second
 	// login can't start while one is already in flight.
 	const startLogin = useCallback(async () => {
-		if (loginPending) {
+		if (
+			loginPending ||
+			!mountedRef.current ||
+			!scopeRef.current.active ||
+			scopeRef.current.target !== target
+		) {
 			return;
 		}
+		stopPolling();
+		const controller = new AbortController();
+		loginRequestRef.current = controller;
 		setLoginPending(true);
 		setLoginPrompt(null);
 		notify("Starting sign-in…", "loading");
@@ -388,28 +420,48 @@ export function AccountTab({ active }: TabProps) {
 			start = await request<LoginStart>(target, "/api/auth/login", {
 				method: "POST",
 				body: { backendUrl: AUTH_BACKEND_URL },
+				signal: controller.signal,
 			});
 		} catch (err) {
-			if (mountedRef.current) {
+			if (
+				mountedRef.current &&
+				!controller.signal.aborted &&
+				scopeRef.current.target === target
+			) {
 				setLoginPending(false);
 				notify(`Sign-in failed: ${errText(err)}`, "error");
 			}
 			return;
 		}
+		if (
+			!mountedRef.current ||
+			controller.signal.aborted ||
+			scopeRef.current.target !== target
+		) {
+			return;
+		}
 		if (start.error) {
-			if (mountedRef.current) {
+			if (
+				mountedRef.current &&
+				!controller.signal.aborted &&
+				scopeRef.current.target === target
+			) {
 				setLoginPending(false);
 				notify(`Sign-in failed: ${start.error}`, "error");
 			}
 			return;
 		}
 		const url = start.verificationUriComplete ?? start.verificationUri ?? null;
-		if (mountedRef.current) {
+		if (
+			mountedRef.current &&
+			!controller.signal.aborted &&
+			scopeRef.current.target === target
+		) {
 			setLoginPrompt({ userCode: start.userCode ?? null, url });
 		}
 		openBrowser(url);
 		startPolling();
-	}, [loginPending, target, notify, startPolling]);
+	}, [loginPending, target, notify, startPolling, stopPolling]);
 
 	// Mirror do_logout: only acts when signed in.
 	const logout = useCallback(async () => {
@@ -501,12 +553,10 @@ export function AccountTab({ active }: TabProps) {
 		mountedRef.current = true;
 		return () => {
 			mountedRef.current = false;
-			if (pollRef.current) {
-				pollRef.current.stop = true;
-			}
-			pollRef.current = null;
+			stopPolling();
+			profileRequestRef.current?.abort();
 		};
-	}, []);
+	}, [stopPolling]);
 
 	useEffect(() => {
 		if (!active) {
@@ -514,7 +564,13 @@ export function AccountTab({ active }: TabProps) {
 		}
 		setPhase("loading");
 		loadAuth();
-	}, [active, loadAuth]);
+		return () => {
+			stopPolling();
+			profileRequestRef.current?.abort();
+			setLoginPending(false);
+			setLoginPrompt(null);
+		};
+	}, [active, loadAuth, stopPolling]);
 
 	// Keep the highlighted row in range as the account list grows/shrinks.
 	useEffect(() => {

@@ -8,6 +8,16 @@ use sha2::Sha256;
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 
+mod auxiliary;
+pub(crate) mod inference_governance;
+use inference_governance::InferenceClient;
+mod provider_usage;
+use provider_usage::{
+    cost_usd_to_micro, inject_stream_usage_option, provider_cache_write_tokens,
+    provider_cached_tokens, response_reported_cost_usd, sse_parse_cache_write_tokens,
+    sse_parse_cached_tokens, sse_parse_cost, sse_parse_usage,
+};
+
 mod inline_eval;
 use inline_eval::{
     backstop_flag, image_detection_kind, inline_detection_kind, inline_outcome,
@@ -582,6 +592,29 @@ pub async fn authenticate(
         };
         let key = key.strip_prefix("Bearer ").unwrap_or(key);
 
+        // Local agent identity is issued by Core, never asserted by the recipient.
+        // Scoped inference remains non-admin and non-forwarder: it cannot alter
+        // routing policy, reattribute spend, or invoke privileged control routes.
+        if key.starts_with("gws1.") {
+            let scope = auth.api_keys.iter()
+                .filter(|entry| entry.name == "local-core" && entry.trusted_forwarder)
+                .find_map(|entry| ryu_gw_credentials::InferenceScope::verify(key, &entry.key).ok());
+            let Some(scope) = scope else {
+                return StaticOutcome::Reject(GatewayError::Unauthorized("Invalid scoped inference credential".to_owned()));
+            };
+            if agent_id.as_deref().is_some_and(|id| id != scope.agent_id)
+                || user_id.as_deref().is_some_and(|id| Some(id) != scope.user_id.as_deref())
+                || session_id.as_deref().is_some_and(|id| Some(id) != scope.session_id.as_deref()) {
+                return StaticOutcome::Reject(GatewayError::Unauthorized("Inference identity does not match the issued scope".to_owned()));
+            }
+            let mut context = build_ctx(false, key.to_owned(), None, None, None,
+                Some(format!("agent:{}", scope.agent_id)), scope.user_id,
+                Some(scope.agent_id), None, false, None, None,
+                std::collections::HashMap::new(), None);
+            context.session_id = scope.session_id;
+            return StaticOutcome::Matched(context);
+        }
+
         if let Some(master) = &auth.master_key {
             if ct_eq(key, master.as_str()) {
                 return StaticOutcome::Matched(build_ctx(
@@ -709,6 +742,7 @@ pub async fn authenticate(
                 // An `rgw_`-shaped token that does not resolve (invalid / revoked /
                 // control plane unreachable) is a HARD 401 — never fall open into
                 // anonymous.
+                Err(crate::policy::ResolveErr::Busy) => Err(GatewayError::RateLimited),
                 Err(crate::policy::ResolveErr::Unresolved) => Err(GatewayError::Unauthorized(
                     "Invalid or revoked gateway token.".to_string(),
                 )),
@@ -726,12 +760,19 @@ pub async fn authenticate(
 ///
 /// No-ops (returns `false`) when smart routing is inactive, when a per-agent
 /// chat slot override is present (explicit pinning wins over routing), or when
-/// the router keeps the original model. It fails open in every error
-/// case — see [`crate::router::smart`].
-async fn apply_smart_routing(state: &AppState, ctx: &RequestContext, body: &mut Value) -> bool {
+/// the router keeps the original model. Provider failures preserve the original
+/// model; security and accounting denials propagate before further dispatch.
+async fn apply_smart_routing(
+    state: &Arc<AppState>,
+    ctx: &RequestContext,
+    body: &mut Value,
+) -> Result<bool, GatewayError> {
     // A pinned per-agent chat slot is an explicit user choice — never override it.
     if ctx.slot_provider.is_some() || ctx.slot_model.is_some() {
-        return false;
+        if let Some(object) = body.as_object_mut() {
+            object.remove("ryu_smart_route");
+        }
+        return Ok(false);
     }
 
     // Per-agent override (the "both" config scope): Core injects the agent's own
@@ -740,7 +781,7 @@ async fn apply_smart_routing(state: &AppState, ctx: &RequestContext, body: &mut 
     // config gets one cached ephemeral `SmartRouter` (keyed by a hash of its JSON)
     // so its rule-embedding + per-session caches persist across the agent's turns.
     // The private field is always stripped before the body reaches the provider.
-    let per_agent = per_request_smart_router(state, body);
+    let per_agent = per_request_smart_router(state, ctx, body)?;
     // Clone the global smart router Arc out of the hot-swap lock so it survives the
     // router `.await` below (PUT /v1/config can swap it concurrently); a per-agent
     // override still wins over the global default.
@@ -751,30 +792,21 @@ async fn apply_smart_routing(state: &AppState, ctx: &RequestContext, body: &mut 
     };
 
     if !router.is_active() {
-        return false;
+        return Ok(false);
     }
 
-    // Clone the active model-routing backend out of its swap lock so it survives
-    // the router `.await` too (W6c: `state.router` is now a registry).
-    let model_router = state.router.active();
+    let inference = auxiliary::GovernedInference::new(Arc::clone(state), ctx.clone(), "smart-routing");
     let chosen = router
-        .resolve(
-            &body["messages"],
-            ctx.session_id.as_deref(),
-            &state.providers,
-            model_router.as_ref(),
-            &state.http,
-            state.config.providers.openai.as_ref(),
-        )
-        .await;
+        .resolve(&body["messages"], ctx.session_id.as_deref(), &inference)
+        .await?;
 
     let Some(model) = chosen else {
-        return false;
+        return Ok(false);
     };
 
     let current = body["model"].as_str().unwrap_or("");
     if model == current {
-        return false;
+        return Ok(false);
     }
 
     debug!(
@@ -784,35 +816,59 @@ async fn apply_smart_routing(state: &AppState, ctx: &RequestContext, body: &mut 
         "smart routing: re-routed request to selected model"
     );
     body["model"] = Value::String(model);
-    true
+    Ok(true)
 }
 
 /// Extract and strip the private `ryu_smart_route` per-agent override from the
 /// request body, returning a cached ephemeral [`SmartRouter`] for it.
 ///
 /// The field is ALWAYS removed from `body` (so it never reaches a provider), even
-/// when it fails to parse. A parse failure returns `None`, so the caller fails
-/// open to the global router. Distinct override configs are cached by a stable
-/// hash of their serialized JSON, so an agent reuses one router (and its
-/// rule-embedding + session caches) across turns.
+/// for callers without Core's trusted-forwarder authority. Authorized overrides
+/// are size-limited and cached in a bounded LRU, scoped to the effective caller policy.
 fn per_request_smart_router(
     state: &AppState,
+    ctx: &RequestContext,
     body: &mut Value,
-) -> Option<Arc<crate::router::smart::SmartRouter>> {
-    let raw = body.as_object_mut()?.remove("ryu_smart_route")?;
-    let cfg: crate::config::SmartRoutingConfig = serde_json::from_value(raw).ok()?;
-
-    let json = serde_json::to_string(&cfg).ok()?;
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    std::hash::Hash::hash(&json, &mut hasher);
-    let key = std::hash::Hasher::finish(&hasher);
-
-    let router = state
-        .per_agent_routers
-        .entry(key)
-        .or_insert_with(|| Arc::new(crate::router::smart::SmartRouter::new(cfg)))
-        .clone();
-    Some(router)
+) -> Result<Option<Arc<crate::router::smart::SmartRouter>>, GatewayError> {
+    let Some(raw) = body
+        .as_object_mut()
+        .and_then(|body| body.remove("ryu_smart_route"))
+    else {
+        return Ok(None);
+    };
+    // This internal configuration channel belongs to Core, never ordinary inference callers.
+    if !ctx.is_master_key
+        && !ctx
+            .key_config
+            .as_ref()
+            .is_some_and(|key| key.trusted_forwarder)
+    {
+        return Ok(None);
+    }
+    let json =
+        serde_json::to_vec(&raw).map_err(|error| GatewayError::BadRequest(error.to_string()))?;
+    if json.len() > 65_536 {
+        return Err(GatewayError::BadRequest(
+            "routing override exceeds 64 KiB".into(),
+        ));
+    }
+    let cfg: crate::config::SmartRoutingConfig =
+        serde_json::from_value(raw).map_err(|error| GatewayError::BadRequest(error.to_string()))?;
+    auxiliary::validate_config(&cfg)?;
+    if !cfg.is_active() {
+        return Ok(Some(Arc::new(crate::router::smart::SmartRouter::new(cfg))));
+    }
+    use sha2::Digest;
+    let key = format!(
+        "{}:{:x}",
+        auxiliary::scope(state, ctx),
+        Sha256::digest(&json)
+    );
+    Ok(Some(
+        state.per_agent_routers.get_or_insert_with(key, || {
+            Arc::new(crate::router::smart::SmartRouter::new(cfg))
+        }),
+    ))
 }
 
 // ─── Anthropic betas (the private `ryu_anthropic_beta` body field) ────────────
@@ -895,15 +951,14 @@ fn stamp_openrouter_identity(body: &mut Value, provider: &str, ctx: &RequestCont
 /// Shared pre-processing: rate-limit + burst check + inbound-firewall + routing.
 /// Returns the routing decision and exact-match cache key.
 ///
-/// `smart_routed` is `true` when [`apply_smart_routing`] already rewrote
+/// The route stage computes whether [`apply_smart_routing`] rewrote
 /// `body["model"]`; in that case eval-driven A/B routing is skipped so the
 /// classifier's choice is honored (otherwise `eval_route` would override the
 /// model's provider — see the no-slot branch below).
 async fn pre_process(
-    state: &AppState,
+    state: &Arc<AppState>,
     ctx: &RequestContext,
     body: &mut Value,
-    smart_routed: bool,
 ) -> Result<(RouteDecision, String, Option<PolicyAlert>), GatewayError> {
     // Ok-path policy alert accumulated during pre-processing (currently a
     // firewall warn-and-continue match). Merged with any budget alert by the
@@ -942,12 +997,12 @@ async fn pre_process(
                     .rate_limiter
                     .check_request_for_key(&ctx.api_key, ctx.key_config.as_ref())
                 {
-                    warn!(key = %ctx.api_key, request_id = %ctx.request_id, "rate limit exceeded");
+                    warn!(key_id = %crate::audit::credential_log_id(&ctx.api_key), request_id = %ctx.request_id, "rate limit exceeded");
                     state.metrics.inc_rate_limited();
                     return Err(GatewayError::RateLimited);
                 }
                 if !state.rate_limiter.check_burst(&ctx.api_key) {
-                    warn!(key = %ctx.api_key, request_id = %ctx.request_id, "burst rate exceeded (bot detection)");
+                    warn!(key_id = %crate::audit::credential_log_id(&ctx.api_key), request_id = %ctx.request_id, "burst rate exceeded (bot detection)");
                     state.metrics.inc_rate_limited();
                     return Err(GatewayError::RateLimited);
                 }
@@ -1001,14 +1056,14 @@ async fn pre_process(
             PipelineStage::Inspector => {
                 let inspector_cfg = scanner.config().inspector.clone();
                 if inspector_cfg.enabled {
-                    let model_router = state.router.active();
-                    let verdict = crate::firewall::inspector::InspectorClient::inspect(
-                        &prompt_text,
-                        &inspector_cfg,
-                        &state.providers,
-                        model_router.as_ref(),
-                    )
-                    .await;
+                    let inference = auxiliary::GovernedInference::new(
+                        Arc::clone(state),
+                        ctx.clone(),
+                        "inspector",
+                    );
+                    let current_text = extract_text_for_scanning(body);
+                    let verdict =
+                        InspectorClient::inspect(&current_text, &inspector_cfg, &inference).await?;
                     if verdict.flagged {
                         match inspector_cfg.action {
                             FirewallPolicy::Block => {
@@ -1172,6 +1227,9 @@ async fn pre_process(
             // over eval/model routing (M3 / #164); eval-driven A/B routing only
             // applies when no slot is set and the classifier did not already choose.
             PipelineStage::Route => {
+                let smart_routed = apply_smart_routing(state, ctx, body).await?;
+                let requested_model = body["model"].as_str().unwrap_or("gpt-4o").to_owned();
+                auxiliary::authorize_model(state, ctx, &requested_model)?;
                 // ALLOWLIST CLAMP on the client-supplied chat slot model. The
                 // `Policy` stage above checked `allows_model` against
                 // `body["model"]` only — but the slot below REPLACES the model
@@ -1295,6 +1353,7 @@ fn inline_action_for(
 /// traps/OOMs/times-out must never be silently skipped (old `None`) nor merely
 /// warned (if bound to `Warn`); it blocks.
 enum InlineFlag {
+    Denied(GatewayError),
     /// The impl is not enforceable this phase, or this binding is skipped — an
     /// honest, logged no-op (formerly `None`).
     Skip,
@@ -1315,7 +1374,8 @@ async fn flag_inline_binding(
     ev: &Evaluator,
     scanner: &FirewallScanner,
     text: &str,
-    state: &AppState,
+    state: &Arc<AppState>,
+    ctx: &RequestContext,
 ) -> InlineFlag {
     match &ev.impl_ {
         EvaluatorImpl::Regex { .. } | EvaluatorImpl::Heuristic => {
@@ -1344,16 +1404,19 @@ async fn flag_inline_binding(
             } else {
                 ins.timeout_ms
             };
-            let model_router = state.router.active();
-            let verdict = InspectorClient::inspect_rubric(
-                text,
-                rubric,
-                &ins.model,
-                timeout,
-                &state.providers,
-                model_router.as_ref(),
+            let inference = auxiliary::GovernedInference::new(
+                Arc::clone(state),
+                ctx.clone(),
+                "inline-evaluator",
+            );
+            let verdict = match InspectorClient::inspect_rubric(
+                text, rubric, &ins.model, timeout, &inference,
             )
-            .await;
+            .await
+            {
+                Ok(verdict) => verdict,
+                Err(error) => return InlineFlag::Denied(error),
+            };
             // Deterministic floor: when the judge did NOT answer (no provider /
             // timeout / unparseable — the common local-only deploy), consult the
             // lexical seed so obvious slurs/threats/blanket-generalizations are still
@@ -1507,7 +1570,7 @@ fn audit_inline_evaluator(
 /// `Sanitize`, and returns a warn-tier [`PolicyAlert`] on `WarnAndContinue`. The
 /// common empty-policy path allocates nothing (no registry build).
 async fn apply_inline_input_evaluators(
-    state: &AppState,
+    state: &Arc<AppState>,
     ctx: &RequestContext,
     body: &mut Value,
     scanner: &FirewallScanner,
@@ -1533,30 +1596,32 @@ async fn apply_inline_input_evaluators(
         if !ev.capabilities.inline || ev.target != EvaluatorTarget::Input {
             continue;
         }
-        let (flagged, reason) = match flag_inline_binding(ev, scanner, prompt_text, state).await {
-            InlineFlag::Skip => continue,
-            InlineFlag::Ran { flagged, reason } => (flagged, reason),
-            InlineFlag::ForceBlock { reason } => {
-                // Fail-closed short-circuit: block regardless of the binding's
-                // configured action (the wasm-policy fail-direction control).
-                let model = body["model"].as_str().unwrap_or("unknown");
-                state.metrics.inc_firewall_blocked();
-                audit_inline_evaluator(state, ctx, model, &ev.id, "blocked", &reason);
-                warn!(
-                    request_id = %ctx.request_id,
-                    evaluator = %ev.id,
-                    %reason,
-                    "inline evaluator: fail-closed block (inbound)"
-                );
-                return Err(GatewayError::FirewallBlocked(
-                    format!(
-                        "Inbound content blocked by evaluator '{}': {}",
-                        ev.id, reason
-                    ),
-                    firewall_policy_alert(scanner.config(), ctx, "block"),
-                ));
-            }
-        };
+        let (flagged, reason) =
+            match flag_inline_binding(ev, scanner, prompt_text, state, ctx).await {
+                InlineFlag::Denied(error) => return Err(error),
+                InlineFlag::Skip => continue,
+                InlineFlag::Ran { flagged, reason } => (flagged, reason),
+                InlineFlag::ForceBlock { reason } => {
+                    // Fail-closed short-circuit: block regardless of the binding's
+                    // configured action (the wasm-policy fail-direction control).
+                    let model = body["model"].as_str().unwrap_or("unknown");
+                    state.metrics.inc_firewall_blocked();
+                    audit_inline_evaluator(state, ctx, model, &ev.id, "blocked", &reason);
+                    warn!(
+                        request_id = %ctx.request_id,
+                        evaluator = %ev.id,
+                        %reason,
+                        "inline evaluator: fail-closed block (inbound)"
+                    );
+                    return Err(GatewayError::FirewallBlocked(
+                        format!(
+                            "Inbound content blocked by evaluator '{}': {}",
+                            ev.id, reason
+                        ),
+                        firewall_policy_alert(scanner.config(), ctx, "block"),
+                    ));
+                }
+            };
         let action = inline_action_for(binding, ev);
         match inline_outcome(flagged, &action) {
             InlineOutcome::Allow => {}
@@ -1611,7 +1676,7 @@ async fn apply_inline_input_evaluators(
 /// so it needs no state threaded from `pre_process`. No-op (allocation-free) when
 /// no binding is enabled.
 async fn apply_inline_output_evaluators(
-    state: &AppState,
+    state: &Arc<AppState>,
     ctx: &RequestContext,
     response: &mut Value,
 ) -> Result<(), GatewayError> {
@@ -1637,7 +1702,8 @@ async fn apply_inline_output_evaluators(
             continue;
         }
         let (flagged, reason) =
-            match flag_inline_binding(ev, scanner.as_ref(), &response_text, state).await {
+            match flag_inline_binding(ev, scanner.as_ref(), &response_text, state, ctx).await {
+                InlineFlag::Denied(error) => return Err(error),
                 InlineFlag::Skip => continue,
                 InlineFlag::Ran { flagged, reason } => (flagged, reason),
                 InlineFlag::ForceBlock { reason } => {
@@ -1732,7 +1798,7 @@ fn output_inline_wants_transform(scanner: &FirewallScanner, registry: &Evaluator
 /// streamed text, returning the STRICTEST outcome (Block > Sanitize > Warn >
 /// Allow) plus a reason, so the streaming firewall can emit the right frame.
 async fn evaluate_output_inline_stream(
-    state: &AppState,
+    state: &Arc<AppState>,
     ctx: &RequestContext,
     scanner: &FirewallScanner,
     assembled: &str,
@@ -1755,7 +1821,8 @@ async fn evaluate_output_inline_stream(
         if !ev.capabilities.inline || ev.target != EvaluatorTarget::Output {
             continue;
         }
-        let (flagged, r) = match flag_inline_binding(ev, scanner, assembled, state).await {
+        let (flagged, r) = match flag_inline_binding(ev, scanner, assembled, state, ctx).await {
+            InlineFlag::Denied(error) => return (InlineOutcome::Block, error.to_string()),
             InlineFlag::Skip => continue,
             InlineFlag::Ran { flagged, reason } => (flagged, reason),
             InlineFlag::ForceBlock { reason: fc_reason } => {
@@ -1819,13 +1886,10 @@ pub async fn run(
 
     state.metrics.inc_requests();
 
-    // Smart routing (custom routing instructions) runs first, rewriting the
-    // model so the rest of the pipeline routes to the classifier's choice.
-    let smart_routed = apply_smart_routing(&state, &ctx, &mut body).await;
+    // Admission and content governance precede optional smart-router inference.
     let requested_model = body["model"].as_str().unwrap_or("unknown").to_string();
-    let (mut decision, cache_key, pre_alert) = pre_process(&state, &ctx, &mut body, smart_routed)
-        .await
-        .map_err(|e| {
+    let (mut decision, cache_key, pre_alert) =
+        pre_process(&state, &ctx, &mut body).await.map_err(|e| {
             state.metrics.inc_errors();
             audit_failure(&state, &ctx, &requested_model, &e, start);
             e
@@ -1864,20 +1928,14 @@ pub async fn run(
 
     // 5b. Semantic cache lookup (optional)
     let mut semantic_embedding: Option<Vec<f32>> = None;
-    if let (Some(sc), Some(openai_cfg)) = (
+    if let (Some(sc), Some(_openai_cfg)) = (
         state.semantic_cache.active(),
         state.config.providers.openai.as_ref(),
     ) {
         let text = SemanticCache::messages_to_text(&body["messages"]);
-        if let Ok(emb) = sc
-            .get_embedding(
-                &text,
-                &state.http,
-                &openai_cfg.base_url,
-                &openai_cfg.api_key,
-            )
-            .await
-        {
+        let inference =
+            auxiliary::GovernedInference::new(Arc::clone(&state), ctx.clone(), "semantic-cache");
+        if let Some(emb) = inference.embed(sc.embedding_model(), &text, 30_000).await? {
             if let Some(cached) = sc.lookup(ctx.org_id.as_deref(), &emb) {
                 debug!(request_id = %ctx.request_id, "semantic cache hit");
                 state.metrics.inc_semantic_cache_hit();
@@ -1924,7 +1982,7 @@ pub async fn run(
     // 6a. Shared (cross-machine) budget — enforce the control-plane coordinator's
     // most recent verdict. The master key always bypasses budget gates.
     if !ctx.is_master_key && state.shared_budget.is_shared_exceeded() {
-        warn!(key = %ctx.api_key, "shared budget exceeded (coordinator verdict)");
+        warn!(key_id = %crate::audit::credential_log_id(&ctx.api_key), "shared budget exceeded (coordinator verdict)");
         state.metrics.inc_budget_exceeded();
         state.metrics.inc_errors();
         return Err(GatewayError::BudgetExceeded(None));
@@ -1938,7 +1996,7 @@ pub async fn run(
                 if used >= budget {
                     if let Some(ref downgrade_model) = key_cfg.downgrade_to {
                         info!(
-                            key = %ctx.api_key,
+                            key_id = %crate::audit::credential_log_id(&ctx.api_key),
                             used,
                             budget,
                             downgrade = %downgrade_model,
@@ -1947,7 +2005,7 @@ pub async fn run(
                         body["model"] = Value::String(downgrade_model.clone());
                         decision = state.router.route(downgrade_model);
                     } else {
-                        warn!(key = %ctx.api_key, used, budget, "token budget exceeded");
+                        warn!(key_id = %crate::audit::credential_log_id(&ctx.api_key), used, budget, "token budget exceeded");
                         state.metrics.inc_budget_exceeded();
                         state.metrics.inc_errors();
                         return Err(GatewayError::BudgetExceeded(None));
@@ -2091,10 +2149,10 @@ pub async fn run(
         //   c) else a plain completion.
         // The Restrict budget action strips `tools`; we inject the search tool
         // only when tools were NOT stripped (B-12).
-        let tools_restricted = matches!(
+	let tools_restricted = matches!(
             budget.as_ref().map(|b| b.action),
             Some(crate::config::BudgetAction::Restrict)
-        );
+	);
         let completion_result = match loop_kind {
             ToolLoopKind::Unified => {
                 let catalog = state
@@ -2171,6 +2229,12 @@ pub async fn run(
 
         match completion_result {
             Ok((mut response, billable_tool_calls)) => {
+                // Provider generation is complete and the response is fully
+                // buffered. Release the local-engine slot before an output
+                // evaluator makes a judge call through the same provider; a
+                // single-slot local engine must be re-entrant for that
+                // post-generation governance pass.
+                drop(_admission);
                 state.circuit_breaker.record_success(provider.name());
                 // Determine degraded mode: we served via a fallback when the primary
                 // was skipped and a different provider is now responding (#218).
@@ -2185,7 +2249,6 @@ pub async fn run(
                 let output_tokens = response["usage"]["completion_tokens"].as_u64().unwrap_or(0);
                 let cached_tokens = provider_cached_tokens(&response);
                 let cache_write_tokens = provider_cache_write_tokens(&response);
-                state.metrics.add_tokens(input_tokens, output_tokens);
                 if cached_tokens > 0 {
                     state.metrics.add_cached_tokens(cached_tokens);
                 }
@@ -2193,6 +2256,12 @@ pub async fn run(
                     state.metrics.add_cache_write_tokens(cache_write_tokens);
                 }
 
+                let mut settlement=inference_governance::settle_completion(&state,&ctx,&response,inference_governance::CompletionReceipt {
+                    provider:provider.name().to_owned(),model:decision.model.clone(),reason:"gateway_usage",audit_provider:provider.name().into(),backend:None,start,
+                    admitted_tokens:0,estimated_input:estimate_prompt_tokens(&body),budget:budget.clone(),reservations:credit_reservation.take().into_iter().collect(),zero_cost:false,
+                });
+                // Tools have already executed too; output rejection must not erase their bill.
+                spawn_tool_call_debit(&state,&ctx,billable_tool_calls);
                 // 9. Outbound firewall
                 let response_text = response_to_text(&response);
                 let outbound_result: Result<bool, GatewayError> = state.with_firewall(|fw| {
@@ -2226,25 +2295,16 @@ pub async fn run(
                         Ok(true)
                     }
                 });
-                let policy_pass = outbound_result?;
+                let policy_pass = outbound_result.map_err(|error|{settlement.fail(&error);error})?;
 
                 // 9b. Unified-evaluator inline guardrails — OUTPUT target (P3).
                 // Runs the resolved per-agent policy's enabled output evaluators
                 // (pii_leakage regex, toxicity/bias LLM-judge) over the response,
                 // reusing the firewall block/sanitize machinery. No-op when no
                 // binding is enabled.
-                apply_inline_output_evaluators(&state, &ctx, &mut response).await?;
+                apply_inline_output_evaluators(&state, &ctx, &mut response).await.map_err(|error|{settlement.fail(&error);error})?;
 
-                // 10. Per-minute token rate limit (sliding window, honours RBAC overrides)
-                let total_tokens = input_tokens + output_tokens;
-                if total_tokens > 0
-                    && !state.rate_limiter.check_tokens_for_key(
-                        &ctx.api_key,
-                        total_tokens,
-                        ctx.key_config.as_ref(),
-                    )
-                {
-                    warn!(key = %ctx.api_key, tokens = total_tokens, "token-per-minute budget exceeded");
+                if settlement.overrun {
                     state.metrics.inc_rate_limited();
                     state.metrics.inc_errors();
                     return Err(GatewayError::RateLimited);
@@ -2274,58 +2334,8 @@ pub async fn run(
                     sc.insert(ctx.org_id.clone(), emb, response.clone());
                 }
 
-                // OpenRouter reports the final transaction price in USD. Keep
-                // that value on the audit row as well as using it for the wallet
-                // debit, so trace, reporting, and reconciliation all see the
-                // same discounted amount.
-                let reported_cost = response["usage"]["cost"].as_f64();
-                let provider_cost_micro_usd = reported_cost.and_then(cost_usd_to_micro);
-
-                // 13. Update audit token totals (per key) and charged-spend budget
-                // counters (per user / per agent / per session — U21 local
-                // counters). The budget amount follows the same provider cost
-                // or configured model-price fallback as the wallet debit.
-                let budget_cost_micro_usd = charged_budget_cost_micro_usd(
-                    &state,
-                    Some(provider.name()),
-                    reported_cost,
-                    input_tokens,
-                    output_tokens,
-                    &decision.model,
-                );
-                state.audit.add_tokens(&ctx.api_key, total_tokens);
-                record_charged_budget(&state, &ctx, budget_cost_micro_usd);
-
-                // 14. Audit log (SQLite)
-                state.log_audit(AuditRecord {
-                    request_id: ctx.request_id.clone(),
-                    api_key: ctx.api_key.clone(),
-                    user_name: ctx.user_name.clone(),
-                    org_id: ctx.org_id.clone(),
-                    team_id: ctx.team_id.clone(),
-                    project_id: ctx.project_id.clone(),
-                    provider: provider.name().to_string(),
-                    model: decision.model.clone(),
-                    input_tokens,
-                    output_tokens,
-                    cache_hit: false,
-                    latency_ms,
-                    eval_score,
-                    error: None,
-                    skill_ids: ctx.skill_ids.clone(),
-                    session_id: ctx.session_id.clone(),
-                    user_id: ctx.user_id.clone(),
-                    agent_id: ctx.agent_id.clone(),
-                    feature: ctx.feature.clone(),
-                    managed_inference: ctx.managed_inference,
-                    provider_cost_micro_usd,
-                    event_type: crate::audit::EventType::ModelCall,
-                    backend: None,
-                    command: None,
-                    duration_ms: None,
-                    exit_code: None,
-                    widget_instance_id: None,
-                });
+                settlement.record_mut().eval_score=eval_score;
+                settlement.record_mut().latency_ms=latency_ms;
 
                 // 14b. Experimental OTel GenAI span (#540, P1): reuse the same
                 // tokens/model/provider/latency. No-op unless OTEL_SEMCONV_STABILITY_OPT_IN
@@ -2362,82 +2372,6 @@ pub async fn run(
                     degraded = ?degraded,
                     "request completed"
                 );
-
-                // 15. Credit-wallet debit hook (#486). Best-effort, post-call:
-                // debit the request's org wallet by this call's marked-up cost
-                // and update the cached empty flag for the next request's budget
-                // gate. Spawned so the control-plane round-trip never adds
-                // latency to the served response; a no-op unless credits are
-                // active and the request carries an org.
-                if let Some(org_id) = ctx.org_id.clone().filter(|s| !s.is_empty()) {
-                    if state.config.credits.is_active() {
-                        let cost = response_cost_micro_usd(
-                            &state,
-                            reported_cost,
-                            input_tokens,
-                            output_tokens,
-                            &decision.model,
-                        );
-                        let state2 = Arc::clone(&state);
-                        let request_id = ctx.request_id.clone();
-                        let fail_closed_sticky =
-                            state.config.credits.fail_closed && ctx.managed_inference;
-                        // Managed policy-alert (item 4): stamp the matched
-                        // budget-cap tier. `limit > 0` excludes the wallet-empty
-                        // decision (invariant: decide() only returns limit==0 for
-                        // the synthetic wallet rule); only tiers >= Warn ride.
-                        let debit_alert_tier = budget
-                            .as_ref()
-                            .filter(|b| b.limit > 0 && b.alert >= AlertTier::Warn)
-                            .map(|b| b.alert);
-                        // The credit permit rides INTO the task so it outlives
-                        // the debit, not the handler — see the binding at
-                        // `enforce_budget` above.
-                        let credit_permit = credit_reservation.take();
-                        let pool = crate::credit_pools::pool_for_gateway_provider(provider.name());
-                        // Built BEFORE the spawn, like `request_id` and `pool`
-                        // above: the task takes ownership of `ctx` and
-                        // `decision`, so reading either inside it would move a
-                        // value the surrounding handler still needs.
-                        let debit_attribution = DebitAttribution {
-                            provider: Some(provider.name().to_string()),
-                            model: Some(decision.model.clone()),
-                            input_tokens: Some(input_tokens as u64),
-                            output_tokens: Some(output_tokens as u64),
-                            duration_ms: Some(latency_ms as u64),
-                            user_id: ctx.user_id.clone(),
-                            task_label: None,
-                            estimated: None,
-                        };
-                        tokio::spawn(async move {
-                            debit_wallet_for_request(
-                                state2,
-                                org_id,
-                                request_id,
-                                "gateway_usage",
-                                cost,
-                                fail_closed_sticky,
-                                debit_alert_tier,
-                                // Authoritative pool attribution: the provider
-                                // that actually answered, not the one the
-                                // pre-flight gate guessed (a fallback may have
-                                // served this).
-                                pool,
-                                // Same rule as `pool`: the provider and model
-                                // that ACTUALLY served, so a fallback shows the
-                                // model the customer was really charged for
-                                // rather than the one they asked for.
-                                debit_attribution,
-                            )
-                            .await;
-                            drop(credit_permit);
-                        });
-                    }
-                }
-
-                // Tool-call (Composio) debit (#496): separate ledger row, fires
-                // only when this request executed billable Composio tools.
-                spawn_tool_call_debit(&state, &ctx, billable_tool_calls);
 
                 return Ok(PipelineOutput {
                     response,
@@ -2501,6 +2435,7 @@ pub async fn run(
         GatewayError::ProviderPaymentRequired { .. } => "provider_payment_required",
         GatewayError::RateLimited => "rate_limit_exceeded",
         GatewayError::InsufficientCredits => "insufficient_credits",
+        GatewayError::AccountingUnavailable => "credit_accounting_unavailable",
         GatewayError::BudgetExceeded(_) => "budget_exceeded",
         GatewayError::FirewallBlocked(_, _) | GatewayError::PolicyViolation(_) => {
             "policy_violation"
@@ -2668,13 +2603,10 @@ pub async fn run_stream(
 
     state.metrics.inc_requests();
 
-    // Smart routing (custom routing instructions) runs first, rewriting the
-    // model so the rest of the pipeline routes to the classifier's choice.
-    let smart_routed = apply_smart_routing(&state, &ctx, &mut body).await;
+    // Admission and content governance precede optional smart-router inference.
     let requested_model = body["model"].as_str().unwrap_or("unknown").to_string();
-    let (mut decision, _cache_key, pre_alert) = pre_process(&state, &ctx, &mut body, smart_routed)
-        .await
-        .map_err(|e| {
+    let (mut decision, _cache_key, pre_alert) =
+        pre_process(&state, &ctx, &mut body).await.map_err(|e| {
             state.metrics.inc_errors();
             audit_failure(&state, &ctx, &requested_model, &e, start);
             e
@@ -2739,7 +2671,7 @@ pub async fn run_stream(
             ctx.key_config.as_ref(),
         )
     {
-        warn!(key = %ctx.api_key, tokens = estimated_tokens, "token-per-minute budget exceeded (stream admission)");
+        warn!(key_id = %crate::audit::credential_log_id(&ctx.api_key), tokens = estimated_tokens, "token-per-minute budget exceeded (stream admission)");
         state.metrics.inc_rate_limited();
         state.metrics.inc_errors();
         return Err(GatewayError::RateLimited);
@@ -2759,6 +2691,11 @@ pub async fn run_stream(
         budget.as_ref().map(|b| b.action),
         Some(crate::config::BudgetAction::Restrict)
     );
+	let output_eval_wants_reentrant_slot = {
+		let scanner = state.resolved_scanner(&ctx);
+		let registry = EvaluatorRegistry::from_config(&state.config);
+		output_inline_wants_transform(&scanner, &registry)
+	};
 
     let fallback_chain = clamped_fallback_chain(&state, &ctx, &decision);
     let mut last_err: Option<GatewayError> = None;
@@ -2802,8 +2739,8 @@ pub async fn run_stream(
         // and the slot frees before the fallback attempt. As on the non-stream
         // path, the re-entrant tool-loop case (`tools_active`) is left ungated to
         // avoid a parent holding a slot while a delegated child waits for one.
-        let admission_permit = if tools_active {
-            crate::concurrency::AdmissionPermit::none()
+		let admission_permit = if tools_active || output_eval_wants_reentrant_slot {
+			crate::concurrency::AdmissionPermit::none()
         } else {
             match state.admission.acquire(provider.name(), ctx.priority).await {
                 Ok(permit) => permit,
@@ -2891,20 +2828,10 @@ pub async fn run_stream(
                 //     the assembled text, then emit either a single blocked SSE
                 //     error frame or the sanitized completion. This defeats
                 //     incremental streaming for those modes on purpose.
-                let firewall_body =
-                    apply_outbound_firewall_stream(stream_body, Arc::clone(&state), ctx.clone())
-                        .await;
-
-                // 10. Stream observer: tap the outbound SSE at stream end to
-                // capture real token usage (from the terminal usage frame, when
-                // stream_options.include_usage was injected) and run eval
-                // scoring. The observer wraps the body AFTER the firewall so it
-                // fires regardless of firewall policy. The audit row is written
-                // at stream end (defer-to-end) rather than at stream start, so
-                // every row in the audit log carries non-zero token counts.
+                // Observe original upstream usage before client-facing DLP can replace frames.
                 let provider_name = provider.name().to_string();
                 let observed_body = attach_stream_observer(
-                    firewall_body,
+                    stream_body,
                     Arc::clone(&state),
                     ctx.clone(),
                     provider_name,
@@ -2919,6 +2846,8 @@ pub async fn run_stream(
                         .filter(|b| b.limit > 0 && b.alert >= AlertTier::Warn)
                         .map(|b| b.alert),
                 );
+
+                let observed_body=apply_outbound_firewall_stream(observed_body,Arc::clone(&state),ctx.clone()).await;
 
                 // Hold the admission slot AND the credit reservation for the
                 // *whole* stream: move both into the body so they drop only when
@@ -3076,14 +3005,14 @@ pub async fn run_multimodal(
         .rate_limiter
         .check_request_for_key(&ctx.api_key, ctx.key_config.as_ref())
     {
-        warn!(key = %ctx.api_key, "rate limit exceeded (multimodal)");
+        warn!(key_id = %crate::audit::credential_log_id(&ctx.api_key), "rate limit exceeded (multimodal)");
         state.metrics.inc_rate_limited();
         let e = GatewayError::RateLimited;
         audit_failure(&state, &ctx, &requested_model, &e, start);
         return Err(e);
     }
     if !state.rate_limiter.check_burst(&ctx.api_key) {
-        warn!(key = %ctx.api_key, "burst rate exceeded (multimodal)");
+        warn!(key_id = %crate::audit::credential_log_id(&ctx.api_key), "burst rate exceeded (multimodal)");
         state.metrics.inc_rate_limited();
         let e = GatewayError::RateLimited;
         audit_failure(&state, &ctx, &requested_model, &e, start);
@@ -3334,7 +3263,7 @@ pub async fn run_multimodal(
                                 state_debit,
                                 org_id,
                                 ref_id,
-                                "media",
+                                "gateway_usage",
                                 media_cost_micro_usd,
                                 fail_closed_sticky,
                                 // Media debits carry no budget-cap tier (item 4
@@ -3435,7 +3364,32 @@ pub async fn run_embedding(
         return Err(error);
     }
 
+    let shape = match operation {
+        EmbeddingOperation::Embed => inference_governance::InputShape::Embedding,
+        EmbeddingOperation::Rerank => inference_governance::InputShape::Rerank,
+    };
     let mut decision = state.router.route(&requested_model);
+    let input_alert = (|| {
+        inference_governance::authorize_model(&state, &ctx, &requested_model)?;
+        inference_governance::enforce_lifetime_budget(&state, &ctx, &mut body, &mut decision)?;
+        inference_governance::inspect_input(&state, &ctx, &mut body, shape)
+    })()
+    .map_err(|error| {
+        audit_failure(&state, &ctx, &requested_model, &error, start);
+        error
+    })?;
+    let estimated_input = inference_governance::input_token_estimate(&body, shape);
+    if !state.rate_limiter.check_tokens_for_key(
+        &ctx.api_key,
+        estimated_input,
+        ctx.key_config.as_ref(),
+    ) {
+        let error = GatewayError::RateLimited;
+        audit_failure(&state, &ctx, &requested_model, &error, start);
+        return Err(error);
+    }
+
+    let original_max_tokens=body.get("max_tokens").cloned();
     let BudgetOutcome {
         decision: budget,
         alert: policy_alert,
@@ -3454,6 +3408,15 @@ pub async fn run_embedding(
         error
     })?;
 
+    inference_governance::authorize_model(&state, &ctx, &decision.model).map_err(|error| {
+        audit_failure(&state, &ctx, &decision.model, &error, start);
+        error
+    })?;
+    body["model"] = json!(decision.model);
+    // Restrict is a text-generation budget action; do not add a chat-only field to this wire shape.
+    if let Some(max_tokens)=original_max_tokens {body["max_tokens"]=max_tokens;} else if let Some(object)=body.as_object_mut(){object.remove("max_tokens");}
+    let mut input_reservation=inference_governance::reserve_input_credit(&state,&ctx,&decision,estimated_input).map_err(|error|{audit_failure(&state,&ctx,&decision.model,&error,start);error})?;
+    let policy_alert = merge_alert(input_alert, policy_alert);
     let fallback_chain = clamped_fallback_chain(&state, &ctx, &decision);
     let primary_provider = fallback_chain.first().cloned();
     let mut primary_skipped = false;
@@ -3492,119 +3455,28 @@ pub async fn run_embedding(
         match result {
             Ok(response) => {
                 state.circuit_breaker.record_success(provider.name());
-                let input_tokens = response["usage"]["prompt_tokens"]
-                    .as_u64()
-                    .or_else(|| response["usage"]["input_tokens"].as_u64())
-                    .or_else(|| response["usage"]["total_tokens"].as_u64())
-                    .unwrap_or(0);
-                let output_tokens = response["usage"]["completion_tokens"].as_u64().unwrap_or(0);
-                let total_tokens = input_tokens.saturating_add(output_tokens);
-                state.metrics.add_tokens(input_tokens, output_tokens);
-
-                if total_tokens > 0
-                    && !state.rate_limiter.check_tokens_for_key(
-                        &ctx.api_key,
-                        total_tokens,
-                        ctx.key_config.as_ref(),
-                    )
-                {
+                let exceeded = inference_governance::settle_completion(
+                    &state,
+                    &ctx,
+                    &response,
+                    inference_governance::CompletionReceipt {
+                        provider: provider.name().to_owned(),
+                        model: decision.model.clone(),
+                        reason: operation.as_str(),
+                        audit_provider: format!("{}:{}", provider.name(), operation.as_str()),
+                        backend: None,
+                        start,
+                        admitted_tokens: estimated_input,
+                        estimated_input,
+                        budget: budget.clone(),
+                        reservations: [credit_reservation.take(),input_reservation.take()].into_iter().flatten().collect(),
+                        zero_cost: false,
+                    },
+                );
+                if exceeded.overrun {
                     state.metrics.inc_rate_limited();
                     state.metrics.inc_errors();
-                    let error = GatewayError::RateLimited;
-                    audit_failure(&state, &ctx, &decision.model, &error, start);
-                    return Err(error);
-                }
-
-                let reported_cost = response["usage"]["cost"]
-                    .as_f64()
-                    .and_then(cost_usd_to_micro);
-                let budget_cost_micro_usd = charged_budget_cost_micro_usd(
-                    &state,
-                    Some(provider.name()),
-                    response["usage"]["cost"].as_f64(),
-                    input_tokens,
-                    output_tokens,
-                    &decision.model,
-                );
-                state.audit.add_tokens(&ctx.api_key, total_tokens);
-                record_charged_budget(&state, &ctx, budget_cost_micro_usd);
-
-                let latency_ms = start.elapsed().as_millis() as u64;
-                let provider_cost_micro_usd = reported_cost;
-                state.log_audit(AuditRecord {
-                    request_id: ctx.request_id.clone(),
-                    api_key: ctx.api_key.clone(),
-                    user_name: ctx.user_name.clone(),
-                    org_id: ctx.org_id.clone(),
-                    team_id: ctx.team_id.clone(),
-                    project_id: ctx.project_id.clone(),
-                    provider: format!("{}:{}", provider.name(), operation.as_str()),
-                    model: decision.model.clone(),
-                    input_tokens,
-                    output_tokens,
-                    cache_hit: false,
-                    latency_ms,
-                    eval_score: None,
-                    error: None,
-                    skill_ids: ctx.skill_ids.clone(),
-                    session_id: ctx.session_id.clone(),
-                    user_id: ctx.user_id.clone(),
-                    agent_id: ctx.agent_id.clone(),
-                    feature: ctx.feature.clone(),
-                    managed_inference: ctx.managed_inference,
-                    provider_cost_micro_usd,
-                    event_type: crate::audit::EventType::ModelCall,
-                    backend: None,
-                    command: None,
-                    duration_ms: None,
-                    exit_code: None,
-                    widget_instance_id: None,
-                });
-
-                if let Some(org_id) = ctx.org_id.clone().filter(|value| !value.is_empty()) {
-                    if state.config.credits.is_active() {
-                        let cost = response_cost_micro_usd(
-                            &state,
-                            response["usage"]["cost"].as_f64(),
-                            input_tokens,
-                            output_tokens,
-                            &decision.model,
-                        );
-                        let fail_closed_sticky =
-                            state.config.credits.fail_closed && ctx.managed_inference;
-                        let budget_alert_tier = budget
-                            .as_ref()
-                            .filter(|value| value.limit > 0 && value.alert >= AlertTier::Warn)
-                            .map(|value| value.alert);
-                        let credit_permit = credit_reservation.take();
-                        let state_debit = Arc::clone(&state);
-                        let request_id = ctx.request_id.clone();
-                        let pool = crate::credit_pools::pool_for_gateway_provider(provider.name());
-                        let attribution = DebitAttribution {
-                            provider: Some(provider.name().to_string()),
-                            model: Some(decision.model.clone()),
-                            input_tokens: Some(input_tokens),
-                            output_tokens: Some(output_tokens),
-                            duration_ms: Some(latency_ms),
-                            user_id: ctx.user_id.clone(),
-                            ..Default::default()
-                        };
-                        tokio::spawn(async move {
-                            debit_wallet_for_request(
-                                state_debit,
-                                org_id,
-                                request_id,
-                                operation.as_str(),
-                                cost,
-                                fail_closed_sticky,
-                                budget_alert_tier,
-                                pool,
-                                attribution,
-                            )
-                            .await;
-                            drop(credit_permit);
-                        });
-                    }
+                    return Err(GatewayError::RateLimited);
                 }
 
                 let degraded = if primary_skipped {
@@ -3874,7 +3746,7 @@ pub async fn submit_video_job(
                         state_debit,
                         org_id,
                         debit_ref,
-                        "media",
+                        "gateway_usage",
                         cost,
                         fail_closed_sticky,
                         None,
@@ -4014,7 +3886,7 @@ pub async fn poll_video_job(
                         state_debit,
                         org_id,
                         debit_ref,
-                        "media",
+                        "gateway_usage",
                         cost,
                         fail_closed_sticky,
                         None,
@@ -4236,6 +4108,14 @@ fn enforce_budget(
     if ctx.is_master_key {
         return Ok(BudgetOutcome::default());
     }
+    if let Some(err) = accounting_unavailable_gate(state, ctx) {
+        state.metrics.inc_errors();
+        warn!(
+            org_id = ?ctx.org_id,
+            "credits: control-plane accounting unavailable, rejecting managed request (503)"
+        );
+        return Err(err);
+    }
     // Pre-flight credit gate (multi-tenant data plane): a managed-inference tenant
     // whose control-plane-resolved wallet is already exhausted is rejected BEFORE
     // dispatch with a hard 402. This closes the "fresh replica serves one request
@@ -4366,7 +4246,7 @@ fn enforce_budget(
             state.metrics.inc_budget_notified();
             warn!(
                 scope = budget.scope.as_str(),
-                key = %budget.key,
+                key_id = %crate::audit::credential_log_id(&budget.key),
                 used_micro_usd = budget.used,
                 limit_micro_usd = budget.limit,
                 "budget reached (notify)"
@@ -4377,7 +4257,7 @@ fn enforce_budget(
                 state.metrics.inc_budget_downgraded();
                 info!(
                     scope = budget.scope.as_str(),
-                    key = %budget.key,
+                    key_id = %crate::audit::credential_log_id(&budget.key),
                     downgrade = %model,
                     "budget reached, downgrading model"
                 );
@@ -4389,7 +4269,7 @@ fn enforce_budget(
             state.metrics.inc_budget_restricted();
             warn!(
                 scope = budget.scope.as_str(),
-                key = %budget.key,
+                key_id = %crate::audit::credential_log_id(&budget.key),
                 cap = budget.restrict_max_tokens,
                 "budget reached, restricting request"
             );
@@ -4406,7 +4286,7 @@ fn enforce_budget(
             state.metrics.inc_errors();
             warn!(
                 scope = budget.scope.as_str(),
-                key = %budget.key,
+                key_id = %crate::audit::credential_log_id(&budget.key),
                 used_micro_usd = budget.used,
                 limit_micro_usd = budget.limit,
                 "budget exceeded (stop)"
@@ -4764,6 +4644,21 @@ fn preflight_credit_gate(ctx: &RequestContext, pool: Option<&str>) -> Option<Gat
     (unrestricted.saturating_add(pooled) <= 0).then_some(GatewayError::InsufficientCredits)
 }
 
+/// Stop new managed provider spend after a debit could not be accounted for.
+/// This is intentionally separate from `wallet_empty_decision`: an outage is
+/// not evidence that the wallet is empty, and mapping it to the wallet-empty
+/// budget action would strand a funded tenant until the process restarts.
+fn accounting_unavailable_gate(state: &AppState, ctx: &RequestContext) -> Option<GatewayError> {
+    if !(ctx.managed_inference && state.config.credits.is_active()) {
+        return None;
+    }
+    let org_id = ctx.org_id.as_deref().filter(|value| !value.is_empty())?;
+    state
+        .wallet
+        .is_org_accounting_unavailable(org_id)
+        .then_some(GatewayError::AccountingUnavailable)
+}
+
 fn wallet_empty_decision(state: &AppState, ctx: &RequestContext) -> Option<BudgetDecision> {
     let credits = &state.config.credits;
     if !credits.is_active() {
@@ -4928,58 +4823,6 @@ fn media_cost_from_response(
         .media_cost_from_response(modality, response)
 }
 
-/// Read a provider-reported USD cost from either the normal response envelope
-/// or a preserved raw payload (OpenRouter image output uses `raw`).
-fn response_reported_cost_usd(response: &Value) -> Option<f64> {
-    response
-        .get("usage")
-        .and_then(|usage| usage.get("cost"))
-        .or_else(|| {
-            response
-                .get("raw")
-                .and_then(|raw| raw.get("usage"))
-                .and_then(|usage| usage.get("cost"))
-        })
-        .and_then(Value::as_f64)
-        .filter(|cost| cost.is_finite() && *cost >= 0.0)
-}
-
-/// Convert a provider-reported USD cost to micro-USD. Zero is meaningful: a
-/// provider promotion can make a managed request free, so only negative and
-/// non-finite values fall back to the token estimate.
-fn cost_usd_to_micro(cost_usd: f64) -> Option<u64> {
-    if cost_usd.is_finite() && cost_usd >= 0.0 {
-        Some((cost_usd * 1_000_000.0).round() as u64)
-    } else {
-        None
-    }
-}
-
-/// Extract the provider-reported generation cost (USD) from an assembled SSE
-/// transcript. OpenRouter includes `usage.cost` in the terminal usage frame when
-/// usage accounting is enabled; mirrors [`sse_parse_usage`]. `None` when absent.
-fn sse_parse_cost(raw: &str) -> Option<f64> {
-    let mut best = None;
-    for line in raw.lines() {
-        let Some(data) = line.strip_prefix("data:") else {
-            continue;
-        };
-        let data = data.trim();
-        if data.is_empty() || data == "[DONE]" {
-            continue;
-        }
-        let Ok(json) = serde_json::from_str::<Value>(data) else {
-            continue;
-        };
-        if let Some(cost) = json["usage"]["cost"].as_f64() {
-            if cost.is_finite() && cost >= 0.0 {
-                best = Some(cost);
-            }
-        }
-    }
-    best
-}
-
 /// The `POST /api/credits/debit` request body. Pulled out of
 /// [`debit_wallet_for_request`] so the wire contract with the control plane is
 /// assertable without a live endpoint — this is the one place the gateway tells
@@ -5103,18 +4946,17 @@ fn debit_request_body(
     body
 }
 
-/// Best-effort post-call wallet debit (#486). Computes the marked-up debit for a
-/// metered call's `costMicroUsd` and POSTs it to the control-plane
-/// `/credits/debit` for the request's org, then updates the cached empty flag
-/// from the authoritative balance so the NEXT request is gated.
+/// Post-call wallet debit (#486). Computes the marked-up debit for a metered
+/// call's `costMicroUsd` and POSTs it to the control-plane `/credits/debit` for
+/// the request's org, then updates the cached balance from the authoritative
+/// response so the NEXT request is gated when necessary.
 ///
-/// Never blocks the (already-served) request: a transport error, a non-2xx, or a
-/// missing org is logged (audit-grade observability via `warn!`). By default it
-/// fails OPEN (the empty flag is left untouched). When `fail_closed_sticky` is
-/// true (managed tenant + `credits.fail_closed`, §5), a transport error or non-2xx
-/// instead flips the org's wallet-empty flag so the NEXT request is refused — the
-/// current response still completes. A zero debit (cache hits, 0-token modalities)
-/// is skipped (the endpoint rejects `amountMicroUsd <= 0`).
+/// The already-served response cannot be unsent, but a managed debit failure is
+/// never allowed to authorize more provider spend: when `fail_closed_sticky` is
+/// true, transport errors, non-2xx responses, and malformed success bodies mark
+/// accounting unavailable and the next managed request receives a retryable 503.
+/// A zero debit (cache hits, 0-token modalities) is skipped because the endpoint
+/// rejects `amountMicroUsd <= 0`.
 ///
 /// `ref_id` makes the debit idempotent: a retried hook is a no-op. Token usage
 /// passes `ref_id = request_id`; the per-request tool-call (Composio) debit passes
@@ -5162,14 +5004,11 @@ async fn debit_wallet_for_request(
     // and `credits.base_url` defaults to `control_plane.base_url` — the bare origin,
     // because the sibling resolve call spells its own prefix out in full
     // (`{}/api/control-plane/gateway/resolve` in `policy/mod.rs`). This join did
-    // not, so in production every debit POSTed to `https://api.ryuhq.com/credits/debit`
-    // and got a plain **404**. The debit hook fails OPEN, and
-    // `GATEWAY_CREDITS_FAIL_CLOSED` is unset by design, so the gateway served the
-    // request anyway and never decremented a wallet: managed inference was
-    // metered, marked-up, audited — and completely unbilled. Verified against
-    // prod (2026-08-06): `/credits/debit` ⇒ 404, `/api/credits/debit` ⇒ 200
-    // `{"applied":true}` with the SAME secret, which is why the secret looked
-    // guilty for so long.
+    // not, so in production every debit POSTed to the wrong path and got a
+    // plain 404. Before the hardening change, the hook failed open and managed
+    // inference could run unbilled. The current default is fail-closed: the
+    // next request receives `credit_accounting_unavailable` after any failed or
+    // malformed debit response.
     let url = format!(
         "{}/api/credits/debit",
         credits.base_url.trim_end_matches('/')
@@ -5199,7 +5038,23 @@ async fn debit_wallet_for_request(
             // flag after a top-up. `wentNonPositive` is the edge event (log only).
             match r.json::<Value>().await {
                 Ok(v) => {
-                    let balance = v["balanceMicroUsd"].as_i64().unwrap_or(0);
+                    let Some(balance) = v["balanceMicroUsd"].as_i64() else {
+                        warn!(
+                            org_id = %org_id,
+                            ref_id = %ref_id,
+                            "credits: debit returned success without an integer balance"
+                        );
+                        audit_debit_failure(
+                            &state,
+                            &org_id,
+                            &ref_id,
+                            "credits debit response missing integer balance",
+                        );
+                        if fail_closed_sticky {
+                            state.wallet.set_org_accounting_unavailable(&org_id, true);
+                        }
+                        return;
+                    };
                     // Records the figure AND derives the empty flag from it, so
                     // Core's dollar-threshold fallback rules read the same number
                     // this gate does (`WalletState::set_org_balance`).
@@ -5213,7 +5068,7 @@ async fn debit_wallet_for_request(
                     }
                 }
                 Err(e) => {
-                    warn!(org_id = %org_id, error = %e, "credits: debit succeeded but response unparseable (failing open)");
+                    warn!(org_id = %org_id, error = %e, "credits: debit succeeded but response unparseable");
                     audit_debit_failure(
                         &state,
                         &org_id,
@@ -5244,7 +5099,7 @@ async fn debit_wallet_for_request(
                 &format!("credits debit failed: control plane returned {status}"),
             );
             if fail_closed_sticky {
-                state.wallet.set_org_empty(&org_id, true);
+                state.wallet.set_org_accounting_unavailable(&org_id, true);
             }
         }
         Err(e) => {
@@ -5261,7 +5116,7 @@ async fn debit_wallet_for_request(
                 &format!("credits debit failed (transport): {e}"),
             );
             if fail_closed_sticky {
-                state.wallet.set_org_empty(&org_id, true);
+                state.wallet.set_org_accounting_unavailable(&org_id, true);
             }
         }
     }
@@ -5474,106 +5329,6 @@ fn audit_debit_failure(state: &AppState, org_id: &str, request_id: &str, error: 
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
-/// Inject `stream_options.include_usage = true` into the request body so
-/// OpenAI-compatible providers emit a terminal usage frame at the end of the
-/// SSE stream. Non-conforming providers silently ignore the field and the
-/// stream observer falls back to the prompt-token estimate.
-///
-/// This is driven by `evals.stream_usage` in the config, never hardcoded.
-fn inject_stream_usage_option(body: &mut Value) {
-    if let Some(obj) = body.as_object_mut() {
-        let opts = obj.entry("stream_options").or_insert_with(|| json!({}));
-        if let Some(opts_obj) = opts.as_object_mut() {
-            opts_obj.entry("include_usage").or_insert(json!(true));
-        }
-    }
-}
-
-/// Parse streamed token counts from an assembled OpenAI SSE transcript.
-///
-/// OpenAI-compatible providers emit one terminal "usage" chunk when
-/// `stream_options.include_usage = true`. Its shape is:
-/// ```json
-/// {"choices":[],"usage":{"prompt_tokens":N,"completion_tokens":M,"total_tokens":T}}
-/// ```
-/// We scan all `data:` frames for a non-empty `usage` block (any frame may
-/// carry it; in practice it is the last non-DONE frame). Returns `(0, 0)` when
-/// no usage frame is found, falling back to the caller's estimate.
-fn sse_parse_usage(raw: &str) -> (u64, u64) {
-    let mut best = (0u64, 0u64);
-    for line in raw.lines() {
-        let Some(data) = line.strip_prefix("data:") else {
-            continue;
-        };
-        let data = data.trim();
-        if data.is_empty() || data == "[DONE]" {
-            continue;
-        }
-        let Ok(json) = serde_json::from_str::<Value>(data) else {
-            continue;
-        };
-        let input = json["usage"]["prompt_tokens"].as_u64().unwrap_or(0);
-        let output = json["usage"]["completion_tokens"].as_u64().unwrap_or(0);
-        if input > 0 || output > 0 {
-            best = (input, output);
-        }
-    }
-    best
-}
-
-/// Read the provider-side prompt-cache read count from a chat-completions
-/// response `usage` block. Covers OpenRouter/OpenAI
-/// (`prompt_tokens_details.cached_tokens`) and Anthropic-shaped
-/// (`cache_read_input_tokens`) usage. Returns 0 when the provider reports no
-/// prompt caching (the common case, so this stays a cheap no-op).
-fn provider_cached_tokens(response: &Value) -> u64 {
-    let usage = &response["usage"];
-    usage["prompt_tokens_details"]["cached_tokens"]
-        .as_u64()
-        .or_else(|| usage["cache_read_input_tokens"].as_u64())
-        .unwrap_or(0)
-}
-
-/// Counterpart of [`provider_cached_tokens`] for cache *writes* — prompt tokens
-/// the provider stored rather than served. Tracked separately because a write is
-/// billed above the normal input rate, so "cached_tokens went up" alone cannot
-/// tell an operator whether caching is saving money or costing it.
-fn provider_cache_write_tokens(response: &Value) -> u64 {
-    let usage = &response["usage"];
-    usage["prompt_tokens_details"]["cache_write_tokens"]
-        .as_u64()
-        .or_else(|| usage["cache_creation_input_tokens"].as_u64())
-        .unwrap_or(0)
-}
-
-/// Streaming counterpart of [`provider_cache_write_tokens`].
-fn sse_parse_cache_write_tokens(raw: &str) -> u64 {
-    sse_scan_usage(raw, provider_cache_write_tokens)
-}
-
-/// Scan an assembled SSE transcript, applying `pick` to every parseable frame
-/// and keeping the last non-zero result — the terminal usage frame in practice.
-fn sse_scan_usage(raw: &str, pick: fn(&Value) -> u64) -> u64 {
-    let mut best = 0u64;
-    for line in raw.lines() {
-        let Some(data) = line.strip_prefix("data:") else {
-            continue;
-        };
-        let data = data.trim();
-        if data.is_empty() || data == "[DONE]" {
-            continue;
-        }
-        let Ok(json) = serde_json::from_str::<Value>(data) else {
-            continue;
-        };
-        let n = pick(&json);
-        if n > 0 {
-            best = n;
-        }
-    }
-    best
-}
-
 /// Resolve the node's prompt-cache policy against this request and stamp the
 /// resulting markers onto the outgoing payload.
 ///
@@ -5632,30 +5387,6 @@ fn apply_prompt_cache(
     outcome
 }
 
-/// Streaming counterpart of [`provider_cached_tokens`]: scan an assembled SSE
-/// transcript for the terminal usage frame's cached-token count. Mirrors
-/// [`sse_parse_usage`]; returns 0 when absent.
-fn sse_parse_cached_tokens(raw: &str) -> u64 {
-    let mut best = 0u64;
-    for line in raw.lines() {
-        let Some(data) = line.strip_prefix("data:") else {
-            continue;
-        };
-        let data = data.trim();
-        if data.is_empty() || data == "[DONE]" {
-            continue;
-        }
-        let Ok(json) = serde_json::from_str::<Value>(data) else {
-            continue;
-        };
-        let cached = provider_cached_tokens(&json);
-        if cached > 0 {
-            best = cached;
-        }
-    }
-    best
-}
-
 /// State threaded through the stream observer unfold loop.
 struct StreamObserverState {
     inner: axum::body::BodyDataStream,
@@ -5671,7 +5402,72 @@ struct StreamObserverState {
     /// Managed policy-alert tier (item 4) carried to the stream-end debit so the
     /// control plane can email owners. `None` unless a budget cap with tier >=
     /// Warn matched this (streaming) request.
-    budget_alert_tier: Option<AlertTier>,
+	budget_alert_tier: Option<AlertTier>,
+}
+
+impl Drop for StreamObserverState {
+	fn drop(&mut self) {
+		if self.done {
+			return;
+		}
+		self.done = true;
+		let (raw_input, raw_output) = sse_parse_usage(&self.accumulated);
+		let input_tokens = if raw_input > 0 {
+			raw_input
+		} else {
+			self.estimated_input_tokens
+		};
+		let output_tokens = if raw_output > 0 {
+			raw_output
+		} else {
+			(self.accumulated.chars().count() as u64).div_ceil(4)
+		};
+		let latency_ms = self.start.elapsed().as_millis() as u64;
+		let total_tokens = input_tokens.saturating_add(output_tokens);
+		self.state
+			.audit
+			.add_tokens(&self.ctx.api_key, total_tokens);
+		self.state.metrics.add_tokens(input_tokens, output_tokens);
+		self.state.rate_limiter.record_tokens_for_key(
+			&self.ctx.api_key,
+			total_tokens.saturating_sub(self.estimated_input_tokens),
+			self.ctx.key_config.as_ref(),
+		);
+		let error = if self.accumulated.len() >= 8 * 1024 * 1024 {
+			"response stream exceeded the 8 MiB scan limit"
+		} else {
+			"stream disconnected before completion; usage estimated"
+		};
+		self.state.log_audit(AuditRecord {
+			request_id: self.ctx.request_id.clone(),
+			api_key: self.ctx.api_key.clone(),
+			user_name: self.ctx.user_name.clone(),
+			org_id: self.ctx.org_id.clone(),
+			team_id: self.ctx.team_id.clone(),
+			project_id: None,
+			provider: self.provider_name.clone(),
+			model: self.model.clone(),
+			input_tokens,
+			output_tokens,
+			cache_hit: false,
+			latency_ms,
+			eval_score: None,
+			error: Some(error.to_owned()),
+			skill_ids: self.ctx.skill_ids.clone(),
+			session_id: self.ctx.session_id.clone(),
+			user_id: self.ctx.user_id.clone(),
+			agent_id: self.ctx.agent_id.clone(),
+			feature: self.ctx.feature.clone(),
+			managed_inference: self.ctx.managed_inference,
+			provider_cost_micro_usd: None,
+			event_type: crate::audit::EventType::ModelCall,
+			backend: None,
+			command: None,
+			duration_ms: None,
+			exit_code: None,
+			widget_instance_id: None,
+		});
+	}
 }
 
 /// Wrap `body` with a stream observer that fires at stream end to:
@@ -5679,8 +5475,8 @@ struct StreamObserverState {
 ///  2. Emit an eval score for sampled requests.
 ///  3. Write a single audit row with the real counts (defer-to-end pattern).
 ///
-/// The observer sits after the outbound firewall wrapper so it fires regardless
-/// of the configured firewall policy. The SSE frames are passed through
+/// The observer sits before the outbound firewall wrapper, so client-visible
+/// block/sanitize frames cannot erase original provider usage or reported cost. The SSE frames are passed through
 /// byte-for-byte; the terminal usage chunk is NOT stripped (clients that
 /// requested `include_usage` should receive it; clients that did not will
 /// receive a bonus usage-only chunk that well-behaved parsers ignore).
@@ -6095,7 +5891,8 @@ async fn apply_outbound_firewall_stream(
     }
 
     // Buffer the whole upstream stream, then decide (node scan first, then evals).
-    let collected = match axum::body::to_bytes(stream_body, usize::MAX).await {
+    const MAX_BUFFERED_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
+    let collected = match axum::body::to_bytes(stream_body, MAX_BUFFERED_RESPONSE_BYTES).await {
         Ok(bytes) => bytes,
         Err(e) => {
             warn!(request_id = %request_id, error = %e, "firewall: failed to buffer stream for outbound scan");
@@ -6348,38 +6145,6 @@ mod tests {
         let (mode, ttl) = resolve_prompt_cache_override(&cfg, &ctx);
         assert_eq!(mode, None, "a locked node must ignore x-ryu-prompt-cache");
         assert_eq!(ttl, None);
-    }
-
-    #[test]
-    fn cache_usage_is_read_from_both_provider_vocabularies() {
-        // OpenAI / OpenRouter shape.
-        let oai = json!({ "usage": { "prompt_tokens_details": {
-            "cached_tokens": 900, "cache_write_tokens": 100 } } });
-        assert_eq!(provider_cached_tokens(&oai), 900);
-        assert_eq!(provider_cache_write_tokens(&oai), 100);
-
-        // Anthropic-native shape.
-        let ant = json!({ "usage": {
-            "cache_read_input_tokens": 42, "cache_creation_input_tokens": 7 } });
-        assert_eq!(provider_cached_tokens(&ant), 42);
-        assert_eq!(provider_cache_write_tokens(&ant), 7);
-
-        // Uncached responses stay at zero (no phantom counters).
-        let plain = json!({ "usage": { "prompt_tokens": 10 } });
-        assert_eq!(provider_cached_tokens(&plain), 0);
-        assert_eq!(provider_cache_write_tokens(&plain), 0);
-    }
-
-    #[test]
-    fn stream_cache_usage_is_read_from_the_terminal_frame() {
-        let sse = concat!(
-            "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n",
-            "data: {\"usage\":{\"prompt_tokens\":1000,\"prompt_tokens_details\":",
-            "{\"cached_tokens\":900,\"cache_write_tokens\":100}}}\n\n",
-            "data: [DONE]\n\n",
-        );
-        assert_eq!(sse_parse_cached_tokens(sse), 900);
-        assert_eq!(sse_parse_cache_write_tokens(sse), 100);
     }
 
     /// An `AppState` whose credits config is exactly what a reservation test
@@ -6887,7 +6652,7 @@ mod tests {
         let estimated = debit_request_body(
             "o1",
             1_950,
-            "media",
+            "gateway_usage",
             "req_1:image",
             None,
             None,
@@ -6905,7 +6670,7 @@ mod tests {
         let measured = debit_request_body(
             "o1",
             2_925,
-            "media",
+            "gateway_usage",
             "req_2:image",
             None,
             None,
@@ -7966,132 +7731,6 @@ mod tests {
 
     // ─── Streaming token-usage tap tests (#179) ───────────────────────────────
 
-    /// inject_stream_usage_option adds include_usage=true to the body.
-    /// A second call must not overwrite an existing value (idempotent).
-    #[test]
-    fn inject_stream_usage_option_adds_field_and_is_idempotent() {
-        let mut body = json!({ "model": "gpt-4o", "messages": [] });
-        inject_stream_usage_option(&mut body);
-        assert_eq!(body["stream_options"]["include_usage"], json!(true));
-
-        // Calling again must not change anything.
-        inject_stream_usage_option(&mut body);
-        assert_eq!(body["stream_options"]["include_usage"], json!(true));
-    }
-
-    /// inject_stream_usage_option preserves existing stream_options fields.
-    #[test]
-    fn inject_stream_usage_option_preserves_existing_stream_options() {
-        let mut body = json!({
-            "model": "gpt-4o",
-            "stream_options": { "custom_field": 42 }
-        });
-        inject_stream_usage_option(&mut body);
-        assert_eq!(body["stream_options"]["include_usage"], json!(true));
-        // Original field must survive.
-        assert_eq!(body["stream_options"]["custom_field"], json!(42));
-    }
-
-    /// sse_parse_usage extracts prompt_tokens and completion_tokens from the
-    /// terminal OpenAI usage frame. This is the recorded SSE fixture for AC2.
-    #[test]
-    fn sse_parse_usage_extracts_from_terminal_usage_frame() {
-        // Recorded SSE fixture: two content delta chunks + terminal usage chunk
-        // + DONE, as emitted by OpenAI when stream_options.include_usage=true.
-        let raw = concat!(
-            "data: {\"id\":\"chatcmpl-x\",\"object\":\"chat.completion.chunk\",",
-            "\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Hello\"},\"finish_reason\":null}]}\n\n",
-            "data: {\"id\":\"chatcmpl-x\",\"object\":\"chat.completion.chunk\",",
-            "\"choices\":[{\"index\":0,\"delta\":{\"content\":\" world\"},\"finish_reason\":\"stop\"}]}\n\n",
-            // Terminal usage frame: choices is empty, usage carries the real counts.
-            "data: {\"id\":\"chatcmpl-x\",\"object\":\"chat.completion.chunk\",",
-            "\"choices\":[],\"usage\":{\"prompt_tokens\":12,\"completion_tokens\":8,\"total_tokens\":20}}\n\n",
-            "data: [DONE]\n\n"
-        );
-
-        let (input, output) = sse_parse_usage(raw);
-        assert_eq!(
-            input, 12,
-            "prompt_tokens must be parsed from the terminal usage frame"
-        );
-        assert_eq!(
-            output, 8,
-            "completion_tokens must be parsed from the terminal usage frame"
-        );
-    }
-
-    /// sse_parse_usage returns (0, 0) when the provider emits no usage frame,
-    /// so the caller can fall back to the prompt estimate.
-    #[test]
-    fn sse_parse_usage_returns_zeros_when_no_usage_frame_present() {
-        let raw = concat!(
-            "data: {\"choices\":[{\"delta\":{\"content\":\"Hi\"}}]}\n\n",
-            "data: [DONE]\n\n"
-        );
-        let (input, output) = sse_parse_usage(raw);
-        assert_eq!(input, 0);
-        assert_eq!(output, 0);
-    }
-
-    /// sse_parse_usage ignores malformed lines and picks the last usage frame.
-    #[test]
-    fn sse_parse_usage_handles_malformed_lines_and_multiple_usage_frames() {
-        let raw = concat!(
-            ": keep-alive\n\n",
-            "data: not-json\n\n",
-            // First usage frame with lower counts.
-            "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":5,\"completion_tokens\":3}}\n\n",
-            // Second usage frame wins (last non-zero wins).
-            "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":20,\"completion_tokens\":10}}\n\n",
-            "data: [DONE]\n\n"
-        );
-        let (input, output) = sse_parse_usage(raw);
-        // Last non-zero frame wins.
-        assert_eq!(input, 20);
-        assert_eq!(output, 10);
-    }
-
-    /// sse_parse_cost pulls OpenRouter's `usage.cost` from the terminal frame.
-    #[test]
-    fn sse_parse_cost_extracts_reported_cost() {
-        let raw = concat!(
-            "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n",
-            "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":12,\"completion_tokens\":8,",
-            "\"cost\":0.0023}}\n\n",
-            "data: [DONE]\n\n"
-        );
-        assert_eq!(sse_parse_cost(raw), Some(0.0023));
-    }
-
-    /// No `usage.cost` (non-OpenRouter provider) → None, so the debit falls back
-    /// to the flat token estimate.
-    #[test]
-    fn sse_parse_cost_absent_returns_none() {
-        let raw = concat!(
-            "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":5,\"completion_tokens\":3}}\n\n",
-            "data: [DONE]\n\n"
-        );
-        assert_eq!(sse_parse_cost(raw), None);
-    }
-
-    /// cost_usd_to_micro converts dollars to micro-USD and rejects junk values.
-    #[test]
-    fn cost_usd_to_micro_converts_and_rejects_negative_or_nonfinite() {
-        assert_eq!(cost_usd_to_micro(0.0023), Some(2300));
-        assert_eq!(cost_usd_to_micro(1.0), Some(1_000_000));
-        assert_eq!(cost_usd_to_micro(0.0), Some(0));
-        assert_eq!(cost_usd_to_micro(-1.0), None);
-        assert_eq!(cost_usd_to_micro(f64::NAN), None);
-        assert_eq!(cost_usd_to_micro(f64::INFINITY), None);
-    }
-
-    #[test]
-    fn sse_parse_cost_preserves_a_free_provider_transaction() {
-        let raw = "data: {\"usage\":{\"cost\":0}}\n\n";
-        assert_eq!(sse_parse_cost(raw), Some(0.0));
-        assert_eq!(cost_usd_to_micro(sse_parse_cost(raw).unwrap()), Some(0));
-    }
-
     #[test]
     fn openrouter_identity_prefers_agent_and_ignores_other_providers() {
         let mut ctx = crate::pipeline::test_support::plain_request_context();
@@ -8671,7 +8310,7 @@ mod tests {
     /// Run the input inline-evaluator stage with one enabled binding for `eval_id`
     /// at `action`, returning the pipeline result.
     async fn run_input_wasm(
-        state: &AppState,
+        state: &Arc<AppState>,
         eval_id: &str,
         action: FirewallPolicy,
     ) -> Result<Option<PolicyAlert>, GatewayError> {
@@ -10149,6 +9788,44 @@ mod fallback_tests {
         // Seed usage above the rule's limit so the very next request trips it.
         state.with_budget(|b| b.record(None, Some("agent-a"), 1_000_000));
         (state, calls)
+    }
+
+    #[tokio::test]
+    async fn scoped_inference_auth_binds_identity_and_enforces_agent_budget() {
+        use crate::config::{BudgetAction, BudgetRule};
+        let (state, calls) = agent_budget_state(BudgetRule {
+            limit: 1_000_000, action: BudgetAction::Stop, downgrade_to: None,
+            restrict_max_tokens: 256, alert: crate::config::AlertTier::Silent,
+            include: crate::config::BudgetChargeInclusion::default(),
+        });
+        let signer = "gwcore_0123456789abcdef0123456789abcdef";
+        state.update_auth_config(vec![serde_json::from_value(serde_json::json!({
+            "key": signer, "name":"local-core", "trusted_forwarder":true,
+        })).unwrap()]);
+        let token = ryu_gw_credentials::InferenceScope {
+            agent_id:"agent-a".into(), user_id:Some("user-a".into()), session_id:Some("session-a".into()),
+        }.sign(signer).unwrap();
+        let bearer = format!("Bearer {token}");
+        let context = super::authenticate(&state, super::AuthInputs::with_key(Some(&bearer))).await.unwrap();
+        assert_eq!(context.agent_id.as_deref(), Some("agent-a"));
+        assert_eq!(context.user_id.as_deref(), Some("user-a"));
+        assert_eq!(context.session_id.as_deref(), Some("session-a"));
+        assert!(!context.is_master_key);
+        assert!(!context.key_config.as_ref().is_some_and(|key| key.trusted_forwarder));
+        for (agent_id, user_id, session_id) in [
+            (Some("agent-b"), None, None), (None, Some("user-b"), None), (None, None, Some("session-b")),
+        ] {
+            let mut input = super::AuthInputs::with_key(Some(&bearer));
+            input.agent_id = agent_id.map(str::to_owned);
+            input.user_id = user_id.map(str::to_owned);
+            input.session_id = session_id.map(str::to_owned);
+            assert!(matches!(super::authenticate(&state, input).await, Err(GatewayError::Unauthorized(_))));
+        }
+        let tampered = format!("{token}0");
+        assert!(matches!(super::authenticate(&state, super::AuthInputs::with_key(Some(&tampered))).await, Err(GatewayError::Unauthorized(_))));
+        let result = run(Arc::clone(&state), context, ping_body()).await;
+        assert!(matches!(result, Err(GatewayError::BudgetExceeded(_))));
+        assert_eq!(calls.load(Ordering::SeqCst), 0, "scoped agent budget must stop before provider dispatch");
     }
 
     fn agent_a_ctx() -> RequestContext {

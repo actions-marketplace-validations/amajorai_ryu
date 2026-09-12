@@ -43,6 +43,10 @@ pub enum JobTarget {
         prompt: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         model: Option<String>,
+        /// Existing conversation to append to. `None` means every firing gets
+        /// its own new persistent conversation.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        conversation_id: Option<String>,
     },
     /// Run one website-monitor check (fetch → compare → alert). The monitor engine
     /// runs OUT-OF-PROCESS (`ryu-monitors` sidecar); the tick dispatches over loopback
@@ -140,6 +144,13 @@ pub struct ScheduledJob {
     /// something. `None` (a job Core or the desktop owns) is never gated.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owner_app: Option<String>,
+    /// Verified user who owns this routine on a shared node. Absent on personal
+    /// nodes and legacy/system jobs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_user_id: Option<String>,
+    /// Organization that owns this routine on a shared node.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub org_id: Option<String>,
     pub created_at: String,
     pub updated_at: String,
     /// ISO timestamp of the last time this job fired (success or failure).
@@ -188,6 +199,26 @@ pub fn load_job(id: &str) -> std::io::Result<ScheduledJob> {
     let bytes = std::fs::read(path)?;
     serde_json::from_slice(&bytes)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+}
+
+/// Record a finished run against the current configuration, not the snapshot
+/// captured before executing agent tools. A run may reschedule or delete itself.
+pub fn append_execution(id: &str, record: ExecRecord) -> std::io::Result<()> {
+    append_execution_at(&jobs_dir().join(format!("{id}.json")), record)
+}
+
+fn append_execution_at(path: &std::path::Path, record: ExecRecord) -> std::io::Result<()> {
+    let bytes = match std::fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    let mut current: ScheduledJob = serde_json::from_slice(&bytes)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+    current.record_execution(record);
+    let json = serde_json::to_vec_pretty(&current)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+    std::fs::write(path, json)
 }
 
 /// List all persisted scheduled jobs.
@@ -248,12 +279,41 @@ mod tests {
             enabled: true,
             require_approval: false,
             owner_app: None,
+            owner_user_id: None,
+            org_id: None,
             created_at: "2026-01-01T00:00:00Z".into(),
             updated_at: "2026-01-01T00:00:00Z".into(),
             last_run_at: None,
             last_outcome: None,
             history: Vec::new(),
         }
+    }
+
+    #[test]
+    fn completion_preserves_rescheduled_config_and_does_not_resurrect_deleted_job() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("job.json");
+        let mut updated = job();
+        updated.schedule = Schedule::Every {
+            interval: "6h".into(),
+        };
+        updated.enabled = false;
+        updated.target = JobTarget::Agent {
+            agent_id: "watch".into(),
+            prompt: "Recheck after reset".into(),
+            model: Some("low-cost-model".into()),
+            conversation_id: None,
+        };
+        std::fs::write(&path, serde_json::to_vec(&updated).unwrap()).unwrap();
+        append_execution_at(&path, record(ExecOutcome::Success, "2026-09-11T00:00:00Z")).unwrap();
+        let saved: ScheduledJob = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(saved.schedule, updated.schedule);
+        assert_eq!(saved.target, updated.target);
+        assert!(!saved.enabled);
+        assert_eq!(saved.history.len(), 1);
+        std::fs::remove_file(&path).unwrap();
+        append_execution_at(&path, record(ExecOutcome::Success, "2026-09-11T00:01:00Z")).unwrap();
+        assert!(!path.exists());
     }
 
     #[test]
@@ -304,6 +364,7 @@ mod tests {
                 agent_id: "a".into(),
                 prompt: "p".into(),
                 model: None,
+                conversation_id: None,
             }
         );
         assert_eq!(

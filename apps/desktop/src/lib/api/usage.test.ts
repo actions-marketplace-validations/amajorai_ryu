@@ -13,7 +13,12 @@ afterEach(() => {
 
 describe("subscription provider usage eligibility", () => {
 	test("accepts configured Ryu OAuth providers supported by Core", () => {
-		for (const id of ["openai-codex", "claude-pro-max", "github-copilot"]) {
+		for (const id of [
+			"openai-codex",
+			"chatgpt",
+			"claude-pro-max",
+			"github-copilot",
+		]) {
 			expect(
 				supportsSubscriptionProviderUsage({
 					authKind: "subscription",
@@ -59,6 +64,7 @@ describe("subscription provider usage eligibility", () => {
 	test("uses the same engine hints as ACP usage polling", () => {
 		expect(supportsUsage("acp:claude")).toBe(true);
 		expect(supportsUsage("acp:codex")).toBe(true);
+		expect(supportsUsage("chatgpt")).toBe(true);
 		expect(supportsUsage("acp:copilot")).toBe(true);
 		expect(supportsUsage("ryu")).toBe(false);
 	});

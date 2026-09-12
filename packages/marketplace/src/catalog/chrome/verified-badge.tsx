@@ -166,7 +166,7 @@ export default function VerifiedBadge({
 			: level === "blue"
 				? tone === "hero"
 					? "text-sky-100"
-					: "text-info"
+					: "text-status-info"
 				: "text-muted-foreground/70 opacity-50 transition-opacity focus-within:opacity-100 hover:opacity-100";
 	return (
 		<VerificationPopover

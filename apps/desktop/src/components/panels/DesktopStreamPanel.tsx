@@ -222,7 +222,7 @@ export function DesktopStreamPanel({ active = true }: { active?: boolean }) {
 				</select>
 				<span
 					className={`size-1.5 shrink-0 rounded-full ${
-						connected ? "bg-emerald-500" : "bg-muted-foreground/40"
+						connected ? "bg-success" : "bg-muted-foreground/40"
 					}`}
 					title={status}
 				/>

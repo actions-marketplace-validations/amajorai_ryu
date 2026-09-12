@@ -1,4 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import {
+	isViewVisible,
+	subscribeViewVisibility,
+} from "../lib/view-visibility.ts";
 
 export interface QueryResult<T> {
 	data: T | undefined;
@@ -6,7 +10,7 @@ export interface QueryResult<T> {
 	isError: boolean;
 	isFetching: boolean;
 	isLoading: boolean;
-	refetch: () => void;
+	refetch: () => Promise<void>;
 }
 
 export class QueryRequestGate {
@@ -44,13 +48,21 @@ export function useQuery<T>(opts: {
 	const { refetchInterval } = opts;
 
 	const run = useCallback((aliveRef: { alive: boolean }, silent: boolean) => {
+		if (!aliveRef.alive) {
+			return Promise.resolve();
+		}
+		// Let a slow bridge response settle before another automatic poll. Replacing
+		// it every interval can otherwise keep the first usable result stale forever.
+		if (silent && (currentRequestRef.current !== null || !isViewVisible())) {
+			return Promise.resolve();
+		}
 		const request = gateRef.current.begin();
 		// A newer request supersedes every older request. Keep the foreground
 		// spinner tied to that newest request so a silent poll cannot leave a
 		// manual refetch stuck in `isFetching` after it becomes stale.
 		currentRequestRef.current = request;
 		setIsFetching(!silent);
-		Promise.resolve()
+		return Promise.resolve()
 			.then(() => fnRef.current())
 			.then((value) => {
 				if (aliveRef.alive && gateRef.current.isCurrent(request)) {
@@ -69,6 +81,7 @@ export function useQuery<T>(opts: {
 					gateRef.current.isCurrent(request) &&
 					currentRequestRef.current === request
 				) {
+					currentRequestRef.current = null;
 					setIsLoading(false);
 					setIsFetching(false);
 				}
@@ -85,7 +98,17 @@ export function useQuery<T>(opts: {
 		if (refetchInterval && refetchInterval > 0) {
 			timer = setInterval(() => run(aliveRef, true), refetchInterval);
 		}
+		const onVisibility = () => {
+			if (isViewVisible()) {
+				run(aliveRef, true);
+			}
+		};
+		const unsubscribe = timer
+			? subscribeViewVisibility(onVisibility)
+			: undefined;
 		return () => {
+			unsubscribe?.();
+			currentRequestRef.current = null;
 			aliveRef.alive = false;
 			gateRef.current.invalidate();
 			if (timer) {
@@ -96,7 +119,7 @@ export function useQuery<T>(opts: {
 	}, [key, refetchInterval, run]);
 
 	const refetch = useCallback(() => {
-		run(manualRef.current, false);
+		return run(manualRef.current, false);
 	}, [run]);
 
 	return {

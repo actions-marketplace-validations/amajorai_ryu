@@ -9,7 +9,7 @@ use axum::{
     Extension, Json, Router,
 };
 use serde::Deserialize;
-use serde_json::json;
+use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::process::Command;
 use std::sync::Arc;
@@ -23,13 +23,17 @@ pub mod auto_title;
 pub mod canvas_migrate;
 pub mod catalog_scan;
 pub mod chat_suggestions;
+pub mod chatgpt_api;
 pub mod continuity;
 pub mod conversations;
 pub mod data_admin;
+mod data_path_api;
+mod backups;
 pub mod encryption;
 pub mod gifs;
 pub mod git;
 pub mod governance;
+pub mod harness;
 pub mod hooks;
 pub mod recommendations;
 // The device-registry + TRMNL display HTTP surface moved to the extracted
@@ -41,6 +45,7 @@ pub mod hardware_ws;
 // turn on the user's behalf. Names no app — it is a host primitive, reached through
 // the generic capability broker.
 pub mod host_chat;
+pub mod model_stream;
 // Healing is now OUT-OF-PROCESS: the `ryu-healing` sidecar (`crates/ryu-healing`
 // `[[bin]]`) owns the diagnose→propose engine, the per-source attempt cap, the
 // `healing.*` prefs, the Gateway diagnosis, and the `/api/healing/*` surface (served
@@ -49,6 +54,9 @@ pub mod host_chat;
 // in-process `healing_api` module or `healing_routes` fn.
 pub mod agent_ui_templates;
 pub mod identity_api;
+pub mod improvement_api;
+pub mod images;
+pub mod language_packs;
 pub mod learning;
 pub mod managed_bot_api;
 pub mod mcp_oauth_api;
@@ -62,18 +70,19 @@ pub mod uploads;
 /// [`crate::memory_host`]. This alias keeps the ~19 `memory::`-qualified call
 /// sites in Core unchanged (re-export shim, zero business logic).
 pub use ryu_memory as memory;
-pub mod app_notify;
 pub mod app_egress;
 pub mod app_email;
+pub mod app_notify;
 pub mod app_tool_usage;
-pub mod provider_router;
 pub mod notifications_api;
 pub mod onboarding_profile;
+pub mod onboarding_state;
 pub mod openapi;
 pub mod plugin_bridge_api;
 pub mod plugin_uninstall;
 pub mod portable_package_runtime;
 pub mod preferences;
+pub mod provider_router;
 pub mod realtime_ws;
 pub mod rules;
 pub mod shadow_proxy;
@@ -88,6 +97,7 @@ pub mod spaces;
 pub mod sync;
 pub mod usage_api;
 pub mod usage_review;
+pub mod vault_api;
 pub mod voice;
 pub mod voice_ws;
 pub mod widgets;
@@ -211,6 +221,10 @@ pub struct ServerState {
     /// `onStartup` re-run. Surfaced through `GET /api/engines` (engines) and
     /// `GET /api/plugins/contributions` (channels + companions).
     pub app_contrib: crate::plugins::app_contrib::AppContribRegistry,
+    /// Coordinates plugin runtime generations. Activation publishes only after
+    /// registration completes; deactivation drains in-flight hook work before
+    /// removing the plugin's contributions.
+    pub plugin_runtime: crate::plugins::runtime::PluginRuntime,
     /// Per-run observability trace store (M4 / issue #178). Persists ordered
     /// spans (tool-call, model-call) keyed by `conversation_id`.
     pub traces: TraceStore,
@@ -269,9 +283,9 @@ pub struct ServerState {
     /// by background ingest loops (`crate::activity::ingest`) that subscribe to
     /// each producing engine. Records *what happened* ⇒ Core.
     pub activity: ryu_activity::ActivityStore,
-    /// Optional mesh plane (#478): a thin handle over the Tailscale/Headscale
-    /// status read path. The daemon itself is an opt-in Sidecar (never in
-    /// `startup_order`); this handle backs `GET /api/mesh/status`.
+    /// Optional private-network plane (#478): a thin handle over the
+    /// Tailscale/Headscale or Tailcat status read path. The provider itself is
+    /// an opt-in Sidecar; this handle backs `GET /api/mesh/status`.
     pub mesh: ryu_mesh::MeshHandle,
     /// In-memory connected-client presence registry (the "who's on this node"
     /// surface). Populated by the `track_connection` middleware on every
@@ -312,6 +326,9 @@ pub struct ServerState {
     /// sweeping conversations at cycle time (never on the chat hot path). Read by
     /// the `/api/learn/*` + `/api/experience/*` surface ([`crate::server::learning`]).
     pub experience: ryu_learning::ExperienceStore,
+    /// Core-owned durable recursive-improvement records. Learning and Research
+    /// carry correlation ids into this store; Core owns lifecycle persistence.
+    pub improvements: ryu_improvement::ImprovementStore,
     /// Per-node Agent-UI template library. Templates are validated JSON over
     /// the closed catalog and resource-scoped by the HTTP handlers.
     pub agent_ui_templates: agent_ui_templates::AgentUiTemplateStore,
@@ -428,6 +445,14 @@ fn ct_eq(a: &str, b: &str) -> bool {
     diff == 0
 }
 
+/// A loopback socket is local only when Core is not behind its own Tailcat
+/// forwarding listener. Tailcat re-originates remote streams as loopback TCP
+/// connections, so its active state must override the otherwise useful
+/// loopback shortcut.
+fn is_trusted_local_peer(peer: std::net::IpAddr, tailcat_proxy_active: bool) -> bool {
+    peer.is_loopback() && !tailcat_proxy_active
+}
+
 #[derive(Clone)]
 struct ResolvedAuthorization {
     context: crate::authorization::AuthorizationContext,
@@ -437,7 +462,7 @@ struct ResolvedAuthorization {
 }
 
 #[derive(Clone)]
-struct VerifiedUserJwt(Option<String>);
+pub(crate) struct VerifiedUserJwt(Option<String>);
 
 fn path_has_prefix(path: &str, prefix: &str) -> bool {
     path == prefix
@@ -449,6 +474,29 @@ fn path_has_prefix(path: &str, prefix: &str) -> bool {
 fn route_policy(method: &Method, path: &str) -> crate::authorization::RoutePolicy {
     use crate::authorization::{Capability, RoutePolicy};
     let read = matches!(*method, Method::GET | Method::HEAD);
+    if path == "/api/onboarding/state" {
+        return RoutePolicy::requires([Capability::GatewayRoute]);
+    }
+    if path == "/api/language-packs/installed" {
+        return RoutePolicy::requires([Capability::GatewayRoute]);
+    }
+    if path == "/api/language-packs/import" {
+        return RoutePolicy::requires([Capability::GatewayRoute]);
+    }
+    if path == "/api/onboarding/access" || path_has_prefix(path, "/api/onboarding/profile") {
+        return RoutePolicy::requires([Capability::GatewayRoute]);
+    }
+    if path_has_prefix(path, "/api/marketplace/packages") {
+        // Package handlers perform the operation-specific node ACL check. This
+        // route gate admits managed users to that check while keeping unknown
+        // routes default-denied elsewhere.
+        return RoutePolicy::requires([Capability::GatewayRoute]);
+    }
+    if path == "/api/preferences/user-personalization" {
+        // The preference handler applies the stricter personal-node owner check;
+        // GatewayRoute is only the managed-user admission step.
+        return RoutePolicy::requires([Capability::GatewayRoute]);
+    }
     if path == "/mcp" || path_has_prefix(path, "/mcp") {
         return RoutePolicy::Authenticated;
     }
@@ -530,7 +578,34 @@ fn route_policy(method: &Method, path: &str) -> crate::authorization::RoutePolic
             RoutePolicy::OwnerOnly
         };
     }
+    if path_has_prefix(path, "/api/vault") {
+        // The handler applies the scope-specific user/node/team/org check.
+        // GatewayRoute admits the managed-user route while preserving the
+        // existing node-token owner path; it does not itself expose a value.
+        return RoutePolicy::requires([Capability::GatewayRoute]);
+    }
     RoutePolicy::OwnerOnly
+}
+
+#[cfg(test)]
+mod local_peer_trust_tests {
+    use super::is_trusted_local_peer;
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+
+    #[test]
+    fn tailcat_forwarded_loopback_is_not_a_trusted_local_peer() {
+        let loopback = IpAddr::V4(Ipv4Addr::LOCALHOST);
+        assert!(is_trusted_local_peer(loopback, false));
+        assert!(!is_trusted_local_peer(loopback, true));
+        assert!(!is_trusted_local_peer(
+            IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)),
+            false
+        ));
+        assert!(!is_trusted_local_peer(
+            IpAddr::V6(Ipv6Addr::LOCALHOST),
+            true
+        ));
+    }
 }
 
 #[cfg(test)]
@@ -562,13 +637,142 @@ mod gateway_audit_route_policy_tests {
             RoutePolicy::OwnerOnly
         );
     }
+
+    #[test]
+    fn node_onboarding_state_uses_gateway_route_for_handler_level_permission_checks() {
+        assert_eq!(
+            route_policy(&Method::GET, "/api/onboarding/state"),
+            RoutePolicy::requires([crate::authorization::Capability::GatewayRoute])
+        );
+        assert_eq!(
+            route_policy(&Method::PUT, "/api/onboarding/state"),
+            RoutePolicy::requires([crate::authorization::Capability::GatewayRoute])
+        );
+        assert_eq!(
+            route_policy(&Method::DELETE, "/api/onboarding/state"),
+            RoutePolicy::requires([crate::authorization::Capability::GatewayRoute])
+        );
+    }
+
+    #[test]
+    fn installed_language_packs_are_readable_with_gateway_route() {
+        assert_eq!(
+            route_policy(&Method::GET, "/api/language-packs/installed"),
+            RoutePolicy::requires([crate::authorization::Capability::GatewayRoute])
+        );
+        assert_eq!(
+            route_policy(&Method::POST, "/api/language-packs/import"),
+            RoutePolicy::requires([crate::authorization::Capability::GatewayRoute])
+        );
+    }
+
+    #[test]
+    fn onboarding_profile_and_package_routes_reach_handler_level_checks() {
+        let gateway_route = RoutePolicy::requires([crate::authorization::Capability::GatewayRoute]);
+        assert_eq!(
+            route_policy(&Method::GET, "/api/onboarding/access"),
+            gateway_route
+        );
+        assert_eq!(
+            route_policy(&Method::GET, "/api/onboarding/profile/availability"),
+            gateway_route
+        );
+        assert_eq!(
+            route_policy(&Method::POST, "/api/onboarding/profile/start"),
+            gateway_route
+        );
+        assert_eq!(
+            route_policy(&Method::GET, "/api/marketplace/packages/installed"),
+            gateway_route
+        );
+        assert_eq!(
+            route_policy(
+                &Method::POST,
+                "/api/marketplace/packages/language_pack/id/enable"
+            ),
+            gateway_route
+        );
+    }
+
+    #[test]
+    fn personal_onboarding_preference_reaches_its_owner_check() {
+        assert_eq!(
+            route_policy(&Method::GET, "/api/preferences/user-personalization"),
+            RoutePolicy::requires([crate::authorization::Capability::GatewayRoute])
+        );
+        assert_eq!(
+            route_policy(&Method::PUT, "/api/preferences/user-personalization"),
+            RoutePolicy::requires([crate::authorization::Capability::GatewayRoute])
+        );
+    }
+}
+
+#[cfg(test)]
+mod gateway_status_redaction_tests {
+    use super::redact_gateway_config;
+
+    #[test]
+    fn persisted_gateway_credentials_are_redacted_before_status_serialization() {
+        let mut config: toml::Value = toml::from_str(
+            r#"
+                [providers.openai]
+                api_key = "openai-secret"
+                api_keys = ["openai-extra"]
+
+                [providers.core]
+                token = "core-secret"
+
+                [providers.genai.keys]
+                gemini = "gemini-secret"
+
+                [auth]
+                master_key = "master-secret"
+
+                [[auth.api_keys]]
+                name = "forwarder"
+                key = "forwarder-secret"
+                trusted_forwarder = true
+
+                [firewall]
+                enabled = true
+            "#,
+        )
+        .expect("test gateway config parses");
+
+        redact_gateway_config(&mut config);
+
+        let json = serde_json::to_value(config).expect("redacted gateway config serializes");
+        let body = json.to_string();
+        for secret in [
+            "openai-secret",
+            "openai-extra",
+            "core-secret",
+            "gemini-secret",
+            "master-secret",
+            "forwarder-secret",
+        ] {
+            assert!(!body.contains(secret), "status response leaked {secret}");
+        }
+        assert_eq!(json["providers"]["openai"]["api_key"], "***");
+        assert_eq!(json["providers"]["openai"]["api_keys"][0], "***");
+        assert_eq!(json["providers"]["core"]["token"], "***");
+        assert_eq!(json["providers"]["genai"]["keys"]["gemini"], "***");
+        assert_eq!(json["auth"]["master_key"], "***");
+        assert_eq!(json["auth"]["api_keys"][0]["name"], "forwarder");
+        assert_eq!(json["auth"]["api_keys"][0]["key"], "***");
+        assert_eq!(json["auth"]["api_keys"][0]["trusted_forwarder"], true);
+        assert_eq!(json["firewall"]["enabled"], true);
+    }
 }
 
 #[cfg(test)]
 mod managed_user_authorization_tests {
-    use super::managed_user_jwt_resolution_for;
+    use super::{
+        anonymous_host_conversation_allowed, caller_owns_host_conversation,
+        host_conversation_proof, host_conversation_proof_is_valid, managed_user_jwt_resolution_for,
+    };
     use crate::authorization::{Capability, RoutePolicy};
-    use crate::identity_verify::{OrgRole, TeamMembership, VerifiedCaller};
+    use crate::identity_verify::{OrgRole, ResourceTenancy, TeamMembership, VerifiedCaller};
     use crate::sidecar::control_plane::{NodeScope, RegisteredNode, RegisteredOrg};
 
     fn node() -> RegisteredNode {
@@ -613,8 +817,13 @@ mod managed_user_authorization_tests {
 
     #[test]
     fn member_user_jwt_gets_tool_execution_but_not_management() {
-        let resolved = managed_user_jwt_resolution_for(caller(OrgRole::Member, "org_1"), &node(), Some("ryu"), 10)
-            .expect("same-org member should resolve");
+        let resolved = managed_user_jwt_resolution_for(
+            caller(OrgRole::Member, "org_1"),
+            &node(),
+            Some("ryu"),
+            10,
+        )
+        .expect("same-org member should resolve");
 
         assert!(!resolved.context.is_owner());
         assert!(resolved
@@ -626,7 +835,9 @@ mod managed_user_authorization_tests {
             )
             .is_allowed());
         assert_eq!(
-            resolved.context.authorize(&RoutePolicy::OwnerOnly, &resolved.bindings, 10),
+            resolved
+                .context
+                .authorize(&RoutePolicy::OwnerOnly, &resolved.bindings, 10),
             crate::authorization::AuthorizationDecision::Deny(
                 crate::authorization::DenialReason::OwnerRequired
             )
@@ -635,8 +846,13 @@ mod managed_user_authorization_tests {
 
     #[test]
     fn viewer_user_jwt_can_list_tools_but_cannot_execute_them() {
-        let resolved = managed_user_jwt_resolution_for(caller(OrgRole::Viewer, "org_1"), &node(), Some("ryu"), 10)
-            .expect("same-org viewer should resolve");
+        let resolved = managed_user_jwt_resolution_for(
+            caller(OrgRole::Viewer, "org_1"),
+            &node(),
+            Some("ryu"),
+            10,
+        )
+        .expect("same-org viewer should resolve");
 
         assert!(resolved
             .context
@@ -658,34 +874,137 @@ mod managed_user_authorization_tests {
 
     #[test]
     fn a_user_from_another_org_is_not_admitted() {
-        assert!(managed_user_jwt_resolution_for(caller(OrgRole::Owner, "org_other"), &node(), Some("ryu"), 10)
-            .is_none());
+        assert!(managed_user_jwt_resolution_for(
+            caller(OrgRole::Owner, "org_other"),
+            &node(),
+            Some("ryu"),
+            10
+        )
+        .is_none());
     }
 
     #[test]
     fn team_node_requires_membership_in_that_team() {
         let mut member = caller(OrgRole::Member, "org_1");
-        assert!(managed_user_jwt_resolution_for(member.clone(), &team_node(), Some("ryu"), 10)
-            .is_none());
+        assert!(
+            managed_user_jwt_resolution_for(member.clone(), &team_node(), Some("ryu"), 10)
+                .is_none()
+        );
 
         member.teams.push(TeamMembership {
             id: "team_1".to_owned(),
             org_id: "org_1".to_owned(),
             role: "member".to_owned(),
         });
-        assert!(managed_user_jwt_resolution_for(member, &team_node(), Some("ryu"), 10)
-            .is_some());
+        assert!(managed_user_jwt_resolution_for(member, &team_node(), Some("ryu"), 10).is_some());
     }
 
     #[test]
     fn personal_node_requires_the_owner() {
-        assert!(managed_user_jwt_resolution_for(caller(OrgRole::Member, "org_1"), &personal_node(), Some("ryu"), 10)
-            .is_some());
+        assert!(managed_user_jwt_resolution_for(
+            caller(OrgRole::Member, "org_1"),
+            &personal_node(),
+            Some("ryu"),
+            10
+        )
+        .is_some());
 
         let mut other = caller(OrgRole::Member, "org_1");
         other.user_id = "user_2".to_owned();
-        assert!(managed_user_jwt_resolution_for(other, &personal_node(), Some("ryu"), 10)
-            .is_none());
+        assert!(
+            managed_user_jwt_resolution_for(other, &personal_node(), Some("ryu"), 10).is_none()
+        );
+    }
+
+    #[test]
+    fn agent_surface_admission_keeps_read_and_edit_capabilities_distinct() {
+        let viewer = managed_user_jwt_resolution_for(
+            caller(OrgRole::Viewer, "org_1"),
+            &node(),
+            Some("agent-a"),
+            10,
+        )
+        .expect("same-org viewer should reach the resource ACL");
+        assert!(viewer
+            .context
+            .authorize(
+                &RoutePolicy::requires([Capability::AgentsRead]),
+                &viewer.bindings,
+                10,
+            )
+            .is_allowed());
+        assert!(!viewer
+            .context
+            .authorize(
+                &RoutePolicy::requires([Capability::AgentsManage]),
+                &viewer.bindings,
+                10,
+            )
+            .is_allowed());
+
+        // A personal-node owner with an administrator role remains admitted to
+        // both sides of the surface; the resource gate then applies the exact
+        // agent ACL without changing the node-scope contract.
+        let owner = managed_user_jwt_resolution_for(
+            caller(OrgRole::Owner, "org_1"),
+            &personal_node(),
+            Some("agent-a"),
+            10,
+        )
+        .expect("personal-node owner should reach agent management");
+        assert!(owner
+            .context
+            .authorize(
+                &RoutePolicy::requires([Capability::AgentsRead]),
+                &owner.bindings,
+                10,
+            )
+            .is_allowed());
+        assert!(owner
+            .context
+            .authorize(
+                &RoutePolicy::requires([Capability::AgentsManage]),
+                &owner.bindings,
+                10,
+            )
+            .is_allowed());
+    }
+
+    #[test]
+    fn a_shared_conversation_does_not_delegate_its_owner_vault() {
+        let member = caller(OrgRole::Member, "org_1");
+        let visible_to_member = ResourceTenancy {
+            owner_user_id: Some("user_2".to_owned()),
+            org_id: Some("org_1".to_owned()),
+            visibility: "org".to_owned(),
+            team_id: None,
+            collaborators: Vec::new(),
+        };
+        assert!(!caller_owns_host_conversation(&member, &visible_to_member));
+
+        let own = ResourceTenancy {
+            owner_user_id: Some("user_1".to_owned()),
+            ..visible_to_member
+        };
+        assert!(caller_owns_host_conversation(&member, &own));
+    }
+
+    #[test]
+    fn anonymous_host_conversation_context_requires_a_trusted_forwarder_on_bound_nodes() {
+        assert!(!anonymous_host_conversation_allowed(true, false));
+        assert!(anonymous_host_conversation_allowed(true, true));
+        assert!(anonymous_host_conversation_allowed(false, false));
+    }
+
+    #[test]
+    fn host_conversation_proof_binds_the_id_to_this_core_process() {
+        let proof = host_conversation_proof("conversation-1");
+        assert!(host_conversation_proof_is_valid("conversation-1", &proof));
+        assert!(!host_conversation_proof_is_valid("conversation-2", &proof));
+        assert!(!host_conversation_proof_is_valid(
+            "conversation-1",
+            "invalid"
+        ));
     }
 }
 
@@ -771,8 +1090,7 @@ fn managed_user_jwt_resolution_for(
                 })
         }
         crate::sidecar::control_plane::NodeScope::Personal => {
-            node.team_id.is_none()
-                && node.owner_user_id.as_deref() == Some(caller.user_id.as_str())
+            node.team_id.is_none() && node.owner_user_id.as_deref() == Some(caller.user_id.as_str())
         }
     };
     if !in_scope {
@@ -919,24 +1237,41 @@ fn denial_status(decision: crate::authorization::AuthorizationDecision) -> Optio
 }
 
 async fn require_auth(
-	req: Request<axum::body::Body>,
-	next: middleware::Next,
+    req: Request<axum::body::Body>,
+    next: middleware::Next,
 ) -> Result<axum::response::Response, StatusCode> {
-	let expected = crate::node_token::active_token().filter(|token| !token.is_empty());
-	require_auth_with_token(req, next, expected).await
+    let expected = crate::node_token::active_token().filter(|token| !token.is_empty());
+    require_auth_with_token(req, next, expected).await
 }
 
 async fn require_auth_with_token(
-	mut req: Request<axum::body::Body>,
-	next: middleware::Next,
-	expected: Option<String>,
+    mut req: Request<axum::body::Body>,
+    next: middleware::Next,
+    expected: Option<String>,
 ) -> Result<axum::response::Response, StatusCode> {
-	let provided = req
-        .headers()
-        .get("authorization")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "))
-        .map(str::to_string);
+    let provided = if req
+        .uri()
+        .path()
+        .starts_with("/api/pi-config/chatgpt/codex/")
+    {
+        req.headers()
+            .get("x-ryu-node-token")
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_string)
+            .or_else(|| {
+                req.headers()
+                    .get("authorization")
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(|v| v.strip_prefix("Bearer "))
+                    .map(str::to_string)
+            })
+    } else {
+        req.headers()
+            .get("authorization")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.strip_prefix("Bearer "))
+            .map(str::to_string)
+    };
     let now = crate::pairing::now_secs();
     let path_agent_id = mcp_path_agent_id(req.uri().path());
     let policy = route_policy(req.method(), req.uri().path());
@@ -1264,11 +1599,13 @@ async fn attach_verified_caller(
 /// node many people share, and the local-first single-user flow must never be
 /// degraded on someone's own machine.
 ///
-/// GATING RULE (fail-closed on shared nodes, full-trust only when unbound):
+/// GATING RULE (fail-closed on shared/managed nodes, full-trust only when unbound):
 ///   - Node UNBOUND (`registered_org() == None`): the shared `RYU_TOKEN` already
 ///     implies a single trusted operator. ALWAYS ALLOW — for both an anonymous
 ///     caller and any signed-in user (including a multi-org user with no single
 ///     resolvable org, who must NOT be forced read-only on their own machine).
+///     A node flagged managed is not considered unbound while registration is
+///     unresolved; it denies until its org binding is available.
 ///   - Node ORG-BOUND (`registered_org() == Some(org)`):
 ///       - `None` caller (no / invalid user JWT) → DENY. A tokenless caller must
 ///         not inherit full trust, or any holder of the shared node token bypasses
@@ -1287,37 +1624,56 @@ pub(crate) async fn enforce_permission(
     caller: &Option<crate::identity_verify::VerifiedCaller>,
     perm: &str,
 ) -> Result<(), StatusCode> {
+    let managed_node = crate::sidecar::control_plane::is_managed_node();
     let node_org = crate::sidecar::control_plane::registered_org().map(|o| o.id);
 
     match caller {
         None => {
-            if node_org.is_some() {
+            if node_org.is_some() || managed_node {
                 Err(StatusCode::FORBIDDEN)
             } else {
                 Ok(())
             }
         }
-        Some(caller) => match node_org.as_deref() {
-            None => Ok(()),
-            Some(node_org) => {
-                if caller.org_id.as_deref() != Some(node_org) {
+        Some(caller) => {
+            if let Some(node) = crate::sidecar::control_plane::registered_node() {
+                // A personal node is private even when its owner belongs to an
+                // organization. Its owner keeps the local full-trust behavior;
+                // every other caller is refused before role permissions are read.
+                if node.scope == crate::sidecar::control_plane::NodeScope::Personal {
+                    return if node.owner_user_id.as_deref() == Some(caller.user_id.as_str()) {
+                        Ok(())
+                    } else {
+                        Err(StatusCode::FORBIDDEN)
+                    };
+                }
+                if node_scope_denial_reason(&node, caller).is_some() {
                     return Err(StatusCode::FORBIDDEN);
                 }
-                if crate::identity_verify::permissions::can(caller.role, perm) {
-                    return Ok(());
-                }
-                let custom = crate::sidecar::control_plane::resolve_permissions(
-                    &state.client,
-                    &caller.user_id,
-                )
-                .await;
-                if custom.contains(perm) {
-                    Ok(())
-                } else {
-                    Err(StatusCode::FORBIDDEN)
+            }
+            match node_org.as_deref() {
+                None if managed_node => Err(StatusCode::FORBIDDEN),
+                None => Ok(()),
+                Some(node_org) => {
+                    if caller.org_id.as_deref() != Some(node_org) {
+                        return Err(StatusCode::FORBIDDEN);
+                    }
+                    if crate::identity_verify::permissions::can(caller.role, perm) {
+                        return Ok(());
+                    }
+                    let custom = crate::sidecar::control_plane::resolve_permissions(
+                        &state.client,
+                        &caller.user_id,
+                    )
+                    .await;
+                    if custom.contains(perm) {
+                        Ok(())
+                    } else {
+                        Err(StatusCode::FORBIDDEN)
+                    }
                 }
             }
-        },
+        }
     }
 }
 
@@ -1353,10 +1709,12 @@ fn node_scope_denial_reason(
             if caller.org_id.as_deref() != Some(node.org.id.as_str()) {
                 return Some("organization_membership_required");
             }
-            let in_team = node
-                .team_id
-                .as_deref()
-                .is_some_and(|team_id| caller.teams.iter().any(|team| team.id == team_id));
+            let in_team = node.team_id.as_deref().is_some_and(|team_id| {
+                caller
+                    .teams
+                    .iter()
+                    .any(|team| team.id == team_id && team.org_id == node.org.id)
+            });
             let org_admin = caller
                 .role
                 .satisfies(crate::identity_verify::OrgRole::Admin);
@@ -1464,6 +1822,17 @@ mod node_scope_tests {
             Some("organization_membership_required")
         );
     }
+
+    #[test]
+    fn team_ids_from_another_org_do_not_authorize_a_node() {
+        let team_node = node(NodeScope::Team, Some("team-1"), None);
+        let mut cross_org = caller("member", Some("org-1"), OrgRole::Member, &["team-1"]);
+        cross_org.teams[0].org_id = "org-2".to_owned();
+        assert_eq!(
+            node_scope_denial_reason(&team_node, &cross_org),
+            Some("team_membership_required")
+        );
+    }
 }
 
 fn app_lifecycle_denied(
@@ -1516,8 +1885,19 @@ async fn enforce_app_lifecycle_permission(
     caller: &Option<crate::identity_verify::VerifiedCaller>,
     permission: &str,
 ) -> Result<(), axum::response::Response> {
+    let managed_node = crate::sidecar::control_plane::is_managed_node();
     let node = crate::sidecar::control_plane::registered_node();
     let Some(node) = node.as_ref() else {
+        // A managed node is not temporarily local while registration is still
+        // resolving. Fail closed here so a missing registration cannot bypass
+        // the lifecycle ACL during startup or after a rejected handshake.
+        if managed_node {
+            return Err(app_lifecycle_denied(
+                permission,
+                None,
+                "managed_node_unregistered",
+            ));
+        }
         // An unbound local node retains the existing node-token owner behavior.
         return Ok(());
     };
@@ -1539,20 +1919,22 @@ async fn enforce_app_lifecycle_permission(
 
     // Custom roles are resolved from the control plane and degrade to an empty
     // set on lookup failure, which preserves the existing fail-closed contract.
-    let mut custom =
-        crate::sidecar::control_plane::resolve_permissions(&state.client, &caller.user_id).await;
+    let mut resolved =
+        crate::sidecar::control_plane::resolve_permission_context(&state.client, &caller.user_id)
+            .await;
     // The personal owner has an implicit full lifecycle grant. Passing it through
     // the normal resolver keeps explicit node denies authoritative.
     if is_personal_owner {
-        custom.insert(permission.to_owned());
+        resolved.permissions.insert(permission.to_owned());
     }
 
-    if crate::acl::decide_with_extra(
+    if crate::acl::decide_with_context(
         caller,
         crate::acl::KIND_NODE,
         &node.node_id,
         permission,
-        &custom,
+        &resolved.permissions,
+        &resolved.role_ids,
     )
     .is_allowed()
     {
@@ -1715,6 +2097,41 @@ async fn marketplace_packages_installed() -> axum::response::Response {
     }
 }
 
+#[derive(serde::Deserialize)]
+struct MarketplaceUsageBody {
+    event: String,
+    id: String,
+    kind: String,
+}
+
+/// `POST /api/marketplace/usage` — record a local, content-free Marketplace
+/// install signal. The caller cannot submit counters; Core increments the one
+/// event after the normal lifecycle permission check and the existing beacon
+/// later sends its aggregate snapshot when community stats are enabled.
+async fn record_marketplace_usage(
+    State(state): State<ServerState>,
+    Extension(caller): Extension<Option<crate::identity_verify::VerifiedCaller>>,
+    Json(body): Json<MarketplaceUsageBody>,
+) -> axum::response::Response {
+    if let Err(response) = enforce_app_lifecycle_permission(
+        &state,
+        &caller,
+        crate::identity_verify::permissions::APP_INSTALL,
+    )
+    .await
+    {
+        return response;
+    }
+    if body.event != "download" {
+        return json_error(
+            StatusCode::BAD_REQUEST,
+            "`event` must be `download`".to_owned(),
+        );
+    }
+    crate::stats_beacon::record_marketplace_event(&body.kind, &body.id, true);
+    Json(json!({ "success": true })).into_response()
+}
+
 async fn install_portable_marketplace_package(
     state: &ServerState,
     headers: &axum::http::HeaderMap,
@@ -1784,10 +2201,9 @@ async fn install_portable_marketplace_package(
             .flatten()
             .is_some_and(|package| package.enabled);
     if was_enabled {
-        if let Err(error) = crate::server::portable_package_runtime::disable_with_owner(
-            state, kind, id, owner,
-        )
-        .await
+        if let Err(error) =
+            crate::server::portable_package_runtime::disable_with_owner(state, kind, id, owner)
+                .await
         {
             return json_error(StatusCode::UNPROCESSABLE_ENTITY, error.to_string());
         }
@@ -1935,13 +2351,8 @@ async fn marketplace_package_enable(
         return response;
     }
     let owner = spaces::owner_of(&caller_tenancy(&caller));
-    match crate::server::portable_package_runtime::enable_with_owner(
-        &state,
-        &kind,
-        &id,
-        &owner,
-    )
-    .await
+    match crate::server::portable_package_runtime::enable_with_owner(&state, &kind, &id, &owner)
+        .await
     {
         Ok(package) => Json(json!({ "success": true, "package": package })).into_response(),
         Err(error) => json_error(StatusCode::UNPROCESSABLE_ENTITY, error.to_string()),
@@ -1963,10 +2374,8 @@ async fn marketplace_package_disable(
         return response;
     }
     let owner = spaces::owner_of(&caller_tenancy(&caller));
-    match crate::server::portable_package_runtime::disable_with_owner(
-        &state, &kind, &id, &owner,
-    )
-    .await
+    match crate::server::portable_package_runtime::disable_with_owner(&state, &kind, &id, &owner)
+        .await
     {
         Ok(package) => Json(json!({ "success": true, "package": package })).into_response(),
         Err(error) => json_error(StatusCode::UNPROCESSABLE_ENTITY, error.to_string()),
@@ -1988,10 +2397,8 @@ async fn marketplace_package_uninstall(
         return response;
     }
     let owner = spaces::owner_of(&caller_tenancy(&caller));
-    match crate::server::portable_package_runtime::uninstall_with_owner(
-        &state, &kind, &id, &owner,
-    )
-    .await
+    match crate::server::portable_package_runtime::uninstall_with_owner(&state, &kind, &id, &owner)
+        .await
     {
         Ok(()) => match crate::portable_packages::uninstall(&kind, &id) {
             Ok(()) => Json(json!({ "success": true, "kind": kind, "id": id })).into_response(),
@@ -2158,6 +2565,21 @@ fn resource_access(
         }
     };
 
+    // Apply the node boundary before the resource tenancy ladder. A team or
+    // personal node is a narrower data-plane surface than its parent org; an
+    // org membership alone must never turn it into a second route around that
+    // node scope.
+    if let Some(node) = crate::sidecar::control_plane::registered_node() {
+        let in_scope =
+            caller.is_some_and(|current| node_scope_denial_reason(&node, current).is_none());
+        if !in_scope {
+            return Err(json_error(
+                StatusCode::FORBIDDEN,
+                "forbidden: caller is outside this node's scope".to_owned(),
+            ));
+        }
+    }
+
     if tenancy.owner_user_id.is_none() && tenancy.org_id.is_none() {
         return if node_org.is_none() {
             Ok(Access::Write)
@@ -2196,7 +2618,7 @@ fn resource_access(
 
 /// Require at least READ access to a resource. Any grant above [`Access::None`]
 /// passes (`resource_access` already turns `None` into a 403).
-fn require_resource_read(
+pub(crate) fn require_resource_read(
     meta: anyhow::Result<Option<crate::identity_verify::ResourceTenancy>>,
     caller: Option<&crate::identity_verify::VerifiedCaller>,
     not_found: &str,
@@ -2219,7 +2641,7 @@ fn require_resource_read_at(
 /// Require WRITE access to a resource. A read-only grant (e.g. an org `Viewer` on
 /// an `org`-visible doc) is refused — mirrors the realtime gateway, which drops a
 /// read-only member's mutating frames.
-fn require_resource_write(
+pub(crate) fn require_resource_write(
     meta: anyhow::Result<Option<crate::identity_verify::ResourceTenancy>>,
     caller: Option<&crate::identity_verify::VerifiedCaller>,
     not_found: &str,
@@ -2232,7 +2654,7 @@ fn require_resource_write(
 /// etc.); coarse `space.write` already gates them, while their NULL owner must
 /// not make every legitimate upload fail the document ACL's legacy-row rule.
 /// Ordinary user Spaces still use the native per-Space tenancy gate.
-async fn require_space_content_write(
+pub(crate) async fn require_space_content_write(
     state: &ServerState,
     caller: &Option<crate::identity_verify::VerifiedCaller>,
     space_id: &str,
@@ -2362,7 +2784,7 @@ pub(crate) fn caller_tenancy(
 /// an UNBOUND node yields the unrestricted filter (byte-identical, one principal);
 /// a BOUND node narrows to the caller's id + org so list/search only surface rows
 /// the caller may read.
-fn caller_doc_filter(
+pub(crate) fn caller_doc_filter(
     caller: &Option<crate::identity_verify::VerifiedCaller>,
 ) -> spaces::DocFilter<'_> {
     match (node_org_id().is_some(), caller.as_ref()) {
@@ -2416,7 +2838,7 @@ pub(crate) fn background_memory_user_id() -> String {
 
 /// Whether `caller` may READ/WRITE memory `entry`. UNBOUND node → always (one
 /// principal). BOUND node → `node`/`project`-scope facts are the shared brain (any
-/// member); a `user`-scope fact is private to its owner; an `org`-scope fact is
+/// member); an `agent`/`user`-scope fact is private to its owner; an `org`-scope fact is
 /// readable by any caller in THAT org. Missing owner on a bound user-scope row
 /// (legacy `'local'`/None the backfill has not reached) → denied (fail closed), as
 /// is an org fact with no scope id or a caller with no org.
@@ -2431,8 +2853,13 @@ fn memory_access_ok(
         return true;
     }
     match entry.scope {
-        memory::MemoryScope::Node | memory::MemoryScope::Project => true,
-        memory::MemoryScope::User => matches!(
+        memory::MemoryScope::Node => true,
+        memory::MemoryScope::Project => entry
+            .scope_id
+            .as_deref()
+            .map(str::trim)
+            .is_some_and(|scope_id| !scope_id.is_empty()),
+        memory::MemoryScope::Agent | memory::MemoryScope::User => matches!(
             (entry.owner_user_id.as_deref(), caller.as_ref()),
             (Some(owner), Some(c)) if owner == c.user_id
         ),
@@ -2619,6 +3046,22 @@ mod resource_acl_tests {
     /// boundary by design; see the `resource_access` preamble.)
     const BOUND: Option<&str> = Some("org1");
     const UNBOUND: Option<&str> = None;
+
+    #[tokio::test]
+    async fn app_documents_keep_caller_acl_despite_matching_app_namespace() {
+        let store = super::spaces::SpaceStore::open_in_memory().unwrap();
+        let owner = super::spaces::DocOwner::owned(Some("alice"), Some("org1"));
+        let space = store.create_space("Private footage", None, &owner).await.unwrap();
+        let doc = store.app_create_doc("@test/editor", &space, "Transcript", &owner).await.unwrap();
+        // Namespace ownership alone admits both callers. The shared row gate must
+        // retain Alice's private ownership for all apps using the host bridge.
+        assert!(store.app_get_doc("@test/editor", &doc).await.unwrap().is_some());
+        let bob = caller("bob", Some("org1"), OrgRole::Member);
+        let alice = caller("alice", Some("org1"), OrgRole::Member);
+        assert_eq!(status(require_resource_read_at(super::spaces::doc_access_meta(&store, &doc).await, Some(&bob), BOUND, "nf")), Some(StatusCode::FORBIDDEN));
+        assert_eq!(status(require_resource_write_at(super::spaces::doc_access_meta(&store, &doc).await, Some(&bob), BOUND, "nf")), Some(StatusCode::FORBIDDEN));
+        assert!(require_resource_write_at(super::spaces::doc_access_meta(&store, &doc).await, Some(&alice), BOUND, "nf").is_ok());
+    }
 
     /// A resource owned by `owner`, scoped to `org`, at `visibility`.
     fn scoped(
@@ -3299,173 +3742,13 @@ async fn destroy_sandbox(Path(run_id): Path<String>) -> impl IntoResponse {
 
 // ── Data folder ("Storage" setting) ──────────────────────────────────────────────
 
-#[derive(serde::Deserialize)]
-struct DataPathTarget {
-    path: String,
-}
-
-#[derive(serde::Deserialize)]
-struct DataPathExportReq {
-    out: String,
-}
-
-/// `GET /api/data-path` — current data-folder location, default, size, free space.
-/// All path logic lives in Core (`crate::data_path`); the desktop only renders it.
-#[utoipa::path(
-    get,
-    path = "/api/data-path",
-    tag = "Data",
-    summary = "The active data folder and its disk info",
-    responses((status = 200, description = "OK", body = serde_json::Value))
-)]
-async fn get_data_path() -> impl IntoResponse {
-    match tokio::task::spawn_blocking(crate::data_path::info).await {
-        Ok(info) => Json(info).into_response(),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({ "error": e.to_string() })),
-        )
-            .into_response(),
-    }
-}
-
-/// `POST /api/data-path/validate` — check a candidate target folder (writable,
-/// empty, not nested in the current folder, enough free space for a copy).
-#[utoipa::path(
-    post,
-    path = "/api/data-path/validate",
-    tag = "Data",
-    summary = "Validate a candidate data folder",
-    request_body = serde_json::Value,
-    responses((status = 200, description = "OK", body = serde_json::Value))
-)]
-async fn validate_data_path(Json(req): Json<DataPathTarget>) -> impl IntoResponse {
-    let target = std::path::PathBuf::from(&req.path);
-    let res = tokio::task::spawn_blocking(move || {
-        crate::data_path::validate_target(&crate::paths::ryu_dir(), &target, true)
-    })
-    .await;
-    match res {
-        Ok(v) => Json(v).into_response(),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({ "ok": false, "error": e.to_string() })),
-        )
-            .into_response(),
-    }
-}
-
-/// `POST /api/data-path/switch` — point-only relocation (NO copy). Writes the
-/// pointer; takes effect on the next Core restart. The old data stays intact, so
-/// this is the "start fresh in a new folder" path. (Copy-and-migrate runs as the
-/// offline `data-path migrate` subcommand the desktop invokes while Core is down.)
-#[utoipa::path(
-    post,
-    path = "/api/data-path/switch",
-    tag = "Data",
-    summary = "Relocate the data folder (restart required)",
-    request_body = serde_json::Value,
-    responses((status = 200, description = "OK", body = serde_json::Value))
-)]
-async fn switch_data_path(Json(req): Json<DataPathTarget>) -> impl IntoResponse {
-    let target = std::path::PathBuf::from(&req.path);
-    let v = crate::data_path::validate_target(&crate::paths::ryu_dir(), &target, false);
-    if !v.ok {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(json!({ "ok": false, "error": v.error })),
-        )
-            .into_response();
-    }
-    match crate::paths::set_data_dir(Some(&target)) {
-        Ok(()) => Json(json!({ "ok": true, "restart_required": true })).into_response(),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({ "ok": false, "error": e.to_string() })),
-        )
-            .into_response(),
-    }
-}
-
-/// `POST /api/data-path/reset` — revert to the default `~/.ryu` (point-only).
-#[utoipa::path(
-    post,
-    path = "/api/data-path/reset",
-    tag = "Data",
-    summary = "Reset the data folder to the default location",
-    responses((status = 200, description = "OK", body = serde_json::Value))
-)]
-async fn reset_data_path() -> impl IntoResponse {
-    match crate::paths::set_data_dir(None) {
-        Ok(()) => Json(json!({ "ok": true, "restart_required": true })).into_response(),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({ "ok": false, "error": e.to_string() })),
-        )
-            .into_response(),
-    }
-}
-
-/// `POST /api/data-path/export` — zip the current data folder to `out`. Read-only
-/// on the data folder, so it runs online (no restart). Import/restore is offline
-/// (the `data-path import` subcommand) because it overwrites the live DB files.
-#[utoipa::path(
-    post,
-    path = "/api/data-path/export",
-    tag = "Data",
-    summary = "Export the data folder to a zip backup",
-    request_body = serde_json::Value,
-    responses((status = 200, description = "OK", body = serde_json::Value))
-)]
-async fn export_data_path(
-    axum::Extension(caller): axum::Extension<Option<crate::identity_verify::VerifiedCaller>>,
-    Json(req): Json<DataPathExportReq>,
-) -> impl IntoResponse {
-    // ── ACL ──────────────────────────────────────────────────────────────────
-    // This zips the ENTIRE data folder — every user's conversations, documents and
-    // memory DBs — so on an org-bound node it is inherently cross-tenant and there is
-    // no scoped variant. Mirror `data_clear`'s danger-zone posture:
-    //   - Node UNBOUND (personal): one principal, `RYU_TOKEN` is the boundary — the
-    //     user backing up their own machine. Behaves exactly as before.
-    //   - Node ORG-BOUND: a whole-folder export dumps other users' data. Even a
-    //     signed-in member must not exfiltrate the shared node, so REFUSE outright.
-    if node_org_id().is_some() {
-        let _ = &caller;
-        return (
-            StatusCode::FORBIDDEN,
-            Json(json!({
-                "ok": false,
-                "error": "forbidden: the data-folder export dumps every user's data and is disabled on a shared (org-bound) node"
-            })),
-        )
-            .into_response();
-    }
-    let out = std::path::PathBuf::from(&req.out);
-    let res = tokio::task::spawn_blocking(move || {
-        crate::data_path::export_zip(&crate::paths::ryu_dir(), &out)
-    })
-    .await;
-    match res {
-        Ok(Ok(bytes)) => Json(json!({ "ok": true, "bytes": bytes })).into_response(),
-        Ok(Err(e)) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({ "ok": false, "error": e.to_string() })),
-        )
-            .into_response(),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({ "ok": false, "error": e.to_string() })),
-        )
-            .into_response(),
-    }
-}
-
 pub fn create_router(
     state: ServerState,
     auth_token: Option<String>,
     bind_addr: &str,
     router_manifests: &[crate::plugin_manifest::PluginManifest],
 ) -> Router {
+    crate::backups::start_scheduler(state.clone());
     // Fail-closed under mesh / remote bind (#478): a node reachable beyond
     // loopback MUST have an auth token, or every protected route is open to the
     // tailnet/LAN. Refuse to build the router (which stops startup) otherwise.
@@ -3641,11 +3924,8 @@ pub fn create_router(
         // (e.g. mail's `/api/mail/*`). Axum routers are immutable after serve,
         // so use the startup snapshot of installed and bootstrap manifests.
         .merge(
-            crate::sidecar::ext_proxy::public_mount_routes(
-                router_manifests,
-                auth_token.clone(),
-            )
-            .expect("built-in public-mount ownership must be unambiguous"),
+            crate::sidecar::ext_proxy::public_mount_routes(router_manifests, auth_token.clone())
+                .expect("built-in public-mount ownership must be unambiguous"),
         );
 
     let protected = Router::new()
@@ -3737,6 +4017,10 @@ pub fn create_router(
             post(composio_connection_initiate),
         )
         .route(
+            "/api/composio/connections/complete",
+            post(composio_connection_complete),
+        )
+        .route(
             "/api/composio/connections/:id",
             get(composio_connection_status),
         )
@@ -3815,13 +4099,24 @@ pub fn create_router(
             "/api/marketplace/packages/installed",
             get(marketplace_packages_installed),
         )
+        .route("/api/marketplace/usage", post(record_marketplace_usage))
+        .route(
+            "/api/language-packs/installed",
+            get(language_packs::installed),
+        )
+        .route(
+            "/api/language-packs/import",
+            post(language_packs::import).layer(DefaultBodyLimit::max(
+                language_packs::MAX_LANGUAGE_PACK_IMPORT_BODY_BYTES,
+            )),
+        )
         .route(
             "/api/marketplace/packages/install",
-            post(marketplace_package_install),
+            post(marketplace_package_install).layer(DefaultBodyLimit::max(16 * 1024)),
         )
         .route(
             "/api/marketplace/packages/update",
-            post(marketplace_package_update),
+            post(marketplace_package_update).layer(DefaultBodyLimit::max(16 * 1024)),
         )
         .route(
             "/api/marketplace/packages/:kind/:id/enable",
@@ -3907,7 +4202,7 @@ pub fn create_router(
         // boot), so it can never actually be disabled — the gate is transparent. The
         // ACP routing/execution substrate that serves a chat turn (`agent_routing/`,
         // `sidecar/adapters/acp.rs`, `/api/chat/stream`) is kernel and is NOT here.
-        .merge(agents_routes(&state.app_store))
+        .merge(agents_routes(&state))
         // Prompt Studio's Promptfoo-compatible suites, immutable snapshots,
         // persisted evaluation runs, and human review are Core-owned resources.
         // The handlers resolve the suite's agent before applying the agent ACL,
@@ -3960,6 +4255,14 @@ pub fn create_router(
         .route(
             "/api/pi-config/providers/:id/login",
             post(start_pi_provider_login),
+        )
+        .route(
+            "/api/pi-config/chatgpt/codex/responses",
+            post(chatgpt_api::responses),
+        )
+        .route(
+            "/api/pi-config/chatgpt/codex/models",
+            get(chatgpt_api::models),
         )
         .route(
             "/api/pi-config/providers/:id/accounts",
@@ -4046,7 +4349,16 @@ pub fn create_router(
             "/api/identities/connections/:id",
             get(identity_api::poll_connection).delete(identity_api::delete_connection),
         )
-        // ── Mesh status (#478): opt-in Tailscale/Headscale reachability ───────
+        // User-managed vault values: metadata-only listing and write/clear
+        // mutations. Values are resolved only inside MCP dispatch.
+        .route("/api/vault/secrets", get(vault_api::list_secrets))
+        .route(
+            "/api/vault/secrets/:name",
+            put(vault_api::put_secret)
+                .delete(vault_api::delete_secret)
+                .layer(DefaultBodyLimit::max(vault_api::MAX_REQUEST_BODY_BYTES)),
+        )
+        // ── Private network status (#478): opt-in Tailscale/Headscale/Tailcat ──
         .route("/api/mesh/status", get(mesh_status))
         .route("/api/mesh/peers", get(mesh_peers))
         .route("/api/mesh/config", post(mesh_config))
@@ -4185,8 +4497,10 @@ pub fn create_router(
         // Core-owned paid-plan profile bootstrap. The route remains on the
         // protected chain so node auth and verified user identity are attached
         // before its owner/admin + entitlement checks run.
+        .merge(onboarding_state::routes())
         .merge(onboarding_profile::routes())
         .merge(continuity::router())
+        .merge(backups::router())
         // ── Danger zone: irreversible bulk "delete all X" (settings) ─────────
         .route("/api/data/counts", get(data_admin::data_counts))
         .route("/api/data/clear", post(data_admin::data_clear))
@@ -4203,6 +4517,11 @@ pub fn create_router(
         .route(
             "/api/conversations/:id",
             get(get_conversation).delete(delete_conversation),
+        )
+        // Promote a client-held temporary transcript into a normal saved chat.
+        .route(
+            "/api/conversations/:id/save",
+            post(save_temporary_conversation_handler),
         )
         .route(
             "/api/conversations/:id/participants",
@@ -4333,6 +4652,10 @@ pub fn create_router(
             "/api/conversations/:id/sessions",
             get(list_sessions_for_conversation_handler),
         )
+        // Versioned durable agent-harness projection. The legacy conversation,
+        // session, approval, worktree, and chat routes remain available; this
+        // mount composes them behind one session/run/event contract.
+        .merge(harness::routes())
         // ── Document Spaces (the store Meetings/Whiteboard/Canvas depend on) ──
         // The ONE mount of `/api/spaces/*`. Same treatment as `/api/meetings/*`:
         // its own sub-router so a single `route_layer` can carry the App gate.
@@ -4435,6 +4758,10 @@ pub fn create_router(
         // sub-router (see `learning_routes`) so the Learning App's enabled bit
         // governs it. Learning `requires` the Skills app (it writes skills).
         .merge(learning_routes(&state.app_store))
+        // ── Recursive-improvement records ──────────────────────────────────
+        // Core owns the durable run and lifecycle; Learning/Research only carry
+        // the optional correlation reference and their own domain state.
+        .merge(improvement_api::routes())
         // ── Self-healing is OUT-OF-PROCESS: the `/api/healing/*` surface is served by
         // the `ryu-healing` sidecar via `public_mount`; Core drives it over loopback
         // (`healing_client`) and keeps only the welded action side. No in-process mount.
@@ -4481,10 +4808,7 @@ pub fn create_router(
         .route("/api/git/init", post(git::git_init_authorized))
         // ── Git branch list + switch (composer branch selector) ─────────────
         .route("/api/git/branches", get(git::git_branches))
-        .route(
-            "/api/git/checkout",
-            post(git::git_checkout_authorized),
-        )
+        .route("/api/git/checkout", post(git::git_checkout_authorized))
         .route(
             "/api/git/create-branch",
             post(git::git_create_branch_authorized),
@@ -4733,7 +5057,10 @@ pub fn create_router(
         // merge); Core links none of it. See `@ryu/recipes`.
         // ── Scheduled jobs / heartbeat ──────────────────────────────────────
         .route("/heartbeat/jobs", get(list_jobs).post(create_job))
-        .route("/heartbeat/jobs/:id", get(get_job).delete(delete_job))
+        .route(
+            "/heartbeat/jobs/:id",
+            get(get_job).put(update_job).delete(delete_job),
+        )
         .route("/heartbeat/jobs/:id/run", post(run_job_now))
         // Connected-client presence (the "who's on this node" surface). Read by
         // the desktop NodeSelector; populated by `track_connection` below.
@@ -4749,11 +5076,14 @@ pub fn create_router(
         // Data folder ("Storage" setting): read location, validate/switch (point-only),
         // reset to default, export a backup zip. Copy-migrate + import run offline as
         // the `ryu-core data-path` subcommand.
-        .route("/api/data-path", get(get_data_path))
-        .route("/api/data-path/validate", post(validate_data_path))
-        .route("/api/data-path/switch", post(switch_data_path))
-        .route("/api/data-path/reset", post(reset_data_path))
-        .route("/api/data-path/export", post(export_data_path))
+        .route("/api/data-path", get(data_path_api::get_data_path))
+        .route("/api/data-path/validate", post(data_path_api::validate_data_path))
+        .route("/api/data-path/switch", post(data_path_api::switch_data_path))
+        .route("/api/data-path/reset", post(data_path_api::reset_data_path))
+        .route(
+            "/api/data-path/export",
+            post(data_path_api::export_data_path).layer(DefaultBodyLimit::max(16 * 1024)),
+        )
         // ── Shadow proxy (`/api/shadow/*`) ──────────────────────────────────
         // The desktop webview's companion/review/search surfaces reach the
         // device-local Shadow through Core: Shadow's own HTTP surface is
@@ -4886,8 +5216,9 @@ fn spaces_routes(app_store: &PluginStore) -> Router<ServerState> {
         .merge(space_imports::routes())
         .route(
             "/api/spaces/import",
-            post(import_space_package)
-                .layer(DefaultBodyLimit::max(space_portable::MAX_SPACE_PACKAGE_BODY_BYTES)),
+            post(import_space_package).layer(DefaultBodyLimit::max(
+                space_portable::MAX_SPACE_PACKAGE_BODY_BYTES,
+            )),
         )
         .route("/api/spaces", get(list_spaces).post(create_space))
         .route("/api/spaces/search", get(search_space_documents))
@@ -5031,6 +5362,12 @@ fn skills_routes(state: &ServerState) -> Router<ServerState> {
         .route("/api/skills/catalog", get(skills_catalog_list))
         .route("/api/skills/catalog/detail", get(skills_catalog_detail))
         .route("/api/skills/catalog/install", post(skills_catalog_install))
+        .route("/api/skills/targets", get(skills_targets))
+        .route(
+            "/api/skills/targets/preferences",
+            put(skills_target_preferences_put).delete(skills_target_preferences_delete),
+        )
+        .route("/api/skills/:id/distribute", post(skills_distribute))
         .route("/api/skills/updates", get(skills_updates))
         .route(
             "/api/skills/install-from-source",
@@ -5227,7 +5564,173 @@ fn sync_plugin_output_styles(manifest: &crate::plugin_manifest::PluginManifest, 
 /// `sidecar/adapters/acp.rs`) is kernel and is deliberately NOT part of this router.
 /// `/api/pi-config/*` is a separate surface (not under `/api/agents`) and stays on
 /// the ungated protected chain.
-fn agents_routes(app_store: &PluginStore) -> Router<ServerState> {
+fn agent_control_audit_route(
+    method: &Method,
+    path: &str,
+) -> Option<(String, String, Option<String>)> {
+    if !matches!(
+        *method,
+        Method::POST | Method::PUT | Method::PATCH | Method::DELETE
+    ) {
+        return None;
+    }
+
+    if *method == Method::POST && path == "/api/agents" {
+        return None;
+    }
+    if *method == Method::POST && path == "/api/agents/catalog/install" {
+        return Some((
+            "agent.catalog.install".to_owned(),
+            "agent-catalog".to_owned(),
+            None,
+        ));
+    }
+    if *method == Method::POST && path == "/api/agents/catalog/uninstall" {
+        return Some((
+            "agent.catalog.uninstall".to_owned(),
+            "agent-catalog".to_owned(),
+            None,
+        ));
+    }
+    if *method == Method::POST && path == "/api/agents/published/install" {
+        return Some((
+            "agent.published.install".to_owned(),
+            "agent-catalog".to_owned(),
+            None,
+        ));
+    }
+    if *method == Method::POST && path == "/api/agents/import" {
+        return Some(("agent.import".to_owned(), "agent-import".to_owned(), None));
+    }
+    if *method == Method::POST && path == "/api/import/run" {
+        return Some((
+            "agent.setup.import".to_owned(),
+            "agent-import".to_owned(),
+            None,
+        ));
+    }
+
+    let segments: Vec<&str> = path.trim_matches('/').split('/').collect();
+    if segments.get(0) != Some(&"api") || segments.get(1) != Some(&"agents") {
+        return None;
+    }
+    let agent_id = segments.get(2)?.trim();
+    if agent_id.is_empty() || matches!(agent_id, "catalog" | "published") {
+        return None;
+    }
+
+    let action = match segments.as_slice() {
+        ["api", "agents", _] if *method == Method::PUT => "agent.update",
+        ["api", "agents", _] if *method == Method::DELETE => "agent.delete",
+        ["api", "agents", _, "prompt-versions"] if *method == Method::POST => {
+            "agent.prompt-version.create"
+        }
+        ["api", "agents", _, "prompt-versions", _, "restore"] if *method == Method::POST => {
+            "agent.prompt-version.restore"
+        }
+        ["api", "agents", _, "migrate-to-ryu"] if *method == Method::POST => "agent.migrate",
+        ["api", "agents", _, "threads", "import"] if *method == Method::POST => {
+            "agent.thread.import"
+        }
+        ["api", "agents", _, "authenticate"] if *method == Method::POST => "agent.auth.login",
+        ["api", "agents", _, "logout"] if *method == Method::POST => "agent.auth.logout",
+        ["api", "agents", _, "accounts", "switch"] if *method == Method::POST => {
+            "agent.auth.account-switch"
+        }
+        ["api", "agents", _, "accounts", "remove"] if *method == Method::POST => {
+            "agent.auth.account-remove"
+        }
+        ["api", "agents", _, "sessions", _] if *method == Method::DELETE => "agent.session.delete",
+        ["api", "agents", _, "sessions", _] if *method == Method::POST => "agent.session.load",
+        ["api", "agents", _, "sessions", _, "load"] if *method == Method::POST => {
+            "agent.session.load"
+        }
+        ["api", "agents", _, "update"] if *method == Method::POST => "agent.runtime.update",
+        ["api", "agents", _, "capabilities"] if *method == Method::PUT => {
+            "agent.capabilities.update"
+        }
+        _ => return None,
+    };
+
+    Some((
+        action.to_owned(),
+        format!("agent:{agent_id}"),
+        Some(agent_id.to_owned()),
+    ))
+}
+
+#[cfg(test)]
+mod agent_control_audit_route_tests {
+    use super::agent_control_audit_route;
+    use axum::http::Method;
+
+    #[test]
+    fn keeps_agent_identity_and_action_in_the_control_row() {
+        assert_eq!(
+            agent_control_audit_route(&Method::PUT, "/api/agents/support"),
+            Some((
+                "agent.update".to_owned(),
+                "agent:support".to_owned(),
+                Some("support".to_owned()),
+            ))
+        );
+        assert_eq!(
+            agent_control_audit_route(
+                &Method::POST,
+                "/api/agents/support/prompt-versions/3/restore"
+            ),
+            Some((
+                "agent.prompt-version.restore".to_owned(),
+                "agent:support".to_owned(),
+                Some("support".to_owned()),
+            ))
+        );
+    }
+
+    #[test]
+    fn leaves_reads_and_agent_creation_for_the_handler_with_the_new_id() {
+        assert_eq!(
+            agent_control_audit_route(&Method::GET, "/api/agents/support"),
+            None
+        );
+        assert_eq!(
+            agent_control_audit_route(&Method::POST, "/api/agents"),
+            None
+        );
+    }
+}
+
+/// Append a Gateway control row for every successful mutating agent-management
+/// route. The caller identity comes from Core's verified JWT extension; route
+/// parameters are used only as bounded correlation metadata.
+async fn audit_agent_control(
+    State(state): State<ServerState>,
+    Extension(caller): Extension<Option<crate::identity_verify::VerifiedCaller>>,
+    req: Request<axum::body::Body>,
+    next: middleware::Next,
+) -> axum::response::Response {
+    let method = req.method().clone();
+    let path = req.uri().path().to_owned();
+    let metadata = agent_control_audit_route(&method, &path);
+    let response = next.run(req).await;
+    if response.status().is_success() {
+        if let Some((action, target, agent_id)) = metadata {
+            record_gateway_control_attributed(
+                &state,
+                &action,
+                &target,
+                Some("successful Core agent-management mutation"),
+                &caller,
+                agent_id.as_deref(),
+            )
+            .await;
+        }
+    }
+    response
+}
+
+fn agents_routes(state: &ServerState) -> Router<ServerState> {
+    let app_store = &state.app_store;
     Router::new()
         .route("/api/agents", get(list_agents).post(create_agent))
         .route("/api/agents/catalog", get(list_agent_catalog))
@@ -5236,12 +5739,15 @@ fn agents_routes(app_store: &PluginStore) -> Router<ServerState> {
             "/api/agents/catalog/uninstall",
             post(uninstall_agent_handler),
         )
-        .route("/api/agents/import", post(import_agent))
+        .route(
+            "/api/agents/import",
+            post(import_agent).layer(DefaultBodyLimit::max(1024 * 1024)),
+        )
         // Install a PUBLISHED agent definition (CatalogKind::Agent). Sibling of
         // `/api/agents/catalog/install` above, which installs an ACP runtime.
         .route(
             "/api/agents/published/install",
-            post(published_agent_install),
+            post(published_agent_install).layer(DefaultBodyLimit::max(16 * 1024)),
         )
         .route(
             "/api/agents/:id",
@@ -5323,6 +5829,10 @@ fn agents_routes(app_store: &PluginStore) -> Router<ServerState> {
             "/api/agents/:id/capabilities",
             get(agent_capabilities).put(set_agent_capabilities),
         )
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            audit_agent_control,
+        ))
         .route_layer(middleware::from_fn_with_state(
             AppGate::new(
                 app_store,
@@ -5620,7 +6130,10 @@ fn voice_routes(app_store: &PluginStore) -> Router<ServerState> {
             "/api/voice/speech-processing-model/install",
             post(voice::speech_processing_model_install),
         )
-        .route("/api/voice/speech-processing", post(voice::speech_processing))
+        .route(
+            "/api/voice/speech-processing",
+            post(voice::speech_processing),
+        )
         // TTS — OuteTTS (built-in) or `?engine=` via the universal Ryu TTS sidecar.
         .route("/api/voice/speak", post(voice::speak))
         .route("/api/voice/tts-engines", get(voice::tts_engines))
@@ -5651,6 +6164,7 @@ fn voice_routes(app_store: &PluginStore) -> Router<ServerState> {
 fn media_routes(app_store: &PluginStore) -> Router<ServerState> {
     Router::new()
         .route("/api/gifs/search", get(gifs::search))
+        .route("/api/assets/images/search", get(images::search))
         .route("/api/images/generate", post(media::generate_image))
         .route("/api/video/generate", post(media::generate_video))
         // Poll a cloud video-generation job (job-based; see media::generate_video).
@@ -5675,6 +6189,11 @@ fn media_routes(app_store: &PluginStore) -> Router<ServerState> {
 fn memory_routes(app_store: &PluginStore) -> Router<ServerState> {
     Router::new()
         .route("/api/memory", get(list_memory).post(create_memory))
+        .route(
+            "/api/memory/settings",
+            get(get_memory_settings).put(update_memory_settings),
+        )
+        .route("/api/memory/graph", get(get_memory_graph))
         .route(
             "/api/memory/:id",
             get(get_memory).put(update_memory).delete(delete_memory),
@@ -5960,7 +6479,25 @@ mod update_check_wire_shape_tests {
     request_body = serde_json::Value,
     responses((status = 200, description = "OK", body = serde_json::Value))
 )]
-async fn schedule_update(Json(body): Json<serde_json::Value>) -> axum::response::Response {
+async fn schedule_update(
+    State(state): State<ServerState>,
+    Extension(caller): Extension<Option<crate::identity_verify::VerifiedCaller>>,
+    Json(body): Json<serde_json::Value>,
+) -> axum::response::Response {
+    if let Err(status) = enforce_permission(
+        &state,
+        &caller,
+        crate::identity_verify::permissions::NODES_MANAGE,
+    )
+    .await
+    {
+        return (
+            status,
+            Json(json!({ "error": "Node management permission is required for updates" })),
+        )
+            .into_response();
+    }
+
     let asset: crate::update::ReleaseAsset =
         match serde_json::from_value(body.get("asset").cloned().unwrap_or(body.clone())) {
             Ok(a) => a,
@@ -6019,7 +6556,24 @@ async fn get_update_schedule() -> axum::response::Response {
     summary = "Cancel a deferred update",
     responses((status = 200, description = "OK", body = serde_json::Value))
 )]
-async fn cancel_update_schedule() -> axum::response::Response {
+async fn cancel_update_schedule(
+    State(state): State<ServerState>,
+    Extension(caller): Extension<Option<crate::identity_verify::VerifiedCaller>>,
+) -> axum::response::Response {
+    if let Err(status) = enforce_permission(
+        &state,
+        &caller,
+        crate::identity_verify::permissions::NODES_MANAGE,
+    )
+    .await
+    {
+        return (
+            status,
+            Json(json!({ "error": "Node management permission is required for updates" })),
+        )
+            .into_response();
+    }
+
     match crate::update::schedule::clear_pending() {
         Ok(()) => (StatusCode::OK, Json(json!({ "ok": true }))).into_response(),
         Err(e) => (
@@ -6042,8 +6596,23 @@ async fn cancel_update_schedule() -> axum::response::Response {
 )]
 async fn update_apply(
     State(state): State<ServerState>,
+    Extension(caller): Extension<Option<crate::identity_verify::VerifiedCaller>>,
     Json(asset): Json<crate::update::ReleaseAsset>,
 ) -> axum::response::Response {
+    if let Err(status) = enforce_permission(
+        &state,
+        &caller,
+        crate::identity_verify::permissions::NODES_MANAGE,
+    )
+    .await
+    {
+        return (
+            status,
+            Json(json!({ "error": "Node management permission is required for updates" })),
+        )
+            .into_response();
+    }
+
     match crate::update::apply::apply_update(&state.downloads, &asset).await {
         Ok(result) => (StatusCode::OK, Json(json!(result))).into_response(),
         Err(e) => (
@@ -6067,7 +6636,17 @@ async fn update_apply(
 async fn get_preference(
     State(state): State<ServerState>,
     Path(key): Path<String>,
+    Extension(caller): Extension<Option<crate::identity_verify::VerifiedCaller>>,
 ) -> axum::response::Response {
+    if key == crate::server::onboarding_state::USER_PERSONALIZATION_PREF_KEY
+        && !crate::server::onboarding_state::can_access_user_personalization(&caller)
+    {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({ "error": "personalization is not available on this node" })),
+        )
+            .into_response();
+    }
     // The node-wide default selection has a built-in value (flagship agent on the
     // bundled local Gemma), served HERE rather than seeded into the store: every
     // client — the composer's seed chain, the Defaults dialog, plugins — reads the
@@ -6135,8 +6714,18 @@ struct SetPreferenceBody {
 async fn set_preference(
     State(state): State<ServerState>,
     Path(key): Path<String>,
+    Extension(caller): Extension<Option<crate::identity_verify::VerifiedCaller>>,
     Json(body): Json<SetPreferenceBody>,
 ) -> axum::response::Response {
+    if key == crate::server::onboarding_state::USER_PERSONALIZATION_PREF_KEY
+        && !crate::server::onboarding_state::can_access_user_personalization(&caller)
+    {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({ "error": "personalization is not available on this node" })),
+        )
+            .into_response();
+    }
     match state.preferences.set(&key, &body.value).await {
         Ok(()) => {
             if key == crate::privacy::PRODUCT_ANALYTICS_ENABLED_PREF_KEY {
@@ -7101,8 +7690,77 @@ async fn notifications_stream() -> axum::response::sse::Sse<
 
 /// `GET /api/events/navigation/stream` — SSE: navigation requests emitted by a
 /// sandboxed app via the `host.navigate` bridge primitive. The connected shell
-/// subscribes and drives its router to the requested target (client consumption is
-/// Track E; this endpoint makes the primitive reachable end-to-end).
+/// subscribes and drives its router to the requested target.
+fn navigation_visible_to_caller(
+    request: &crate::events::NavigationRequest,
+    caller: &Option<crate::identity_verify::VerifiedCaller>,
+    node_bound: bool,
+) -> bool {
+    match request.target_user_id.as_deref() {
+        Some(target_user_id) => caller
+            .as_ref()
+            .is_some_and(|candidate| candidate.user_id == target_user_id),
+        // An unaddressed navigation is safe only on a personal node. A shared
+        // node must never broadcast one user's shell action to every teammate.
+        None => !node_bound,
+    }
+}
+
+#[cfg(test)]
+mod navigation_visibility_tests {
+    use super::navigation_visible_to_caller;
+    use crate::events::{NavigationKind, NavigationRequest};
+    use crate::identity_verify::{OrgRole, VerifiedCaller};
+
+    fn request(target_user_id: Option<&str>) -> NavigationRequest {
+        NavigationRequest {
+            plugin_id: "agent".to_owned(),
+            target: "agents".to_owned(),
+            params: None,
+            kind: NavigationKind::Tab,
+            force_new: false,
+            target_user_id: target_user_id.map(str::to_owned),
+        }
+    }
+
+    fn caller(user_id: &str) -> Option<VerifiedCaller> {
+        Some(VerifiedCaller {
+            user_id: user_id.to_owned(),
+            email: None,
+            org_id: Some("org-1".to_owned()),
+            role: OrgRole::Member,
+            teams: Vec::new(),
+        })
+    }
+
+    #[test]
+    fn targeted_navigation_reaches_only_the_verified_user() {
+        let addressed = request(Some("alice"));
+        assert!(navigation_visible_to_caller(
+            &addressed,
+            &caller("alice"),
+            true
+        ));
+        assert!(!navigation_visible_to_caller(
+            &addressed,
+            &caller("bob"),
+            true
+        ));
+        assert!(!navigation_visible_to_caller(&addressed, &None, true));
+    }
+
+    #[test]
+    fn unaddressed_navigation_is_personal_node_only() {
+        let unaddressed = request(None);
+        assert!(navigation_visible_to_caller(&unaddressed, &None, false));
+        assert!(!navigation_visible_to_caller(
+            &unaddressed,
+            &caller("alice"),
+            true
+        ));
+    }
+}
+
 #[utoipa::path(
     get,
     path = "/api/events/navigation/stream",
@@ -7110,25 +7768,33 @@ async fn notifications_stream() -> axum::response::sse::Sse<
     summary = "App navigation-request SSE stream",
     responses((status = 200, description = "Server-Sent Events stream"))
 )]
-async fn navigation_stream() -> axum::response::sse::Sse<
+async fn navigation_stream(
+    Extension(caller): Extension<Option<crate::identity_verify::VerifiedCaller>>,
+) -> axum::response::sse::Sse<
     impl futures_util::Stream<Item = Result<axum::response::sse::Event, std::convert::Infallible>>,
 > {
     use axum::response::sse::{Event, KeepAlive, Sse};
     use tokio::sync::broadcast::error::RecvError;
 
-    let rx = crate::events::subscribe_navigation();
-    let stream = futures_util::stream::unfold(rx, |mut rx| async move {
-        loop {
-            match rx.recv().await {
-                Ok(ev) => {
-                    let data = serde_json::to_string(&ev).unwrap_or_default();
-                    return Some((Ok(Event::default().data(data)), rx));
+    let node_bound = crate::sidecar::control_plane::registered_org().is_some();
+    let stream = futures_util::stream::unfold(
+        (crate::events::subscribe_navigation(), caller, node_bound),
+        |(mut rx, caller, node_bound)| async move {
+            loop {
+                match rx.recv().await {
+                    Ok(ev) => {
+                        if !navigation_visible_to_caller(&ev, &caller, node_bound) {
+                            continue;
+                        }
+                        let data = serde_json::to_string(&ev).unwrap_or_default();
+                        return Some((Ok(Event::default().data(data)), (rx, caller, node_bound)));
+                    }
+                    Err(RecvError::Lagged(_)) => continue,
+                    Err(RecvError::Closed) => return None,
                 }
-                Err(RecvError::Lagged(_)) => continue,
-                Err(RecvError::Closed) => return None,
             }
-        }
-    });
+        },
+    );
     Sse::new(stream).keep_alive(KeepAlive::default())
 }
 
@@ -7149,6 +7815,7 @@ async fn navigation_stream() -> axum::response::sse::Sse<
 )]
 async fn all_events_stream(
     State(state): State<ServerState>,
+    Extension(caller): Extension<Option<crate::identity_verify::VerifiedCaller>>,
 ) -> axum::response::sse::Sse<
     impl futures_util::Stream<Item = Result<axum::response::sse::Event, std::convert::Infallible>>,
 > {
@@ -7226,6 +7893,32 @@ async fn all_events_stream(
         },
     ));
 
+    // Navigation is user-scoped on shared nodes. Keep it on the unified socket
+    // so the Desktop does not spend another long-lived HTTP connection, while
+    // applying the same filter as the legacy navigation endpoint.
+    let node_bound = crate::sidecar::control_plane::registered_org().is_some();
+    let navigation: TaggedStream = Box::pin(stream::unfold(
+        (crate::events::subscribe_navigation(), caller, node_bound),
+        |(mut rx, caller, node_bound)| async move {
+            loop {
+                match rx.recv().await {
+                    Ok(ev) => {
+                        if !navigation_visible_to_caller(&ev, &caller, node_bound) {
+                            continue;
+                        }
+                        let data = serde_json::to_string(&ev).unwrap_or_default();
+                        return Some((
+                            Ok(Event::default().event("navigation").data(data)),
+                            (rx, caller, node_bound),
+                        ));
+                    }
+                    Err(RecvError::Lagged(_)) => continue,
+                    Err(RecvError::Closed) => return None,
+                }
+            }
+        },
+    ));
+
     #[allow(unused_mut)]
     let activity = tagged("activity", state.activity.subscribe());
     let streams: Vec<TaggedStream> = vec![
@@ -7233,6 +7926,7 @@ async fn all_events_stream(
         notifications,
         tagged("approvals", state.approvals.store.subscribe()),
         downloads,
+        navigation,
     ];
     // Monitors, quests, dashboards, and meetings are now out-of-process
     // (`ryu-monitors` / `ryu-quests` / `ryu-dashboards` / `ryu-meetings` sidecars);
@@ -7652,6 +8346,7 @@ async fn auth_login(
     path = "/api/auth/status",
     tag = "Auth",
     summary = "Device authorization status",
+    description = "Returns device authorization state. The active account bearer is included only for a trusted local client; Tailcat-forwarded requests receive status flags without the bearer.",
     responses((status = 200, description = "OK", body = serde_json::Value))
 )]
 async fn auth_status(
@@ -7662,12 +8357,10 @@ async fn auth_status(
     let authenticated = matches!(s.status, crate::auth::AuthStatus::Authenticated);
     let pending = matches!(s.status, crate::auth::AuthStatus::Pending);
     tracing::debug!("auth_status: authenticated={authenticated} pending={pending}");
-    // The raw cloud bearer is only ever handed to a genuine loopback peer (the
-    // local desktop's oauth.ts poll). A remote caller — even one holding the node
-    // bearer that admitted it through `require_auth` — gets the status booleans
-    // but never the account's cloud token (same peer-IP gate as realtime_ws's
-    // loopback allowance).
-    let token = if peer.ip().is_loopback() {
+    // The raw cloud bearer is only ever handed to a genuine local peer (the
+    // local CLI/native poll). Tailcat re-originates remote streams as loopback
+    // TCP connections, so its active listener explicitly disables this shortcut.
+    let token = if is_trusted_local_peer(peer.ip(), crate::sidecar::tailcat::proxy_is_active()) {
         s.token.clone()
     } else {
         None
@@ -7902,6 +8595,81 @@ async fn chat_stream(
         None => None,
     };
     req.user_jwt = user_jwt;
+    // A session-bound caller may omit `conversation_id` and the runnable target;
+    // resolve both from Core's durable session row. If the body tries to mix a
+    // different conversation or runnable into that session, reject it before
+    // history, memory, or provider routing can observe the mismatch.
+    if let Some(session_id) = req.session_id.clone() {
+        let session = match state.conversations.get_session(&session_id).await {
+            Ok(Some(session)) => session,
+            Ok(None) => return json_error(StatusCode::NOT_FOUND, "session not found".to_owned()),
+            Err(error) => {
+                return json_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("session lookup failed: {error}"),
+                )
+            }
+        };
+        if let Some(conversation_id) = req.conversation_id.as_deref() {
+            if conversation_id != session.conversation_id {
+                return json_error(
+                    StatusCode::CONFLICT,
+                    "session and conversation_id do not match".to_owned(),
+                );
+            }
+        }
+        req.conversation_id = Some(session.conversation_id.clone());
+        match session.runnable_kind {
+            crate::runnable::RunnableKind::Agent => {
+                if let Some(agent_id) = req.agent_id.as_deref() {
+                    if agent_id != session.runnable_id {
+                        return json_error(
+                            StatusCode::CONFLICT,
+                            "session and agent_id do not match".to_owned(),
+                        );
+                    }
+                }
+                if req.workflow_id.is_some() || req.team_id.is_some() {
+                    return json_error(
+                        StatusCode::CONFLICT,
+                        "an agent session cannot target a workflow or team".to_owned(),
+                    );
+                }
+                req.agent_id = Some(session.runnable_id);
+            }
+            crate::runnable::RunnableKind::Workflow => {
+                if req.agent_id.is_some() || req.team_id.is_some() {
+                    return json_error(
+                        StatusCode::CONFLICT,
+                        "a workflow session cannot target an agent or team".to_owned(),
+                    );
+                }
+                if let Some(workflow_id) = req.workflow_id.as_deref() {
+                    if workflow_id != session.runnable_id {
+                        return json_error(
+                            StatusCode::CONFLICT,
+                            "session and workflow_id do not match".to_owned(),
+                        );
+                    }
+                }
+                req.workflow_id = Some(session.runnable_id);
+            }
+            _ => {
+                return json_error(
+                    StatusCode::NOT_IMPLEMENTED,
+                    "this session runnable kind has no chat adapter".to_owned(),
+                )
+            }
+        }
+    }
+    if let Some(conversation_id) = req.conversation_id.as_deref() {
+        if !crate::sidecar::adapters::acp::is_safe_host_conversation_id(conversation_id) {
+            return json_error(
+                StatusCode::BAD_REQUEST,
+                "conversation_id must be 1-128 ASCII letters, digits, '.', '_' or '-'".to_owned(),
+            );
+        }
+    }
     // Widget follow-ups carry only an opaque ticket on the wire. Validate it
     // here, but defer consumption until the final pre-dispatch point below so
     // RBAC and conversation ACL rejection do not burn a valid ticket. Core is
@@ -7951,8 +8719,30 @@ async fn chat_stream(
     // through and is CLAIMED for this caller, which is the write that makes every
     // downstream gate on this conversation non-vacuous.
     if let Some(conversation_id) = req.conversation_id.clone() {
-        if let Err(resp) = gate_and_claim_conversation(&state, &caller, &conversation_id).await {
-            return resp;
+        if req.persist {
+            if let Err(resp) = gate_and_claim_conversation(&state, &caller, &conversation_id).await
+            {
+                return resp;
+            }
+        } else {
+            // Temporary/team-member turns must never claim or reuse a durable
+            // conversation id. A fresh client-held id is fine; an existing id
+            // would let a non-persisted turn attach itself to another transcript.
+            match state.conversations.get_access_meta(&conversation_id).await {
+                Ok(Some(_)) => {
+                    return json_error(
+                        StatusCode::CONFLICT,
+                        "temporary chat id is already in use".to_owned(),
+                    );
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    return json_error(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        format!("conversation access lookup failed: {error}"),
+                    );
+                }
+            }
         }
     }
     // `referenced_conversation_ids` are client supplied too. The active-thread
@@ -7976,6 +8766,14 @@ async fn chat_stream(
         }
     }
     req.referenced_conversation_ids = readable_references;
+    // Community Marketplace usage is recorded locally as a counter only. The
+    // consent-gated Core beacon later sends an anonymous snapshot, and resolves
+    // portable agent runtime ids back to their Marketplace listing ids.
+    if let Some(workflow_id) = req.workflow_id.as_deref() {
+        crate::stats_beacon::record_marketplace_event("workflow", workflow_id, false);
+    } else if let Some(agent_id) = req.agent_id.as_deref() {
+        crate::stats_beacon::record_marketplace_event("agent", agent_id, false);
+    }
     // Wake any `onChat`-gated plugins the first time a chat turn is handled
     // (once per process, off the hot path — see `fire_on_chat_once`). Cheap
     // atomic on every subsequent request; covers both the single- and team-chat
@@ -8246,20 +9044,68 @@ async fn route_single_turn(
 /// wrapper can re-run a turn during a `continue` loop.
 async fn route_single_turn_once(
     state: &ServerState,
-    req: crate::sidecar::adapters::ChatStreamRequest,
+    mut req: crate::sidecar::adapters::ChatStreamRequest,
     watch: crate::routing_policy::reactive::TurnWatch,
 ) -> axum::response::Response {
+    // Resolve the auto sentinel before deriving memory access, then keep the
+    // concrete id on the request so the router and memory layer use the same
+    // agent and the classifier runs only once for this turn.
+    let auto_target = match (req.target_agent_id.as_deref(), req.agent_id.as_deref()) {
+        (Some(id), _) if id == crate::agent_routing::AUTO_AGENT_ID => Some(true),
+        (None, Some(id)) if id == crate::agent_routing::AUTO_AGENT_ID => Some(false),
+        _ => None,
+    };
+    if let Some(is_target) = auto_target {
+        let user_text = req
+            .messages
+            .iter()
+            .rev()
+            .find(|message| message.role == "user")
+            .map(crate::sidecar::adapters::ui_message_text)
+            .unwrap_or_default();
+        let resolved =
+            crate::agent_routing::resolve_auto_agent(&user_text, req.conversation_id.as_deref())
+                .await;
+        if is_target {
+            req.target_agent_id = Some(resolved);
+        } else {
+            req.agent_id = Some(resolved);
+        }
+    }
     // Apply the global skills disclosure mode (progressive vs full) from the pref
     // so the ACP chat path injects the L1 index + loads on demand (default) or the
     // full skill bodies. Cheap pref read; mirrors the per-request recall resolution.
     apply_skills_disclosure(state).await;
     // Resolve auto-recall (U17) config from prefs/env. Default ON; encoded as
     // `Some`/`None` so a disabled feature does zero work inside route_chat_stream.
-    let recall = if resolve_auto_recall_enabled(state).await {
+    let memory_principal_available = node_org_id().is_none() || req.author_user_id.is_some();
+    let temporary_context_enabled = req.persist
+        || req
+            .plugin_flags
+            .get(crate::memory_policy::TEMPORARY_CONTEXT_FLAG)
+            .copied()
+            .unwrap_or(false);
+    let recall = if memory_principal_available
+        && temporary_context_enabled
+        && resolve_auto_recall_enabled(state).await
+    {
+        // A council/mention target takes precedence over the ordinary agent id
+        // during routing. Use the same explicit target for memory access, or an
+        // agent-scoped fact can be recalled for the wrong agent on this turn.
+        let memory_agent_id = req.target_agent_id.clone().or_else(|| req.agent_id.clone());
         // Resolve the active agent's memory access from its MemorySlot: which
         // scope levels it may recall and which Spaces it may inject. Missing agent
         // / slot => empty vecs, which mean "all levels, no Spaces" (back-compat).
-        let (read_levels, space_ids) = resolve_memory_access(state, req.agent_id.as_deref()).await;
+        let (read_levels, space_ids) =
+            resolve_memory_access(state, memory_agent_id.as_deref()).await;
+        let memory_owner = if node_org_id().is_some() {
+            req.author_user_id
+                .as_deref()
+                .map(str::to_owned)
+                .unwrap_or_else(background_memory_user_id)
+        } else {
+            memory::LOCAL_USER.to_owned()
+        };
         Some(crate::sidecar::adapters::AutoRecallConfig {
             retrieval: state.retrieval.clone(),
             top_k: resolve_auto_recall_top_k(state).await,
@@ -8270,6 +9116,12 @@ async fn route_single_turn_once(
             read_levels,
             space_ids,
             caller_user_id: req.author_user_id.clone(),
+            agent_id: memory_agent_id,
+            include_sensitive_topics: state
+                .memory
+                .include_sensitive_topics(&memory_owner)
+                .await
+                .unwrap_or(false),
         })
     } else {
         None
@@ -8939,6 +9791,52 @@ fn parse_acp_selections(raw: Option<&str>) -> crate::sidecar::adapters::acp::Ses
         .unwrap_or_default()
 }
 
+/// Require a caller's permission on the exact agent named by an agent-management
+/// route. The broad `AgentsRead`/`AgentsManage` route policy only admits the
+/// request to Core; this resource gate is the authority that applies the agent's
+/// ACL before Core resolves or spawns its ACP runtime.
+async fn enforce_agent_resource_permission(
+    state: &ServerState,
+    caller: &Option<crate::identity_verify::VerifiedCaller>,
+    permission: &'static str,
+    agent_id: &str,
+) -> Result<(), axum::response::Response> {
+    enforce_permission_on(state, caller, permission, crate::acl::KIND_AGENT, agent_id)
+        .await
+        .map_err(|status| json_error(status, format!("insufficient permissions: {permission}")))
+}
+
+/// Run an ACP operation only after its exact-agent ACL check succeeds.
+/// This narrow generic seam also lets tests prove a denied check skips an
+/// injected side effect without constructing the full Core server state.
+async fn run_after_agent_resource_permission<T>(
+    permission: impl std::future::Future<Output = Result<(), axum::response::Response>>,
+    operation: impl std::future::Future<Output = T>,
+) -> Result<T, axum::response::Response> {
+    permission.await?;
+    Ok(operation.await)
+}
+
+async fn resolve_acp_spawn_cmd_authorized(
+    state: &ServerState,
+    caller: &Option<crate::identity_verify::VerifiedCaller>,
+    permission: &'static str,
+    agent_id: &str,
+) -> Result<Option<String>, axum::response::Response> {
+    run_after_agent_resource_permission(
+        enforce_agent_resource_permission(state, caller, permission, agent_id),
+        async {
+            crate::sidecar::adapters::resolve_acp_spawn_cmd(
+                agent_id,
+                &state.agents,
+                &state.agent_store,
+            )
+            .await
+        },
+    )
+    .await
+}
+
 /// `GET /api/agents/:id/acp-config` — the agent's advertised ACP session config.
 ///
 /// Opens a throwaway ACP session (no prompt) and returns `{ modes, models,
@@ -8956,20 +9854,29 @@ fn parse_acp_selections(raw: Option<&str>) -> crate::sidecar::adapters::acp::Ses
     tag = "Agents",
     summary = "Get an agent's ACP configuration",
     params(("id" = String, Path), ("selections" = Option<String>, Query)),
-    responses((status = 200, description = "OK", body = serde_json::Value))
+    responses(
+        (status = 200, description = "OK", body = serde_json::Value),
+        (status = 403, description = "Agent view permission required", body = serde_json::Value)
+    )
 )]
 async fn acp_config(
     State(state): State<ServerState>,
+    axum::Extension(caller): axum::Extension<Option<crate::identity_verify::VerifiedCaller>>,
     Path(agent_id): Path<String>,
     axum::extract::Query(query): axum::extract::Query<AcpConfigQuery>,
 ) -> axum::response::Response {
-    let Some(spawn_cmd) = crate::sidecar::adapters::resolve_acp_spawn_cmd(
+    let spawn_cmd = match resolve_acp_spawn_cmd_authorized(
+        &state,
+        &caller,
+        crate::identity_verify::permissions::AGENT_VIEW,
         &agent_id,
-        &state.agents,
-        &state.agent_store,
     )
     .await
-    else {
+    {
+        Ok(spawn_cmd) => spawn_cmd,
+        Err(response) => return response,
+    };
+    let Some(spawn_cmd) = spawn_cmd else {
         // Not an ACP agent → no session/new advertisement to read.
         return Json(serde_json::json!({
             "modes": null,
@@ -9028,20 +9935,29 @@ struct AcpAuthRequest {
     summary = "Authenticate to an ACP agent (login)",
     params(("id" = String, Path, description = "Agent id")),
     request_body = serde_json::Value,
-    responses((status = 200, description = "OK", body = serde_json::Value))
+    responses(
+        (status = 200, description = "OK", body = serde_json::Value),
+        (status = 403, description = "Agent edit permission required", body = serde_json::Value)
+    )
 )]
 async fn acp_authenticate(
     State(state): State<ServerState>,
+    axum::Extension(caller): axum::Extension<Option<crate::identity_verify::VerifiedCaller>>,
     Path(agent_id): Path<String>,
     Json(body): Json<AcpAuthRequest>,
 ) -> axum::response::Response {
-    let Some(spawn_cmd) = crate::sidecar::adapters::resolve_acp_spawn_cmd(
+    let spawn_cmd = match resolve_acp_spawn_cmd_authorized(
+        &state,
+        &caller,
+        crate::identity_verify::permissions::AGENT_EDIT,
         &agent_id,
-        &state.agents,
-        &state.agent_store,
     )
     .await
-    else {
+    {
+        Ok(spawn_cmd) => spawn_cmd,
+        Err(response) => return response,
+    };
+    let Some(spawn_cmd) = spawn_cmd else {
         return (
             StatusCode::BAD_REQUEST,
             Json(serde_json::json!({ "error": "not an ACP agent" })),
@@ -9119,19 +10035,28 @@ async fn acp_authenticate(
     tag = "Agents",
     summary = "Log out of an ACP agent",
     params(("id" = String, Path, description = "Agent id")),
-    responses((status = 200, description = "OK", body = serde_json::Value))
+    responses(
+        (status = 200, description = "OK", body = serde_json::Value),
+        (status = 403, description = "Agent edit permission required", body = serde_json::Value)
+    )
 )]
 async fn acp_logout(
     State(state): State<ServerState>,
+    axum::Extension(caller): axum::Extension<Option<crate::identity_verify::VerifiedCaller>>,
     Path(agent_id): Path<String>,
 ) -> axum::response::Response {
-    let Some(spawn_cmd) = crate::sidecar::adapters::resolve_acp_spawn_cmd(
+    let spawn_cmd = match resolve_acp_spawn_cmd_authorized(
+        &state,
+        &caller,
+        crate::identity_verify::permissions::AGENT_EDIT,
         &agent_id,
-        &state.agents,
-        &state.agent_store,
     )
     .await
-    else {
+    {
+        Ok(spawn_cmd) => spawn_cmd,
+        Err(response) => return response,
+    };
+    let Some(spawn_cmd) = spawn_cmd else {
         return (
             StatusCode::BAD_REQUEST,
             Json(serde_json::json!({ "error": "not an ACP agent" })),
@@ -9243,22 +10168,20 @@ async fn pi_provider_account_switch(
             )
                 .into_response();
         };
-        let api_key = match crate::pi_config::provider_account_api_key(
-            &provider_id,
-            &body.account_id,
-        ) {
-            Ok(key) => key,
-            Err(error) => {
-                return (
-                    StatusCode::BAD_REQUEST,
-                    Json(serde_json::json!({
-                        "switched": false,
-                        "error": error.to_string(),
-                    })),
-                )
-                    .into_response();
-            }
-        };
+        let api_key =
+            match crate::pi_config::provider_account_api_key(&provider_id, &body.account_id) {
+                Ok(key) => key,
+                Err(error) => {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Json(serde_json::json!({
+                            "switched": false,
+                            "error": error.to_string(),
+                        })),
+                    )
+                        .into_response();
+                }
+            };
         let (status, Json(result)) = gateway_set_provider(
             State(state.clone()),
             Extension(caller.clone()),
@@ -9352,23 +10275,32 @@ async fn pi_provider_account_remove(
     tag = "Agents",
     summary = "List an ACP agent's accounts",
     params(("id" = String, Path, description = "Agent id")),
-    responses((status = 200, description = "OK", body = serde_json::Value))
+    responses(
+        (status = 200, description = "OK", body = serde_json::Value),
+        (status = 403, description = "Agent view permission required", body = serde_json::Value)
+    )
 )]
 async fn acp_accounts(
     State(state): State<ServerState>,
+    axum::Extension(caller): axum::Extension<Option<crate::identity_verify::VerifiedCaller>>,
     Path(agent_id): Path<String>,
-) -> Json<serde_json::Value> {
-    let accounts = match crate::sidecar::adapters::resolve_acp_spawn_cmd(
+) -> axum::response::Response {
+    let spawn_cmd = match resolve_acp_spawn_cmd_authorized(
+        &state,
+        &caller,
+        crate::identity_verify::permissions::AGENT_VIEW,
         &agent_id,
-        &state.agents,
-        &state.agent_store,
     )
     .await
     {
+        Ok(spawn_cmd) => spawn_cmd,
+        Err(response) => return response,
+    };
+    let accounts = match spawn_cmd {
         Some(spawn_cmd) => crate::pi_config::list_acp_accounts(&spawn_cmd),
         None => Vec::new(),
     };
-    Json(serde_json::json!({ "accounts": accounts }))
+    Json(serde_json::json!({ "accounts": accounts })).into_response()
 }
 
 /// `POST /api/agents/:id/accounts/switch` — switch an ACP agent's active
@@ -9382,20 +10314,29 @@ async fn acp_accounts(
     summary = "Switch an ACP agent's active account",
     params(("id" = String, Path, description = "Agent id")),
     request_body = serde_json::Value,
-    responses((status = 200, description = "OK", body = serde_json::Value))
+    responses(
+        (status = 200, description = "OK", body = serde_json::Value),
+        (status = 403, description = "Agent edit permission required", body = serde_json::Value)
+    )
 )]
 async fn acp_account_switch(
     State(state): State<ServerState>,
+    axum::Extension(caller): axum::Extension<Option<crate::identity_verify::VerifiedCaller>>,
     Path(agent_id): Path<String>,
     Json(body): Json<AccountAction>,
 ) -> axum::response::Response {
-    let Some(spawn_cmd) = crate::sidecar::adapters::resolve_acp_spawn_cmd(
+    let spawn_cmd = match resolve_acp_spawn_cmd_authorized(
+        &state,
+        &caller,
+        crate::identity_verify::permissions::AGENT_EDIT,
         &agent_id,
-        &state.agents,
-        &state.agent_store,
     )
     .await
-    else {
+    {
+        Ok(spawn_cmd) => spawn_cmd,
+        Err(response) => return response,
+    };
+    let Some(spawn_cmd) = spawn_cmd else {
         return (
             StatusCode::BAD_REQUEST,
             Json(serde_json::json!({ "switched": false, "error": "not an ACP agent" })),
@@ -9438,20 +10379,29 @@ async fn acp_account_switch(
     summary = "Remove an ACP agent account",
     params(("id" = String, Path, description = "Agent id")),
     request_body = serde_json::Value,
-    responses((status = 200, description = "OK", body = serde_json::Value))
+    responses(
+        (status = 200, description = "OK", body = serde_json::Value),
+        (status = 403, description = "Agent edit permission required", body = serde_json::Value)
+    )
 )]
 async fn acp_account_remove(
     State(state): State<ServerState>,
+    axum::Extension(caller): axum::Extension<Option<crate::identity_verify::VerifiedCaller>>,
     Path(agent_id): Path<String>,
     Json(body): Json<AccountAction>,
 ) -> axum::response::Response {
-    let Some(spawn_cmd) = crate::sidecar::adapters::resolve_acp_spawn_cmd(
+    let spawn_cmd = match resolve_acp_spawn_cmd_authorized(
+        &state,
+        &caller,
+        crate::identity_verify::permissions::AGENT_EDIT,
         &agent_id,
-        &state.agents,
-        &state.agent_store,
     )
     .await
-    else {
+    {
+        Ok(spawn_cmd) => spawn_cmd,
+        Err(response) => return response,
+    };
+    let Some(spawn_cmd) = spawn_cmd else {
         return (
             StatusCode::BAD_REQUEST,
             Json(serde_json::json!({ "removed": false, "error": "not an ACP agent" })),
@@ -9482,19 +10432,28 @@ async fn acp_account_remove(
     tag = "Agents",
     summary = "List an ACP agent's sessions",
     params(("id" = String, Path, description = "Agent id")),
-    responses((status = 200, description = "OK", body = serde_json::Value))
+    responses(
+        (status = 200, description = "OK", body = serde_json::Value),
+        (status = 403, description = "Agent view permission required", body = serde_json::Value)
+    )
 )]
 async fn list_acp_sessions_handler(
     State(state): State<ServerState>,
+    axum::Extension(caller): axum::Extension<Option<crate::identity_verify::VerifiedCaller>>,
     Path(agent_id): Path<String>,
 ) -> axum::response::Response {
-    let Some(spawn_cmd) = crate::sidecar::adapters::resolve_acp_spawn_cmd(
+    let spawn_cmd = match resolve_acp_spawn_cmd_authorized(
+        &state,
+        &caller,
+        crate::identity_verify::permissions::AGENT_VIEW,
         &agent_id,
-        &state.agents,
-        &state.agent_store,
     )
     .await
-    else {
+    {
+        Ok(spawn_cmd) => spawn_cmd,
+        Err(response) => return response,
+    };
+    let Some(spawn_cmd) = spawn_cmd else {
         return Json(serde_json::json!({ "sessions": [] })).into_response();
     };
     match crate::sidecar::adapters::acp::list_acp_sessions(spawn_cmd).await {
@@ -9518,19 +10477,28 @@ async fn list_acp_sessions_handler(
         ("id" = String, Path, description = "Agent id"),
         ("sid" = String, Path, description = "Session id")
     ),
-    responses((status = 200, description = "OK", body = serde_json::Value))
+    responses(
+        (status = 200, description = "OK", body = serde_json::Value),
+        (status = 403, description = "Agent edit permission required", body = serde_json::Value)
+    )
 )]
 async fn delete_acp_session_handler(
     State(state): State<ServerState>,
+    axum::Extension(caller): axum::Extension<Option<crate::identity_verify::VerifiedCaller>>,
     Path((agent_id, sid)): Path<(String, String)>,
 ) -> axum::response::Response {
-    let Some(spawn_cmd) = crate::sidecar::adapters::resolve_acp_spawn_cmd(
+    let spawn_cmd = match resolve_acp_spawn_cmd_authorized(
+        &state,
+        &caller,
+        crate::identity_verify::permissions::AGENT_EDIT,
         &agent_id,
-        &state.agents,
-        &state.agent_store,
     )
     .await
-    else {
+    {
+        Ok(spawn_cmd) => spawn_cmd,
+        Err(response) => return response,
+    };
+    let Some(spawn_cmd) = spawn_cmd else {
         return (
             StatusCode::BAD_REQUEST,
             Json(serde_json::json!({ "error": "not an ACP agent" })),
@@ -9579,20 +10547,29 @@ struct LoadSessionBody {
         ("sid" = String, Path, description = "Session id")
     ),
     request_body = serde_json::Value,
-    responses((status = 200, description = "OK", body = serde_json::Value))
+    responses(
+        (status = 200, description = "OK", body = serde_json::Value),
+        (status = 403, description = "Agent edit permission required", body = serde_json::Value)
+    )
 )]
 async fn load_acp_session_handler(
     State(state): State<ServerState>,
+    axum::Extension(caller): axum::Extension<Option<crate::identity_verify::VerifiedCaller>>,
     Path((agent_id, sid)): Path<(String, String)>,
     body: Option<Json<LoadSessionBody>>,
 ) -> axum::response::Response {
-    let Some(spawn_cmd) = crate::sidecar::adapters::resolve_acp_spawn_cmd(
+    let spawn_cmd = match resolve_acp_spawn_cmd_authorized(
+        &state,
+        &caller,
+        crate::identity_verify::permissions::AGENT_EDIT,
         &agent_id,
-        &state.agents,
-        &state.agent_store,
     )
     .await
-    else {
+    {
+        Ok(spawn_cmd) => spawn_cmd,
+        Err(response) => return response,
+    };
+    let Some(spawn_cmd) = spawn_cmd else {
         return (
             StatusCode::BAD_REQUEST,
             Json(serde_json::json!({ "error": "not an ACP agent" })),
@@ -9640,13 +10617,30 @@ async fn agent_npm_package(state: &ServerState, agent_id: &str) -> Option<String
     tag = "Agents",
     summary = "Check an agent runtime for updates",
     params(("id" = String, Path, description = "Agent id")),
-    responses((status = 200, description = "OK", body = serde_json::Value))
+    responses(
+        (status = 200, description = "OK", body = serde_json::Value),
+        (status = 403, description = "Agent view permission required", body = serde_json::Value)
+    )
 )]
 async fn agent_update_check(
     State(state): State<ServerState>,
+    axum::Extension(caller): axum::Extension<Option<crate::identity_verify::VerifiedCaller>>,
     Path(agent_id): Path<String>,
-) -> Json<serde_json::Value> {
-    let entry = state.agents.find_by_prefix(&agent_id).cloned();
+) -> axum::response::Response {
+    let entry = match run_after_agent_resource_permission(
+        enforce_agent_resource_permission(
+            &state,
+            &caller,
+            crate::identity_verify::permissions::AGENT_VIEW,
+            &agent_id,
+        ),
+        async { state.agents.find_by_prefix(&agent_id).cloned() },
+    )
+    .await
+    {
+        Ok(entry) => entry,
+        Err(response) => return response,
+    };
     let probe = entry.as_ref().and_then(|e| e.version_probe.clone());
     let bridge_npm_package = probe.as_ref().and_then(|p| p.bridge_npm_package.clone());
     // `agent_npm_package` parses the SPAWN command, so for an ACP agent it yields
@@ -9702,6 +10696,7 @@ async fn agent_update_check(
         "latestBridgeVersion": latest_bridge,
         "updateAvailable": update_available,
     }))
+    .into_response()
 }
 
 /// How an on-PATH agent CLI was installed, which is what decides whether Ryu can
@@ -10027,16 +11022,33 @@ async fn resolve_capability_model_ref(
     tag = "Agents",
     summary = "Resolve an agent's capabilities (tools / reasoning / vision)",
     params(("id" = String, Path), ("model" = Option<String>, Query, description = "Override the model ref to probe")),
-    responses((status = 200, description = "OK", body = serde_json::Value))
+    responses(
+        (status = 200, description = "OK", body = serde_json::Value),
+        (status = 403, description = "Agent view permission required", body = serde_json::Value)
+    )
 )]
 async fn agent_capabilities(
     State(state): State<ServerState>,
+    axum::Extension(caller): axum::Extension<Option<crate::identity_verify::VerifiedCaller>>,
     Path(agent_id): Path<String>,
     axum::extract::Query(query): axum::extract::Query<AgentCapabilitiesQuery>,
 ) -> axum::response::Response {
     use crate::model_catalog::capabilities::{self as caps, CapabilityReport, DetectedCaps};
 
-    let overrides = caps::load_override(&agent_id);
+    let overrides = match run_after_agent_resource_permission(
+        enforce_agent_resource_permission(
+            &state,
+            &caller,
+            crate::identity_verify::permissions::AGENT_VIEW,
+            &agent_id,
+        ),
+        async { caps::load_override(&agent_id) },
+    )
+    .await
+    {
+        Ok(overrides) => overrides,
+        Err(response) => return response,
+    };
     let acp_selections = parse_acp_selections(query.selections.as_deref());
     let model_ref = resolve_capability_model_ref(&state, &agent_id, query.model).await;
     let local_detected = model_ref.as_deref().and_then(caps::detect_local);
@@ -10138,10 +11150,14 @@ struct CapabilityOverridePatch {
     summary = "Persist an agent's capability overrides",
     params(("id" = String, Path)),
     request_body = serde_json::Value,
-    responses((status = 200, description = "OK", body = serde_json::Value))
+    responses(
+        (status = 200, description = "OK", body = serde_json::Value),
+        (status = 403, description = "Agent edit permission required", body = serde_json::Value)
+    )
 )]
 async fn set_agent_capabilities(
     State(state): State<ServerState>,
+    axum::Extension(caller): axum::Extension<Option<crate::identity_verify::VerifiedCaller>>,
     Path(agent_id): Path<String>,
     Json(patch): Json<CapabilityOverridePatch>,
 ) -> axum::response::Response {
@@ -10152,7 +11168,21 @@ async fn set_agent_capabilities(
         reasoning: patch.reasoning,
         vision: patch.vision,
     };
-    if let Err(e) = crate::model_catalog::capabilities::save_override(&agent_id, &overrides) {
+    let save_result = match run_after_agent_resource_permission(
+        enforce_agent_resource_permission(
+            &state,
+            &caller,
+            crate::identity_verify::permissions::AGENT_EDIT,
+            &agent_id,
+        ),
+        async { crate::model_catalog::capabilities::save_override(&agent_id, &overrides) },
+    )
+    .await
+    {
+        Ok(save_result) => save_result,
+        Err(response) => return response,
+    };
+    if let Err(e) = save_result {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({ "error": e.to_string() })),
@@ -10163,6 +11193,7 @@ async fn set_agent_capabilities(
     // model override here: report the agent's own effective capabilities.
     agent_capabilities(
         State(state),
+        axum::Extension(caller),
         Path(agent_id),
         axum::extract::Query(AgentCapabilitiesQuery {
             model: None,
@@ -11129,6 +12160,12 @@ async fn channel_run(
     axum::Extension(caller): axum::Extension<Option<crate::identity_verify::VerifiedCaller>>,
     Json(mut req): Json<ChannelRunRequest>,
 ) -> axum::response::Response {
+    if !crate::sidecar::adapters::acp::is_safe_host_conversation_id(&req.conversation_id) {
+        return json_error(
+            StatusCode::BAD_REQUEST,
+            "conversation_id must be 1-128 ASCII letters, digits, '.', '_' or '-'".to_owned(),
+        );
+    }
     // Per-resource ACL (machine-ingress variant). `conversation_id` is caller-supplied
     // here too, so without this a node-token holder could pass a HUMAN's conversation
     // id and have that thread's history loaded as context and their turn appended
@@ -11798,6 +12835,25 @@ struct IndexChunkBody {
     content: String,
 }
 
+fn valid_retrieval_chunk_id(id: &str) -> bool {
+    let id = id.trim();
+    !id.is_empty() && id.len() <= 200 && !id.chars().any(char::is_control)
+}
+
+#[cfg(test)]
+mod retrieval_index_contract_tests {
+    use super::valid_retrieval_chunk_id;
+
+    #[test]
+    fn stable_ids_are_bounded_and_control_free() {
+        assert!(valid_retrieval_chunk_id("command-palette-memory"));
+        assert!(valid_retrieval_chunk_id("  trimmed-id  "));
+        assert!(!valid_retrieval_chunk_id(""));
+        assert!(!valid_retrieval_chunk_id("\n"));
+        assert!(!valid_retrieval_chunk_id(&"x".repeat(201)));
+    }
+}
+
 #[utoipa::path(
     post,
     path = "/api/retrieval/index",
@@ -11827,10 +12883,89 @@ async fn index_retrieval_chunk(
     {
         return json_error(status, "forbidden".to_owned());
     }
+    let chunk_id = body.id.trim();
+    if !valid_retrieval_chunk_id(chunk_id) {
+        return json_error(
+            StatusCode::BAD_REQUEST,
+            "id must be between 1 and 200 bytes and contain no control characters".to_owned(),
+        );
+    }
     let source = match body.source.as_deref() {
         Some("space") => ChunkSource::Space,
         _ => ChunkSource::Memory,
     };
+    if source == ChunkSource::Memory {
+        // Memory content must enter the encrypted source of truth first. The old
+        // endpoint used to create an orphaned plaintext retrieval row, bypassing
+        // memory ownership, sensitivity, lifecycle, and the Memory Library.
+        if !memory::detect_sensitive_topics(&body.content).is_empty()
+            && !sensitive_memory_enabled(&state, &caller).await
+        {
+            return json_error(
+                StatusCode::BAD_REQUEST,
+                "sensitive topics are disabled in Settings → Memory".to_owned(),
+            );
+        }
+        if body.content.trim().is_empty() {
+            return json_error(StatusCode::BAD_REQUEST, "content is empty".to_owned());
+        }
+        let owner = memory_owner_user_id(&caller);
+        match state.memory.get(chunk_id).await {
+            Ok(Some(existing)) => {
+                if !memory_access_ok(&caller, &existing)
+                    || (!sensitive_memory_enabled(&state, &caller).await
+                        && !existing.sensitive_topics.is_empty())
+                {
+                    return json_error(StatusCode::NOT_FOUND, "memory not found".to_owned());
+                }
+                let updated = state
+                    .memory
+                    .update(
+                        chunk_id,
+                        memory::MemoryPatch {
+                            content: Some(body.content),
+                            ..Default::default()
+                        },
+                    )
+                    .await;
+                match updated {
+                    Ok(Some(entry)) => {
+                        index_memory_entry(&state, &entry).await;
+                        return Json(json!({ "success": true, "id": chunk_id })).into_response();
+                    }
+                    Ok(None) => {
+                        return json_error(StatusCode::NOT_FOUND, "memory not found".to_owned())
+                    }
+                    Err(error) => {
+                        return json_error(StatusCode::INTERNAL_SERVER_ERROR, error.to_string())
+                    }
+                }
+            }
+            Ok(None) => {
+                let mut memory = memory::NewMemory::user_fact(body.content);
+                memory.author_agent_id = Some("default".to_owned());
+                match state
+                    .memory
+                    .record_full_with_id(chunk_id, &owner, "default", memory)
+                    .await
+                {
+                    Ok(Some(id)) => {
+                        if let Ok(Some(entry)) = state.memory.get(&id).await {
+                            index_memory_entry(&state, &entry).await;
+                        }
+                        return Json(json!({ "success": true, "id": id })).into_response();
+                    }
+                    Ok(None) => {
+                        return json_error(StatusCode::BAD_REQUEST, "content is empty".to_owned())
+                    }
+                    Err(error) => {
+                        return json_error(StatusCode::INTERNAL_SERVER_ERROR, error.to_string())
+                    }
+                }
+            }
+            Err(error) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()),
+        }
+    }
     // Stamp the indexing caller as the chunk's owner on a bound node so the
     // retrieval tenancy filter can gate it; unbound → shared (filter is a no-op).
     // A bound node with NO verified caller refuses outright rather than writing an
@@ -11859,7 +12994,7 @@ async fn index_retrieval_chunk(
     match state
         .retrieval
         .index_chunk(
-            &body.id,
+            chunk_id,
             source,
             body.space_id.as_deref(),
             &body.content,
@@ -11867,7 +13002,7 @@ async fn index_retrieval_chunk(
         )
         .await
     {
-        Ok(()) => Json(json!({ "success": true, "id": body.id })).into_response(),
+        Ok(()) => Json(json!({ "success": true, "id": chunk_id })).into_response(),
         Err(e) => json_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     }
 }
@@ -11883,6 +13018,8 @@ struct RetrievalSearchBody {
     include_memory: Option<bool>,
     #[serde(default)]
     min_score: Option<f32>,
+    #[serde(default)]
+    agent_id: Option<String>,
 }
 
 #[utoipa::path(
@@ -11922,26 +13059,312 @@ async fn search_retrieval(
         return json_error(status, "forbidden".to_owned());
     }
     let node_bound = node_org_id().is_some();
+    let include_sensitive = sensitive_memory_enabled(&state, &caller).await;
+    let include_memory = body.include_memory.unwrap_or(true);
+    let agent_id = body.agent_id.clone();
     let opts = retrieval::RetrievalOptions {
         top_k: body.top_k.unwrap_or(retrieval::DEFAULT_TOP_K),
         space_ids: body.space_ids,
-        include_memory: body.include_memory.unwrap_or(true),
+        include_memory,
         min_score: body.min_score.unwrap_or(0.0),
+        agent_id: agent_id.clone(),
+        include_sensitive,
         node_bound,
         caller_user_id: caller.as_ref().map(|c| c.user_id.clone()),
         caller_org_id: caller.as_ref().and_then(|c| c.org_id.clone()),
         ..Default::default()
     };
-    match state.retrieval.retrieve(&body.query, &opts).await {
-        Ok(chunks) => Json(json!({ "chunks": chunks })).into_response(),
-        Err(e) => json_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    if include_memory {
+        if let Ok(facts) = state.memory.all_for_backfill(500).await {
+            refresh_memory_retrieval_metadata(&state, &facts).await;
+        }
     }
+    let vector_chunks = match state.retrieval.retrieve(&body.query, &opts).await {
+        Ok(chunks) => chunks,
+        Err(e) => {
+            tracing::warn!("retrieval vector search failed; trying memory graph: {e:#}");
+            Vec::new()
+        }
+    };
+    if !include_memory {
+        return Json(json!({ "chunks": vector_chunks })).into_response();
+    }
+    let graph_chunks = match state.memory.all_for_backfill(500).await {
+        Ok(facts) => {
+            let graph =
+                retrieval::MemoryGraph::from_documents(facts.iter().map(memory_graph_document));
+            let filter = retrieval::MemoryGraphQuery {
+                agent_id: agent_id.as_deref(),
+                include_all_agents: false,
+                allowed_scopes: None,
+                project_id: opts.project_id.as_deref(),
+                include_all_projects: false,
+                node_bound,
+                caller_user_id: opts.caller_user_id.as_deref(),
+                caller_org_id: opts.caller_org_id.as_deref(),
+                include_sensitive,
+            };
+            graph
+                .search(&body.query, &filter, opts.top_k)
+                .into_iter()
+                .filter_map(|hit| {
+                    graph
+                        .document(&hit.memory_id)
+                        .map(|entry| retrieval::ScoredChunk {
+                            id: entry.memory_id.clone(),
+                            source: ChunkSource::Memory,
+                            space_id: None,
+                            content: entry.content.clone(),
+                            score: hit.score,
+                        })
+                })
+                .collect::<Vec<_>>()
+        }
+        Err(error) => {
+            tracing::warn!("memory graph search source scan failed (skipping): {error:#}");
+            Vec::new()
+        }
+    };
+    let chunks = if graph_chunks.is_empty() {
+        vector_chunks
+    } else {
+        retrieval::fuse_ranked_lists(vector_chunks, vec![graph_chunks], opts.top_k)
+    };
+    Json(json!({ "chunks": chunks })).into_response()
 }
 
 // ── Memory management API (/api/memory) ──────────────────────────────────────
 // First-class CRUD over long-term memory so the desktop Memory Library can
 // browse, classify, and curate facts. Writes keep the retrieval index in sync so
 // a created/edited fact is immediately RAG-retrievable (and a deleted one gone).
+
+/// Resolve the principal whose sensitive-memory consent may be read or changed.
+/// A bound node must have a verified user; an unbound node has one local principal.
+fn memory_settings_user_id(
+    caller: &Option<crate::identity_verify::VerifiedCaller>,
+) -> Option<String> {
+    if node_org_id().is_some() {
+        caller.as_ref().map(|value| value.user_id.clone())
+    } else {
+        Some(memory::LOCAL_USER.to_owned())
+    }
+}
+
+async fn require_memory_permission(
+    state: &ServerState,
+    caller: &Option<crate::identity_verify::VerifiedCaller>,
+    permission: &str,
+) -> Result<(), axum::response::Response> {
+    if enforce_permission(state, caller, permission).await.is_err() {
+        return Err(json_error(
+            StatusCode::FORBIDDEN,
+            format!("insufficient permissions: {permission}"),
+        ));
+    }
+    Ok(())
+}
+
+/// Resolve sensitive-memory consent for a request. Missing or unreadable state is
+/// deliberately false: this preference grants access to special-category facts.
+async fn sensitive_memory_enabled(
+    state: &ServerState,
+    caller: &Option<crate::identity_verify::VerifiedCaller>,
+) -> bool {
+    let Some(user_id) = memory_settings_user_id(caller) else {
+        return false;
+    };
+    state
+        .memory
+        .include_sensitive_topics(&user_id)
+        .await
+        .unwrap_or(false)
+}
+
+#[derive(serde::Deserialize)]
+struct MemorySettingsBody {
+    include_sensitive_topics: bool,
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/memory/settings",
+    tag = "Memory",
+    summary = "Get memory privacy settings",
+    responses((status = 200, description = "OK", body = serde_json::Value))
+)]
+async fn get_memory_settings(
+    State(state): State<ServerState>,
+    axum::Extension(caller): axum::Extension<Option<crate::identity_verify::VerifiedCaller>>,
+) -> axum::response::Response {
+    if let Err(response) = require_memory_permission(
+        &state,
+        &caller,
+        crate::identity_verify::permissions::SPACE_READ,
+    )
+    .await
+    {
+        return response;
+    }
+    let Some(user_id) = memory_settings_user_id(&caller) else {
+        return json_error(
+            StatusCode::FORBIDDEN,
+            "a verified user is required to read sensitive memory settings".to_owned(),
+        );
+    };
+    let enabled = state
+        .memory
+        .include_sensitive_topics(&user_id)
+        .await
+        .unwrap_or(false);
+    Json(json!({ "include_sensitive_topics": enabled })).into_response()
+}
+
+#[utoipa::path(
+    put,
+    path = "/api/memory/settings",
+    tag = "Memory",
+    summary = "Update memory privacy settings",
+    request_body = serde_json::Value,
+    responses((status = 200, description = "OK", body = serde_json::Value))
+)]
+async fn update_memory_settings(
+    State(state): State<ServerState>,
+    axum::Extension(caller): axum::Extension<Option<crate::identity_verify::VerifiedCaller>>,
+    Json(body): Json<MemorySettingsBody>,
+) -> axum::response::Response {
+    if let Err(response) = require_memory_permission(
+        &state,
+        &caller,
+        crate::identity_verify::permissions::SPACE_WRITE,
+    )
+    .await
+    {
+        return response;
+    }
+    let Some(user_id) = memory_settings_user_id(&caller) else {
+        return json_error(
+            StatusCode::FORBIDDEN,
+            "a verified user is required to change sensitive memory settings".to_owned(),
+        );
+    };
+    match state
+        .memory
+        .set_include_sensitive_topics(&user_id, body.include_sensitive_topics)
+        .await
+    {
+        Ok(()) => {
+            if !body.include_sensitive_topics {
+                // Revoke first, then remove every derived row for this principal.
+                // The set-based cleanup is not capped by the source-store page
+                // size, and every read path also checks consent so a retry after
+                // a cleanup failure remains fail-closed.
+                let owner = node_org_id().is_some().then_some(user_id.as_str());
+                if let Err(error) = state.retrieval.clear_sensitive_memory_chunks(owner).await {
+                    return json_error(StatusCode::INTERNAL_SERVER_ERROR, error.to_string());
+                }
+            }
+            Json(json!({
+                "include_sensitive_topics": body.include_sensitive_topics
+            }))
+            .into_response()
+        }
+        Err(error) => json_error(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()),
+    }
+}
+
+#[derive(serde::Deserialize, Default)]
+struct MemoryGraphQuery {
+    #[serde(default)]
+    agent_id: Option<String>,
+    #[serde(default)]
+    project_id: Option<String>,
+    #[serde(default)]
+    max_nodes: Option<usize>,
+    #[serde(default)]
+    max_edges: Option<usize>,
+}
+
+fn memory_graph_document(entry: &memory::LongTermEntry) -> retrieval::MemoryGraphDocument {
+    retrieval::MemoryGraphDocument {
+        memory_id: entry.id.clone(),
+        content: entry.content.clone(),
+        scope: entry.scope.as_str().to_owned(),
+        scope_id: entry.scope_id.clone(),
+        category: entry.category.as_str().to_owned(),
+        agent_id: entry.author_agent_id.clone(),
+        owner_user_id: entry.owner_user_id.clone(),
+        owner_org_id: None,
+        importance: entry.importance,
+        tags: entry.tags.clone(),
+        sensitive_topics: entry
+            .sensitive_topics
+            .iter()
+            .map(|topic| topic.as_str().to_owned())
+            .collect(),
+    }
+}
+
+/// Build an access-filtered typed graph from the encrypted memory source. The
+/// graph is a bounded derived projection; it is never treated as an ACL or a
+/// second source of truth.
+#[utoipa::path(
+    get,
+    path = "/api/memory/graph",
+    tag = "Memory",
+    summary = "Get the typed memory graph",
+    params(("agent_id" = Option<String>, Query), ("project_id" = Option<String>, Query), ("max_nodes" = Option<usize>, Query), ("max_edges" = Option<usize>, Query)),
+    responses((status = 200, description = "OK", body = serde_json::Value))
+)]
+async fn get_memory_graph(
+    State(state): State<ServerState>,
+    axum::Extension(caller): axum::Extension<Option<crate::identity_verify::VerifiedCaller>>,
+    axum::extract::Query(query): axum::extract::Query<MemoryGraphQuery>,
+) -> axum::response::Response {
+    if let Err(response) = require_memory_permission(
+        &state,
+        &caller,
+        crate::identity_verify::permissions::SPACE_READ,
+    )
+    .await
+    {
+        return response;
+    }
+    let node_bound = node_org_id().is_some();
+    let caller_user_id = caller.as_ref().map(|value| value.user_id.clone());
+    let caller_org_id = caller.as_ref().and_then(|value| value.org_id.clone());
+    let include_sensitive = sensitive_memory_enabled(&state, &caller).await;
+    let facts = match state.memory.all_for_backfill(500).await {
+        Ok(facts) => facts,
+        Err(error) => {
+            return json_error(StatusCode::INTERNAL_SERVER_ERROR, error.to_string());
+        }
+    };
+    let graph = retrieval::MemoryGraph::from_documents(facts.iter().map(memory_graph_document));
+    let allowed_scopes = [
+        "agent".to_owned(),
+        "user".to_owned(),
+        "node".to_owned(),
+        "project".to_owned(),
+        "org".to_owned(),
+    ];
+    let filter = retrieval::MemoryGraphQuery {
+        agent_id: query.agent_id.as_deref(),
+        include_all_agents: query.agent_id.is_none(),
+        allowed_scopes: Some(&allowed_scopes),
+        project_id: query.project_id.as_deref(),
+        include_all_projects: query.project_id.is_none(),
+        node_bound,
+        caller_user_id: caller_user_id.as_deref(),
+        caller_org_id: caller_org_id.as_deref(),
+        include_sensitive,
+    };
+    let snapshot = graph.snapshot(
+        &filter,
+        query.max_nodes.unwrap_or(160).clamp(1, 500),
+        query.max_edges.unwrap_or(320).clamp(1, 1_000),
+    );
+    Json(snapshot).into_response()
+}
 
 #[derive(serde::Deserialize)]
 struct MemoryListQuery {
@@ -12005,6 +13428,26 @@ where
 /// Best-effort: mirror a memory entry into the retrieval index so it is
 /// immediately RAG-retrievable. Logs and continues on failure (fail-open).
 pub(crate) async fn index_memory_entry(state: &ServerState, entry: &memory::LongTermEntry) {
+    if entry.lifecycle != memory::MemoryLifecycle::Active {
+        // Inactive rows remain available for audit/rollback, but must never be
+        // reintroduced into the retrieval projection by a stale index request.
+        let _ = state.retrieval.remove_chunk(&entry.id).await;
+        return;
+    }
+    // A revoked consent must not leave a plaintext/vector projection behind.
+    // Read gating below is still authoritative, but removing the derived row
+    // narrows the at-rest exposure as soon as this bridge runs.
+    let consent_user = entry.owner_user_id.as_deref().unwrap_or(memory::LOCAL_USER);
+    if !entry.sensitive_topics.is_empty()
+        && !state
+            .memory
+            .include_sensitive_topics(consent_user)
+            .await
+            .unwrap_or(false)
+    {
+        let _ = state.retrieval.remove_chunk(&entry.id).await;
+        return;
+    }
     // Denormalize the memory's owner onto its retrieval chunk so the per-caller
     // filter (`memory_tenancy_allows`) runs in-process. On an unbound node, or for a
     // legacy `'local'`-owned row, stamp `shared()` — the retrieval memory filter is a
@@ -12018,13 +13461,15 @@ pub(crate) async fn index_memory_entry(state: &ServerState, entry: &memory::Long
     };
     if let Err(e) = state
         .retrieval
-        .index_memory_chunk(
+        .index_memory_chunk_with_metadata(
             &entry.id,
             &entry.content,
             entry.scope.as_str(),
             entry.scope_id.as_deref(),
             entry.category.as_str(),
             entry.importance,
+            entry.author_agent_id.as_deref(),
+            !entry.sensitive_topics.is_empty(),
             owner,
         )
         .await
@@ -12033,6 +13478,41 @@ pub(crate) async fn index_memory_entry(state: &ServerState, entry: &memory::Long
             "memory: indexing entry {} failed (search may lag): {e:#}",
             entry.id
         );
+    }
+}
+
+/// Refresh metadata for already-indexed memory rows without making a provider
+/// call. This closes the migration window for old retrieval rows that predate
+/// agent and sensitivity fields, so direct search cannot treat an old sensitive
+/// fact as ordinary merely because its projection is stale.
+async fn refresh_memory_retrieval_metadata(state: &ServerState, entries: &[memory::LongTermEntry]) {
+    let node_org = node_org_id();
+    for entry in entries {
+        let owner = match (node_org.as_deref(), entry.owner_user_id.as_deref()) {
+            (Some(org), Some(uid)) if uid != memory::LOCAL_USER => {
+                retrieval::RetrievalOwner::owned(Some(uid), Some(org), None)
+            }
+            _ => retrieval::RetrievalOwner::shared(),
+        };
+        if let Err(error) = state
+            .retrieval
+            .update_memory_metadata(
+                &entry.id,
+                entry.scope.as_str(),
+                entry.scope_id.as_deref(),
+                entry.category.as_str(),
+                entry.importance,
+                entry.author_agent_id.as_deref(),
+                !entry.sensitive_topics.is_empty(),
+                owner,
+            )
+            .await
+        {
+            tracing::warn!(
+                "memory: refreshing retrieval metadata for {} failed: {error:#}",
+                entry.id
+            );
+        }
     }
 }
 
@@ -12049,6 +13529,15 @@ async fn list_memory(
     axum::Extension(caller): axum::Extension<Option<crate::identity_verify::VerifiedCaller>>,
     axum::extract::Query(q): axum::extract::Query<MemoryListQuery>,
 ) -> axum::response::Response {
+    if let Err(response) = require_memory_permission(
+        &state,
+        &caller,
+        crate::identity_verify::permissions::SPACE_READ,
+    )
+    .await
+    {
+        return response;
+    }
     let filter = memory::MemoryFilter {
         scope: q.scope.as_deref().map(memory::MemoryScope::from_str),
         scope_id: q.scope_id,
@@ -12063,7 +13552,12 @@ async fn list_memory(
         caller.as_ref().and_then(|c| c.org_id.as_deref()),
         node_org_id().is_some(),
     );
-    match state.memory.list_visible(&filter, vis).await {
+    let include_sensitive = sensitive_memory_enabled(&state, &caller).await;
+    match state
+        .memory
+        .list_visible_with_sensitive(&filter, vis, include_sensitive)
+        .await
+    {
         Ok(entries) => Json(json!({ "memories": entries })).into_response(),
         Err(e) => json_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     }
@@ -12074,17 +13568,46 @@ async fn create_memory(
     axum::Extension(caller): axum::Extension<Option<crate::identity_verify::VerifiedCaller>>,
     Json(body): Json<CreateMemoryBody>,
 ) -> axum::response::Response {
+    if let Err(response) = require_memory_permission(
+        &state,
+        &caller,
+        crate::identity_verify::permissions::SPACE_WRITE,
+    )
+    .await
+    {
+        return response;
+    }
     let scope = body
         .scope
         .as_deref()
         .map(memory::MemoryScope::from_str)
         .unwrap_or_default();
+    let agent = body
+        .agent_id
+        .clone()
+        .unwrap_or_else(|| "default".to_owned());
+    let sensitive_topics = memory::detect_sensitive_topics(&body.content);
+    if !sensitive_topics.is_empty() && !sensitive_memory_enabled(&state, &caller).await {
+        return json_error(
+            StatusCode::BAD_REQUEST,
+            "sensitive topics are disabled in Settings → Memory".to_owned(),
+        );
+    }
+    if !sensitive_topics.is_empty() && scope != memory::MemoryScope::User {
+        return json_error(
+            StatusCode::BAD_REQUEST,
+            "sensitive memory must use user scope; shared and agent scopes are not supported"
+                .to_owned(),
+        );
+    }
     // An org-scope fact's owning org is SERVER-derived, never client-supplied:
     // accepting a caller's `scope_id` here would let anyone publish a memory into an
     // org they do not belong to. The caller's verified org wins, and with no
     // resolvable org the write is refused rather than silently downgraded to a
     // narrower scope the user did not ask for.
-    let scope_id = if scope == memory::MemoryScope::Org {
+    let scope_id = if scope == memory::MemoryScope::Agent {
+        Some(agent.clone())
+    } else if scope == memory::MemoryScope::Org {
         match caller.as_ref().and_then(|c| c.org_id.clone()) {
             Some(org) => Some(org),
             None => {
@@ -12097,6 +13620,18 @@ async fn create_memory(
     } else {
         body.scope_id
     };
+    if scope == memory::MemoryScope::Project
+        && scope_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .is_none()
+    {
+        return json_error(
+            StatusCode::BAD_REQUEST,
+            "project-scope memory requires a non-empty scope_id".to_owned(),
+        );
+    }
     let new = memory::NewMemory {
         content: body.content,
         scope,
@@ -12109,9 +13644,12 @@ async fn create_memory(
         importance: body.importance.unwrap_or(memory::DEFAULT_IMPORTANCE),
         when_to_use: body.when_to_use,
         tags: body.tags.unwrap_or_default(),
-        author_agent_id: body.agent_id.clone(),
+        author_agent_id: if scope == memory::MemoryScope::Agent {
+            Some(agent.clone())
+        } else {
+            body.agent_id.clone()
+        },
     };
-    let agent = body.agent_id.unwrap_or_else(|| "default".to_string());
     // Stamp the verified caller as the fact's owner on a bound node (the per-user
     // tenancy key); unbound → LOCAL_USER, byte-identical to the pre-ACL build.
     let owner = memory_owner_user_id(&caller);
@@ -12141,11 +13679,23 @@ async fn get_memory(
     axum::Extension(caller): axum::Extension<Option<crate::identity_verify::VerifiedCaller>>,
     Path(id): Path<String>,
 ) -> axum::response::Response {
+    if let Err(response) = require_memory_permission(
+        &state,
+        &caller,
+        crate::identity_verify::permissions::SPACE_READ,
+    )
+    .await
+    {
+        return response;
+    }
     match state.memory.get(&id).await {
         Ok(Some(entry)) => {
             // Per-caller tenancy: another member cannot read a private (user-scope)
             // fact by id. A 404 (not 403) so the id's existence is not confirmed.
-            if !memory_access_ok(&caller, &entry) {
+            if !memory_access_ok(&caller, &entry)
+                || (!sensitive_memory_enabled(&state, &caller).await
+                    && !entry.sensitive_topics.is_empty())
+            {
                 return json_error(StatusCode::NOT_FOUND, "memory not found".to_string());
             }
             Json(json!({ "memory": entry })).into_response()
@@ -12170,15 +13720,38 @@ async fn update_memory(
     Path(id): Path<String>,
     Json(body): Json<UpdateMemoryBody>,
 ) -> axum::response::Response {
+    if let Err(response) = require_memory_permission(
+        &state,
+        &caller,
+        crate::identity_verify::permissions::SPACE_WRITE,
+    )
+    .await
+    {
+        return response;
+    }
     // Per-caller tenancy: a member cannot mutate another's private fact. Load first
     // so the gate reads the row's owner + scope (404 hides existence on denial).
-    match state.memory.get(&id).await {
-        Ok(Some(entry)) if !memory_access_ok(&caller, &entry) => {
+    let existing = match state.memory.get(&id).await {
+        Ok(Some(entry))
+            if !memory_access_ok(&caller, &entry)
+                || (!sensitive_memory_enabled(&state, &caller).await
+                    && !entry.sensitive_topics.is_empty()) =>
+        {
             return json_error(StatusCode::NOT_FOUND, "memory not found".to_string());
         }
+        Ok(Some(entry)) => entry,
         Ok(None) => return json_error(StatusCode::NOT_FOUND, "memory not found".to_string()),
         Err(e) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
-        Ok(Some(_)) => {}
+    };
+    if let Some(content) = body.content.as_deref() {
+        if !memory::detect_sensitive_topics(content).is_empty()
+            && !sensitive_memory_enabled(&state, &caller).await
+        {
+            return json_error(
+                StatusCode::BAD_REQUEST,
+                "sensitive topics are disabled in Settings → Memory".to_owned(),
+            );
+        }
     }
     // The gate above checks the row's CURRENT scope, but a patch may CHANGE it —
     // so re-scoping needs its own gate, or any member could promote a personal fact
@@ -12186,9 +13759,32 @@ async fn update_memory(
     // Server-derive the org id on a re-scope to `org` for the same reason
     // `create_memory` does, and refuse when no org is resolvable.
     let new_scope = body.scope.as_deref().map(memory::MemoryScope::from_str);
+    let resulting_scope = new_scope.unwrap_or(existing.scope);
+    let resulting_sensitive = body
+        .content
+        .as_deref()
+        .map(|content| !memory::detect_sensitive_topics(content).is_empty())
+        .unwrap_or(!existing.sensitive_topics.is_empty());
+    if resulting_sensitive && resulting_scope != memory::MemoryScope::User {
+        return json_error(
+            StatusCode::BAD_REQUEST,
+            "sensitive memory must use user scope; shared and agent scopes are not supported"
+                .to_owned(),
+        );
+    }
     // `MemoryPatch::scope_id` is doubly-optional: `None` leaves it alone, `Some(None)`
     // clears it. A re-scope to org must SET it, hence `Some(Some(org))`.
-    let scope_id = if new_scope == Some(memory::MemoryScope::Org) {
+    let scope_id = if new_scope == Some(memory::MemoryScope::Agent) {
+        match existing.author_agent_id.clone() {
+            Some(agent_id) if !agent_id.trim().is_empty() => Some(Some(agent_id)),
+            _ => {
+                return json_error(
+                    StatusCode::BAD_REQUEST,
+                    "an agent-scope memory requires an authored agent".to_owned(),
+                )
+            }
+        }
+    } else if new_scope == Some(memory::MemoryScope::Org) {
         match caller.as_ref().and_then(|c| c.org_id.clone()) {
             Some(org) => Some(Some(org)),
             None => {
@@ -12202,6 +13798,23 @@ async fn update_memory(
     } else {
         body.scope_id
     };
+    let effective_project_scope_id = match scope_id.as_ref() {
+        Some(Some(value)) => Some(value.as_str()),
+        Some(None) => None,
+        None if new_scope.is_none() => existing.scope_id.as_deref(),
+        None => None,
+    };
+    if resulting_scope == memory::MemoryScope::Project
+        && effective_project_scope_id
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .is_none()
+    {
+        return json_error(
+            StatusCode::BAD_REQUEST,
+            "project-scope memory requires a non-empty scope_id".to_owned(),
+        );
+    }
     let patch = memory::MemoryPatch {
         content: body.content,
         scope: new_scope,
@@ -12229,9 +13842,22 @@ async fn delete_memory(
     axum::Extension(caller): axum::Extension<Option<crate::identity_verify::VerifiedCaller>>,
     Path(id): Path<String>,
 ) -> axum::response::Response {
+    if let Err(response) = require_memory_permission(
+        &state,
+        &caller,
+        crate::identity_verify::permissions::SPACE_WRITE,
+    )
+    .await
+    {
+        return response;
+    }
     // Per-caller tenancy: a member cannot delete another's private fact.
     match state.memory.get(&id).await {
-        Ok(Some(entry)) if !memory_access_ok(&caller, &entry) => {
+        Ok(Some(entry))
+            if !memory_access_ok(&caller, &entry)
+                || (!sensitive_memory_enabled(&state, &caller).await
+                    && !entry.sensitive_topics.is_empty()) =>
+        {
             return json_error(StatusCode::NOT_FOUND, "memory not found".to_string());
         }
         Ok(None) => return json_error(StatusCode::NOT_FOUND, "memory not found".to_string()),
@@ -15119,12 +16745,8 @@ async fn install_app_bundle(
     } else {
         crate::identity_verify::permissions::APP_INSTALL
     };
-    if let Err(response) = enforce_app_lifecycle_permission(
-        &state,
-        &caller,
-        lifecycle_permission,
-    )
-    .await
+    if let Err(response) =
+        enforce_app_lifecycle_permission(&state, &caller, lifecycle_permission).await
     {
         return response;
     }
@@ -16019,6 +17641,7 @@ async fn install_plugin_from_catalog(
 
     match outcome {
         Ok(installed_plugins) => {
+            crate::stats_beacon::record_marketplace_event("plugin", &id, true);
             let dependencies: Vec<&str> = installed_plugins
                 .iter()
                 .map(|(pid, _)| pid.as_str())
@@ -16284,11 +17907,11 @@ async fn reverify_existing_official_package(state: &ServerState, id: &str) {
 /// trains, and pulling every dependency onto `nightly` because the target is there
 /// would put a user on prereleases they never chose.
 async fn resolve_plugin_from_catalog(
-	state: &ServerState,
-	id: &str,
-	buyer_token: Option<String>,
-	channel: Option<&str>,
-	version: Option<&str>,
+    state: &ServerState,
+    id: &str,
+    buyer_token: Option<String>,
+    channel: Option<&str>,
+    version: Option<&str>,
 ) -> Result<
     (
         crate::plugin_manifest::PluginManifest,
@@ -16393,11 +18016,11 @@ impl std::fmt::Display for CatalogResolveFailed {
 impl std::error::Error for CatalogResolveFailed {}
 
 async fn resolve_plugin_from_catalog_inner(
-	state: &ServerState,
-	id: &str,
-	buyer_token: Option<String>,
-	channel: Option<&str>,
-	version: Option<&str>,
+    state: &ServerState,
+    id: &str,
+    buyer_token: Option<String>,
+    channel: Option<&str>,
+    version: Option<&str>,
 ) -> Result<
     (
         crate::plugin_manifest::PluginManifest,
@@ -16792,21 +18415,17 @@ async fn find_manifest(
     id: &str,
 ) -> Option<crate::plugin_manifest::PluginManifest> {
     let manifests = state.app_manifests.read().await;
-    manifests
-        .iter()
-        .find(|m| m.id == id)
-        .cloned()
-        .or_else(|| {
-            // Opt-in built-in apps are intentionally absent from the runtime
-            // manifest set until installed. They still need to resolve through
-            // the built-in install endpoint. External-repository apps carry their
-            // Companion through the verified package/standalone carriage. Keep
-            // runtime activation unchanged: this is a read-only manifest lookup
-            // for the install/enable handlers.
-            crate::plugin_manifest::PluginManifestLoader::load_builtins()
-                .into_iter()
-                .find(|m| m.id == id)
-        })
+    manifests.iter().find(|m| m.id == id).cloned().or_else(|| {
+        // Opt-in built-in apps are intentionally absent from the runtime
+        // manifest set until installed. They still need to resolve through
+        // the built-in install endpoint. External-repository apps carry their
+        // Companion through the verified package/standalone carriage. Keep
+        // runtime activation unchanged: this is a read-only manifest lookup
+        // for the install/enable handlers.
+        crate::plugin_manifest::PluginManifestLoader::load_builtins()
+            .into_iter()
+            .find(|m| m.id == id)
+    })
 }
 
 /// Load the user's host-access trust policy from preferences.
@@ -16940,14 +18559,16 @@ async fn plugins_isolation_handler(State(state): State<ServerState>) -> axum::re
     post,
     path = "/api/plugins/{id}/install",
     tag = "Plugins",
-    summary = "Install a built-in plugin by id",
+    summary = "Install a built-in plugin by id or preview the install",
     params(("id" = String, Path)),
+    request_body = LifecycleDryRunBody,
     responses((status = 200, description = "OK", body = serde_json::Value))
 )]
 async fn install_app_handler(
     State(state): State<ServerState>,
     Path(id): Path<String>,
     Extension(caller): Extension<Option<crate::identity_verify::VerifiedCaller>>,
+    body: Option<Json<LifecycleDryRunBody>>,
 ) -> axum::response::Response {
     if let Err(response) = enforce_app_lifecycle_permission(
         &state,
@@ -16965,6 +18586,27 @@ async fn install_app_handler(
             format!("no manifest found for app '{id}'; ensure the ryu.json is loaded"),
         );
     };
+    let dry_run = body.is_some_and(|body| body.0.dry_run);
+    if dry_run {
+        let installed = match state.app_store.get(&id).await {
+            Ok(record) => record,
+            Err(error) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()),
+        };
+        return Json(json!({
+            "success": true,
+            "dryRun": true,
+            "action": "install",
+            "app": {
+                "id": manifest.id,
+                "name": manifest.name,
+                "version": manifest.version,
+            },
+            "currentlyInstalled": installed.is_some(),
+            "wouldInstall": installed.is_none(),
+            "enabledAfterInstall": false,
+        }))
+        .into_response();
+    }
 
     // Register the add in the download center, the same way the catalog-resolve
     // path does (`resolve_plugin_from_catalog`), under the SAME `plugin:<id>` row
@@ -16988,8 +18630,7 @@ async fn install_app_handler(
     } else {
         None
     };
-    let provenance = is_compiled_builtin
-        .then(crate::plugins::isolation::PluginProvenance::builtin);
+    let provenance = is_compiled_builtin.then(crate::plugins::isolation::PluginProvenance::builtin);
     let installed = state
         .downloads
         .register_indeterminate_as(
@@ -17019,6 +18660,7 @@ async fn install_app_handler(
 
     match installed {
         Ok(record) => {
+            crate::stats_beacon::record_marketplace_event("app", &id, true);
             // Live contributions refresh — same lossy `system:plugins` nudge as
             // the enable handler, so a newly installed plugin's presence reaches
             // subscribed shells immediately.
@@ -17063,16 +18705,18 @@ async fn install_app_handler(
     post,
     path = "/api/plugins/{id}/enable",
     tag = "Plugins",
-    summary = "Enable a plugin (activate its runnables)",
+    summary = "Enable a plugin or preview its activation plan",
     params(("id" = String, Path)),
+    request_body = LifecycleDryRunBody,
     responses((status = 200, description = "OK", body = serde_json::Value))
 )]
 async fn enable_app_handler(
     State(state): State<ServerState>,
     Path(id): Path<String>,
     Extension(caller): Extension<Option<crate::identity_verify::VerifiedCaller>>,
+    body: Option<Json<LifecycleDryRunBody>>,
 ) -> axum::response::Response {
-    use crate::plugins::lifecycle::{enable_app, EnableError};
+    use crate::plugins::lifecycle::{enable_app, plan_enable_app, EnableError};
     use crate::sidecar::gateway::{gateway_token, gateway_url};
 
     if let Err(response) = enforce_app_lifecycle_permission(
@@ -17108,16 +18752,28 @@ async fn enable_app_handler(
     let all_manifests: Vec<crate::plugin_manifest::PluginManifest> =
         state.app_manifests.read().await.clone();
 
-    let outcome = match enable_app(
-        &state.app_store,
-        &manifest,
-        &all_manifests,
-        &gw_url,
-        gw_token.as_deref(),
-        &state.client,
-    )
-    .await
-    {
+    let dry_run = body.is_some_and(|body| body.0.dry_run);
+    let outcome = match if dry_run {
+        plan_enable_app(
+            &state.app_store,
+            &manifest,
+            &all_manifests,
+            &gw_url,
+            gw_token.as_deref(),
+            &state.client,
+        )
+        .await
+    } else {
+        enable_app(
+            &state.app_store,
+            &manifest,
+            &all_manifests,
+            &gw_url,
+            gw_token.as_deref(),
+            &state.client,
+        )
+        .await
+    } {
         Ok(outcome) => outcome,
         Err(EnableError::GrantsDenied { plugin, denied }) => {
             return (
@@ -17180,6 +18836,24 @@ async fn enable_app_handler(
             return json_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string());
         }
     };
+
+    if dry_run {
+        let planned_ids: Vec<String> = outcome
+            .in_enable_order()
+            .map(|record| record.id.clone())
+            .collect();
+        let app = outcome.target.clone();
+        return Json(json!({
+            "success": true,
+            "dryRun": true,
+            "action": "enable",
+            "app": app,
+            "wouldEnable": planned_ids,
+            "enabledDependencies": outcome.dependencies.iter().map(|record| record.id.clone()).collect::<Vec<_>>(),
+            "approvedGrants": outcome.target.approved_grants,
+        }))
+        .into_response();
+    }
 
     // Activate EVERY plugin this call enabled, in enable order (dependencies
     // first, target last). Flipping a dependency's enabled bit without running
@@ -17295,6 +18969,29 @@ async fn activate_plugin(
     manifest: &crate::plugin_manifest::PluginManifest,
     record: &crate::plugins::PluginRecord,
 ) -> (Vec<serde_json::Value>, PolicyApplyOutcome) {
+    let activation = state.plugin_runtime.begin_activation(&manifest.id).await;
+    let runtime_binding = crate::plugins::runtime::RuntimeGenerationBinding::new(
+        state.plugin_runtime.clone(),
+        activation.generation().clone(),
+    );
+    // The lifecycle bit can change while the Gateway validation response is in
+    // flight. Do not publish a stale activation after a concurrent disable.
+    let still_enabled = state
+        .app_store
+        .get(&manifest.id)
+        .await
+        .ok()
+        .flatten()
+        .is_some_and(|current| current.enabled);
+    if !still_enabled {
+        tracing::debug!(
+            plugin = %manifest.id,
+            generation = activation.generation().number(),
+            "plugin activation became stale before registration"
+        );
+        return (Vec::new(), PolicyApplyOutcome::default());
+    }
+
     // Build and run the RunnableRegistry to activate the manifest's Runnables.
     // Handlers capture cloned subsystem handles; the registry is built per-call
     // so ServerState stays Clone (no non-Clone field added).
@@ -17326,7 +19023,14 @@ async fn activate_plugin(
     // resource sampler + `/api/sidecar/status`) like a built-in. Gated on tier +
     // approved `sidecar:process` grant; spawned + best-effort so a slow binary
     // download never blocks the enable response.
-    apply_sidecars(state, manifest, &record.approved_grants, true).await;
+    apply_sidecars(
+        state,
+        manifest,
+        &record.approved_grants,
+        true,
+        Some(runtime_binding.clone()),
+    )
+    .await;
 
     // ONE plugin model: enabling a synth MCP-server record flips the mcp.json
     // `enabled` flag that actually gates spawn + tool listing, so the record's
@@ -17386,6 +19090,7 @@ async fn activate_plugin(
             Err(e) => json!({ "id": rid, "ok": false, "error": e }),
         })
         .collect();
+    activation.commit();
     (statuses, policy_outcome)
 }
 
@@ -17742,6 +19447,34 @@ pub async fn fire_activation_event(state: &ServerState, event: &str) {
         let Some(approved_grants) = enabled_ids.get(&manifest.id) else {
             continue;
         };
+        if !crate::runnable::manifest_should_activate(manifest, &snapshot) {
+            continue;
+        }
+        let Some(activation) = state
+            .plugin_runtime
+            .begin_activation_if_inactive(&manifest.id)
+            .await
+        else {
+            continue;
+        };
+        // The enabled snapshot was captured before the per-plugin write lease.
+        // Re-check the store so a disable that won the race cannot be followed
+        // by a stale registration.
+        let still_enabled = state
+            .app_store
+            .get(&manifest.id)
+            .await
+            .ok()
+            .flatten()
+            .is_some_and(|current| current.enabled);
+        if !still_enabled {
+            tracing::debug!(
+                plugin = %manifest.id,
+                generation = activation.generation().number(),
+                "activation event became stale before registration"
+            );
+            continue;
+        }
         let results = registry.register_active(manifest, &snapshot);
         for (rid, res) in results {
             if let Err(e) = res {
@@ -17785,6 +19518,7 @@ pub async fn fire_activation_event(state: &ServerState, event: &str) {
             // prose nothing evaluates (design §1, the `ThemeContribution` argument).
             sync_plugin_output_styles(manifest, true);
         }
+        activation.commit();
     }
 }
 
@@ -17908,10 +19642,7 @@ fn stamp_contribution_authority(
         object.insert("plugin".to_string(), serde_json::json!(manifest.id));
         // Always overwrite a publisher-supplied lookalike. This field is an
         // authorization decision made by Core, never manifest data.
-        object.insert(
-            "http_policy".to_string(),
-            serde_json::json!(http_policy),
-        );
+        object.insert("http_policy".to_string(), serde_json::json!(http_policy));
     }
 }
 
@@ -18180,7 +19911,7 @@ async fn plugin_contributions(
     State(state): State<ServerState>,
     headers: axum::http::HeaderMap,
 ) -> axum::response::Response {
-    // Read the store ONCE and derive both views from it. `store_tabs` needs the
+    // Read lifecycle records once and derive both views. `store_tabs` needs the
     // INSTALLED set as well as the enabled one (it is served outside the enabled
     // filter and tags each tab with both bits), so splitting this into two `list()`
     // calls would be a second round-trip for the same rows.
@@ -18192,6 +19923,8 @@ async fn plugin_contributions(
         Ok(records) => records,
         Err(e) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     };
+    // Presence metadata needs ids only, not UI blobs or a query per manifest.
+    let ui_bundle_ids = state.app_store.ids_with_ui_code().await.unwrap_or_default();
     let installed_ids: std::collections::HashSet<String> =
         all_records.iter().map(|r| r.id.clone()).collect();
     let enabled_records: std::collections::HashMap<String, crate::plugins::PluginRecord> =
@@ -18465,11 +20198,7 @@ async fn plugin_contributions(
         let Some(record) = enabled_records.get(&manifest.id) else {
             continue;
         };
-        let has_ui = state
-            .app_store
-            .has_ui_code(&manifest.id)
-            .await
-            .unwrap_or(false);
+        let has_ui = ui_bundle_ids.contains(&manifest.id);
         for entry in &manifest.runnables {
             if entry.kind != crate::runnable::RunnableKind::Companion {
                 continue;
@@ -19074,16 +20803,17 @@ fn provision_external_runtime(
 /// On enable each spec is gated by
 /// [`crate::sidecar::manifest_sidecar::may_run_sidecar`] (Core-tier auto; Community
 /// needs the approved `sidecar:process` grant, read from `approved_grants` — never
-/// the manifest's unvalidated declarations). Work is **spawned** and best-effort so
-/// a slow binary download / venv build never blocks the enable (or disable)
-/// response — the same graceful-degrade contract as `provision_external_runtime`.
-/// Stop is ungated (disabling always tears down), so the disable path ignores
-/// `approved_grants`.
+/// the manifest's unvalidated declarations). Enable work is **spawned** and
+/// best-effort so a slow binary download / venv build never blocks the enable
+/// response. Each spawned start carries the activation generation and holds a
+/// work lease, so disable waits for it or rejects it as stale. Stop is ungated,
+/// awaited under the deactivation lease, and ignores `approved_grants`.
 async fn apply_sidecars(
     state: &ServerState,
     manifest: &crate::plugin_manifest::PluginManifest,
     approved_grants: &[String],
     enabled: bool,
+    runtime_binding: Option<crate::plugins::runtime::RuntimeGenerationBinding>,
 ) {
     if manifest.sidecars.is_empty() {
         return;
@@ -19101,6 +20831,7 @@ async fn apply_sidecars(
             manifest: std::sync::Arc::new(manifest.clone()),
             tier,
             approved_grants: approved_grants.to_vec(),
+            runtime: runtime_binding.clone(),
         }
     });
     for spec in &manifest.sidecars {
@@ -19121,6 +20852,9 @@ async fn apply_sidecars(
                 spec.clone(),
                 state.downloads.clone(),
             );
+            if let Some(binding) = runtime_binding.clone() {
+                built = built.with_runtime_binding(binding);
+            }
             if let Some(registration) = mcp_registration.clone() {
                 built = built.with_mcp_registration(registration);
             }
@@ -19171,6 +20905,7 @@ async fn apply_sidecars(
                                 .unwrap_or_default(),
                             declared_routes: http.routes.clone(),
                             client: state.client.clone(),
+                            runtime: runtime_binding.clone(),
                         },
                     );
                 }
@@ -19228,7 +20963,15 @@ async fn apply_sidecars(
             }
             let plugin_id = manifest.id.clone();
             let spec_name = spec.name.clone();
+            let runtime_binding = runtime_binding.clone();
             tokio::spawn(async move {
+                let _runtime_lease = match runtime_binding {
+                    Some(binding) => match binding.acquire().await {
+                        Some(lease) => Some(lease),
+                        None => return,
+                    },
+                    None => None,
+                };
                 if let Err(e) = manager.register_and_start(sidecar).await {
                     tracing::warn!(
                         "plugin '{plugin_id}': manifest sidecar '{spec_name}' failed to start \
@@ -19238,11 +20981,9 @@ async fn apply_sidecars(
             });
         } else {
             let name = crate::sidecar::manifest_sidecar::namespaced_name(&manifest.id, &spec.name);
-            tokio::spawn(async move {
-                if let Err(e) = manager.stop_and_deregister(&name).await {
-                    tracing::warn!("manifest sidecar '{name}' failed to stop: {e}");
-                }
-            });
+            if let Err(e) = manager.stop_and_deregister(&name).await {
+                tracing::warn!("manifest sidecar '{name}' failed to stop: {e}");
+            }
         }
     }
 }
@@ -19270,7 +21011,14 @@ pub async fn reconcile_plugin_sidecars(state: &ServerState) {
         if manifest.sidecars.is_empty() {
             continue;
         }
-        apply_sidecars(state, manifest, &rec.approved_grants, true).await;
+        let Some(binding) = state.plugin_runtime.active_binding(&rec.id).await else {
+            tracing::debug!(
+                plugin = %rec.id,
+                "skipping sidecar reconcile until the plugin runtime generation is active"
+            );
+            continue;
+        };
+        apply_sidecars(state, manifest, &rec.approved_grants, true, Some(binding)).await;
     }
 }
 
@@ -19582,6 +21330,8 @@ async fn delete_plugin_secret_handler(
                         (reverse-topological order). Default false: a disable that \
                         would break a dependent is refused with 409 and the blockers \
                         named in `dependency_error.dependents`."),
+        ("dryRun" = Option<bool>, Query,
+         description = "Validate and return the disable blast radius without changing state."),
     ),
     responses(
         (status = 200, description = "OK", body = serde_json::Value),
@@ -19595,7 +21345,7 @@ async fn disable_app_handler(
     axum::extract::Query(params): axum::extract::Query<DisableAppParams>,
     Extension(caller): Extension<Option<crate::identity_verify::VerifiedCaller>>,
 ) -> axum::response::Response {
-    use crate::plugins::lifecycle::{disable_app, DisableError};
+    use crate::plugins::lifecycle::{disable_app, plan_disable_app, DisableError};
 
     if let Err(response) = enforce_app_lifecycle_permission(
         &state,
@@ -19610,16 +21360,43 @@ async fn disable_app_handler(
     let all_manifests: Vec<crate::plugin_manifest::PluginManifest> =
         state.app_manifests.read().await.clone();
 
-    match disable_app(
-        &state.app_store,
-        &id,
-        &all_manifests,
-        params.cascade,
-        params.force,
-    )
-    .await
-    {
+    let outcome = if params.dry_run {
+        plan_disable_app(
+            &state.app_store,
+            &id,
+            &all_manifests,
+            params.cascade,
+            params.force,
+        )
+        .await
+    } else {
+        disable_app(
+            &state.app_store,
+            &id,
+            &all_manifests,
+            params.cascade,
+            params.force,
+        )
+        .await
+    };
+    match outcome {
         Ok(outcome) => {
+            if params.dry_run {
+                let disabled_ids: Vec<String> = outcome
+                    .disabled
+                    .iter()
+                    .map(|record| record.id.clone())
+                    .collect();
+                return Json(json!({
+                    "success": true,
+                    "dryRun": true,
+                    "action": "disable",
+                    "app": outcome.target(),
+                    "wouldDisable": disabled_ids,
+                    "cascade": params.cascade,
+                }))
+                .into_response();
+            }
             // Deactivate every plugin this call disabled, in disable order
             // (dependents first, the target last) — so a dependent is never left
             // running for even an instant against a torn-down dependency.
@@ -19818,6 +21595,17 @@ struct DisableAppParams {
     /// it is refused (409, `code: "load_bearing"`) unless explicitly forced.
     #[serde(default)]
     force: bool,
+    /// When `true`, resolve the same dependency and safety checks but do not
+    /// change lifecycle state or tear down runtime contributions.
+    #[serde(rename = "dryRun", default)]
+    dry_run: bool,
+}
+
+#[derive(serde::Deserialize, Default, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+struct LifecycleDryRunBody {
+    #[serde(default)]
+    dry_run: bool,
 }
 
 /// Query params for `POST /api/plugins/:id/uninstall`.
@@ -19829,6 +21617,10 @@ struct UninstallAppParams {
     /// named — the same posture as the disable cascade.
     #[serde(default)]
     cascade: bool,
+    /// When `true`, resolve the uninstall blast radius without removing the
+    /// lifecycle record, scheduler jobs, or plugin files.
+    #[serde(rename = "dryRun", default)]
+    dry_run: bool,
 }
 
 /// `POST /api/plugins/:id/uninstall` — disable the plugin (and, with
@@ -19862,6 +21654,8 @@ struct UninstallAppParams {
          description = "Also disable every enabled plugin that depends on this one \
                         before removing it. Default false: an uninstall blocked by a \
                         dependent is refused with 409."),
+        ("dryRun" = Option<bool>, Query,
+         description = "Validate and return the uninstall blast radius without changing state."),
     ),
     request_body = serde_json::Value,
     responses(
@@ -19877,7 +21671,7 @@ async fn uninstall_app_handler(
     Extension(caller): Extension<Option<crate::identity_verify::VerifiedCaller>>,
     body: Bytes,
 ) -> axum::response::Response {
-    use crate::plugins::lifecycle::{uninstall_app, UninstallError};
+    use crate::plugins::lifecycle::{plan_uninstall_app, uninstall_app, UninstallError};
 
     if let Err(response) = enforce_app_lifecycle_permission(
         &state,
@@ -19905,8 +21699,31 @@ async fn uninstall_app_handler(
     let all_manifests: Vec<crate::plugin_manifest::PluginManifest> =
         state.app_manifests.read().await.clone();
 
-    match uninstall_app(&state.app_store, &id, &all_manifests, params.cascade).await {
+    let outcome = if params.dry_run {
+        plan_uninstall_app(&state.app_store, &id, &all_manifests, params.cascade).await
+    } else {
+        uninstall_app(&state.app_store, &id, &all_manifests, params.cascade).await
+    };
+    match outcome {
         Ok(outcome) => {
+            if params.dry_run {
+                let disabled_ids: Vec<String> = outcome
+                    .disabled
+                    .iter()
+                    .map(|record| record.id.clone())
+                    .collect();
+                return Json(json!({
+                    "success": true,
+                    "dryRun": true,
+                    "action": "uninstall",
+                    "wouldRemove": outcome.removed,
+                    "wouldDisable": disabled_ids,
+                    "cascade": params.cascade,
+                    "cleanup": cleanup,
+                    "cleanupErrors": Vec::<String>::new(),
+                }))
+                .into_response();
+            }
             // Tear down every plugin the uninstall disabled, in disable order
             // (dependents first, target last) — reusing the SAME per-RunnableKind
             // teardown a disable runs. The record was already removed by
@@ -20073,6 +21890,13 @@ async fn deactivate_plugin(
     state: &ServerState,
     manifest: &crate::plugin_manifest::PluginManifest,
 ) -> PolicyApplyOutcome {
+    let deactivation = state.plugin_runtime.begin_deactivation(&manifest.id).await;
+    tracing::debug!(
+        plugin = %manifest.id,
+        generation = deactivation.generation().number(),
+        "deactivating plugin runtime generation"
+    );
+
     // Derived ext-API tools, dropped OUTSIDE the per-kind loop below because that loop
     // iterates `manifest.runnables` and a derived tool has no runnable entry — it was
     // lowered from the sidecar's OpenAPI document, not declared. Without this line a
@@ -20144,7 +21968,7 @@ async fn deactivate_plugin(
     // Symmetric to enable: stop + deregister the plugin's managed sidecars so a
     // disabled plugin's process stops instead of lingering (the app ⇄ sidecar
     // bridge teardown). Stop is ungated.
-    apply_sidecars(state, manifest, &[], false).await;
+    apply_sidecars(state, manifest, &[], false, None).await;
     // Symmetric to enable: disabling a synth MCP-server record clears the mcp.json
     // `enabled` flag so the server stops being spawned/listed — the toggle is no
     // longer a no-op against the running server. Best-effort + a no-op for every
@@ -20184,7 +22008,7 @@ async fn deactivate_plugin(
 }
 
 /// Request body for `POST /api/apps/:id/update`.
-#[derive(serde::Deserialize, Default)]
+#[derive(serde::Deserialize, Default, utoipa::ToSchema)]
 struct UpdateAppBody {
     /// When `true`, allow downgrading to an older version.
     #[serde(default)]
@@ -20199,6 +22023,10 @@ struct UpdateAppBody {
     /// Exact historical release tag selected from the Marketplace Versions tab.
     #[serde(default)]
     version: Option<String>,
+    /// Resolve and validate the update without writing the manifest, lifecycle
+    /// row, dependency installs, or channel pin.
+    #[serde(rename = "dryRun", default)]
+    dry_run: bool,
 }
 
 /// `POST /api/apps/:id/update` — update an installed plugin by **re-installing the
@@ -20360,10 +22188,10 @@ async fn update_app_handler(
             format!("catalog returned manifest `{}` for `{id}`", manifest.id),
         );
     }
-	let channel_to_persist = requested_version
-		.as_ref()
-		.map(|_| crate::update::channel_of(&manifest.version))
-		.or_else(|| switching_channel.then(|| target_channel.clone()));
+    let channel_to_persist = requested_version
+        .as_ref()
+        .map(|_| crate::update::channel_of(&manifest.version))
+        .or_else(|| switching_channel.then(|| target_channel.clone()));
 
     // 3. Downgrade / no-op gate BEFORE any mutation (one definition: `plan_update`).
     //    An explicit channel switch carries its own authority: every prerelease
@@ -20376,16 +22204,26 @@ async fn update_app_handler(
         body.force || switching_channel || requested_version.is_some(),
     ) {
         Ok(UpdatePlan::NoOp) => {
+            if body.dry_run {
+                return Json(json!({
+                    "success": true,
+                    "dryRun": true,
+                    "action": "update",
+                    "app": record,
+                    "fromVersion": record.version,
+                    "toVersion": manifest.version,
+                    "channel": target_channel,
+                    "channelSwitch": switching_channel,
+                    "installedDependencies": Vec::<String>::new(),
+                }))
+                .into_response();
+            }
             // The version did not move, but the pin still may have: a switch onto a
             // train that currently sits at the same build is a real change to what
             // the NEXT update follows, so persist it before answering.
             let mut app = record.clone();
             if let Some(channel) = channel_to_persist.as_deref() {
-                match state
-                    .app_store
-                    .set_channel(&id, Some(channel))
-                    .await
-                {
+                match state.app_store.set_channel(&id, Some(channel)).await {
                     Ok(Some(updated)) => app = updated,
                     Ok(None) => {}
                     Err(e) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
@@ -20451,10 +22289,25 @@ async fn update_app_handler(
 
     // 4. Resolve + install any NEW dependencies the new version declares.
     let installed_dependencies =
-        match install_new_dependencies_for_update(&state, &manifest, buyer_token).await {
+        match install_new_dependencies_for_update(&state, &manifest, buyer_token, body.dry_run).await {
             Ok(deps) => deps,
             Err((status, msg)) => return json_error(status, msg),
         };
+
+    if body.dry_run {
+        return Json(json!({
+            "success": true,
+            "dryRun": true,
+            "action": "update",
+            "app": record,
+            "fromVersion": record.version,
+            "toVersion": manifest.version,
+            "channel": channel_to_persist.as_deref().unwrap_or(target_channel.as_str()),
+            "channelSwitch": switching_channel,
+            "installedDependencies": installed_dependencies,
+        }))
+        .into_response();
+    }
 
     // 5. Persist: write the new manifest to disk, then the store transition
     //    (version + ui_code, enabled preserved). On a store failure restore the
@@ -20475,11 +22328,7 @@ async fn update_app_handler(
             // version off the new train, and leaving the old pin would send the very
             // next update back to the train the user just left.
             let updated = if let Some(channel) = channel_to_persist.as_deref() {
-                match state
-                    .app_store
-                    .set_channel(&id, Some(channel))
-                    .await
-                {
+                match state.app_store.set_channel(&id, Some(channel)).await {
                     Ok(Some(record)) => record,
                     Ok(None) | Err(_) => updated,
                 }
@@ -20589,6 +22438,7 @@ async fn install_new_dependencies_for_update(
     state: &ServerState,
     manifest: &crate::plugin_manifest::PluginManifest,
     buyer_token: Option<String>,
+    dry_run: bool,
 ) -> Result<Vec<String>, (StatusCode, String)> {
     use crate::plugin_manifest::PluginManifest;
 
@@ -20697,6 +22547,10 @@ async fn install_new_dependencies_for_update(
         return Ok(vec![]);
     }
 
+    if dry_run {
+        return Ok(dep_order.into_iter().map(|plugin| plugin.id).collect());
+    }
+
     // ── Install the new-dep closure with rollback (reuses install_closure +
     //    persist_installed_plugin + rollback_plugin_install — the same sinks
     //    `install_plugin_from_catalog` uses).
@@ -20795,7 +22649,94 @@ async fn list_engines(State(state): State<ServerState>) -> Json<serde_json::Valu
     responses((status = 200, description = "OK", body = serde_json::Value))
 )]
 async fn engine_models() -> Json<serde_json::Value> {
-    Json(json!({ "models": crate::sidecar::adapters::engine_model_catalog() }))
+    let mut models = crate::sidecar::adapters::engine_model_catalog();
+    // Mesh LLM owns its model catalog because model weights/config live in its
+    // runtime, not in Ryu. When it is the selected resident engine, project its
+    // OpenAI-compatible `/v1/models` ids into the same secret-free catalog that
+    // every other engine picker consumes. A down/unselected Mesh LLM contributes
+    // no stale placeholder model, so Rooms cannot offer a prompt that would be
+    // routed to a different local engine.
+    if crate::sidecar::active_engine::ActiveEngineStore::load()
+        .active
+        .as_deref()
+        == Some("mesh-llm")
+    {
+        let endpoint = crate::sidecar::active_engine::local_engine_base_url("mesh-llm")
+            .map(|base| format!("{}/v1/models", base.trim_end_matches('/')));
+        if let Some(endpoint) = endpoint {
+            let client = reqwest::Client::builder()
+                .connect_timeout(std::time::Duration::from_millis(250))
+                .timeout(std::time::Duration::from_secs(1))
+                .build()
+                .unwrap_or_else(|_| reqwest::Client::new());
+            if let Ok(response) = client.get(endpoint).send().await {
+                if let Ok(value) = response.json::<serde_json::Value>().await {
+                    let discovered = value
+                        .get("data")
+                        .and_then(serde_json::Value::as_array)
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|entry| {
+                            let id = entry.get("id")?.as_str()?.trim();
+                            (!id.is_empty()).then(|| crate::sidecar::adapters::EngineModel {
+                                id: id.to_owned(),
+                                name: id.to_owned(),
+                            })
+                        })
+                        .collect::<Vec<_>>();
+                    if !discovered.is_empty() {
+                        models.insert("mesh-llm".to_owned(), discovered);
+                    }
+                }
+            }
+        }
+    }
+    if crate::sidecar::active_engine::ActiveEngineStore::load()
+        .active
+        .as_deref()
+        == Some("lemonade")
+    {
+        match crate::sidecar::providers::LemonadeManager::new()
+            .chat_models()
+            .await
+        {
+            Ok(discovered) => {
+                models.insert("lemonade".to_owned(), discovered);
+            }
+            Err(error) => tracing::debug!(%error, "Lemonade model discovery unavailable"),
+        }
+    }
+    if crate::sidecar::active_engine::ActiveEngineStore::load()
+        .active
+        .as_deref()
+        == Some("llama-swap")
+    {
+        match crate::sidecar::providers::LlamaSwapManager::new()
+            .chat_models()
+            .await
+        {
+            Ok(discovered) => {
+                models.insert("llama-swap".to_owned(), discovered);
+            }
+            Err(error) => tracing::debug!(%error, "llama-swap model discovery unavailable"),
+        }
+    }
+    if crate::sidecar::active_engine::ActiveEngineStore::load()
+        .active
+        .as_deref()
+        == Some("freetoken")
+    {
+        match crate::sidecar::providers::FreeTokenManager::new()
+            .chat_models()
+            .await
+        {
+            Ok(discovered) => {
+                models.insert("freetoken".to_owned(), discovered);
+            }
+            Err(error) => tracing::debug!(%error, "FreeToken model discovery unavailable"),
+        }
+    }
+    Json(json!({ "models": models }))
 }
 
 /// Convert the persona's first active source into the shared desktop glyph shape.
@@ -20806,19 +22747,13 @@ fn persona_avatar_glyph(persona: Option<&crate::agents::PersonaSlot>) -> Option<
     if let Some(url) = persona.avatar_url.as_ref() {
         return Some(json!({ "kind": "avatar", "dataUrl": url }));
     }
-    if let Some(expression) = persona
+    if let Some(spec) = persona
         .expressive
         .as_ref()
-        .and_then(|spec| spec.expression.as_ref())
+        .filter(|spec| spec.expression.is_some())
     {
-        let mut glyph = json!({ "kind": "expressive", "expression": expression });
-        if let Some(animation) = persona
-            .expressive
-            .as_ref()
-            .and_then(|spec| spec.animation.as_ref())
-        {
-            glyph["animation"] = json!(animation);
-        }
+        let mut glyph = serde_json::to_value(spec).ok()?;
+        glyph["kind"] = json!("expressive");
         return Some(glyph);
     }
     if let Some(emoji) = persona.emoji.as_ref() {
@@ -21196,6 +23131,8 @@ async fn resolve_npm_latest_for_agent(package: &str) -> Option<String> {
 #[derive(serde::Deserialize)]
 struct AgentCatalogAction {
     id: String,
+    #[serde(rename = "dryRun", default)]
+    dry_run: bool,
 }
 
 /// Extract the npm package from an `npx -y [--] <pkg> [args]` spawn command,
@@ -21445,7 +23382,7 @@ async fn install_agent_runtime(
     post,
     path = "/api/agents/catalog/install",
     tag = "Agents",
-    summary = "Install an agent from the catalog",
+    summary = "Install an agent or preview the runtime plan",
     request_body = serde_json::Value,
     responses((status = 200, description = "OK", body = serde_json::Value))
 )]
@@ -21475,6 +23412,28 @@ async fn install_agent_handler(
             Json(json!({ "error": format!("unknown agent id: {}", body.id) })),
         );
     };
+    if body.dry_run {
+        let installed = state
+            .agent_store
+            .installed_ids()
+            .await
+            .map(|ids| ids.contains(&body.id))
+            .unwrap_or(false);
+        return (
+            StatusCode::OK,
+            Json(json!({
+                "ok": true,
+                "success": true,
+                "dryRun": true,
+                "action": "install",
+                "id": body.id,
+                "name": entry.name,
+                "alreadyInstalled": installed,
+                "wouldInstall": !installed,
+                "writes": ["agent installed flag", "optional runtime files"],
+            })),
+        );
+    }
     match state.agent_store.set_installed(&body.id, true).await {
         Ok(_) => {
             let downloads = state.downloads.clone();
@@ -21497,7 +23456,7 @@ async fn install_agent_handler(
     post,
     path = "/api/agents/catalog/uninstall",
     tag = "Agents",
-    summary = "Uninstall a catalog agent",
+    summary = "Uninstall a catalog agent or preview the removal",
     request_body = serde_json::Value,
     responses((status = 200, description = "OK", body = serde_json::Value))
 )]
@@ -21519,6 +23478,27 @@ async fn uninstall_agent_handler(
         return (
             StatusCode::NOT_FOUND,
             Json(json!({ "error": format!("unknown agent id: {}", body.id) })),
+        );
+    }
+    if body.dry_run {
+        let installed = state
+            .agent_store
+            .installed_ids()
+            .await
+            .map(|ids| ids.contains(&body.id))
+            .unwrap_or(false);
+        return (
+            StatusCode::OK,
+            Json(json!({
+                "ok": true,
+                "success": true,
+                "dryRun": true,
+                "action": "uninstall",
+                "id": body.id,
+                "alreadyInstalled": installed,
+                "wouldUninstall": installed,
+                "writes": ["agent installed flag"],
+            })),
         );
     }
     match state.agent_store.set_installed(&body.id, false).await {
@@ -21566,7 +23546,19 @@ async fn create_agent(
         );
     }
     match state.agent_store.create(input).await {
-        Ok(record) => (StatusCode::CREATED, Json(json!({ "agent": record }))),
+        Ok(record) => {
+            let agent_id = record.id.clone();
+            record_gateway_control_attributed(
+                &state,
+                "agent.create",
+                &format!("agent:{agent_id}"),
+                Some("initial agent configuration"),
+                &caller,
+                Some(&agent_id),
+            )
+            .await;
+            (StatusCode::CREATED, Json(json!({ "agent": record })))
+        }
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({ "error": e.to_string() })),
@@ -21777,7 +23769,10 @@ async fn create_agent_prompt_version(
     path = "/api/agents/{id}/prompt-versions/{version_id}",
     tag = "Agents",
     summary = "Get an agent prompt version",
-    params(("id" = String, Path), ("version_id" = String, Path)),
+    params(
+        ("id" = String, Path),
+        ("version_id" = String, Path),
+    ),
     responses((status = 200, description = "OK", body = serde_json::Value))
 )]
 async fn get_agent_prompt_version(
@@ -22998,23 +24993,45 @@ async fn migrate_to_ryu(
 )]
 async fn export_agent(
     State(state): State<ServerState>,
+    axum::Extension(caller): axum::Extension<Option<crate::identity_verify::VerifiedCaller>>,
     axum::extract::Path(id): axum::extract::Path<String>,
-) -> (StatusCode, Json<serde_json::Value>) {
-    match state.agent_store.get(&id).await {
+) -> axum::response::Response {
+    if enforce_permission_on(
+        &state,
+        &caller,
+        crate::identity_verify::permissions::AGENT_VIEW,
+        crate::acl::KIND_AGENT,
+        &id,
+    )
+    .await
+    .is_err()
+    {
+        return no_store_response(
+            (
+                StatusCode::FORBIDDEN,
+                Json(json!({ "error": "insufficient permissions: agent.view" })),
+            )
+                .into_response(),
+        );
+    }
+    let response = match state.agent_store.get(&id).await {
         Ok(Some(record)) => {
             let mut template = record.to_template();
             template.agent_config.schedules = agent_schedule_templates(&id);
-            (StatusCode::OK, Json(json!({ "template": template })))
+            (StatusCode::OK, Json(json!({ "template": template }))).into_response()
         }
         Ok(None) => (
             StatusCode::NOT_FOUND,
             Json(json!({ "error": format!("agent '{id}' not found") })),
-        ),
+        )
+            .into_response(),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({ "error": e.to_string() })),
-        ),
-    }
+        )
+            .into_response(),
+    };
+    no_store_response(response)
 }
 
 /// `POST /api/agents/import`
@@ -23388,6 +25405,8 @@ async fn published_agent_install(
                         ),
                     );
                 }
+                crate::stats_beacon::associate_marketplace_runtime("agent", &id, &record.id);
+                crate::stats_beacon::record_marketplace_event("agent", &id, true);
             }
             (
                 if replayed {
@@ -23416,6 +25435,10 @@ async fn published_agent_install(
 /// `llamacpp`→`llama-server` and `.exe` handling used by every install-status
 /// endpoint so they all report the same per-engine reality.
 fn binary_installed_on_disk(name: &str) -> bool {
+    if name == "ryutts" {
+        return crate::sidecar::external_runtime::venv_exists(&crate::sidecar::providers::ryutts::sidecar_dir())
+            && crate::sidecar::providers::ryutts::kokoro::is_model_present();
+    }
     // Sidecars without a file-based binary: trust the store.
     if matches!(name, "openclaw" | "vllm") {
         return true;
@@ -23445,8 +25468,14 @@ fn binary_installed_on_disk(name: &str) -> bool {
     if name == "tailscale" {
         return crate::sidecar::tailscale::resolve_mesh_pair().is_ok();
     }
+    if name == "tailcat" {
+        return crate::sidecar::tailcat::resolve_binary().is_ok();
+    }
     if name == "mesh-llm" {
         return crate::sidecar::providers::mesh_llm::installer::binary_is_available();
+    }
+    if name == "mlx-serve" {
+        return crate::sidecar::providers::mlx_serve::installer::binary_is_available();
     }
     // llama.cpp (and every tier that shares its binary) installs into a
     // per-variant directory rather than loose in `~/.ryu/bin`, because the CPU,
@@ -23486,6 +25515,27 @@ struct ConversationMessagesQuery {
     /// Message id at the top of the currently loaded page. The next page is
     /// returned strictly before this message in active chronological order.
     before: Option<String>,
+}
+
+const MAX_TEMPORARY_SNAPSHOT_MESSAGES: usize = 200;
+const MAX_TEMPORARY_SNAPSHOT_MESSAGE_BYTES: usize = 2 * 1024 * 1024;
+const MAX_TEMPORARY_SNAPSHOT_PARTS_BYTES: usize = 4 * 1024 * 1024;
+
+#[derive(serde::Deserialize)]
+struct SaveTemporaryConversationMessage {
+    content: String,
+    #[serde(default)]
+    parts: Vec<serde_json::Value>,
+    role: String,
+}
+
+#[derive(serde::Deserialize)]
+struct SaveTemporaryConversationBody {
+    #[serde(default)]
+    agent_id: Option<String>,
+    #[serde(default)]
+    folder_path: Option<String>,
+    messages: Vec<SaveTemporaryConversationMessage>,
 }
 
 #[utoipa::path(
@@ -23699,6 +25749,160 @@ async fn get_conversation(
             format!("conversation '{id}' not found"),
         ),
         Err(e) => json_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    }
+}
+
+/// `POST /api/conversations/:id/save` — promote a temporary chat snapshot into
+/// a normal conversation. Temporary turns stay client-held until this explicit
+/// action, so the endpoint is a creation path rather than an update path.
+#[utoipa::path(
+    post,
+    path = "/api/conversations/{id}/save",
+    tag = "Conversations",
+    summary = "Save a temporary chat",
+    params(("id" = String, Path)),
+    request_body = serde_json::Value,
+    responses((status = 201, description = "Saved conversation", body = serde_json::Value))
+)]
+async fn save_temporary_conversation_handler(
+    State(state): State<ServerState>,
+    axum::Extension(caller): axum::Extension<Option<crate::identity_verify::VerifiedCaller>>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+    Json(body): Json<SaveTemporaryConversationBody>,
+) -> axum::response::Response {
+    // Saving promotes client-held content into the conversation store. Use the
+    // same agent-run gate as the chat route so an unverified node-token caller or
+    // a valid JWT from another organization cannot mint an owned conversation.
+    if enforce_permission(
+        &state,
+        &caller,
+        crate::identity_verify::permissions::AGENT_RUN,
+    )
+    .await
+    .is_err()
+    {
+        return json_error(
+            StatusCode::FORBIDDEN,
+            "insufficient permissions: agent.run".to_owned(),
+        );
+    }
+    let conversation_id = id.trim();
+    if conversation_id.is_empty() || conversation_id.len() > 200 {
+        return json_error(
+            StatusCode::BAD_REQUEST,
+            "temporary chat id must be between 1 and 200 bytes".to_owned(),
+        );
+    }
+    if body.messages.is_empty() {
+        return json_error(
+            StatusCode::BAD_REQUEST,
+            "a temporary chat must contain at least one message".to_owned(),
+        );
+    }
+    if body.messages.len() > MAX_TEMPORARY_SNAPSHOT_MESSAGES {
+        return json_error(
+            StatusCode::BAD_REQUEST,
+            format!(
+                "a temporary chat may contain at most {MAX_TEMPORARY_SNAPSHOT_MESSAGES} messages"
+            ),
+        );
+    }
+
+    let agent_id = body
+        .agent_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned);
+    let folder_path = body
+        .folder_path
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned);
+    let caller_user_id = caller.as_ref().map(|value| value.user_id.clone());
+    let created_at = chrono_now_ms();
+    let mut messages = Vec::with_capacity(body.messages.len());
+    for (index, message) in body.messages.into_iter().enumerate() {
+        let role = message.role.trim();
+        if !matches!(role, "user" | "assistant") {
+            return json_error(
+                StatusCode::BAD_REQUEST,
+                "temporary chat messages must be user or assistant turns".to_owned(),
+            );
+        }
+        if message.content.len() > MAX_TEMPORARY_SNAPSHOT_MESSAGE_BYTES {
+            return json_error(
+                StatusCode::BAD_REQUEST,
+                format!(
+                    "temporary chat message {index} is too large (max {MAX_TEMPORARY_SNAPSHOT_MESSAGE_BYTES} bytes)"
+                ),
+            );
+        }
+        let parts = (!message.parts.is_empty()).then(|| serde_json::Value::Array(message.parts));
+        if let Some(parts) = parts.as_ref() {
+            let parts_bytes = match serde_json::to_vec(parts) {
+                Ok(bytes) => bytes.len(),
+                Err(_) => {
+                    return json_error(
+                        StatusCode::BAD_REQUEST,
+                        format!("temporary chat message {index} has invalid parts"),
+                    );
+                }
+            };
+            if parts_bytes > MAX_TEMPORARY_SNAPSHOT_PARTS_BYTES {
+                return json_error(
+                    StatusCode::BAD_REQUEST,
+                    format!(
+                        "temporary chat message {index} parts are too large (max {MAX_TEMPORARY_SNAPSHOT_PARTS_BYTES} bytes)"
+                    ),
+                );
+            }
+        }
+        messages.push(conversations::TemporaryConversationMessage {
+            role: role.to_owned(),
+            content: message.content,
+            agent_id: (role == "assistant").then(|| agent_id.clone()).flatten(),
+            author_user_id: (role == "user").then(|| caller_user_id.clone()).flatten(),
+            parts,
+            created_at: created_at + index as i64,
+        });
+    }
+
+    match state.conversations.get_access_meta(conversation_id).await {
+        Ok(Some(_)) => {
+            return json_error(
+                StatusCode::CONFLICT,
+                "conversation already exists".to_owned(),
+            );
+        }
+        Ok(None) => {}
+        Err(error) => {
+            return json_error(StatusCode::INTERNAL_SERVER_ERROR, error.to_string());
+        }
+    }
+
+    match state
+        .conversations
+        .save_temporary_conversation(
+            conversation_id,
+            agent_id.as_deref(),
+            folder_path.as_deref(),
+            &messages,
+            caller_tenancy(&caller),
+        )
+        .await
+    {
+        Ok(conversation) => (
+            StatusCode::CREATED,
+            Json(json!({ "conversation": conversation })),
+        )
+            .into_response(),
+        Err(error) if error.to_string().contains("conversation already exists") => json_error(
+            StatusCode::CONFLICT,
+            "conversation already exists".to_owned(),
+        ),
+        Err(error) => json_error(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()),
     }
 }
 
@@ -24041,7 +26245,14 @@ async fn set_message_feedback_handler(
         );
     }
     // Fan out to the reward + memory sinks (fail-soft; never fails the click).
-    let outcome = crate::learning::apply_message_feedback(&state, &id, &target, rating).await;
+    let outcome = crate::learning::apply_message_feedback(
+        &state,
+        &id,
+        &target,
+        rating,
+        caller.as_ref().map(|value| value.user_id.as_str()),
+    )
+    .await;
     Json(json!({
         "ok": true,
         "rating": rating,
@@ -24744,9 +26955,7 @@ fn goal_state_from_record(record: Option<GoalRecord>) -> GoalState {
     }
 }
 
-fn goal_storage_namespace(
-    caller: Option<&crate::identity_verify::VerifiedCaller>,
-) -> String {
+fn goal_storage_namespace(caller: Option<&crate::identity_verify::VerifiedCaller>) -> String {
     crate::plugin_host::storage_namespace_for_tenant(
         caller.map(|value| value.user_id.as_str()),
         GOAL_STORAGE_NAMESPACE,
@@ -24893,7 +27102,11 @@ async fn clear_goal_handler(
         );
     };
     match storage
-        .delete(GOAL_PLUGIN_ID, &goal_storage_namespace(caller.as_ref()), &id)
+        .delete(
+            GOAL_PLUGIN_ID,
+            &goal_storage_namespace(caller.as_ref()),
+            &id,
+        )
         .await
     {
         Ok(()) => Json(json!({ "success": true })).into_response(),
@@ -25339,7 +27552,7 @@ pub(crate) async fn call_side_model_with_provider(
     if let Some(provider) = provider.filter(|value| !value.trim().is_empty()) {
         req = req.header("x-ryu-slot-chat-provider", provider.trim());
     }
-    if let Some(t) = gateway_token() {
+    if let Some(t) = crate::sidecar::gateway::gateway_core_token() {
         req = req.bearer_auth(t);
     }
     let resp = req
@@ -26218,7 +28431,10 @@ fn native_history_access_denied(
         ("id" = String, Path),
         ("cwd" = Option<String>, Query, description = "Filter to threads from this working directory")
     ),
-    responses((status = 200, description = "OK", body = serde_json::Value))
+    responses(
+        (status = 200, description = "OK", body = serde_json::Value),
+        (status = 403, description = "Agent view permission required", body = serde_json::Value)
+    )
 )]
 async fn list_agent_threads_handler(
     State(state): State<ServerState>,
@@ -26226,6 +28442,16 @@ async fn list_agent_threads_handler(
     axum::extract::Path(agent_id): axum::extract::Path<String>,
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> axum::response::Response {
+    if let Err(response) = enforce_agent_resource_permission(
+        &state,
+        &caller,
+        crate::identity_verify::permissions::AGENT_VIEW,
+        &agent_id,
+    )
+    .await
+    {
+        return response;
+    }
     if let Some(response) = native_history_access_denied(caller.as_ref()) {
         return response;
     }
@@ -26262,6 +28488,8 @@ async fn list_agent_threads_handler(
 #[derive(serde::Deserialize)]
 struct ImportThreadBody {
     thread_id: String,
+    #[serde(default)]
+    dry_run: bool,
 }
 
 /// Return the not-yet-imported tail of a native transcript.
@@ -26295,11 +28523,29 @@ fn missing_imported_message_tail<'a>(
     &imported[imported_index..]
 }
 
+fn import_reuse_permission(
+    result: Result<(), axum::response::Response>,
+) -> Result<bool, axum::response::Response> {
+    match result {
+        Ok(()) => Ok(true),
+        Err(response)
+            if matches!(
+                response.status(),
+                StatusCode::FORBIDDEN | StatusCode::NOT_FOUND
+            ) =>
+        {
+            Ok(false)
+        }
+        Err(response) => Err(response),
+    }
+}
+
 #[cfg(test)]
 mod imported_thread_merge_tests {
-    use super::missing_imported_message_tail;
+    use super::{import_reuse_permission, json_error, missing_imported_message_tail};
     use crate::native_history::ImportedMessage;
     use crate::server::conversations::StoredMessage;
+    use axum::http::StatusCode;
 
     fn stored(role: &str, content: &str, created_at: i64) -> StoredMessage {
         StoredMessage {
@@ -26328,6 +28574,27 @@ mod imported_thread_merge_tests {
             content: content.to_string(),
             created_at: Some(created_at),
         }
+    }
+
+    #[test]
+    fn import_reuse_only_falls_through_for_denial_or_missing_rows() {
+        assert!(
+            import_reuse_permission(Ok(())).expect("authorized reuse decision"),
+            "an authorized existing conversation may be updated"
+        );
+        for status in [StatusCode::FORBIDDEN, StatusCode::NOT_FOUND] {
+            assert!(
+                !import_reuse_permission(Err(json_error(status, "not reusable".to_owned())))
+                    .expect("denied reuse decision"),
+                "{status} should create a separate caller-owned import"
+            );
+        }
+        let failure = import_reuse_permission(Err(json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "resource metadata unavailable".to_owned(),
+        )))
+        .expect_err("a metadata failure must not become a successful fresh import");
+        assert_eq!(failure.status(), StatusCode::INTERNAL_SERVER_ERROR);
     }
 
     #[test]
@@ -26398,6 +28665,22 @@ mod imported_thread_merge_tests {
         assert_eq!(missing.len(), 1);
         assert_eq!(missing[0].content, "new tail");
     }
+
+    #[test]
+    fn import_thread_body_defaults_to_live_and_accepts_dry_run() {
+        let live: super::ImportThreadBody = serde_json::from_value(serde_json::json!({
+            "thread_id": "thread"
+        }))
+        .unwrap();
+        assert!(!live.dry_run);
+
+        let preview: super::ImportThreadBody = serde_json::from_value(serde_json::json!({
+            "thread_id": "thread",
+            "dry_run": true
+        }))
+        .unwrap();
+        assert!(preview.dry_run);
+    }
 }
 
 /// Import one native thread into a Ryu conversation: read the agent's on-disk
@@ -26412,7 +28695,10 @@ mod imported_thread_merge_tests {
     summary = "Import a native thread into a Ryu conversation",
     params(("id" = String, Path)),
     request_body = serde_json::Value,
-    responses((status = 200, description = "OK", body = serde_json::Value))
+    responses(
+        (status = 200, description = "OK", body = serde_json::Value),
+        (status = 403, description = "Agent view or edit permission required", body = serde_json::Value)
+    )
 )]
 async fn import_agent_thread_handler(
     State(state): State<ServerState>,
@@ -26420,6 +28706,26 @@ async fn import_agent_thread_handler(
     axum::extract::Path(agent_id): axum::extract::Path<String>,
     Json(body): Json<ImportThreadBody>,
 ) -> axum::response::Response {
+    if let Err(response) = enforce_agent_resource_permission(
+        &state,
+        &caller,
+        crate::identity_verify::permissions::AGENT_VIEW,
+        &agent_id,
+    )
+    .await
+    {
+        return response;
+    }
+    if let Err(response) = enforce_agent_resource_permission(
+        &state,
+        &caller,
+        crate::identity_verify::permissions::AGENT_EDIT,
+        &agent_id,
+    )
+    .await
+    {
+        return response;
+    }
     if let Some(response) = native_history_access_denied(caller.as_ref()) {
         return response;
     }
@@ -26441,7 +28747,10 @@ pub(crate) async fn import_agent_thread_for_sync(
         state,
         &None,
         agent_id,
-        ImportThreadBody { thread_id },
+        ImportThreadBody {
+            thread_id,
+            dry_run: false,
+        },
         tenancy,
     )
     .await
@@ -26476,80 +28785,141 @@ async fn import_agent_thread_inner(
         );
     }
 
+    let tenancy = tenancy_override
+        .clone()
+        .unwrap_or_else(|| caller_tenancy(caller));
     // Dedup + sync: a repeat import of the same agent-native thread updates the
     // existing Ryu conversation with the source transcript's new tail.
     let origin = format!("import:{engine}");
     if let Some(native_id) = imported.thread.native_session_id.as_deref() {
         match state
             .conversations
-            .find_imported_conversation(&origin, native_id)
+            .find_imported_conversation(&origin, native_id, &tenancy)
             .await
         {
             Ok(Some(existing)) => {
-                let existing_messages = match state.conversations.get_messages(&existing).await {
-                    Ok(messages) => messages,
-                    Err(e) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
-                };
-                let missing_messages =
-                    missing_imported_message_tail(&existing_messages, &imported.messages);
-                let messages_added = missing_messages.len();
-                let tenancy = tenancy_override
-                    .clone()
-                    .unwrap_or_else(|| caller_tenancy(caller));
-                for msg in missing_messages {
-                    if let Err(e) = state
-                        .conversations
-                        .append_message_at(
-                            &existing,
-                            &msg.role,
-                            &msg.content,
-                            Some(&agent_id),
-                            None,
-                            None,
-                            tenancy.clone(),
-                            msg.created_at,
-                        )
-                        .await
-                    {
-                        return json_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string());
+                // The tenancy key prevents cross-owner matches. Keep the
+                // canonical conversation write check as defense in depth for
+                // resource ACL denies and stale rows. The sync service is an
+                // explicit SharedOrg writer; its scoped query cannot match a
+                // private human import.
+                let service_reuse = matches!(
+                    tenancy_override.as_ref(),
+                    Some(conversations::Tenancy::SharedOrg { .. })
+                );
+                let caller_can_update = if service_reuse {
+                    true
+                } else {
+                    match import_reuse_permission(require_resource_write(
+                        state.conversations.get_access_meta(&existing).await,
+                        caller.as_ref(),
+                        "conversation not found",
+                    )) {
+                        Ok(can_update) => can_update,
+                        Err(response) => return response,
                     }
+                };
+                if caller_can_update {
+                    let existing_messages = match state.conversations.get_messages(&existing).await
+                    {
+                        Ok(messages) => messages,
+                        Err(e) => {
+                            return json_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string());
+                        }
+                    };
+                    let missing_messages =
+                        missing_imported_message_tail(&existing_messages, &imported.messages);
+                    let messages_added = missing_messages.len();
+                    if body.dry_run {
+                        return Json(json!({
+                            "conversation_id": existing,
+                            "agent_id": agent_id,
+                            "engine": engine,
+                            "message_count": imported.messages.len(),
+                            "messages_added": messages_added,
+                            "truncated": imported.truncated,
+                            "title": imported.thread.title,
+                            "cwd": imported.thread.cwd,
+                            "already_imported": true,
+                            "dry_run": true,
+                            "would_create": false,
+                        }))
+                        .into_response();
+                    }
+                    for msg in missing_messages {
+                        if let Err(e) = state
+                            .conversations
+                            .append_message_at(
+                                &existing,
+                                &msg.role,
+                                &msg.content,
+                                Some(&agent_id),
+                                None,
+                                None,
+                                tenancy.clone(),
+                                msg.created_at,
+                            )
+                            .await
+                        {
+                            return json_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string());
+                        }
+                    }
+                    if messages_added > 0 {
+                        crate::events::publish_system_notification_for_user(
+                            "Thread import updated",
+                            format!(
+                                "{} synced {messages_added} new messages from {engine}.",
+                                imported.thread.title
+                            ),
+                            "success",
+                            caller.as_ref().map(|verified| verified.user_id.clone()),
+                        );
+                    }
+                    if let Some(native_id) = imported.thread.native_session_id.as_deref() {
+                        crate::server::agent_sync::remember_native_session(
+                            &existing,
+                            &agent_id,
+                            &engine,
+                            native_id,
+                            imported.thread.cwd.as_deref(),
+                        );
+                    }
+                    return Json(json!({
+                        "conversation_id": existing,
+                        "agent_id": agent_id,
+                        "engine": engine,
+                        "message_count": imported.messages.len(),
+                        "messages_added": messages_added,
+                        "truncated": imported.truncated,
+                        "title": imported.thread.title,
+                        "cwd": imported.thread.cwd,
+                        "already_imported": true,
+                        "dry_run": false,
+                        "would_create": false,
+                    }))
+                    .into_response();
                 }
-                if messages_added > 0 {
-                    crate::events::publish_system_notification_for_user(
-                        "Thread import updated",
-                        format!(
-                            "{} synced {messages_added} new messages from {engine}.",
-                            imported.thread.title
-                        ),
-                        "success",
-                        caller.as_ref().map(|verified| verified.user_id.clone()),
-                    );
-                }
-                if let Some(native_id) = imported.thread.native_session_id.as_deref() {
-                    crate::server::agent_sync::remember_native_session(
-                        &existing,
-                        &agent_id,
-                        &engine,
-                        native_id,
-                        imported.thread.cwd.as_deref(),
-                    );
-                }
-                return Json(json!({
-                    "conversation_id": existing,
-                    "agent_id": agent_id,
-                    "engine": engine,
-                    "message_count": imported.messages.len(),
-                    "messages_added": messages_added,
-                    "truncated": imported.truncated,
-                    "title": imported.thread.title,
-                    "cwd": imported.thread.cwd,
-                    "already_imported": true,
-                }))
-                .into_response();
             }
             Ok(None) => {}
             Err(e) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
         }
+    }
+
+    if body.dry_run {
+        return Json(json!({
+            "conversation_id": Value::Null,
+            "agent_id": agent_id,
+            "engine": engine,
+            "message_count": imported.messages.len(),
+            "messages_added": imported.messages.len(),
+            "truncated": imported.truncated,
+            "title": imported.thread.title,
+            "cwd": imported.thread.cwd,
+            "already_imported": false,
+            "dry_run": true,
+            "would_create": true,
+        }))
+        .into_response();
     }
 
     let conversation_id = format!("conv_{}", uuid::Uuid::new_v4());
@@ -26558,9 +28928,6 @@ async fn import_agent_thread_inner(
     // untenanted, which `resource_access` denies to EVERYONE on an org-bound node —
     // the importer would 403 out of the thread they just imported. No-op on a
     // personal node (see `caller_tenancy`).
-    let tenancy = tenancy_override
-        .clone()
-        .unwrap_or_else(|| caller_tenancy(caller));
     if let Err(e) = state
         .conversations
         .ensure_conversation(
@@ -26662,6 +29029,8 @@ async fn import_agent_thread_inner(
         "title": imported.thread.title,
         "cwd": imported.thread.cwd,
         "already_imported": false,
+        "dry_run": false,
+        "would_create": true,
     }))
     .into_response()
 }
@@ -27136,6 +29505,16 @@ async fn import_memory_item(
         tags: vec![tag],
         author_agent_id: None,
     };
+    if !memory::detect_sensitive_topics(&mem.content).is_empty()
+        && !sensitive_memory_enabled(&state, caller).await
+    {
+        return crate::import::ImportOutcome::failed(
+            crate::import::kind::MEMORY,
+            &selection.id,
+            &selection.id,
+            "sensitive topics are disabled in Settings → Memory",
+        );
+    }
     match state.memory.record_full(&owner, "default", mem).await {
         Ok(Some(id)) => {
             match state.memory.get(&id).await {
@@ -27390,20 +29769,37 @@ async fn resolved_agent_tool_allowlist(state: &ServerState, agent_id: &str) -> O
     tag = "Agents",
     summary = "List an agent's tools + MCP tools",
     params(("id" = String, Path)),
-    responses((status = 200, description = "OK", body = serde_json::Value))
+    responses(
+        (status = 200, description = "OK", body = serde_json::Value),
+        (status = 403, description = "Agent view permission required", body = serde_json::Value)
+    )
 )]
 async fn list_tools(
     State(state): State<ServerState>,
+    axum::Extension(caller): axum::Extension<Option<crate::identity_verify::VerifiedCaller>>,
     axum::extract::Path(agent_id): axum::extract::Path<String>,
-) -> Json<serde_json::Value> {
+) -> axum::response::Response {
     // Tools the ACP agent has actually invoked this run...
-    let observed = state.agents.tools_for(&agent_id);
+    let observed = match run_after_agent_resource_permission(
+        enforce_agent_resource_permission(
+            &state,
+            &caller,
+            crate::identity_verify::permissions::AGENT_VIEW,
+            &agent_id,
+        ),
+        async { state.agents.tools_for(&agent_id) },
+    )
+    .await
+    {
+        Ok(observed) => observed,
+        Err(response) => return response,
+    };
     // ...plus the registered MCP tools this agent is allowed to use. The
     // persisted agent card supplies the default scope and the registry config
     // can provide an operator override.
     let allowlist = resolved_agent_tool_allowlist(&state, &agent_id).await;
     let mcp = state.mcp.tools_for_agent(allowlist.as_deref()).await;
-    Json(json!({ "tools": observed, "mcpTools": mcp }))
+    Json(json!({ "tools": observed, "mcpTools": mcp })).into_response()
 }
 
 /// `GET /api/mcp/servers` — list the MCP servers registered in Core config.
@@ -27977,6 +30373,8 @@ struct McpCatalogInstallBody {
     /// failing on a name collision. Preserves the server's enabled state + env.
     #[serde(default)]
     force: bool,
+    #[serde(rename = "dryRun", default)]
+    dry_run: bool,
 }
 
 /// `GET /api/mcp/updates` — installed MCP servers whose recorded catalog version
@@ -28027,7 +30425,7 @@ async fn mcp_updates(State(_state): State<ServerState>) -> Json<serde_json::Valu
     post,
     path = "/api/mcp/catalog/install",
     tag = "MCP",
-    summary = "Install an MCP server from the catalog",
+    summary = "Install an MCP server or preview the config",
     request_body = serde_json::Value,
     responses((status = 200, description = "OK", body = serde_json::Value))
 )]
@@ -28127,6 +30525,26 @@ async fn mcp_catalog_install(
             Some(url.clone()),
         ),
     };
+
+    if body.dry_run {
+        return (
+            StatusCode::OK,
+            Json(json!({
+                "success": true,
+                "dryRun": true,
+                "action": "install",
+                "server": {
+                    "name": plan.server_name,
+                    "command": command,
+                    "args": args,
+                    "url": url,
+                    "description": plan.description,
+                    "enabled": false,
+                },
+                "writes": [],
+            })),
+        );
+    }
 
     match write_mcp_entry(
         &plan.server_name,
@@ -29117,20 +31535,29 @@ struct CallToolBody {
     /// owner) and scopes per-user audit. Absent → env/`"default"` fallback.
     #[serde(default)]
     user_id: Option<String>,
-    /// The **server-derived** host conversation this tool call runs on behalf of,
-    /// forwarded by the Gateway exec plane (`POST /v1/exec/tool`). Lowered to a
-    /// [`crate::sidecar::mcp::ToolPrincipal`] so a gateway-exec'd tool resolves
-    /// `Owned` on an org-bound node instead of the fail-closed `Unresolved`.
-    /// Distinct from `user_id`, which is client-supplied and MUST NEVER be an
-    /// authorization principal. Absent ⇒ fail-closed default (unbound nodes are
-    /// unaffected: they resolve `Unrestricted` regardless).
+    /// Internal host conversation context forwarded by the Gateway exec plane
+    /// (`POST /v1/exec/tool`). Direct managed-user callers may provide it only
+    /// for a conversation they own; visibility or collaboration never delegates
+    /// the owner's vault. The node-token path is accepted only with the
+    /// process-local proof Core adds before its Gateway forward. Distinct from
+    /// `user_id`, which is client-supplied and MUST NEVER be an authorization
+    /// principal. Absent ⇒ fail-closed default on bound nodes (unbound nodes
+    /// remain unrestricted).
     #[serde(default)]
     host_conversation_id: Option<String>,
-    /// Set by the Gateway's own OpenAI tool loop after it has recorded the
-    /// action. Core's direct ACP/MCP callers leave this false so Core can emit
-    /// the charge to the Gateway exactly once.
+    /// Process-local proof attached by Core before its Gateway forward. It is
+    /// never accepted from a normal client and is required when an anonymous
+    /// node-token request carries `host_conversation_id` on a bound node.
     #[serde(default)]
-    budget_already_metered: bool,
+    host_conversation_proof: Option<String>,
+    /// Optional Core-injected onboarding profile scopes. These are narrowing
+    /// controls only; normal network callers cannot widen an agent's access by
+    /// supplying them.
+    #[serde(default)]
+    profile_composio_connection_scope:
+        Option<Vec<crate::sidecar::adapters::ComposioConnectionBinding>>,
+    #[serde(default)]
+    profile_conversation_scope: Option<Vec<String>>,
 }
 
 #[derive(serde::Deserialize)]
@@ -29151,6 +31578,98 @@ fn is_billable_composio_tool(tool_id: &str) -> bool {
 
 /// `POST /api/mcp/tools/call` — invoke a registered MCP tool. This is the path
 /// the chat tool loop (U12) uses to execute a tool the agent requested.
+async fn authorize_tool_host_conversation(
+    state: &ServerState,
+    caller: Option<&crate::identity_verify::VerifiedCaller>,
+    raw_id: Option<&str>,
+    host_conversation_proof: Option<&str>,
+) -> Result<Option<String>, (StatusCode, String)> {
+    let Some(raw_id) = raw_id else {
+        return Ok(None);
+    };
+    if !crate::sidecar::adapters::acp::is_safe_host_conversation_id(raw_id) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "host_conversation_id must be 1-128 ASCII letters, digits, '.', '_' or '-'".to_owned(),
+        ));
+    }
+
+    // A managed-user JWT identifies the human who is making this direct Core
+    // request. A shared or collaborator-visible conversation is not enough to
+    // select that conversation owner's vault: the caller must own the host
+    // conversation. An anonymous node-token request may carry this context only
+    // with the process-local proof Core created before its Gateway forward;
+    // otherwise a direct node-token caller could omit the user JWT and select
+    // another owner's vault.
+    if let Some(caller) = caller {
+        let meta = match state.conversations.get_access_meta(raw_id).await {
+            Ok(Some(meta)) => meta,
+            Ok(None) => {
+                return Err((
+                    StatusCode::FORBIDDEN,
+                    "host conversation is not owned by the caller".to_owned(),
+                ));
+            }
+            Err(error) => {
+                return Err((
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("host conversation lookup failed: {error}"),
+                ));
+            }
+        };
+        if !caller_owns_host_conversation(caller, &meta) {
+            return Err((
+                StatusCode::FORBIDDEN,
+                "host conversation is not owned by the caller".to_owned(),
+            ));
+        }
+    } else if !anonymous_host_conversation_allowed(
+        crate::sidecar::control_plane::registered_org().is_some()
+            || crate::sidecar::control_plane::is_managed_node(),
+        host_conversation_proof
+            .is_some_and(|proof| host_conversation_proof_is_valid(raw_id, proof)),
+    ) {
+        return Err((
+            StatusCode::FORBIDDEN,
+            "host conversation requires a verified caller or trusted forwarder".to_owned(),
+        ));
+    }
+    Ok(Some(raw_id.to_owned()))
+}
+
+fn anonymous_host_conversation_allowed(node_bound: bool, trusted_forwarder: bool) -> bool {
+    trusted_forwarder || !node_bound
+}
+
+/// Prove that a host conversation id came from this Core's own Gateway forward
+/// path. The key is process-local and never leaves Core; the Gateway only relays
+/// the proof. A direct node-token caller therefore cannot opt into the trusted
+/// host-context path by copying a public header or body flag.
+pub(crate) fn host_conversation_proof(conversation_id: &str) -> String {
+    use base64::Engine as _;
+    use sha2::{Digest, Sha256};
+
+    static KEY: std::sync::OnceLock<[u8; 16]> = std::sync::OnceLock::new();
+    let key = KEY.get_or_init(|| *uuid::Uuid::new_v4().as_bytes());
+    let mut digest = Sha256::new();
+    digest.update(b"ryu-host-conversation-proof-v1\0");
+    digest.update(key);
+    digest.update(conversation_id.as_bytes());
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(digest.finalize())
+}
+
+fn host_conversation_proof_is_valid(conversation_id: &str, proof: &str) -> bool {
+    ct_eq(proof, &host_conversation_proof(conversation_id))
+}
+
+fn caller_owns_host_conversation(
+    caller: &crate::identity_verify::VerifiedCaller,
+    meta: &crate::identity_verify::ResourceTenancy,
+) -> bool {
+    meta.owner_user_id.as_deref() == Some(caller.user_id.as_str())
+        && meta.org_id.as_deref() == caller.org_id.as_deref()
+}
+
 #[utoipa::path(
     post,
     path = "/api/mcp/tools/call",
@@ -29161,13 +31680,29 @@ fn is_billable_composio_tool(tool_id: &str) -> bool {
 )]
 async fn call_mcp_tool(
     State(state): State<ServerState>,
+    axum::Extension(caller): axum::Extension<Option<crate::identity_verify::VerifiedCaller>>,
     Json(body): Json<CallToolBody>,
 ) -> axum::response::Response {
-    let should_record_tool_charge =
-        !body.budget_already_metered && is_billable_composio_tool(&body.tool);
+    let host_conversation_id = match authorize_tool_host_conversation(
+        &state,
+        caller.as_ref(),
+        body.host_conversation_id.as_deref(),
+        body.host_conversation_proof.as_deref(),
+    )
+    .await
+    {
+        Ok(value) => value,
+        Err((status, message)) => return json_error(status, message),
+    };
+    // Core is the execution and charge authority for every Composio action that
+    // reaches this dispatcher. A client-controlled `budget_already_metered`
+    // flag used to let any node-token caller suppress the charge notification.
+    // Gateway callers now rely on this Core-side event and do not debit the same
+    // unified-tool execution a second time.
+    let should_record_tool_charge = is_billable_composio_tool(&body.tool);
     let charge_agent_id = body.agent_id.clone();
     let charge_user_id = body.user_id.clone();
-    let charge_session_id = body.host_conversation_id.clone();
+    let charge_session_id = host_conversation_id.clone();
     // The allowlist must be tied to a *known* agent. A `None` allowlist means
     // "allow every tool" (see `McpRegistry::call_tool`), so we must not let a
     // client reach that path by omitting or faking `agent_id` — that would be a
@@ -29187,6 +31722,20 @@ async fn call_mcp_tool(
         )
             .into_response();
     }
+    if state.mcp.command_tool_requires_files_read(&body.tool).await
+        && enforce_permission(
+            &state,
+            &caller,
+            crate::identity_verify::permissions::SPACE_READ,
+        )
+        .await
+        .is_err()
+    {
+        return json_error(
+            StatusCode::FORBIDDEN,
+            "insufficient permissions: space.read (required for workspace file search)".to_owned(),
+        );
+    }
     // Per-agent restriction comes from the agent's configured allowlist. (A
     // deny-by-default global policy for unconfigured agents is Gateway /
     // control-plane scope, U28/U30, out of scope here.)
@@ -29205,7 +31754,7 @@ async fn call_mcp_tool(
         .unwrap_or_default();
     match state
         .mcp
-        .call_tool_with_identity(
+        .call_tool_with_identity_scoped(
             // The calling agent, so its configured `approval_tools` (policy
             // Layer A) feed the approval gate.
             Some(agent_id),
@@ -29227,7 +31776,9 @@ async fn call_mcp_tool(
             // refusing); absent ⇒ fail-closed `Unresolved` on a bound node (e.g. a
             // direct/legacy caller). Unbound (personal) nodes resolve `Unrestricted`
             // regardless. This is NEVER `user_id` (client-supplied, spoofable).
-            body.host_conversation_id.as_deref(),
+            host_conversation_id.as_deref(),
+            body.profile_composio_connection_scope.as_deref(),
+            body.profile_conversation_scope.as_deref(),
         )
         .await
     {
@@ -29273,6 +31824,7 @@ async fn call_mcp_tool(
 )]
 async fn call_action(
     State(state): State<ServerState>,
+    axum::Extension(caller): axum::Extension<Option<crate::identity_verify::VerifiedCaller>>,
     Path(action_id): Path<String>,
     Json(body): Json<CallActionBody>,
 ) -> axum::response::Response {
@@ -29285,15 +31837,16 @@ async fn call_action(
     };
     call_mcp_tool(
         State(state),
+        axum::Extension(caller),
         Json(CallToolBody {
             tool: tool_id,
             arguments: body.arguments,
             agent_id: body.agent_id,
             user_id: body.user_id,
             host_conversation_id: None,
-            // The public Action route must never accept the Gateway's internal
-            // charge-bypass marker.
-            budget_already_metered: false,
+            host_conversation_proof: None,
+            profile_composio_connection_scope: None,
+            profile_conversation_scope: None,
         }),
     )
     .await
@@ -30289,6 +32842,7 @@ mod tool_search_scope_tests {
 )]
 async fn tools_search(
     State(state): State<ServerState>,
+    axum::Extension(caller): axum::Extension<Option<crate::identity_verify::VerifiedCaller>>,
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> Json<serde_json::Value> {
     let query = params.get("q").map(String::as_str).unwrap_or_default();
@@ -30319,7 +32873,13 @@ async fn tools_search(
 
     let mut results = state
         .mcp
-        .search_scoped(query, kind, fetch, &skills_allowlist)
+        .search_scoped_for_user(
+            query,
+            kind,
+            fetch,
+            &skills_allowlist,
+            caller.as_ref().map(|caller| caller.user_id.as_str()),
+        )
         .await;
     if let Some(agent) = agent {
         if let Some(allow) = resolved_agent_tool_allowlist(&state, agent).await {
@@ -30388,6 +32948,15 @@ struct ToolExecBody {
     /// so the caller must bind it to a real session upstream.
     #[serde(default)]
     conversation_id: Option<String>,
+    /// Core-validated server-derived host conversation for conversation-scoped
+    /// tools. This is distinct from `conversation_id`, which remains the
+    /// client-supplied Composio entity/audit selector for compatibility.
+    #[serde(default)]
+    host_conversation_id: Option<String>,
+    /// Process-local proof attached by Core's Gateway forwarder. A direct
+    /// node-token caller cannot opt into another user's conversation scope.
+    #[serde(default)]
+    host_conversation_proof: Option<String>,
 }
 
 /// Body for `POST /api/tools/exec/resume`.
@@ -30418,8 +32987,22 @@ struct ToolExecResumeBody {
 )]
 async fn tools_exec(
     State(state): State<ServerState>,
+    axum::Extension(verified_caller): axum::Extension<
+        Option<crate::identity_verify::VerifiedCaller>,
+    >,
     Json(body): Json<ToolExecBody>,
 ) -> axum::response::Response {
+    let host_conversation_id = match authorize_tool_host_conversation(
+        &state,
+        verified_caller.as_ref(),
+        body.host_conversation_id.as_deref(),
+        body.host_conversation_proof.as_deref(),
+    )
+    .await
+    {
+        Ok(value) => value,
+        Err((status, message)) => return json_error(status, message),
+    };
     if let Some(agent_id) = body.agent_id.as_deref() {
         if state
             .agent_store
@@ -30464,12 +33047,13 @@ async fn tools_exec(
         .unwrap_or_default();
     let caller: std::sync::Arc<dyn crate::tool_exec::ToolCaller> = state.mcp.clone();
     let invoker = std::sync::Arc::new(
-        crate::tool_exec::SandboxToolInvoker::registry_with_identity(
+        crate::tool_exec::SandboxToolInvoker::registry_with_identity_and_conversation(
             caller,
             agent_id.clone(),
             allowlist,
             body.conversation_id,
             identity_profile_ids,
+            host_conversation_id,
         ),
     );
     let outcome = crate::tool_exec::execute_code(body.code, invoker, &agent_id).await;
@@ -30548,9 +33132,12 @@ async fn tools_exec_resume(
 
 // ── Mesh status (#478) ───────────────────────────────────────────────────────
 
-/// `GET /api/mesh/status` — opt-in Tailscale/Headscale mesh reachability.
+/// `GET /api/mesh/status` — opt-in Tailscale/Headscale mesh or Tailcat reachability.
 ///
-/// Returns the canonical Contract 6 superset. When the mesh is disabled
+/// Returns the canonical Contract 6 superset. The backend is `tailscale`,
+/// `headscale`, or `tailcat`; Tailcat reports its short-lived connection
+/// bearer as `tailcat_address` and has no peer list or control server. When the
+/// mesh is disabled
 /// (`ryu_mesh::is_enabled()` false — `RYU_MESH_ENABLED` unset AND the
 /// `mesh-enabled` pref off) this is the all-default object with HTTP 200 (never
 /// 500), so a vanilla install reports `enabled:false` without amber.
@@ -30558,7 +33145,7 @@ async fn tools_exec_resume(
     get,
     path = "/api/mesh/status",
     tag = "Nodes",
-    summary = "Mesh (Tailscale/Headscale) reachability + peers",
+    summary = "Mesh (Tailscale/Headscale) or Tailcat reachability + peers",
     responses((status = 200, description = "Mesh status", body = serde_json::Value))
 )]
 async fn mesh_status(State(state): State<ServerState>) -> Json<serde_json::Value> {
@@ -30598,15 +33185,19 @@ async fn mesh_peers(State(state): State<ServerState>) -> Json<serde_json::Value>
     Json(serde_json::to_value(resp).unwrap_or_default())
 }
 
-/// `POST /api/mesh/config` — enable or disable the mesh plane from the desktop.
+/// `POST /api/mesh/config` — enable or disable the network plane from the desktop.
 ///
 /// Persists the `mesh-enabled` pref (so the choice survives a Core restart),
 /// updates the in-process signal [`ryu_mesh::set_pref_enabled`] immediately, and
-/// starts (enable) or stops (disable) the Tailscale daemon sidecar. Always
+/// starts (enable) or stops (disable) the selected network sidecar. Always
 /// answers 200 with the live status so the desktop toggle reflects the PERSISTED
 /// state even when the daemon fails to start; a daemon-start failure rides in a
 /// non-contract `start_error` field (the desktop surfaces it as a warning, not a
 /// rolled-back toggle).
+///
+/// The optional `backend` request field accepts `headscale`, `tailscale`, or
+/// `tailcat`. Supplying it persists the selection and, when the network is
+/// enabled, stops the previous backend before starting the selected one.
 ///
 /// A missing client is the common `start_error`, and it is no longer a dead end.
 /// PATH adoption still wins, but when there is no complete `tailscale`/`tailscaled`
@@ -30614,13 +33205,15 @@ async fn mesh_peers(State(state): State<ServerState>) -> Json<serde_json::Value>
 /// non-contract fields beside `start_error`:
 ///
 /// - `missing_binaries: string[]` — what could not be resolved anywhere.
-/// - `can_install: bool` — whether THIS node has an install route at all (Linux
-///   archive, macOS Homebrew, or `RYU_TAILSCALE_RELEASE_URL`). True ⇒ the client
-///   should offer the install; false ⇒ tell the user how to install it themselves.
+/// - `can_install: bool` — whether THIS node has a managed install route for the
+///   selected network client. True ⇒ the background install starts; false ⇒ the
+///   response names the operator-managed fallback.
 ///
-/// **Enabling the mesh INSTALLS the client** when one is missing and this node has
-/// an install route — the same way picking an engine installs it. The user asked
-/// for a tailnet, not for a shopping list; making them find
+/// **Enabling any network backend INSTALLS its client** when one is missing and
+/// this node has an install route — the same way picking an engine installs it.
+/// Tailcat uses a pinned, checksum-verified release asset; Tailscale/Headscale
+/// use the pinned official userspace pair. The user asked for a connection, not
+/// for a shopping list; making them find
 /// `POST /api/setup/tailscale/install` themselves was the whole reason enabling
 /// the mesh felt broken. So a third non-contract field rides along:
 ///
@@ -30629,35 +33222,74 @@ async fn mesh_peers(State(state): State<ServerState>) -> Json<serde_json::Value>
 ///   `/api/mesh/status` rather than treat `start_error` as final.
 ///
 /// The install is still NOT inline. It is `tokio::spawn`ed via
-/// [`spawn_mesh_client_install`] precisely because these are minute-long
+/// [`spawn_mesh_backend_install`] precisely because these are minute-long
 /// transfers; awaiting one inside the toggle handler would hang the request past
 /// any client timeout. The daemon is started by that task once the binaries land,
 /// so the client does not need to re-POST this route.
 ///
-/// Security: enabling mesh makes this Core reachable over the tailnet, so the
-/// fail-closed token gate (`enforce_remote_auth`) requires a strong
+/// Security: enabling a network backend makes this Core reachable through a
+/// tailnet or a Tailcat listener, so the fail-closed token gate (`enforce_remote_auth`) requires a strong
 /// non-placeholder `RYU_TOKEN` before this handler persists or starts the mesh, and
 /// the same check runs again at startup. A node with no usable token cannot be
 /// enabled or restarted with the mesh on. Loopback-admin trust
 /// neutralization follows automatically: the gateway is (re)spawned with
 /// `RYU_MESH_ENABLED=1` once `is_enabled()` reads true.
-#[derive(serde::Deserialize)]
+#[derive(serde::Deserialize, utoipa::ToSchema)]
+#[schema(rename_all = "camelCase")]
 struct MeshConfigBody {
     enabled: bool,
+    /// Optional explicit network backend. Existing callers may omit it and keep
+    /// the stored selection. Accepted values are `headscale`, `tailscale`, and
+    /// `tailcat`.
+    #[serde(default)]
+    backend: Option<String>,
 }
 
 #[utoipa::path(
     post,
     path = "/api/mesh/config",
     tag = "Nodes",
-    summary = "Enable or disable the mesh plane",
-    request_body = serde_json::Value,
+    summary = "Enable or disable the network plane",
+    request_body = MeshConfigBody,
     responses((status = 200, description = "Mesh status after applying the change", body = serde_json::Value))
 )]
 async fn mesh_config(
     State(state): State<ServerState>,
     Json(body): Json<MeshConfigBody>,
 ) -> axum::response::Response {
+    let was_enabled = ryu_mesh::is_enabled();
+    let current_backend = crate::sidecar::tailscale::mesh_backend().await.0;
+    let requested_backend = match body.backend.as_deref() {
+        Some(raw) => {
+            let Some(backend) = crate::sidecar::tailscale::parse_backend_choice(raw) else {
+                return json_error(
+                    StatusCode::BAD_REQUEST,
+                    "backend must be one of: headscale, tailscale, tailcat".to_owned(),
+                );
+            };
+            backend
+        }
+        None => current_backend,
+    };
+
+    // An operator environment override is authoritative. Do not report a
+    // successful UI switch that the next status read will silently override.
+    if let Some(raw) = std::env::var("RYU_MESH_BACKEND")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+    {
+        let env_backend = crate::sidecar::tailscale::parse_backend(Some(&raw));
+        if body.backend.is_some() && requested_backend != env_backend {
+            return json_error(
+                    StatusCode::CONFLICT,
+                    format!(
+                        "RYU_MESH_BACKEND pins this node to {}; remove or change that environment override before selecting another backend",
+                        env_backend.as_str()
+                    ),
+                );
+        }
+    }
+
     if body.enabled {
         let resolved = crate::node_token::resolve_and_export();
         let token = resolved.as_ref().map(|value| value.token.clone());
@@ -30666,6 +33298,44 @@ async fn mesh_config(
             return json_error(StatusCode::FORBIDDEN, error);
         }
     }
+
+    // A backend swap while enabled must stop the old process before the new
+    // adapter starts. This is kept server-side so clients cannot leave both
+    // network listeners active by racing preference writes.
+    if was_enabled && current_backend != requested_backend {
+        if let Err(error) = state
+            .manager
+            .stop_sidecar(current_backend.sidecar_name())
+            .await
+        {
+            tracing::warn!(
+                backend = current_backend.as_str(),
+                "network: failed to stop previous backend during switch: {error}"
+            );
+        }
+        state
+            .manager
+            .unmark_installed(current_backend.sidecar_name())
+            .await;
+    }
+
+    if body.backend.is_some() {
+        if let Err(error) = state
+            .preferences
+            .set(
+                crate::mesh_host::MESH_BACKEND_PREF_KEY,
+                requested_backend.as_str(),
+            )
+            .await
+        {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": format!("failed to persist mesh-backend pref: {error}") })),
+            )
+                .into_response();
+        }
+    }
+
     let value = if body.enabled { "true" } else { "false" };
     if let Err(e) = state
         .preferences
@@ -30687,46 +33357,85 @@ async fn mesh_config(
         can_install: false,
     };
     if body.enabled {
-        // The PURE pre-check first, so a missing client is diagnosed structurally
-        // rather than scraped back out of the start error's prose.
-        if let Err(m) = crate::sidecar::tailscale::ensure_mesh_binaries() {
-            tracing::warn!("mesh: {m}");
-            // Install it FOR them when this node has a route, instead of handing
-            // back a sentence about `brew`. The task starts the daemon itself once
-            // the binaries land (mesh stays enabled throughout), so the client's
-            // only job is to show progress and re-read the status.
-            if m.can_install {
-                tracing::info!(
-                    "mesh: no Tailscale client on this node — installing one in the background"
-                );
-                spawn_mesh_client_install(
-                    state.downloads.clone(),
-                    Arc::clone(&state.manager),
-                    Arc::clone(&state.install_status),
-                );
-                // True even when an install was ALREADY running (the helper's
-                // `false`): the user's enable is being served by that run, and
-                // reporting "not installing" would send the client back to the
-                // dead-end error text.
-                installing = true;
+        match requested_backend {
+            crate::sidecar::tailscale::MeshBackend::Tailcat => {
+                state.manager.unmark_installed("tailscale").await;
+                if let Err(error) = crate::sidecar::tailcat::resolve_binary() {
+                    tracing::warn!("network: {error}");
+                    start_error = Some(error.to_string());
+                    missing.missing = vec!["tailcat".to_owned()];
+                    missing.can_install = crate::sidecar::tailcat_downloader::can_install();
+                    if missing.can_install {
+                        spawn_mesh_backend_install(
+                            state.downloads.clone(),
+                            Arc::clone(&state.manager),
+                            Arc::clone(&state.install_status),
+                            requested_backend,
+                        );
+                        installing = true;
+                    }
+                    state.manager.unmark_installed("tailcat").await;
+                } else {
+                    state.manager.mark_installed("tailcat").await;
+                    if let Err(error) = state.manager.start_sidecar("tailcat").await {
+                        tracing::warn!("network: Tailcat failed to start: {error}");
+                        start_error = Some(error.to_string());
+                    }
+                }
             }
-            start_error = Some(m.to_string());
-            missing = m;
-        } else {
-            // Make the daemon eligible to run, then start it.
-            state.manager.mark_installed("tailscale").await;
-            if let Err(e) = state.manager.start_sidecar("tailscale").await {
-                tracing::warn!("mesh: daemon failed to start after enable: {e}");
-                start_error = Some(e.to_string());
+            crate::sidecar::tailscale::MeshBackend::Headscale
+            | crate::sidecar::tailscale::MeshBackend::Tailscale => {
+                // The PURE pre-check first, so a missing client is diagnosed
+                // structurally rather than scraped back out of the start error's
+                // prose.
+                if let Err(m) = crate::sidecar::tailscale::ensure_mesh_binaries() {
+                    tracing::warn!("mesh: {m}");
+                    // Install it FOR them when this node has a route, instead of
+                    // handing back a sentence about `brew`. The task starts the
+                    // daemon itself once the binaries land.
+                    if m.can_install {
+                        tracing::info!(
+                            "mesh: no Tailscale client on this node — installing one in the background"
+                        );
+                        spawn_mesh_backend_install(
+                            state.downloads.clone(),
+                            Arc::clone(&state.manager),
+                            Arc::clone(&state.install_status),
+                            requested_backend,
+                        );
+                        installing = true;
+                    }
+                    start_error = Some(m.to_string());
+                    missing = m;
+                    state.manager.unmark_installed("tailscale").await;
+                } else {
+                    state.manager.unmark_installed("tailcat").await;
+                    // Make the daemon eligible to run, then start it.
+                    state.manager.mark_installed("tailscale").await;
+                    if let Err(error) = state.manager.start_sidecar("tailscale").await {
+                        tracing::warn!("mesh: daemon failed to start after enable: {error}");
+                        start_error = Some(error.to_string());
+                    }
+                }
             }
         }
     } else {
         // Best-effort stop — a daemon that never started is not an error for a
-        // disable request, and neither is `tailscale down` on an absent socket.
-        state.manager.unmark_installed("tailscale").await;
-        if let Err(e) = state.manager.stop_sidecar("tailscale").await {
-            tracing::warn!("mesh: stop after disable failed: {e}");
+        // disable request. Stop BOTH adapters so disabling after a backend
+        // preference change cannot leave the old listener alive.
+        for backend in [
+            crate::sidecar::tailscale::MeshBackend::Headscale,
+            crate::sidecar::tailscale::MeshBackend::Tailcat,
+        ] {
+            if let Err(error) = state.manager.stop_sidecar(backend.sidecar_name()).await {
+                tracing::warn!(
+                    backend = backend.as_str(),
+                    "network: stop after disable failed: {error}"
+                );
+            }
         }
+        state.manager.unmark_installed("tailscale").await;
+        state.manager.unmark_installed("tailcat").await;
     }
 
     let status = state.mesh.status().await;
@@ -30754,8 +33463,28 @@ async fn mesh_config(
 /// toggle twice does not queue a second 38 MB transfer (or a second
 /// `brew install`). Cleared by the task itself, in both the success and the
 /// failure arm — a stuck flag would make the mesh permanently uninstallable.
-static MESH_INSTALL_IN_FLIGHT: std::sync::atomic::AtomicBool =
+static TAILSCALE_INSTALL_IN_FLIGHT: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
+static TAILCAT_INSTALL_IN_FLIGHT: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+fn mesh_install_key(backend: crate::sidecar::tailscale::MeshBackend) -> &'static str {
+    match backend {
+        crate::sidecar::tailscale::MeshBackend::Tailcat => "tailcat",
+        crate::sidecar::tailscale::MeshBackend::Headscale
+        | crate::sidecar::tailscale::MeshBackend::Tailscale => "tailscale",
+    }
+}
+
+fn mesh_install_flag(
+    backend: crate::sidecar::tailscale::MeshBackend,
+) -> &'static std::sync::atomic::AtomicBool {
+    match backend {
+        crate::sidecar::tailscale::MeshBackend::Tailcat => &TAILCAT_INSTALL_IN_FLIGHT,
+        crate::sidecar::tailscale::MeshBackend::Headscale
+        | crate::sidecar::tailscale::MeshBackend::Tailscale => &TAILSCALE_INSTALL_IN_FLIGHT,
+    }
+}
 
 /// Install the mesh client in the background and, if the mesh is (still) enabled
 /// when it lands, start the daemon.
@@ -30769,40 +33498,80 @@ static MESH_INSTALL_IN_FLIGHT: std::sync::atomic::AtomicBool =
 /// enabled-check is re-read AFTER the download rather than captured before it,
 /// because a minute-long install gives the user ample time to switch the mesh
 /// back off — starting a daemon they just disabled would be a surprise.
-pub(crate) fn spawn_mesh_client_install(
+pub(crate) fn spawn_mesh_backend_install(
     downloads: crate::downloads::DownloadCenter,
     manager: Arc<SidecarManager>,
     install_status: Arc<InstallStatusStore>,
+    backend: crate::sidecar::tailscale::MeshBackend,
 ) -> bool {
     use std::sync::atomic::Ordering;
-    if MESH_INSTALL_IN_FLIGHT.swap(true, Ordering::SeqCst) {
+    let install_key = mesh_install_key(backend);
+    if mesh_install_flag(backend).swap(true, Ordering::SeqCst) {
         tracing::info!(
-            "mesh: a Tailscale client install is already running — not starting another"
+            backend = backend.as_str(),
+            "mesh: a network client install is already running — not starting another"
         );
         return false;
     }
     tokio::spawn(async move {
-        install_status.set_installing("tailscale").await;
-        let result = crate::sidecar::tailscale::downloader::install_mesh_client(&downloads).await;
-        MESH_INSTALL_IN_FLIGHT.store(false, Ordering::SeqCst);
+        install_status.set_installing(install_key).await;
+        let result = match backend {
+            crate::sidecar::tailscale::MeshBackend::Tailcat => {
+                crate::sidecar::tailcat_downloader::install_tailcat(&downloads).await
+            }
+            crate::sidecar::tailscale::MeshBackend::Headscale
+            | crate::sidecar::tailscale::MeshBackend::Tailscale => {
+                crate::sidecar::tailscale::downloader::install_mesh_client(&downloads).await
+            }
+        };
+        mesh_install_flag(backend).store(false, Ordering::SeqCst);
         match result {
             Ok(version) => {
-                install_status.set_installed("tailscale", version).await;
-                if ryu_mesh::is_enabled() {
-                    manager.mark_installed("tailscale").await;
-                    if let Err(e) = manager.start_sidecar("tailscale").await {
-                        tracing::warn!("mesh: daemon failed to start after auto-install: {e}");
-                    } else {
-                        tracing::info!("mesh: client installed and daemon started");
+                install_status.set_installed(install_key, version).await;
+                let selected_backend = crate::sidecar::tailscale::mesh_backend().await.0;
+                let selected_uses_installed_client = match backend {
+                    crate::sidecar::tailscale::MeshBackend::Tailcat => {
+                        selected_backend == crate::sidecar::tailscale::MeshBackend::Tailcat
                     }
+                    crate::sidecar::tailscale::MeshBackend::Headscale
+                    | crate::sidecar::tailscale::MeshBackend::Tailscale => {
+                        selected_backend != crate::sidecar::tailscale::MeshBackend::Tailcat
+                    }
+                };
+                if ryu_mesh::is_enabled() && selected_uses_installed_client {
+                    let sidecar = selected_backend.sidecar_name();
+                    manager.mark_installed(sidecar).await;
+                    if let Err(e) = manager.start_sidecar(sidecar).await {
+                        tracing::warn!(
+                            backend = selected_backend.as_str(),
+                            "mesh: daemon failed to start after auto-install: {e}"
+                        );
+                    } else {
+                        tracing::info!(
+                            backend = selected_backend.as_str(),
+                            "mesh: client installed and daemon started"
+                        );
+                    }
+                } else if ryu_mesh::is_enabled() {
+                    tracing::info!(
+                        backend = selected_backend.as_str(),
+                        installed_backend = backend.as_str(),
+                        "mesh: network client installed, but another backend is selected; leaving it stopped"
+                    );
                 } else {
-                    tracing::info!("mesh: client installed, but the mesh was turned off meanwhile");
+                    tracing::info!(
+                        backend = backend.as_str(),
+                        "mesh: client installed, but the mesh was turned off meanwhile"
+                    );
                 }
             }
             Err(e) => {
-                tracing::error!("mesh: automatic Tailscale client install failed: {e:#}");
+                tracing::error!(
+                    backend = backend.as_str(),
+                    "mesh: automatic network client install failed: {e:#}"
+                );
                 install_status
-                    .set_failed("tailscale", format!("{e:#}"))
+                    .set_failed(install_key, format!("{e:#}"))
                     .await;
             }
         }
@@ -31773,23 +34542,22 @@ async fn import_space_package(
             "Space package exceeds the archive limit".to_owned(),
         );
     }
-    let archive = match base64::engine::general_purpose::STANDARD
-        .decode(body.archive_base64.as_bytes())
-    {
-        Ok(bytes) if bytes.len() <= space_portable::MAX_SPACE_PACKAGE_ARCHIVE_BYTES => bytes,
-        Ok(_) => {
-            return json_error(
-                StatusCode::PAYLOAD_TOO_LARGE,
-                "Space package exceeds the archive limit".to_owned(),
-            );
-        }
-        Err(error) => {
-            return json_error(
-                StatusCode::BAD_REQUEST,
-                format!("archive_base64 is invalid: {error}"),
-            );
-        }
-    };
+    let archive =
+        match base64::engine::general_purpose::STANDARD.decode(body.archive_base64.as_bytes()) {
+            Ok(bytes) if bytes.len() <= space_portable::MAX_SPACE_PACKAGE_ARCHIVE_BYTES => bytes,
+            Ok(_) => {
+                return json_error(
+                    StatusCode::PAYLOAD_TOO_LARGE,
+                    "Space package exceeds the archive limit".to_owned(),
+                );
+            }
+            Err(error) => {
+                return json_error(
+                    StatusCode::BAD_REQUEST,
+                    format!("archive_base64 is invalid: {error}"),
+                );
+            }
+        };
     let extracted = match crate::portable_packages::extract_archive(&archive) {
         Ok(package) => package,
         Err(error) => return json_error(StatusCode::BAD_REQUEST, error.to_string()),
@@ -31874,24 +34642,26 @@ async fn export_space_package(
         Err(error) => return json_error(StatusCode::UNPROCESSABLE_ENTITY, error.to_string()),
     };
     let filename = format!("{}.ryupack", space_package_filename(&space.name));
-    Json(json!({
-        "success": true,
-        "filename": filename,
-        "content_type": "application/zip",
-        "archive_base64": base64::engine::general_purpose::STANDARD.encode(&package.archive),
-        "package": {
-            "kind": "space",
-            "name": space.name,
-            "version": space_portable::SPACE_PACKAGE_VERSION,
-            "files": package.file_paths,
-            "pages": package.page_count,
-            "databases": package.database_count,
-            "rows": package.row_count,
-            "excluded": package.excluded_count,
-            "embeddings": false
-        }
-    }))
-    .into_response()
+    no_store_response(
+        Json(json!({
+            "success": true,
+            "filename": filename,
+            "content_type": "application/zip",
+            "archive_base64": base64::engine::general_purpose::STANDARD.encode(&package.archive),
+            "package": {
+                "kind": "space",
+                "name": space.name,
+                "version": space_portable::SPACE_PACKAGE_VERSION,
+                "files": package.file_paths,
+                "pages": package.page_count,
+                "databases": package.database_count,
+                "rows": package.row_count,
+                "excluded": package.excluded_count,
+                "embeddings": false
+            }
+        }))
+        .into_response(),
+    )
 }
 
 #[utoipa::path(
@@ -32631,14 +35401,14 @@ async fn ingest_document(
 }
 
 #[derive(serde::Deserialize)]
-struct SearchBody {
-    query: String,
+pub(crate) struct SearchBody {
+    pub(crate) query: String,
     #[serde(default = "default_search_limit")]
-    limit: usize,
+    pub(crate) limit: usize,
     /// Override wiki link-expansion for this search (`None` = server default,
     /// governed by `RYU_SPACES_LINK_EXPANSION`).
     #[serde(default)]
-    link_expansion: Option<bool>,
+    pub(crate) link_expansion: Option<bool>,
 }
 
 fn default_search_limit() -> usize {
@@ -32654,7 +35424,7 @@ fn default_search_limit() -> usize {
     request_body = serde_json::Value,
     responses((status = 200, description = "OK", body = serde_json::Value))
 )]
-async fn search_space(
+pub(crate) async fn search_space(
     State(state): State<ServerState>,
     axum::Extension(caller): axum::Extension<Option<crate::identity_verify::VerifiedCaller>>,
     axum::extract::Path(id): axum::extract::Path<String>,
@@ -33803,10 +36573,12 @@ async fn get_document_version(
     }
     let version = match state.spaces.get_document_version(&version_id).await {
         Ok(Some(version)) => Ok(Some(version)),
-        Ok(None) => state
-            .spaces
-            .get_source_history_version(&doc_id, &version_id)
-            .await,
+        Ok(None) => {
+            state
+                .spaces
+                .get_source_history_version(&doc_id, &version_id)
+                .await
+        }
         Err(error) => Err(error),
     };
     match version {
@@ -34213,6 +36985,14 @@ fn json_error(status: StatusCode, msg: String) -> axum::response::Response {
         .header("content-type", "application/json")
         .body(axum::body::Body::from(body))
         .unwrap_or_else(|_| (StatusCode::INTERNAL_SERVER_ERROR, "internal error").into_response())
+}
+
+fn no_store_response(mut response: axum::response::Response) -> axum::response::Response {
+    response.headers_mut().insert(
+        axum::http::header::CACHE_CONTROL,
+        HeaderValue::from_static("no-store"),
+    );
+    response
 }
 
 #[utoipa::path(
@@ -34859,19 +37639,38 @@ async fn composio_triggers(
 async fn composio_connections(
     State(state): State<ServerState>,
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+    axum::Extension(caller): axum::Extension<Option<crate::identity_verify::VerifiedCaller>>,
 ) -> (StatusCode, Json<serde_json::Value>) {
+    let owner = match crate::mcp_oauth::owner_for_caller(caller.as_ref()) {
+        Ok(owner) => owner,
+        Err(error) => {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(json!({ "error": error.to_string(), "data": [] })),
+            )
+        }
+    };
     // No Composio key is the default state, not a failure: report it as an empty,
     // unconfigured list (200) so callers show a "connect an integration" empty
     // state rather than a load error. 502 stays reserved for real upstream faults.
-    if !crate::composio_auth::is_configured() {
+    if !ryu_composio::service::is_configured() && !crate::composio_auth::is_configured() {
         return (
             StatusCode::OK,
             Json(json!({ "data": [], "configured": false })),
         );
     }
     let toolkit = params.get("toolkit").map(String::as_str).unwrap_or("");
-    match crate::composio_connect::list_connections(&state.client, toolkit).await {
-        Ok(value) => (StatusCode::OK, Json(value)),
+    let composio_entity = caller.as_ref().map(|caller| caller.user_id.as_str());
+    match crate::composio_connect::list_connections(&state.client, toolkit, composio_entity).await {
+        Ok(mut value) => {
+            if let Err(error) = decorate_composio_access_levels(&owner, &mut value).await {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({ "error": error.to_string(), "data": [] })),
+                );
+            }
+            (StatusCode::OK, Json(value))
+        }
         Err(e) => (
             StatusCode::BAD_GATEWAY,
             Json(json!({ "error": e.to_string(), "data": [] })),
@@ -34882,6 +37681,8 @@ async fn composio_connections(
 /// Body for `POST /api/composio/connections/initiate`.
 #[derive(serde::Deserialize)]
 struct ComposioConnectBody {
+    #[serde(default)]
+    access_level: crate::identity::ConnectionAccessLevel,
     toolkit: String,
 }
 
@@ -34898,15 +37699,137 @@ struct ComposioConnectBody {
 )]
 async fn composio_connection_initiate(
     State(state): State<ServerState>,
+    axum::Extension(caller): axum::Extension<Option<crate::identity_verify::VerifiedCaller>>,
     Json(body): Json<ComposioConnectBody>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    match crate::composio_connect::initiate(&state.client, &body.toolkit).await {
-        Ok(value) => (StatusCode::OK, Json(value)),
+    let owner = match crate::mcp_oauth::owner_for_caller(caller.as_ref()) {
+        Ok(owner) => owner,
+        Err(error) => {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(json!({ "error": error.to_string() })),
+            )
+        }
+    };
+    let Some(store) = crate::identity::global() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({ "error": "identity store not initialized" })),
+        );
+    };
+    let composio_entity = caller.as_ref().map(|caller| caller.user_id.as_str());
+    match crate::composio_connect::initiate(&state.client, &body.toolkit, composio_entity).await {
+        Ok(mut value) => {
+            let toolkit = body.toolkit.trim();
+            if let Err(error) = store
+                .set_connection_access_level(
+                    &owner,
+                    crate::connection_policy::COMPOSIO_PROVIDER,
+                    &crate::connection_policy::composio_connection_key(toolkit),
+                    body.access_level,
+                )
+                .await
+            {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({
+                        "error": format!("Composio connection policy could not be saved: {error}")
+                    })),
+                );
+            }
+            if let Some(object) = value.as_object_mut() {
+                object.insert("access_level".to_owned(), json!(body.access_level.as_str()));
+            }
+            (StatusCode::OK, Json(value))
+        }
         Err(e) => (
             StatusCode::BAD_GATEWAY,
             Json(json!({ "error": e.to_string() })),
         ),
     }
+}
+
+/// Callback session data only; identity is supplied by authenticated middleware.
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ComposioCompleteBody {
+    session_uri: String,
+}
+
+/// Redeem a provider-returned session only for the authenticated caller.
+#[utoipa::path(
+    post,
+    path = "/api/composio/connections/complete",
+    tag = "Composio",
+    summary = "Complete a Connect account after callback identity verification",
+    request_body = serde_json::Value,
+    responses((status = 200, description = "Verified account metadata", body = serde_json::Value))
+)]
+async fn composio_connection_complete(
+    axum::Extension(caller): axum::Extension<Option<crate::identity_verify::VerifiedCaller>>,
+    Json(body): Json<ComposioCompleteBody>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    if let Err(error) = crate::mcp_oauth::owner_for_caller(caller.as_ref()) {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({ "error": error.to_string() })),
+        );
+    }
+    if body.session_uri.is_empty() || body.session_uri.len() > 4096 {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "Invalid callback session URI" })),
+        );
+    }
+    match ryu_composio::service::complete(
+        &body.session_uri,
+        caller.as_ref().map(|caller| caller.user_id.as_str()),
+    )
+    .await
+    {
+        Some(Ok(value)) => (StatusCode::OK, Json(value)),
+        Some(Err(error)) => (
+            StatusCode::BAD_GATEWAY,
+            Json(json!({ "error": error.to_string() })),
+        ),
+        None => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({ "error": "Connect is not configured" })),
+        ),
+    }
+}
+
+/// Add the owner's stored access ceiling to the metadata-only Composio list.
+/// Missing policy rows resolve to the safe `RiskBased` default, which keeps
+/// connections created by older Core versions governed after an upgrade.
+async fn decorate_composio_access_levels(
+    owner: &str,
+    value: &mut serde_json::Value,
+) -> anyhow::Result<()> {
+    let Some(store) = crate::identity::global() else {
+        return Ok(());
+    };
+    let Some(data) = value.get_mut("data").and_then(Value::as_array_mut) else {
+        return Ok(());
+    };
+    for connection in data {
+        let Some(object) = connection.as_object_mut() else {
+            continue;
+        };
+        let toolkit = object.get("toolkit").and_then(Value::as_str).unwrap_or("");
+        let access_level = store
+            .get_connection_access_level(
+                owner,
+                crate::connection_policy::COMPOSIO_PROVIDER,
+                &crate::connection_policy::composio_connection_key(toolkit),
+            )
+            .await?;
+        object.insert(
+            "access_level".to_owned(),
+            Value::String(access_level.as_str().to_owned()),
+        );
+    }
+    Ok(())
 }
 
 /// `GET /api/composio/connections/:id` — poll one connection's status (the client
@@ -34922,7 +37845,28 @@ async fn composio_connection_initiate(
 async fn composio_connection_status(
     State(state): State<ServerState>,
     axum::extract::Path(id): axum::extract::Path<String>,
+    axum::Extension(caller): axum::Extension<Option<crate::identity_verify::VerifiedCaller>>,
 ) -> (StatusCode, Json<serde_json::Value>) {
+    if let Err(error) = crate::mcp_oauth::owner_for_caller(caller.as_ref()) {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({ "error": error.to_string() })),
+        );
+    }
+    if let Some(result) = ryu_composio::service::connection_status(
+        &id,
+        caller.as_ref().map(|caller| caller.user_id.as_str()),
+    )
+    .await
+    {
+        return match result {
+            Ok(value) => (StatusCode::OK, Json(value)),
+            Err(error) => (
+                StatusCode::BAD_GATEWAY,
+                Json(json!({ "error": error.to_string() })),
+            ),
+        };
+    }
     match crate::composio_connect::connection_status(&state.client, &id).await {
         Ok(value) => (StatusCode::OK, Json(value)),
         Err(e) => (
@@ -35402,6 +38346,8 @@ struct ModelInstallBody {
     /// Drives the single-file-vs-snapshot dispatch on the direct HF path.
     #[serde(default)]
     format: Option<String>,
+    #[serde(rename = "dryRun", default)]
+    dry_run: bool,
 }
 
 /// Header carrying the buyer's CONTROL-PLANE session bearer for a Marketplace
@@ -35450,7 +38396,7 @@ fn buyer_bearer_from_headers(headers: &axum::http::HeaderMap) -> Option<String> 
     post,
     path = "/api/models/catalog/install",
     tag = "Models",
-    summary = "Install a GGUF model file",
+    summary = "Install a model file or preview the download",
     request_body = serde_json::Value,
     responses((status = 200, description = "OK", body = serde_json::Value))
 )]
@@ -35500,7 +38446,7 @@ async fn models_catalog_install(
                 );
             }
         };
-        let Some(file) = descriptor.files.into_iter().next() else {
+        let Some(file) = descriptor.files.first().cloned() else {
             return (
                 StatusCode::BAD_GATEWAY,
                 Json(
@@ -35514,6 +38460,20 @@ async fn models_catalog_install(
             return (
                 StatusCode::BAD_REQUEST,
                 Json(json!({ "success": false, "error": format!("download URL rejected: {e}") })),
+            );
+        }
+        if body.dry_run {
+            return (
+                StatusCode::OK,
+                Json(json!({
+                    "success": true,
+                    "dryRun": true,
+                    "action": "install",
+                    "source": source.id(),
+                    "repoId": descriptor.repo_id,
+                    "files": descriptor.files,
+                    "writes": [],
+                })),
             );
         }
         return match crate::model_catalog::install_from_descriptor(
@@ -35541,6 +38501,35 @@ async fn models_catalog_install(
     let endpoint = active_model_endpoint(&state).await;
     let format =
         crate::model_format::ModelFormat::from_wire(body.format.as_deref().unwrap_or("gguf"));
+
+    if body.dry_run {
+        return match crate::model_catalog::model_detail_json(
+            &state.client,
+            &endpoint,
+            &body.id,
+            format,
+        )
+        .await
+        {
+            Ok(detail) => (
+                StatusCode::OK,
+                Json(json!({
+                    "success": true,
+                    "dryRun": true,
+                    "action": "install",
+                    "id": body.id,
+                    "file": body.file,
+                    "format": body.format.as_deref().unwrap_or("gguf"),
+                    "detail": detail,
+                    "writes": [],
+                })),
+            ),
+            Err(error) => (
+                StatusCode::BAD_GATEWAY,
+                Json(json!({ "success": false, "error": error.to_string() })),
+            ),
+        };
+    }
 
     // Dispatch on format: GGUF is a single verified file; safetensors/MLX are a
     // multi-file repo snapshot. (Ollama is its own CLI pull, never routed here.)
@@ -35584,6 +38573,8 @@ struct ModelUninstallBody {
     id: String,
     /// The GGUF filename to remove (its stem is the on-disk key).
     file: String,
+    #[serde(rename = "dryRun", default)]
+    dry_run: bool,
 }
 
 /// `POST /api/models/catalog/uninstall { id, file }`
@@ -35596,7 +38587,7 @@ struct ModelUninstallBody {
     post,
     path = "/api/models/catalog/uninstall",
     tag = "Models",
-    summary = "Uninstall a model file",
+    summary = "Uninstall a model file or preview the removal",
     request_body = serde_json::Value,
     responses((status = 200, description = "OK", body = serde_json::Value))
 )]
@@ -35613,6 +38604,24 @@ async fn models_catalog_uninstall(
     .await
     {
         return response;
+    }
+    if body.dry_run {
+        return match crate::model_catalog::plan_uninstall_file(&body.id, &body.file) {
+            Ok(plan) => (
+                StatusCode::OK,
+                Json(json!({
+                    "success": true,
+                    "dryRun": true,
+                    "action": "uninstall",
+                    "plan": plan,
+                    "writes": [],
+                })),
+            ),
+            Err(error) => (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "success": false, "error": error.to_string() })),
+            ),
+        };
     }
     match crate::model_catalog::uninstall_file(&body.id, &body.file) {
         Ok(()) => (StatusCode::OK, Json(json!({ "success": true }))),
@@ -36130,22 +39139,6 @@ fn host_is_allowlisted_in(host: &str, port: u16, list: Option<&str>) -> bool {
 /// Runtime wrapper: read [`ENV_AGENT_EGRESS_SSRF_GUARD`] and classify.
 fn agent_egress_guard_enabled() -> bool {
     agent_egress_guard_enabled_from(std::env::var(ENV_AGENT_EGRESS_SSRF_GUARD).ok().as_deref())
-}
-
-/// Runtime wrapper: is `host:port` exempted by [`ENV_AGENT_EGRESS_ALLOW_HOSTS`]?
-///
-/// Retained (and `allow`ed) as the named runtime counterpart to
-/// [`host_is_allowlisted_in`]: [`screen_egress_url_with`] now takes the allowlist
-/// as a parameter so it is testable without touching process env, so this has no
-/// in-crate caller. Kept rather than deleted because it is the one place the
-/// env-var → decision binding is spelled out for a future caller to reuse.
-#[allow(dead_code)]
-fn host_is_allowlisted(host: &str, port: u16) -> bool {
-    host_is_allowlisted_in(
-        host,
-        port,
-        std::env::var(ENV_AGENT_EGRESS_ALLOW_HOSTS).ok().as_deref(),
-    )
 }
 
 /// SSRF egress screen for agent browsing tools that fetch arbitrary URLs.
@@ -37714,10 +40707,493 @@ async fn skills_catalog_detail(
 }
 
 #[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct SkillInstallBody {
     id: String,
     #[serde(default)]
     source: Option<String>,
+    #[serde(default)]
+    prompt_for_targets: bool,
+    target_ids: Option<Vec<String>>,
+    #[serde(default)]
+    remember_target_ids: bool,
+    #[serde(default)]
+    dry_run: bool,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SkillTargetPreferencesBody {
+    target_ids: Vec<String>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SkillDistributeBody {
+    target_ids: Vec<String>,
+    #[serde(default)]
+    remember_target_ids: bool,
+}
+
+async fn skill_target_context_and_targets() -> anyhow::Result<(
+    crate::skills_catalog::distribution::DistributionContext,
+    Vec<crate::skills_catalog::distribution::SkillAgentTargetView>,
+)> {
+    tokio::task::spawn_blocking(|| {
+        let context = crate::skills_catalog::distribution::DistributionContext::current()?;
+        let targets = crate::skills_catalog::distribution::list_agent_targets(
+            &context.home_dir,
+            &context.environment,
+        )?;
+        Ok((context, targets))
+    })
+    .await
+    .map_err(|error| anyhow::anyhow!("agent target discovery task failed: {error}"))?
+}
+
+async fn skill_target_preferences(
+    state: &ServerState,
+    targets: &[crate::skills_catalog::distribution::SkillAgentTargetView],
+) -> anyhow::Result<crate::skills_catalog::distribution::ParsedPreferences> {
+    let raw = state
+        .preferences
+        .get(crate::skills_catalog::distribution::INSTALL_TARGETS_PREF)
+        .await?;
+    Ok(crate::skills_catalog::distribution::parse_preferences(
+        raw.as_deref(),
+        targets,
+    ))
+}
+
+fn skill_target_envelope(
+    targets: Vec<crate::skills_catalog::distribution::SkillAgentTargetView>,
+    parsed: crate::skills_catalog::distribution::ParsedPreferences,
+) -> serde_json::Value {
+    json!({
+        "targets": targets,
+        "preferences": parsed.preferences,
+        "droppedTargetIds": parsed.dropped_target_ids,
+        "warning": parsed.warning,
+    })
+}
+
+fn deduplicate_target_ids(target_ids: Vec<String>) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    target_ids
+        .into_iter()
+        .filter(|target_id| seen.insert(target_id.clone()))
+        .collect()
+}
+
+fn should_distribute_after_install(
+    preferences: &crate::skills_catalog::distribution::SkillInstallPreferencesV1,
+    input: &crate::skills_catalog::distribution::SkillTargetSelectionInput,
+) -> bool {
+    input.target_ids.is_some() || preferences.configured
+}
+
+async fn reload_before_optional_preference_write<Reload, PreferenceWrite>(
+    reload: Reload,
+    remember_target_ids: bool,
+    preference_write: PreferenceWrite,
+) -> anyhow::Result<()>
+where
+    Reload: FnOnce(),
+    PreferenceWrite: std::future::Future<Output = anyhow::Result<()>>,
+{
+    reload();
+    if remember_target_ids {
+        preference_write.await?;
+    }
+    Ok(())
+}
+
+async fn save_skill_target_preferences(
+    state: &ServerState,
+    target_ids: Vec<String>,
+) -> anyhow::Result<crate::skills_catalog::distribution::SkillInstallPreferencesV1> {
+    let preferences = crate::skills_catalog::distribution::SkillInstallPreferencesV1 {
+        version: 1,
+        configured: true,
+        target_ids,
+    };
+    let encoded = serde_json::to_string(&preferences)?;
+    state
+        .preferences
+        .set(
+            crate::skills_catalog::distribution::INSTALL_TARGETS_PREF,
+            &encoded,
+        )
+        .await?;
+    Ok(preferences)
+}
+
+/// `GET /api/skills/targets` — list known global agent targets and the resolved
+/// install defaults. Reading the target registry is available to every caller
+/// that can reach the Skills App; it does not require install permission.
+#[utoipa::path(
+    get,
+    path = "/api/skills/targets",
+    tag = "Skills",
+    summary = "List agent skill targets and install defaults",
+    responses(
+        (status = 200, description = "Targets and preferences", body = serde_json::Value),
+        (status = 500, description = "Target registry or preferences unavailable", body = serde_json::Value)
+    )
+)]
+async fn skills_targets(State(state): State<ServerState>) -> (StatusCode, Json<serde_json::Value>) {
+    let (_, targets) = match skill_target_context_and_targets().await {
+        Ok(result) => result,
+        Err(error) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": error.to_string() })),
+            );
+        }
+    };
+    match skill_target_preferences(&state, &targets).await {
+        Ok(parsed) => (StatusCode::OK, Json(skill_target_envelope(targets, parsed))),
+        Err(error) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": error.to_string() })),
+        ),
+    }
+}
+
+/// `PUT /api/skills/targets/preferences` — validate and remember the default
+/// agent targets used by future catalog installs.
+#[utoipa::path(
+    put,
+    path = "/api/skills/targets/preferences",
+    tag = "Skills",
+    summary = "Set default agent skill targets",
+    request_body = serde_json::Value,
+    responses(
+        (status = 200, description = "Preferences saved", body = serde_json::Value),
+        (status = 400, description = "Invalid target id", body = serde_json::Value),
+        (status = 403, description = "Install permission required", body = serde_json::Value),
+        (status = 500, description = "Target registry or preferences unavailable", body = serde_json::Value)
+    )
+)]
+async fn skills_target_preferences_put(
+    State(state): State<ServerState>,
+    Extension(caller): Extension<Option<crate::identity_verify::VerifiedCaller>>,
+    Json(body): Json<SkillTargetPreferencesBody>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    if let Err(response) = enforce_app_lifecycle_permission_json(
+        &state,
+        &caller,
+        crate::identity_verify::permissions::APP_INSTALL,
+    )
+    .await
+    {
+        return response;
+    }
+    let (_, targets) = match skill_target_context_and_targets().await {
+        Ok(result) => result,
+        Err(error) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": error.to_string() })),
+            );
+        }
+    };
+    let target_ids = deduplicate_target_ids(body.target_ids);
+    if let Err(error) =
+        crate::skills_catalog::distribution::validate_target_ids(&target_ids, &targets)
+    {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "success": false, "error": error.to_string() })),
+        );
+    }
+    let preferences = match save_skill_target_preferences(&state, target_ids).await {
+        Ok(preferences) => preferences,
+        Err(error) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "success": false, "error": error.to_string() })),
+            );
+        }
+    };
+    let parsed = crate::skills_catalog::distribution::ParsedPreferences {
+        preferences,
+        dropped_target_ids: Vec::new(),
+        warning: None,
+    };
+    (StatusCode::OK, Json(skill_target_envelope(targets, parsed)))
+}
+
+/// `DELETE /api/skills/targets/preferences` — clear the default so the next
+/// prompt-aware install asks again. Existing distributed files are untouched.
+#[utoipa::path(
+    delete,
+    path = "/api/skills/targets/preferences",
+    tag = "Skills",
+    summary = "Clear default agent skill targets",
+    responses(
+        (status = 200, description = "Preferences cleared", body = serde_json::Value),
+        (status = 403, description = "Install permission required", body = serde_json::Value),
+        (status = 500, description = "Target registry or preferences unavailable", body = serde_json::Value)
+    )
+)]
+async fn skills_target_preferences_delete(
+    State(state): State<ServerState>,
+    Extension(caller): Extension<Option<crate::identity_verify::VerifiedCaller>>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    if let Err(response) = enforce_app_lifecycle_permission_json(
+        &state,
+        &caller,
+        crate::identity_verify::permissions::APP_INSTALL,
+    )
+    .await
+    {
+        return response;
+    }
+    let (_, targets) = match skill_target_context_and_targets().await {
+        Ok(result) => result,
+        Err(error) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": error.to_string() })),
+            );
+        }
+    };
+    if let Err(error) = state
+        .preferences
+        .delete(crate::skills_catalog::distribution::INSTALL_TARGETS_PREF)
+        .await
+    {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "success": false, "error": error.to_string() })),
+        );
+    }
+    let parsed = crate::skills_catalog::distribution::ParsedPreferences {
+        preferences: Default::default(),
+        dropped_target_ids: Vec::new(),
+        warning: None,
+    };
+    (StatusCode::OK, Json(skill_target_envelope(targets, parsed)))
+}
+
+/// `POST /api/skills/:id/distribute` — project an already-installed canonical
+/// skill package into the selected agent-native global directories.
+#[utoipa::path(
+    post,
+    path = "/api/skills/{id}/distribute",
+    tag = "Skills",
+    summary = "Distribute an installed skill to agent targets",
+    params(("id" = String, Path, description = "Canonical skill id")),
+    request_body = serde_json::Value,
+    responses(
+        (status = 200, description = "Per-target distribution result", body = serde_json::Value),
+        (status = 400, description = "Invalid target or canonical package", body = serde_json::Value),
+        (status = 403, description = "Install permission required", body = serde_json::Value),
+        (status = 404, description = "Canonical skill not found", body = serde_json::Value),
+        (status = 500, description = "Distribution task or preferences failed", body = serde_json::Value)
+    )
+)]
+async fn skills_distribute(
+    State(state): State<ServerState>,
+    Extension(caller): Extension<Option<crate::identity_verify::VerifiedCaller>>,
+    Path(id): Path<String>,
+    Json(body): Json<SkillDistributeBody>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    if let Err(response) = enforce_app_lifecycle_permission_json(
+        &state,
+        &caller,
+        crate::identity_verify::permissions::APP_INSTALL,
+    )
+    .await
+    {
+        return response;
+    }
+    let target_ids = body.target_ids;
+    let id_for_validation = id.clone();
+    let target_ids_for_validation = target_ids.clone();
+    let validated = tokio::task::spawn_blocking(move || {
+        let context = crate::skills_catalog::distribution::DistributionContext::current()?;
+        let targets = crate::skills_catalog::distribution::list_agent_targets(
+            &context.home_dir,
+            &context.environment,
+        )?;
+        crate::skills_catalog::distribution::validate_target_ids(
+            &target_ids_for_validation,
+            &targets,
+        )?;
+        Ok::<_, anyhow::Error>((context, ryu_skills::resolve_skill_md(&id_for_validation)))
+    })
+    .await;
+    let (context, source_skill_md) = match validated {
+        Ok(Ok(result)) => result,
+        Ok(Err(error)) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "success": false, "error": error.to_string() })),
+            );
+        }
+        Err(error) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(
+                    json!({ "success": false, "error": format!("target validation task failed: {error}") }),
+                ),
+            );
+        }
+    };
+    let Some(source_skill_md) = source_skill_md else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "success": false, "error": "canonical skill not found" })),
+        );
+    };
+    if body.remember_target_ids {
+        if let Err(error) = save_skill_target_preferences(&state, target_ids.clone()).await {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "success": false, "error": error.to_string() })),
+            );
+        }
+    }
+    let id_for_distribution = id.clone();
+    let distributed = tokio::task::spawn_blocking(move || {
+        crate::skills_catalog::distribution::distribute_skill(
+            &context,
+            &id_for_distribution,
+            &source_skill_md,
+            &target_ids,
+        )
+    })
+    .await;
+    match distributed {
+        Ok(Ok(distribution)) => (
+            StatusCode::OK,
+            Json(json!({ "success": true, "distribution": distribution })),
+        ),
+        Ok(Err(error)) => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "success": false, "error": error.to_string() })),
+        ),
+        Err(error) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(
+                json!({ "success": false, "error": format!("distribution task failed: {error}") }),
+            ),
+        ),
+    }
+}
+
+#[cfg(test)]
+mod skill_target_api_contract_tests {
+    use super::{
+        reload_before_optional_preference_write, should_distribute_after_install,
+        SkillDistributeBody, SkillInstallBody, SkillTargetPreferencesBody,
+    };
+    use crate::skills_catalog::distribution::{
+        SkillInstallPreferencesV1, SkillTargetSelectionInput,
+    };
+
+    #[test]
+    fn legacy_skill_install_body_keeps_target_prompting_disabled() {
+        let body: SkillInstallBody =
+            serde_json::from_str(r#"{"id":"owner/repo/demo"}"#).expect("body parses");
+
+        assert_eq!(body.id, "owner/repo/demo");
+        assert!(!body.prompt_for_targets);
+        assert!(body.target_ids.is_none());
+        assert!(!body.remember_target_ids);
+    }
+
+    #[test]
+    fn skill_install_body_accepts_camel_case_target_selection_fields() {
+        let body: SkillInstallBody = serde_json::from_str(
+            r#"{"id":"owner/repo/demo","promptForTargets":true,"targetIds":["codex"],"rememberTargetIds":true}"#,
+        )
+        .expect("body parses");
+
+        assert!(body.prompt_for_targets);
+        assert_eq!(
+            body.target_ids.as_deref(),
+            Some(["codex".to_owned()].as_slice())
+        );
+        assert!(body.remember_target_ids);
+    }
+
+    #[test]
+    fn target_preference_body_accepts_target_ids_only() {
+        let body: SkillTargetPreferencesBody =
+            serde_json::from_str(r#"{"targetIds":["codex","claude-code"]}"#).expect("body parses");
+
+        assert_eq!(body.target_ids, ["codex", "claude-code"]);
+    }
+
+    #[test]
+    fn manual_distribution_body_defaults_remember_to_false() {
+        let body: SkillDistributeBody =
+            serde_json::from_str(r#"{"targetIds":[]}"#).expect("body parses");
+
+        assert!(body.target_ids.is_empty());
+        assert!(!body.remember_target_ids);
+    }
+
+    #[test]
+    fn legacy_unconfigured_install_skips_distribution() {
+        assert!(!should_distribute_after_install(
+            &SkillInstallPreferencesV1::default(),
+            &SkillTargetSelectionInput::default(),
+        ));
+    }
+
+    #[test]
+    fn configured_empty_default_still_requests_a_distribution_result() {
+        let preferences = SkillInstallPreferencesV1 {
+            version: 1,
+            configured: true,
+            target_ids: Vec::new(),
+        };
+
+        assert!(should_distribute_after_install(
+            &preferences,
+            &SkillTargetSelectionInput::default(),
+        ));
+    }
+
+    #[test]
+    fn explicit_empty_selection_still_requests_a_distribution_result() {
+        let input = SkillTargetSelectionInput {
+            target_ids: Some(Vec::new()),
+            ..Default::default()
+        };
+
+        assert!(should_distribute_after_install(
+            &SkillInstallPreferencesV1::default(),
+            &input,
+        ));
+    }
+
+    #[tokio::test]
+    async fn canonical_reload_precedes_a_failing_remember_write() {
+        let calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let reload_calls = calls.clone();
+        let write_calls = calls.clone();
+
+        let result = reload_before_optional_preference_write(
+            move || reload_calls.lock().expect("calls lock").push("reload"),
+            true,
+            async move {
+                write_calls.lock().expect("calls lock").push("remember");
+                Err::<(), _>(anyhow::anyhow!("preference write failed"))
+            },
+        )
+        .await;
+
+        assert!(result.is_err());
+        assert_eq!(
+            calls.lock().expect("calls lock").as_slice(),
+            ["reload", "remember"]
+        );
+    }
 }
 
 /// `GET /api/skills/updates` — installed (through-Ryu) skills whose local
@@ -37735,9 +41211,11 @@ async fn skills_updates(State(state): State<ServerState>) -> Json<serde_json::Va
     Json(json!({ "updates": updates }))
 }
 
-/// `POST /api/skills/catalog/install { id, source? }` — installs into the universal
-/// `~/.claude/skills/<slug>/SKILL.md` and reloads the live skill registry so the
-/// Skill is usable immediately (and visible to Claude Code / the skills CLI).
+/// `POST /api/skills/catalog/install { id, source?, promptForTargets?, targetIds?,
+/// rememberTargetIds? }` — installs into the canonical skills directory and
+/// reloads the live registry so the Skill is usable immediately. Prompt-aware
+/// callers can distribute the installed package to agent-native global skill
+/// directories; older callers keep canonical-only behavior until defaults exist.
 ///
 /// Source-aware (#463): skills.sh installs via the `owner/repo/slug` download
 /// path; a custom Claude marketplace source resolves the chosen item to its
@@ -37749,7 +41227,13 @@ async fn skills_updates(State(state): State<ServerState>) -> Json<serde_json::Va
     tag = "Skills",
     summary = "Install a skill from the catalog",
     request_body = serde_json::Value,
-    responses((status = 200, description = "OK", body = serde_json::Value))
+    responses(
+        (status = 200, description = "Canonical install and optional target distribution completed", body = serde_json::Value),
+        (status = 400, description = "Invalid source or target", body = serde_json::Value),
+        (status = 403, description = "Install permission required", body = serde_json::Value),
+        (status = 409, description = "Prompt-aware install requires a target selection", body = serde_json::Value),
+        (status = 500, description = "Install, preferences, or distribution failed", body = serde_json::Value)
+    )
 )]
 async fn skills_catalog_install(
     State(state): State<ServerState>,
@@ -37782,6 +41266,70 @@ async fn skills_catalog_install(
             Json(json!({
                 "success": false,
                 "error": "install requires the card's concrete source when browsing all marketplaces",
+            })),
+        );
+    }
+    let (distribution_context, targets) = match skill_target_context_and_targets().await {
+        Ok(result) => result,
+        Err(error) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "success": false, "error": error.to_string() })),
+            );
+        }
+    };
+    let parsed_preferences = match skill_target_preferences(&state, &targets).await {
+        Ok(parsed) => parsed,
+        Err(error) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "success": false, "error": error.to_string() })),
+            );
+        }
+    };
+    let selection_input = crate::skills_catalog::distribution::SkillTargetSelectionInput {
+        prompt_for_targets: body.prompt_for_targets,
+        target_ids: body.target_ids.clone(),
+        remember_target_ids: body.remember_target_ids,
+    };
+    let selected_target_ids = match crate::skills_catalog::distribution::resolve_target_selection(
+        &parsed_preferences.preferences,
+        &selection_input,
+    ) {
+        Ok(target_ids) => target_ids,
+        Err(_) => {
+            return (
+                StatusCode::CONFLICT,
+                Json(json!({
+                    "success": false,
+                    "error": "skill_targets_required",
+                    "code": "skill_targets_required",
+                })),
+            );
+        }
+    };
+    if let Err(error) =
+        crate::skills_catalog::distribution::validate_target_ids(&selected_target_ids, &targets)
+    {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "success": false, "error": error.to_string() })),
+        );
+    }
+    let distribute_after_install =
+        should_distribute_after_install(&parsed_preferences.preferences, &selection_input);
+    if body.dry_run {
+        return (
+            StatusCode::OK,
+            Json(json!({
+                "success": true,
+                "dryRun": true,
+                "action": "install",
+                "id": body.id,
+                "source": source_id,
+                "targetIds": selected_target_ids,
+                "distributeAfterInstall": distribute_after_install,
+                "writes": ["canonical skill registry", "optional agent skill targets"],
             })),
         );
     }
@@ -37823,14 +41371,76 @@ async fn skills_catalog_install(
         .await;
     match installed {
         Ok(result) => {
-            // Hot-reload the registry so the new Skill is selectable without a restart.
-            state.skills.reload();
-            (
-                StatusCode::OK,
-                Json(
-                    json!({ "success": true, "result": serde_json::to_value(result).unwrap_or_default() }),
-                ),
+            crate::stats_beacon::record_marketplace_event("skill", &id, true);
+            let result_value = serde_json::to_value(&result).unwrap_or_default();
+            let remember_target_ids =
+                selection_input.remember_target_ids && selection_input.target_ids.is_some();
+            let remembered_target_ids = selected_target_ids.clone();
+            if let Err(error) = reload_before_optional_preference_write(
+                || state.skills.reload(),
+                remember_target_ids,
+                async {
+                    save_skill_target_preferences(&state, remembered_target_ids).await?;
+                    Ok(())
+                },
             )
+            .await
+            {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({
+                        "success": false,
+                        "canonicalInstalled": true,
+                        "result": result_value,
+                        "error": error.to_string(),
+                    })),
+                );
+            }
+            if !distribute_after_install {
+                return (
+                    StatusCode::OK,
+                    Json(json!({ "success": true, "result": result_value })),
+                );
+            }
+            let skill_id = result.slug.clone();
+            let source_skill_md = std::path::PathBuf::from(&result.path);
+            let distributed = tokio::task::spawn_blocking(move || {
+                crate::skills_catalog::distribution::distribute_skill(
+                    &distribution_context,
+                    &skill_id,
+                    &source_skill_md,
+                    &selected_target_ids,
+                )
+            })
+            .await;
+            match distributed {
+                Ok(Ok(distribution)) => (
+                    StatusCode::OK,
+                    Json(json!({
+                        "success": true,
+                        "result": result_value,
+                        "distribution": distribution,
+                    })),
+                ),
+                Ok(Err(error)) => (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({
+                        "success": false,
+                        "canonicalInstalled": true,
+                        "result": result_value,
+                        "error": error.to_string(),
+                    })),
+                ),
+                Err(error) => (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({
+                        "success": false,
+                        "canonicalInstalled": true,
+                        "result": result_value,
+                        "error": format!("distribution task failed: {error}"),
+                    })),
+                ),
+            }
         }
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -37844,6 +41454,8 @@ struct SkillInstallFromSourceBody {
     /// One of the six supported source forms: `owner/repo`, a github/gitlab URL,
     /// a github `/tree/<ref>/<subdir>` URL, a `git@` SSH url, or a local path.
     source: String,
+    #[serde(rename = "dryRun", default)]
+    dry_run: bool,
 }
 
 /// `POST /api/skills/install-from-source { source }` — resolve a source reference
@@ -37885,6 +41497,18 @@ async fn skills_install_from_source(
         return (
             StatusCode::BAD_REQUEST,
             Json(json!({ "success": false, "error": "`source` must not be empty" })),
+        );
+    }
+    if body.dry_run {
+        return (
+            StatusCode::OK,
+            Json(json!({
+                "success": true,
+                "dryRun": true,
+                "action": "install",
+                "source": body.source,
+                "writes": ["canonical skill registry"],
+            })),
         );
     }
     match crate::skills_catalog::from_source::install_from_source(&state.client, &body.source).await
@@ -38220,7 +41844,7 @@ async fn skills_system_status(State(state): State<ServerState>) -> Json<serde_js
     responses((status = 200, description = "OK", body = serde_json::Value))
 )]
 async fn skills_system_sync(State(state): State<ServerState>) -> Json<serde_json::Value> {
-    use crate::skills_catalog::system_skills::{sync_bundled, SYNC_ENABLED_PREF};
+    use crate::skills_catalog::system_skills::{sync_bundled_with_preferences, SYNC_ENABLED_PREF};
     let enabled = state
         .preferences
         .get(SYNC_ENABLED_PREF)
@@ -38234,7 +41858,8 @@ async fn skills_system_sync(State(state): State<ServerState>) -> Json<serde_json
             )
         })
         .unwrap_or(true);
-    let report = sync_bundled(&state.client, enabled, "").await;
+    let report =
+        sync_bundled_with_preferences(&state.client, &state.preferences, enabled, "").await;
     state.skills.reload();
     Json(json!({
         "success": report.complete,
@@ -38347,6 +41972,8 @@ struct InstallSidecarQuery {
     /// companion path so it can launch a fully materialized bundle later.
     #[serde(default)]
     wait: bool,
+    #[serde(rename = "dryRun", default)]
+    dry_run: bool,
 }
 
 #[utoipa::path(
@@ -38359,6 +41986,7 @@ struct InstallSidecarQuery {
         ("force" = Option<bool>, Query, description = "Re-download even when already installed"),
         ("version" = Option<String>, Query, description = "Expected release-train version for Island"),
         ("wait" = Option<bool>, Query, description = "Wait for Island extraction to finish"),
+        ("dryRun" = Option<bool>, Query, description = "Return the install plan without downloading or changing status"),
     ),
     responses((status = 200, description = "Server-Sent Events stream"))
 )]
@@ -38391,6 +42019,20 @@ async fn install_sidecar(
                 std::env::consts::OS,
                 std::env::consts::ARCH
             ),
+        }));
+    }
+
+    if query.dry_run {
+        return Json(json!({
+            "success": true,
+            "dryRun": true,
+            "action": "install",
+            "name": name,
+            "supported": true,
+            "installed": binary_installed_on_disk(&sidecar_name),
+            "force": query.force,
+            "version": query.version,
+            "writes": ["sidecar binary or runtime files", "install status"],
         }));
     }
 
@@ -38429,7 +42071,9 @@ async fn install_sidecar(
             .await
         {
             Ok(path) => {
-                install_status.set_installed("island", version.clone()).await;
+                install_status
+                    .set_installed("island", version.clone())
+                    .await;
                 return Json(json!({
                     "success": true,
                     "forced": query.force,
@@ -38438,9 +42082,7 @@ async fn install_sidecar(
                 }));
             }
             Err(error) => {
-                install_status
-                    .set_failed("island", error.to_string())
-                    .await;
+                install_status.set_failed("island", error.to_string()).await;
                 return Json(json!({
                     "success": false,
                     "forced": query.force,
@@ -38496,6 +42138,11 @@ async fn install_sidecar(
                 .ensure_model(&downloads)
                 .await
                 .map(|_| "installed".to_string()),
+            "audiocpp" => {
+                crate::sidecar::providers::audiocpp::AudioCppDownloader::new()
+                    .ensure_installed(&downloads)
+                    .await
+            }
             "sdcpp" => {
                 crate::sidecar::providers::sdcpp::StableDiffusionDownloader::new()
                     .ensure_installed(&downloads)
@@ -38564,6 +42211,23 @@ async fn install_sidecar(
                 )
                 .await
                 .map(|_| "installed".to_string()),
+            // mlx-serve is an adopt-or-start native binary. Ryu does not vendor
+            // the executable or its model cache; the installer adopts a PATH
+            // binary or uses the upstream Homebrew formula.
+            "mlx-serve" => {
+                downloads
+                    .register_indeterminate(
+                        "engine:mlx-serve".to_string(),
+                        crate::downloads::DownloadKind::Engine,
+                        "MLX Serve".to_string(),
+                        async {
+                            crate::sidecar::providers::mlx_serve::installer::ensure_installed()
+                                .await
+                                .map(|_| "adopted".to_string())
+                        },
+                    )
+                    .await
+            }
             // apfel is adopt-a-binary (Apple Foundation Models): PATH-detect an
             // existing install, else best-effort `brew install apfel`. Nothing to
             // download — Apple FM ships with the OS.
@@ -38579,24 +42243,24 @@ async fn install_sidecar(
             // Mesh LLM is adopt-or-start: Ryu keeps its config and model cache
             // outside the node data directory, and only records the executable's
             // presence after the operator installs it or Homebrew succeeds.
-            "mesh-llm" => downloads
-                .register_indeterminate(
-                    "engine:mesh-llm".to_string(),
-                    crate::downloads::DownloadKind::Engine,
-                    "Mesh LLM".to_string(),
-                    async {
-                        crate::sidecar::providers::mesh_llm::installer::ensure_installed()
-                            .await
-                            .map(|_| "adopted".to_string())
-                    },
-                )
-                .await,
-            // The mesh client (#478). Two legs by asset reality, not by taste — see
-            // `sidecar/tailscale/downloader.rs`: a pinned upstream `.tgz` through the
-            // download center where one exists, and Homebrew on macOS, where
-            // upstream's only download is a GUI app bundle that ships no
-            // `tailscaled`. The brew leg reports no byte progress, so it registers
-            // as an indeterminate task exactly like `apfel`.
+            "mesh-llm" => {
+                downloads
+                    .register_indeterminate(
+                        "engine:mesh-llm".to_string(),
+                        crate::downloads::DownloadKind::Engine,
+                        "Mesh LLM".to_string(),
+                        async {
+                            crate::sidecar::providers::mesh_llm::installer::ensure_installed()
+                                .await
+                                .map(|_| "adopted".to_string())
+                        },
+                    )
+                    .await
+            }
+            // The mesh clients (#478). Tailscale/Headscale use the managed
+            // `tailscale` + `tailscaled` pair; Tailcat uses its own pinned CLI
+            // downloader. Each route is surfaced in the same download overlay and
+            // verified before the binary is marked installed.
             //
             // This is the EXPLICIT install path. `POST /api/mesh/config` still does
             // not download inline (a 38 MB transfer inside the toggle handler would
@@ -38605,6 +42269,7 @@ async fn install_sidecar(
             "tailscale" => {
                 crate::sidecar::tailscale::downloader::install_mesh_client(&downloads).await
             }
+            "tailcat" => crate::sidecar::tailcat_downloader::install_tailcat(&downloads).await,
             "island" => {
                 let version = query
                     .version
@@ -38613,6 +42278,32 @@ async fn install_sidecar(
                 crate::sidecar::tools::island::ensure_installed(&downloads, &version, query.force)
                     .await
                     .map(|_| version)
+            }
+            "freetoken" => {
+                crate::sidecar::providers::FreeTokenManager::new()
+                    .install()
+                    .await
+            }
+            "llama-swap" => {
+                crate::sidecar::providers::LlamaSwapManager::new()
+                    .install()
+                    .await
+            }
+            "lemonade" => {
+                crate::sidecar::providers::LemonadeManager::new()
+                    .install()
+                    .await
+            }
+            "ryutts" => {
+                match crate::sidecar::providers::ryutts::ensure_kokoro_runtime().await {
+                    Ok(true) => match crate::sidecar::providers::ryutts::kokoro::KokoroDownloader::new()
+                        .ensure_installed(&downloads).await {
+                        Ok(version) => crate::sidecar::download_manager::VersionStore::record_persisted("ryutts", &version, "installed").map(|()| version),
+                        Err(error) => Err(error),
+                    },
+                    Ok(false) => Err(anyhow::anyhow!("A compatible Python runtime is required for Kokoro speech")),
+                    Err(error) => Err(error),
+                }
             }
             // Docker Model Runner is adopt-only: there is nothing to download.
             // "Installing" means verifying DMR is enabled + reachable on :12434,
@@ -38664,7 +42355,9 @@ async fn install_sidecar(
                 // `!is_enabled()`, so the only possible product is a confusing
                 // error. `POST /api/mesh/config` marks it when the mesh is actually
                 // turned on.
-                if sidecar_name != "tailscale" || ryu_mesh::is_enabled() {
+                if !matches!(sidecar_name.as_str(), "tailscale" | "tailcat")
+                    || ryu_mesh::is_enabled()
+                {
                     setup.mark_installed(&sidecar_name).await;
                 }
                 tracing::info!("sidecar '{}' installed successfully", sidecar_name);
@@ -38691,13 +42384,28 @@ async fn install_sidecar(
     path = "/api/setup/{name}/uninstall",
     tag = "Sidecars",
     summary = "Uninstall a sidecar",
-    params(("name" = String, Path)),
+    params(
+        ("name" = String, Path),
+        ("dryRun" = Option<bool>, Query, description = "Return the removal plan without changing files"),
+    ),
     responses((status = 200, description = "OK", body = serde_json::Value))
 )]
 async fn uninstall_sidecar(
     State(state): State<ServerState>,
     axum::extract::Path(name): axum::extract::Path<String>,
+    Query(query): Query<InstallSidecarQuery>,
 ) -> Json<serde_json::Value> {
+    if query.dry_run {
+        return Json(json!({
+            "success": true,
+            "dryRun": true,
+            "action": "uninstall",
+            "name": name,
+            "removeData": false,
+            "installed": binary_installed_on_disk(&name),
+            "writes": ["sidecar binary and runtime files", "install status"],
+        }));
+    }
     // Clear install status
     state.install_status.clear(&name).await;
 
@@ -38720,13 +42428,28 @@ async fn uninstall_sidecar(
     path = "/api/setup/{name}/uninstall-with-data",
     tag = "Sidecars",
     summary = "Uninstall a sidecar and its data",
-    params(("name" = String, Path)),
+    params(
+        ("name" = String, Path),
+        ("dryRun" = Option<bool>, Query, description = "Return the removal plan without changing files"),
+    ),
     responses((status = 200, description = "OK", body = serde_json::Value))
 )]
 async fn uninstall_sidecar_with_data(
     State(state): State<ServerState>,
     axum::extract::Path(name): axum::extract::Path<String>,
+    Query(query): Query<InstallSidecarQuery>,
 ) -> Json<serde_json::Value> {
+    if query.dry_run {
+        return Json(json!({
+            "success": true,
+            "dryRun": true,
+            "action": "uninstall",
+            "name": name,
+            "removeData": true,
+            "installed": binary_installed_on_disk(&name),
+            "writes": ["sidecar binary, runtime, and data files", "install status"],
+        }));
+    }
     // Clear install status
     state.install_status.clear(&name).await;
 
@@ -39516,6 +43239,8 @@ async fn get_sandbox_backend(State(_state): State<ServerState>) -> Json<serde_js
 #[derive(serde::Deserialize)]
 struct SetSandboxBackendBody {
     name: String,
+    #[serde(rename = "dryRun", default)]
+    dry_run: bool,
 }
 
 /// Set the default sandbox backend. Persists to `~/.ryu/sandbox-backend.json`
@@ -39526,7 +43251,7 @@ struct SetSandboxBackendBody {
     post,
     path = "/api/sandbox/backend",
     tag = "Sandboxes",
-    summary = "Set the default sandbox backend",
+    summary = "Set or preview the default sandbox backend",
     request_body = serde_json::Value,
     responses((status = 200, description = "OK", body = serde_json::Value))
 )]
@@ -39546,6 +43271,21 @@ async fn set_sandbox_backend(
                 "error": format!("unknown sandbox backend '{name}'"),
             }));
         }
+    }
+    if body.dry_run {
+        let active = sandbox::configured_backend().as_str().to_owned();
+        return Json(json!({
+            "success": true,
+            "dryRun": true,
+            "action": "set",
+            "active": active,
+            "requested": name,
+            "alreadyActive": active == name,
+            "detected": sandbox::detect_backend(name).await,
+            "supported": crate::catalog::registry::supported_on_node(name),
+            "wouldPersist": true,
+            "writes": ["sandbox-backend.json"]
+        }));
     }
     match SandboxBackendStore::save(Some(name)) {
         Ok(()) => Json(json!({ "success": true, "active": name })),
@@ -39615,6 +43355,8 @@ struct SetActiveModelBody {
     /// derived from the model's format via `pick_engine`.
     #[serde(default)]
     engine: Option<String>,
+    #[serde(rename = "dryRun", default)]
+    dry_run: bool,
 }
 
 /// `POST /api/models/active { id }` — switch the GGUF the local chat engine
@@ -39630,7 +43372,7 @@ struct SetActiveModelBody {
     post,
     path = "/api/models/active",
     tag = "Models",
-    summary = "Switch the active served local chat model",
+    summary = "Switch the active served local chat model or preview the switch",
     request_body = serde_json::Value,
     responses((status = 200, description = "OK", body = serde_json::Value))
 )]
@@ -39656,6 +43398,32 @@ async fn set_active_model(
     if selection.format == crate::model_format::ModelFormat::Gguf
         && crate::model_catalog::capabilities::detect_local_is_diffusion(&selection.r#ref)
     {
+        if body.dry_run {
+            let current = state
+                .preferences
+                .get(installed::ACTIVE_DIFFUSION_MODEL_PREF)
+                .await
+                .ok()
+                .flatten();
+            return (
+                StatusCode::OK,
+                Json(json!({
+                    "success": true,
+                    "dryRun": true,
+                    "action": "switch",
+                    "active": selection.r#ref,
+                    "engine": "sdcpp",
+                    "format": selection.format.as_str(),
+                    "diffusion": true,
+                    "current": current,
+                    "alreadyActive": current.as_deref() == Some(selection.r#ref.as_str()),
+                    "wouldPersist": true,
+                    "wouldRestart": true,
+                    "wouldRefreshGateway": false,
+                    "writes": ["active diffusion model preference", "sdcpp sidecar restart"]
+                })),
+            );
+        }
         if let Err(e) = state
             .preferences
             .set(installed::ACTIVE_DIFFUSION_MODEL_PREF, &selection.r#ref)
@@ -39710,6 +43478,43 @@ async fn set_active_model(
         },
     };
     selection.engine = picked.clone();
+
+    if body.dry_run {
+        let current = state
+            .preferences
+            .get(installed::ACTIVE_MODEL_PREF)
+            .await
+            .ok()
+            .flatten()
+            .and_then(|raw| installed::parse_active_pref(&raw));
+        let already_active = current.as_ref().is_some_and(|active| {
+            active.r#ref == selection.r#ref && active.engine == picked.as_str()
+        });
+        let would_swap = resident.as_deref() != Some(picked.as_str());
+        return (
+            StatusCode::OK,
+            Json(json!({
+                "success": true,
+                "dryRun": true,
+                "action": "switch",
+                "active": selection.r#ref,
+                "engine": picked,
+                "format": selection.format.as_str(),
+                "current": current.as_ref().map(|active| active.r#ref.clone()),
+                "alreadyActive": already_active,
+                "residentEngine": resident,
+                "wouldPersist": true,
+                "wouldSwap": would_swap,
+                "wouldRestart": !would_swap,
+                "wouldRefreshGateway": true,
+                "writes": [
+                    "active model preference",
+                    "local engine selection",
+                    "local gateway provider refresh"
+                ]
+            })),
+        );
+    }
 
     // 3. Persist the structured selection FIRST, so the engine we start in the
     //    next step boots already pointed at the right model (the provider's
@@ -40316,11 +44121,93 @@ async fn gateway_restart(
     }
 }
 
+const REDACTED_GATEWAY_CONFIG_VALUE: &str = "***";
+
+fn is_gateway_secret_key(key: &str) -> bool {
+    matches!(
+        key.to_ascii_lowercase().as_str(),
+        "api_key"
+            | "api_keys"
+            | "access_token"
+            | "authorization"
+            | "bearer"
+            | "bearer_token"
+            | "client_secret"
+            | "credential"
+            | "credentials"
+            | "encryption_key"
+            | "key"
+            | "keys"
+            | "master_key"
+            | "password"
+            | "private_key"
+            | "refresh_token"
+            | "secret"
+            | "secret_key"
+            | "signing_key"
+            | "signing_secret"
+            | "token"
+            | "webhook_secret"
+    )
+}
+
+/// Remove credential values from the generic persisted Gateway config while
+/// retaining non-secret policy/configuration fields used by status surfaces.
+/// This stays Core-local instead of depending on Gateway's typed config view:
+/// Core owns the persisted file path and must protect unknown future Gateway
+/// fields as well as today's provider/auth shapes.
+fn redact_gateway_config(value: &mut toml::Value) {
+    match value {
+        toml::Value::Table(table) => {
+            for (key, value) in table.iter_mut() {
+                if is_gateway_secret_key(key) {
+                    redact_gateway_secret_value(value);
+                } else {
+                    redact_gateway_config(value);
+                }
+            }
+        }
+        toml::Value::Array(values) => {
+            for value in values {
+                redact_gateway_config(value);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn redact_gateway_secret_value(value: &mut toml::Value) {
+    match value {
+        // Preserve adapter names and auth-key metadata, but redact every scalar
+        // held by a secret container such as providers.genai.keys.
+        toml::Value::Table(table) => {
+            for (_, value) in table.iter_mut() {
+                redact_gateway_secret_value(value);
+            }
+        }
+        // Auth api_keys is an array of metadata tables, while provider api_keys
+        // is an array of scalar credentials. Keep the former's safe metadata.
+        toml::Value::Array(values) => {
+            for value in values {
+                if matches!(value, toml::Value::Table(_)) {
+                    redact_gateway_config(value);
+                } else {
+                    *value = toml::Value::String(REDACTED_GATEWAY_CONFIG_VALUE.to_owned());
+                }
+            }
+        }
+        _ => {
+            *value = toml::Value::String(REDACTED_GATEWAY_CONFIG_VALUE.to_owned());
+        }
+    }
+}
+
 /// `GET /api/gateway/status` — a read-only observability proxy that fetches the
 /// local gateway's `/health` and `/metrics` and returns a combined snapshot.
 /// Also includes the persisted effective config from `gateway.toml` so the
 /// desktop surfaces can reflect the current firewall/routing/budget settings
-/// even when the gateway is unreachable.
+/// even when the gateway is unreachable. Credential values in that config are
+/// replaced with `***` before the response is serialized.
 ///
 /// Always responds `200`. When the gateway is unreachable it returns
 /// `{ "reachable": false, ... }` rather than an error status, so the desktop
@@ -40334,6 +44221,7 @@ async fn gateway_restart(
     path = "/api/gateway/status",
     tag = "Gateway",
     summary = "Gateway status (proxied)",
+    description = "Returns Gateway health, metrics, and a persisted effective configuration with credential values redacted before serialization. Always responds 200, including when the Gateway is unreachable.",
     responses((status = 200, description = "OK", body = serde_json::Value))
 )]
 async fn gateway_status(State(state): State<ServerState>) -> Json<serde_json::Value> {
@@ -40347,7 +44235,8 @@ async fn gateway_status(State(state): State<ServerState>) -> Json<serde_json::Va
     // the persisted config even when the gateway is temporarily down.
     let effective_config: Option<serde_json::Value> = gateway_config_path().and_then(|p| {
         let raw = std::fs::read_to_string(&p).ok()?;
-        let v: toml::Value = toml::from_str(&raw).ok()?;
+        let mut v: toml::Value = toml::from_str(&raw).ok()?;
+        redact_gateway_config(&mut v);
         serde_json::to_value(v).ok()
     });
 
@@ -40427,6 +44316,20 @@ async fn record_gateway_control(
     summary: Option<&str>,
     caller: &Option<crate::identity_verify::VerifiedCaller>,
 ) {
+    record_gateway_control_attributed(state, action, target, summary, caller, None).await;
+}
+
+/// Same best-effort control sink with an optional stable agent correlation.
+/// Agent-management routes use this so the organization audit and the agent
+/// passport point to the same row.
+async fn record_gateway_control_attributed(
+    state: &ServerState,
+    action: &str,
+    target: &str,
+    summary: Option<&str>,
+    caller: &Option<crate::identity_verify::VerifiedCaller>,
+    agent_id: Option<&str>,
+) {
     use crate::sidecar::gateway::{gateway_admin_key, gateway_url};
 
     let base = gateway_url();
@@ -40442,6 +44345,7 @@ async fn record_gateway_control(
             "actor_name": caller
                 .as_ref()
                 .and_then(|value| value.email.as_deref()),
+            "agent_id": agent_id,
         }));
     if let Some(token) = gateway_admin_key() {
         request = request.bearer_auth(token);
@@ -41379,6 +45283,7 @@ async fn gateway_run_evals(
 #[derive(serde::Deserialize, Debug)]
 struct AuditQueryParams {
     session_id: Option<String>,
+    agent_id: Option<String>,
     #[serde(default)]
     errors_only: bool,
     limit: Option<u32>,
@@ -41409,6 +45314,9 @@ async fn gateway_audit(
     let mut query_parts: Vec<String> = Vec::new();
     if let Some(sid) = &params.session_id {
         query_parts.push(format!("session_id={}", urlencoding_simple(sid)));
+    }
+    if let Some(agent_id) = &params.agent_id {
+        query_parts.push(format!("agent_id={}", urlencoding_simple(agent_id)));
     }
     if params.errors_only {
         query_parts.push("errors_only=true".to_string());
@@ -41886,6 +45794,8 @@ async fn get_workflow_template(
 #[derive(serde::Deserialize)]
 struct InstallTemplateBody {
     template_id: String,
+    #[serde(rename = "dryRun", default)]
+    dry_run: bool,
 }
 
 /// `POST /api/workflows/catalog/install` — install a template into the user's
@@ -41896,7 +45806,7 @@ struct InstallTemplateBody {
     post,
     path = "/api/workflows/catalog/install",
     tag = "Workflows",
-    summary = "Install a workflow template",
+    summary = "Install a workflow template or preview the new workflows",
     request_body = serde_json::Value,
     responses((status = 200, description = "OK", body = serde_json::Value))
 )]
@@ -41914,8 +45824,32 @@ async fn install_workflow_template(
     {
         return response;
     }
+    if body.dry_run {
+        let Some(template) = crate::workflow::templates::find(&body.template_id) else {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({ "success": false, "error": "template not found" })),
+            );
+        };
+        return (
+            StatusCode::OK,
+            Json(json!({
+                "success": true,
+                "dryRun": true,
+                "action": "install",
+                "templateId": body.template_id,
+                "primary": template.meta,
+                "bodyCount": template.bodies.len(),
+                "wouldCreate": template.bodies.len() + 1,
+                "writes": ["workflow definitions", "workflow trigger schedules"],
+            })),
+        );
+    }
     match crate::workflow::templates::install(&body.template_id).await {
-        Ok(workflow_id) => (StatusCode::OK, Json(json!({ "workflow_id": workflow_id }))),
+        Ok(workflow_id) => {
+            crate::stats_beacon::record_marketplace_event("workflow", &body.template_id, true);
+            (StatusCode::OK, Json(json!({ "workflow_id": workflow_id })))
+        }
         Err(e) => {
             let status = if e.contains("unknown template") {
                 StatusCode::NOT_FOUND
@@ -42165,11 +46099,16 @@ async fn get_workflow_version(
     path = "/workflows/{id}/versions/{version_id}/restore",
     tag = "Workflows",
     summary = "Restore a workflow version",
-    params(("id" = String, Path), ("version_id" = String, Path)),
+    params(
+        ("id" = String, Path),
+        ("version_id" = String, Path),
+        ("dryRun" = Option<bool>, Query, description = "Preview the restore without changing the workflow or triggers"),
+    ),
     responses((status = 200, description = "OK", body = serde_json::Value))
 )]
 async fn restore_workflow_version(
     axum::extract::Path((id, version_id)): axum::extract::Path<(String, String)>,
+    Query(query): Query<WorkflowDryRunQuery>,
 ) -> (StatusCode, Json<serde_json::Value>) {
     // Load the target version first — fail fast if it is gone.
     let version = match crate::workflow::store::load_workflow_version(&id, &version_id) {
@@ -42187,6 +46126,22 @@ async fn restore_workflow_version(
             );
         }
     };
+    if query.dry_run {
+        let current_exists = crate::workflow::store::load_workflow(&id).is_ok();
+        return (
+            StatusCode::OK,
+            Json(json!({
+                "success": true,
+                "dryRun": true,
+                "action": "restore",
+                "workflowId": id,
+                "versionId": version_id,
+                "currentExists": current_exists,
+                "target": version.workflow,
+                "writes": ["workflow definition", "workflow triggers", "undo checkpoint"],
+            })),
+        );
+    }
     // Snapshot the current definition so the restore can be undone (best-effort:
     // a brand-new workflow with no on-disk file simply has nothing to snapshot).
     if let Ok(current) = crate::workflow::store::load_workflow(&id) {
@@ -42214,16 +46169,53 @@ async fn restore_workflow_version(
 }
 
 #[derive(serde::Deserialize, Default)]
+struct WorkflowDryRunQuery {
+    #[serde(rename = "dryRun", default)]
+    dry_run: bool,
+}
+
+#[derive(serde::Deserialize, Default, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
 struct RunWorkflowBody {
     /// Initial input map (key → value) for `Input` nodes.
     #[serde(default)]
     input: std::collections::HashMap<String, String>,
     /// Optional run id to create or resume. Generated when absent.
-    #[serde(default)]
+    #[serde(default, alias = "run_id")]
     run_id: Option<String>,
+    /// Evaluate in memory without creating run history or invoking effectful
+    /// nodes. The supplied `runId` is ignored in this mode.
+    #[serde(default, alias = "dry_run")]
+    dry_run: bool,
 }
 
-/// `POST /workflows/:id/run` — execute a persisted workflow end-to-end.
+#[cfg(test)]
+mod workflow_run_body_tests {
+    use super::RunWorkflowBody;
+
+    #[test]
+    fn accepts_camel_case_dry_run_and_legacy_snake_case_alias() {
+        let camel: RunWorkflowBody = serde_json::from_value(serde_json::json!({
+            "input": { "text": "hello" },
+            "runId": "ignored",
+            "dryRun": true
+        }))
+        .expect("camel-case request body should parse");
+        assert!(camel.dry_run);
+        assert_eq!(camel.run_id.as_deref(), Some("ignored"));
+
+        let legacy: RunWorkflowBody = serde_json::from_value(serde_json::json!({
+            "dry_run": true,
+            "run_id": "legacy"
+        }))
+        .expect("legacy snake-case aliases should remain readable");
+        assert!(legacy.dry_run);
+        assert_eq!(legacy.run_id.as_deref(), Some("legacy"));
+    }
+}
+
+/// `POST /workflows/:id/run` — execute a persisted workflow end-to-end, or
+/// evaluate it as a read-only dry run when `dryRun` is true.
 ///
 /// Routes through the durable engine selected by `durable::select_engine()` —
 /// the in-process petgraph topological executor with file-backed resumable
@@ -42231,14 +46223,20 @@ struct RunWorkflowBody {
 /// `run_id` to resume a run after a Core restart (already-Completed nodes are
 /// skipped and their output reused).
 ///
+/// Set `dryRun: true` to evaluate the graph as a transient read-only projection:
+/// no run file, lifecycle hook, approval, timer checkpoint, or effectful node
+/// execution is created. Pure nodes and classified read-only MCP tools may run;
+/// other effectful nodes are returned as skipped with reasons.
+///
 /// Returns 503 when the gateway is unreachable and fail-closed is in effect.
 #[utoipa::path(
     post,
     path = "/workflows/{id}/run",
     tag = "Workflows",
     summary = "Run a workflow",
+    description = "Execute a workflow durably, or set dryRun to true for a transient read-only projection. Normal runs use file-backed resumable checkpoints; dry runs create no run history, lifecycle hook, approval, timer checkpoint, or effectful node execution. Pure nodes and classified read-only MCP tools may run, while other effectful nodes are returned as skipped with reasons. A caller-provided runId is ignored in dry-run mode.",
     params(("id" = String, Path)),
-    request_body = serde_json::Value,
+    request_body = RunWorkflowBody,
     responses((status = 200, description = "OK", body = serde_json::Value))
 )]
 async fn run_workflow(
@@ -42274,19 +46272,31 @@ async fn run_workflow(
         }
     };
 
-    let run_id = body
-        .run_id
-        .unwrap_or_else(|| format!("run_{}", uuid::Uuid::new_v4().simple()));
-
-    let engine = crate::workflow::durable::select_engine();
+    let run_id = if body.dry_run {
+        // Dry runs are transient projections. Never accept a caller-provided
+        // id here: a fresh id avoids accidental durable-run lookup and makes
+        // the no-history contract explicit.
+        format!("dryrun_{}", uuid::Uuid::new_v4().simple())
+    } else {
+        body.run_id
+            .unwrap_or_else(|| format!("run_{}", uuid::Uuid::new_v4().simple()))
+    };
 
     tracing::debug!(
         workflow_id = %id,
         run_id = %run_id,
-        "workflow: starting durable run"
+        dry_run = body.dry_run,
+        "workflow: starting run"
     );
 
-    match engine.execute(&workflow, body.input, run_id).await {
+    let outcome = if body.dry_run {
+        crate::workflow::executor::dry_run_workflow(&workflow, body.input, run_id).await
+    } else {
+        let engine = crate::workflow::durable::select_engine();
+        engine.execute(&workflow, body.input, run_id).await
+    };
+
+    match outcome {
         Ok(run) => (StatusCode::OK, Json(json!({ "success": true, "run": run }))),
         Err(e) => {
             // Fail-closed: a gateway-unreachable error (from run_prompt) maps to 503.
@@ -42543,6 +46553,162 @@ async fn persist_delegate_children(
 
 // ── Scheduled-job handlers (heartbeat) ──────────────────────────────────────
 
+fn scheduled_job_visible_at(
+    job: &crate::scheduler::store::ScheduledJob,
+    caller: &Option<crate::identity_verify::VerifiedCaller>,
+    node_org: Option<&str>,
+) -> bool {
+    let Some(node_org) = node_org else {
+        return true;
+    };
+    caller.as_ref().is_some_and(|caller| {
+        job.owner_user_id.as_deref() == Some(caller.user_id.as_str())
+            && job.org_id.as_deref() == Some(node_org)
+    })
+}
+
+fn scheduled_job_visible(
+    job: &crate::scheduler::store::ScheduledJob,
+    caller: &Option<crate::identity_verify::VerifiedCaller>,
+) -> bool {
+    let node_org = node_org_id();
+    scheduled_job_visible_at(job, caller, node_org.as_deref())
+}
+
+#[cfg(test)]
+mod scheduled_job_visibility_tests {
+    use super::scheduled_job_visible_at;
+    use crate::identity_verify::{OrgRole, VerifiedCaller};
+    use crate::scheduler::store::{JobTarget, Schedule, ScheduledJob};
+
+    fn job(user_id: Option<&str>, org_id: Option<&str>) -> ScheduledJob {
+        ScheduledJob {
+            id: "routine-test".to_owned(),
+            name: "Routine test".to_owned(),
+            schedule: Schedule::Every {
+                interval: "1h".to_owned(),
+            },
+            target: JobTarget::Agent {
+                agent_id: "agent-test".to_owned(),
+                prompt: "test".to_owned(),
+                model: None,
+                conversation_id: None,
+            },
+            enabled: true,
+            require_approval: false,
+            owner_app: None,
+            owner_user_id: user_id.map(str::to_owned),
+            org_id: org_id.map(str::to_owned),
+            created_at: "now".to_owned(),
+            updated_at: "now".to_owned(),
+            last_run_at: None,
+            last_outcome: None,
+            history: Vec::new(),
+        }
+    }
+
+    fn caller(user_id: &str, org_id: &str) -> Option<VerifiedCaller> {
+        Some(VerifiedCaller {
+            user_id: user_id.to_owned(),
+            email: None,
+            org_id: Some(org_id.to_owned()),
+            role: OrgRole::Member,
+            teams: Vec::new(),
+        })
+    }
+
+    #[test]
+    fn shared_routines_are_visible_only_to_their_owner() {
+        let routine = job(Some("alice"), Some("org-1"));
+        assert!(scheduled_job_visible_at(
+            &routine,
+            &caller("alice", "org-1"),
+            Some("org-1")
+        ));
+        assert!(!scheduled_job_visible_at(
+            &routine,
+            &caller("bob", "org-1"),
+            Some("org-1")
+        ));
+        assert!(!scheduled_job_visible_at(&routine, &None, Some("org-1")));
+    }
+
+    #[test]
+    fn personal_nodes_keep_single_user_routine_behavior() {
+        let routine = job(None, None);
+        assert!(scheduled_job_visible_at(&routine, &None, None));
+    }
+}
+
+async fn validate_scheduled_target(
+    state: &ServerState,
+    caller: &Option<crate::identity_verify::VerifiedCaller>,
+    target: &crate::scheduler::store::JobTarget,
+    enabled: bool,
+) -> Result<(), String> {
+    if let crate::scheduler::store::JobTarget::Agent {
+        agent_id,
+        conversation_id,
+        ..
+    } = target
+    {
+        match state.agent_store.get(agent_id).await {
+            Ok(Some(agent))
+                if !enabled
+                    || agent.lifecycle_status == crate::agents::AgentLifecycleStatus::Active => {}
+            Ok(Some(agent)) => {
+                return Err(format!(
+                    "agent '{}' is in {} mode and cannot have an enabled automation",
+                    agent.name,
+                    agent.lifecycle_status.as_str()
+                ));
+            }
+            Ok(None) => return Err(format!("agent '{agent_id}' not found")),
+            Err(error) => return Err(error.to_string()),
+        }
+
+        if let Some(conversation_id) = conversation_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+        {
+            let meta = state
+                .conversations
+                .get_access_meta(conversation_id)
+                .await
+                .map_err(|error| error.to_string())?
+                .ok_or_else(|| format!("conversation '{conversation_id}' not found"))?;
+            if let Some(node_org) = node_org_id() {
+                let owned_by_caller = caller.as_ref().is_some_and(|caller| {
+                    meta.owner_user_id.as_deref() == Some(caller.user_id.as_str())
+                        && meta.org_id.as_deref() == Some(node_org.as_str())
+                });
+                if !owned_by_caller {
+                    return Err(format!(
+                        "conversation '{conversation_id}' is not owned by this user"
+                    ));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn validate_scheduled_job_input(
+    state: &ServerState,
+    caller: &Option<crate::identity_verify::VerifiedCaller>,
+    name: &str,
+    schedule: &crate::scheduler::store::Schedule,
+    target: &crate::scheduler::store::JobTarget,
+    enabled: bool,
+) -> Result<(), String> {
+    if name.trim().is_empty() {
+        return Err("routine name is required".to_owned());
+    }
+    crate::scheduler::validate_schedule(schedule)?;
+    validate_scheduled_target(state, caller, target, enabled).await
+}
+
 #[utoipa::path(
     get,
     path = "/heartbeat/jobs",
@@ -42550,9 +46716,28 @@ async fn persist_delegate_children(
     summary = "List the scheduled jobs",
     responses((status = 200, description = "OK", body = serde_json::Value))
 )]
-async fn list_jobs() -> Json<serde_json::Value> {
-    let jobs = crate::scheduler::store::list_jobs();
-    Json(json!({ "jobs": jobs }))
+async fn list_jobs(
+    State(state): State<ServerState>,
+    Extension(caller): Extension<Option<crate::identity_verify::VerifiedCaller>>,
+) -> axum::response::Response {
+    if enforce_permission(
+        &state,
+        &caller,
+        crate::identity_verify::permissions::AGENT_VIEW,
+    )
+    .await
+    .is_err()
+    {
+        return json_error(
+            StatusCode::FORBIDDEN,
+            "insufficient permissions: agent.view".to_owned(),
+        );
+    }
+    let jobs = crate::scheduler::store::list_jobs()
+        .into_iter()
+        .filter(|job| scheduled_job_visible(job, &caller))
+        .collect::<Vec<_>>();
+    Json(json!({ "jobs": jobs })).into_response()
 }
 
 #[derive(serde::Deserialize)]
@@ -42577,83 +46762,61 @@ fn default_enabled() -> bool {
     true
 }
 
+#[utoipa::path(
+    post,
+    path = "/heartbeat/jobs",
+    tag = "Core",
+    summary = "Create a scheduled job",
+    request_body = serde_json::Value,
+    responses((status = 200, description = "OK", body = serde_json::Value))
+)]
 async fn create_job(
     State(state): State<ServerState>,
+    Extension(caller): Extension<Option<crate::identity_verify::VerifiedCaller>>,
     Json(body): Json<CreateJobBody>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    if let crate::scheduler::store::JobTarget::Agent { agent_id, .. } = &body.target {
-        match state.agent_store.get(agent_id).await {
-            Ok(Some(agent))
-                if agent.lifecycle_status != crate::agents::AgentLifecycleStatus::Active =>
-            {
-                if body.enabled {
-                    return (
-                        StatusCode::BAD_REQUEST,
-                        Json(json!({
-                            "success": false,
-                            "error": format!("agent '{}' is in {} mode and cannot have an enabled automation", agent.name, agent.lifecycle_status.as_str())
-                        })),
-                    );
-                }
-            }
-            Ok(Some(_)) => {}
-            Ok(None) => {
-                return (
-                    StatusCode::BAD_REQUEST,
-                    Json(
-                        json!({ "success": false, "error": format!("agent '{agent_id}' not found") }),
-                    ),
-                );
-            }
-            Err(error) => {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({ "success": false, "error": error.to_string() })),
-                );
-            }
-        }
+    if enforce_permission(
+        &state,
+        &caller,
+        crate::identity_verify::permissions::AGENT_EDIT,
+    )
+    .await
+    .is_err()
+    {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({ "success": false, "error": "insufficient permissions: agent.edit" })),
+        );
     }
 
-    // Validate the schedule up front so a broken cron is never persisted.
-    if let crate::scheduler::store::Schedule::Cron { expr, tz } = &body.schedule {
-        if let Err(e) = crate::scheduler::cron::CronSchedule::parse(expr) {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(json!({ "success": false, "error": e })),
-            );
-        }
-        // Reject an unknown zone here rather than at tick time: a job that
-        // parses but never fires is the worst outcome for a schedule, because
-        // nothing reports it.
-        if let Some(name) = tz {
-            if let Err(e) = crate::scheduler::cron::parse_tz(name) {
-                return (
-                    StatusCode::BAD_REQUEST,
-                    Json(json!({ "success": false, "error": e })),
-                );
-            }
-        }
-    }
-    if let crate::scheduler::store::Schedule::Every { interval } = &body.schedule {
-        if humantime::parse_duration(interval).is_err() {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(
-                    json!({ "success": false, "error": format!("invalid interval '{interval}'") }),
-                ),
-            );
-        }
+    if let Err(error) = validate_scheduled_job_input(
+        &state,
+        &caller,
+        &body.name,
+        &body.schedule,
+        &body.target,
+        body.enabled,
+    )
+    .await
+    {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "success": false, "error": error })),
+        );
     }
 
     let now = chrono::Utc::now().to_rfc3339();
     let job = crate::scheduler::store::ScheduledJob {
         id: format!("job_{}", uuid::Uuid::new_v4().simple()),
-        name: body.name,
+        name: body.name.trim().to_owned(),
         schedule: body.schedule,
         target: body.target,
         enabled: body.enabled,
         require_approval: body.require_approval,
         owner_app: body.owner_app.filter(|s| !s.trim().is_empty()),
+        owner_user_id: node_org_id()
+            .and_then(|_| caller.as_ref().map(|caller| caller.user_id.clone())),
+        org_id: node_org_id(),
         created_at: now.clone(),
         updated_at: now,
         last_run_at: None,
@@ -42679,30 +46842,145 @@ async fn create_job(
     responses((status = 200, description = "OK", body = serde_json::Value))
 )]
 async fn get_job(
+    State(state): State<ServerState>,
+    Extension(caller): Extension<Option<crate::identity_verify::VerifiedCaller>>,
     axum::extract::Path(id): axum::extract::Path<String>,
 ) -> (StatusCode, Json<serde_json::Value>) {
+    if enforce_permission(
+        &state,
+        &caller,
+        crate::identity_verify::permissions::AGENT_VIEW,
+    )
+    .await
+    .is_err()
+    {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({ "success": false, "error": "insufficient permissions: agent.view" })),
+        );
+    }
     match crate::scheduler::store::load_job(&id) {
-        Ok(job) => (StatusCode::OK, Json(json!({ "job": job }))),
+        Ok(job) if scheduled_job_visible(&job, &caller) => {
+            (StatusCode::OK, Json(json!({ "job": job })))
+        }
         Err(_) => (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "success": false, "error": "job not found" })),
+        ),
+        Ok(_) => (
             StatusCode::NOT_FOUND,
             Json(json!({ "success": false, "error": "job not found" })),
         ),
     }
 }
 
-async fn delete_job(
+#[derive(serde::Deserialize)]
+struct UpdateJobBody {
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    schedule: Option<crate::scheduler::store::Schedule>,
+    #[serde(default)]
+    target: Option<crate::scheduler::store::JobTarget>,
+    #[serde(default)]
+    enabled: Option<bool>,
+    #[serde(default)]
+    require_approval: Option<bool>,
+}
+
+#[utoipa::path(
+    put,
+    path = "/heartbeat/jobs/{id}",
+    tag = "Core",
+    summary = "Update a scheduled job",
+    params(("id" = String, Path)),
+    request_body = serde_json::Value,
+    responses((status = 200, description = "OK", body = serde_json::Value))
+)]
+async fn update_job(
+    State(state): State<ServerState>,
+    Extension(caller): Extension<Option<crate::identity_verify::VerifiedCaller>>,
     axum::extract::Path(id): axum::extract::Path<String>,
-) -> (StatusCode, Json<serde_json::Value>) {
+    Json(body): Json<UpdateJobBody>,
+) -> axum::response::Response {
+    if enforce_permission(
+        &state,
+        &caller,
+        crate::identity_verify::permissions::AGENT_EDIT,
+    )
+    .await
+    .is_err()
+    {
+        return json_error(
+            StatusCode::FORBIDDEN,
+            "insufficient permissions: agent.edit".to_owned(),
+        );
+    }
+    let Ok(mut job) = crate::scheduler::store::load_job(&id) else {
+        return json_error(StatusCode::NOT_FOUND, "job not found".to_owned());
+    };
+    if !scheduled_job_visible(&job, &caller) {
+        return json_error(StatusCode::NOT_FOUND, "job not found".to_owned());
+    }
+    let name = body.name.unwrap_or_else(|| job.name.clone());
+    let schedule = body.schedule.unwrap_or_else(|| job.schedule.clone());
+    let target = body.target.unwrap_or_else(|| job.target.clone());
+    let enabled = body.enabled.unwrap_or(job.enabled);
+    if let Err(error) =
+        validate_scheduled_job_input(&state, &caller, &name, &schedule, &target, enabled).await
+    {
+        return json_error(StatusCode::BAD_REQUEST, error);
+    }
+    job.name = name.trim().to_owned();
+    job.schedule = schedule;
+    job.target = target;
+    job.enabled = enabled;
+    if let Some(require_approval) = body.require_approval {
+        job.require_approval = require_approval;
+    }
+    job.updated_at = chrono::Utc::now().to_rfc3339();
+    if let Err(error) = crate::scheduler::store::save_job(&job) {
+        return json_error(StatusCode::INTERNAL_SERVER_ERROR, error.to_string());
+    }
+    Json(json!({ "success": true, "job": job })).into_response()
+}
+
+#[utoipa::path(
+    delete,
+    path = "/heartbeat/jobs/{id}",
+    tag = "Core",
+    summary = "Delete a scheduled job",
+    params(("id" = String, Path)),
+    responses((status = 200, description = "OK", body = serde_json::Value))
+)]
+async fn delete_job(
+    State(state): State<ServerState>,
+    Extension(caller): Extension<Option<crate::identity_verify::VerifiedCaller>>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> axum::response::Response {
+    if enforce_permission(
+        &state,
+        &caller,
+        crate::identity_verify::permissions::AGENT_EDIT,
+    )
+    .await
+    .is_err()
+    {
+        return json_error(
+            StatusCode::FORBIDDEN,
+            "insufficient permissions: agent.edit".to_owned(),
+        );
+    }
+    let Ok(job) = crate::scheduler::store::load_job(&id) else {
+        return json_error(StatusCode::NOT_FOUND, "job not found".to_owned());
+    };
+    if !scheduled_job_visible(&job, &caller) {
+        return json_error(StatusCode::NOT_FOUND, "job not found".to_owned());
+    }
     match crate::scheduler::store::delete_job(&id) {
-        Ok(true) => (StatusCode::OK, Json(json!({ "success": true }))),
-        Ok(false) => (
-            StatusCode::NOT_FOUND,
-            Json(json!({ "success": false, "error": "job not found" })),
-        ),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({ "success": false, "error": e.to_string() })),
-        ),
+        Ok(true) => Json(json!({ "success": true })).into_response(),
+        Ok(false) => json_error(StatusCode::NOT_FOUND, "job not found".to_owned()),
+        Err(e) => json_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     }
 }
 
@@ -42710,19 +46988,7 @@ async fn delete_job(
 /// endpoint. Templates must never be able to write a job that the scheduler
 /// would silently skip after import.
 fn validate_agent_schedule(schedule: &crate::scheduler::store::Schedule) -> Result<(), String> {
-    match schedule {
-        crate::scheduler::store::Schedule::Cron { expr, tz } => {
-            crate::scheduler::cron::CronSchedule::parse(expr).map_err(|error| error.to_string())?;
-            if let Some(name) = tz {
-                crate::scheduler::cron::parse_tz(name).map_err(|error| error.to_string())?;
-            }
-        }
-        crate::scheduler::store::Schedule::Every { interval } => {
-            humantime::parse_duration(interval)
-                .map_err(|_| format!("invalid interval '{interval}'"))?;
-        }
-    }
-    Ok(())
+    crate::scheduler::validate_schedule(schedule)
 }
 
 fn validate_agent_schedules(
@@ -42765,10 +47031,13 @@ fn build_agent_schedule_jobs(
                     agent_id: agent_id.to_owned(),
                     prompt: schedule.instructions.trim().to_owned(),
                     model: None,
+                    conversation_id: schedule.conversation_id.clone(),
                 },
                 enabled: schedule.enabled,
                 require_approval: schedule.require_approval,
                 owner_app: None,
+                owner_user_id: None,
+                org_id: None,
                 created_at: now.clone(),
                 updated_at: now.clone(),
                 last_run_at: None,
@@ -42808,6 +47077,7 @@ fn agent_schedule_templates(agent_id: &str) -> Vec<crate::agents::AgentScheduleT
             let crate::scheduler::store::JobTarget::Agent {
                 agent_id: target_agent_id,
                 prompt,
+                conversation_id,
                 ..
             } = job.target
             else {
@@ -42822,6 +47092,7 @@ fn agent_schedule_templates(agent_id: &str) -> Vec<crate::agents::AgentScheduleT
                 instructions: prompt,
                 enabled: job.enabled,
                 require_approval: job.require_approval,
+                conversation_id,
             })
         })
         .collect()
@@ -42875,7 +47146,7 @@ fn disable_agent_schedules(agent_id: &str) -> std::io::Result<()> {
 ///
 /// The "does this actually work" affordance every automation surface wants, and
 /// the only honest one: it runs the *saved* job through the same
-/// [`crate::scheduler::run_target`] the tick loop uses, so what it proves is what
+/// [`crate::scheduler::run_target_for_job`] the tick loop uses, so what it proves is what
 /// will happen when the schedule fires — not an approximation assembled by the
 /// caller. The outcome is recorded in the job's history exactly as a scheduled
 /// run is, which is why a manual run shows up alongside the automatic ones.
@@ -42893,55 +47164,71 @@ fn disable_agent_schedules(agent_id: &str) -> std::io::Result<()> {
     responses((status = 200, description = "OK", body = serde_json::Value))
 )]
 async fn run_job_now(
+    State(state): State<ServerState>,
+    Extension(caller): Extension<Option<crate::identity_verify::VerifiedCaller>>,
     axum::extract::Path(id): axum::extract::Path<String>,
-) -> (StatusCode, Json<serde_json::Value>) {
-    let Ok(mut job) = crate::scheduler::store::load_job(&id) else {
-        return (
-            StatusCode::NOT_FOUND,
-            Json(json!({ "success": false, "error": "job not found" })),
+) -> axum::response::Response {
+    if enforce_permission(
+        &state,
+        &caller,
+        crate::identity_verify::permissions::AGENT_EDIT,
+    )
+    .await
+    .is_err()
+    {
+        return json_error(
+            StatusCode::FORBIDDEN,
+            "insufficient permissions: agent.edit".to_owned(),
         );
+    }
+    let Ok(job) = crate::scheduler::store::load_job(&id) else {
+        return json_error(StatusCode::NOT_FOUND, "job not found".to_owned());
+    };
+    if !scheduled_job_visible(&job, &caller) {
+        return json_error(StatusCode::NOT_FOUND, "job not found".to_owned());
     };
 
     let started_at = chrono::Utc::now().to_rfc3339();
-    let result = crate::scheduler::run_target(&job.target).await;
+    let result = crate::scheduler::run_target_for_job(&job).await;
     let finished_at = chrono::Utc::now().to_rfc3339();
 
-    let (record, response) = match result {
-        Ok(run_id) => (
-            crate::scheduler::store::ExecRecord {
+    let (record, status, body) = match result {
+        Ok(run_id) => {
+            let record = crate::scheduler::store::ExecRecord {
                 started_at,
                 finished_at,
                 outcome: crate::scheduler::store::ExecOutcome::Success,
                 run_id: run_id.clone(),
                 error: None,
-            },
+            };
             (
+                record,
                 StatusCode::OK,
                 Json(json!({ "success": true, "run_id": run_id })),
-            ),
-        ),
-        Err(error) => (
-            crate::scheduler::store::ExecRecord {
+            )
+        }
+        Err(error) => {
+            let record = crate::scheduler::store::ExecRecord {
                 started_at,
                 finished_at,
                 outcome: crate::scheduler::store::ExecOutcome::Failure,
                 run_id: None,
                 error: Some(error.clone()),
-            },
+            };
             // 200 with `success: false`, not a 5xx: the request was served
             // correctly and the *job* failed. The caller renders the message.
             (
+                record,
                 StatusCode::OK,
                 Json(json!({ "success": false, "error": error })),
-            ),
-        ),
+            )
+        }
     };
 
-    job.record_execution(record);
-    if let Err(e) = crate::scheduler::store::save_job(&job) {
+    if let Err(e) = crate::scheduler::store::append_execution(&job.id, record) {
         tracing::error!("failed to persist job '{}' after a manual run: {e}", job.id);
     }
-    response
+    (status, body).into_response()
 }
 
 #[utoipa::path(
@@ -44353,8 +48640,8 @@ mod plugin_catalog_tests {
     /// The rule against the manifests we actually ship. These twelve ids are the
     /// whole argument: seven items claim a destination WITHOUT a companion runnable
     /// (four via `dock_panels`, three via a top-level route) and were filed as
-    /// plugins by the old companion-only test; four document parsers each ship a
-    /// Python sidecar and are still plugins; and `@ryu/memory` targets a sub-path of
+    /// plugins by the old companion-only test; five document parsers each ship a
+    /// sidecar and are still plugins; and `@ryu/memory` targets a sub-path of
     /// a shell-owned surface and is still a plugin.
     #[test]
     fn catalog_taxonomy_classifies_shipped_manifests_by_destination() {
@@ -44390,7 +48677,8 @@ mod plugin_catalog_tests {
         }
 
         for id in [
-            // Four interchangeable `document.parse` providers, each with a sidecar.
+            // Five interchangeable `document.parse` providers, each with a sidecar.
+            "@ryu/anydoc",
             "@ryu/docling",
             "@ryu/markitdown",
             "@ryu/mineru",
@@ -45613,7 +49901,7 @@ mod mcp_plugin_governance_tests {
 // every unbound node stays strictly node-token gated.
 #[cfg(test)]
 mod require_auth_tests {
-	use axum::{
+    use axum::{
         body::Body,
         http::{Request, StatusCode},
         middleware,
@@ -45688,7 +49976,6 @@ mod require_auth_tests {
             StatusCode::UNAUTHORIZED
         );
     }
-
 }
 
 // ── Pure request/parse/format helpers ────────────────────────────────────────
@@ -47197,6 +51484,24 @@ async fn acl_vocabulary() -> Json<serde_json::Value> {
 
 // ── Per-resource permission enforcement ──────────────────────────────────────
 
+fn resource_permission_admission(
+    managed_node: bool,
+    node_org: Option<&str>,
+    caller: Option<&crate::identity_verify::VerifiedCaller>,
+) -> Result<(), StatusCode> {
+    if caller.is_none() {
+        return if node_org.is_some() || managed_node {
+            Err(StatusCode::FORBIDDEN)
+        } else {
+            Ok(())
+        };
+    }
+    if managed_node && node_org.is_none() {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    Ok(())
+}
+
 /// Require that the caller holds `permission` on ONE SPECIFIC resource.
 ///
 /// The per-resource sibling of [`enforce_permission`]. That one answers "may this
@@ -47210,6 +51515,7 @@ async fn acl_vocabulary() -> Json<serde_json::Value> {
 /// deliberately, so the two gates cannot disagree about who is even a candidate:
 ///   - anonymous + node UNBOUND -> allowed (a personal node's boundary is its
 ///     node token; denying would lock the single local user out of their own data);
+///   - managed but unregistered -> denied until the node binding resolves;
 ///   - anonymous + node ORG-BOUND -> denied;
 ///   - a caller from a different org than the node's -> denied.
 ///
@@ -47225,14 +51531,12 @@ pub(crate) async fn enforce_permission_on(
     kind: &str,
     resource_id: &str,
 ) -> Result<(), StatusCode> {
+    let managed_node = crate::sidecar::control_plane::is_managed_node();
     let node_org = crate::sidecar::control_plane::registered_org().map(|o| o.id);
 
+    resource_permission_admission(managed_node, node_org.as_deref(), caller.as_ref())?;
     let Some(caller) = caller else {
-        return if node_org.is_some() {
-            Err(StatusCode::FORBIDDEN)
-        } else {
-            Ok(())
-        };
+        return Ok(());
     };
 
     // UNBOUND node: there is no org to scope roles against, so `to_caller_for_org`
@@ -47241,21 +51545,44 @@ pub(crate) async fn enforce_permission_on(
     // lock the single local user out of their own spaces — the exact trap
     // `resource_access` documents. `enforce_permission` returns Ok here for the
     // same reason; the two gates must not disagree about who is a candidate.
+    // A node flagged managed but not yet registered is not an unbound personal
+    // node; fail closed until its control-plane binding is available.
     let Some(node_org) = node_org.as_deref() else {
         return Ok(());
     };
 
-    if caller.org_id.as_deref() != Some(node_org) {
+    let personal_owner = if let Some(node) = crate::sidecar::control_plane::registered_node() {
+        if node_scope_denial_reason(&node, caller).is_some() {
+            return Err(StatusCode::FORBIDDEN);
+        }
+        node.scope == crate::sidecar::control_plane::NodeScope::Personal
+            && node.owner_user_id.as_deref() == Some(caller.user_id.as_str())
+    } else {
+        false
+    };
+
+    if !personal_owner && caller.org_id.as_deref() != Some(node_org) {
         return Err(StatusCode::FORBIDDEN);
     }
 
     // Custom org roles live in the control plane, not the JWT. A lookup failure
     // returns an EMPTY set, degrading to the built-in role tier rather than
     // granting anything.
-    let custom =
-        crate::sidecar::control_plane::resolve_permissions(&state.client, &caller.user_id).await;
+    let mut resolved =
+        crate::sidecar::control_plane::resolve_permission_context(&state.client, &caller.user_id)
+            .await;
+    if personal_owner {
+        resolved.permissions.insert(perm.to_owned());
+    }
 
-    match crate::acl::decide_with_extra(caller, kind, resource_id, perm, &custom) {
+    match crate::acl::decide_with_context(
+        caller,
+        kind,
+        resource_id,
+        perm,
+        &resolved.permissions,
+        &resolved.role_ids,
+    ) {
         crate::acl::Decision::Allowed => Ok(()),
         crate::acl::Decision::Denied => Err(StatusCode::FORBIDDEN),
     }
@@ -47334,7 +51661,7 @@ async fn enforce_node_acl_management(
 /// can read, so every document gate resolves the parent from the store instead.
 /// A missing document yields `None`, which callers surface as 404 — never as
 /// permitted.
-async fn document_parent_space(state: &ServerState, doc_id: &str) -> Option<String> {
+pub(crate) async fn document_parent_space(state: &ServerState, doc_id: &str) -> Option<String> {
     state.spaces.document_space_id(doc_id).await.ok().flatten()
 }
 
@@ -47350,6 +51677,7 @@ async fn acl_get_resource(
     headers: axum::http::HeaderMap,
     Path((kind, id)): Path<(String, String)>,
 ) -> Result<Json<serde_json::Value>, axum::response::Response> {
+    validate_acl_resource(&kind, &id)?;
     // Reading WHO has access is itself sensitive — the rule set names every team
     // and person with an exception on this resource. Gated on the same permission
     // as writing it, so a caller who may not change the rules may not enumerate
@@ -47377,6 +51705,56 @@ struct AclPutBody {
     overwrites: Vec<crate::acl::store::StoredOverwrite>,
 }
 
+fn validate_acl_resource(kind: &str, resource_id: &str) -> Result<(), axum::response::Response> {
+    if !crate::acl::ENFORCED_KINDS.contains(&kind) {
+        return Err(json_error(
+            StatusCode::BAD_REQUEST,
+            format!("unknown ACL resource kind `{kind}`"),
+        ));
+    }
+    if resource_id.is_empty() || resource_id.len() > 300 {
+        return Err(json_error(
+            StatusCode::BAD_REQUEST,
+            "ACL resource id must be between 1 and 300 characters".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_acl_overwrites(
+    rows: &[crate::acl::store::StoredOverwrite],
+) -> Result<(), axum::response::Response> {
+    for row in rows {
+        if !matches!(row.target_type.as_str(), "org" | "team" | "role" | "member") {
+            return Err(json_error(
+                StatusCode::BAD_REQUEST,
+                format!("unknown ACL target type `{}`", row.target_type),
+            ));
+        }
+        if row.target_id.is_empty() || row.target_id.len() > 300 {
+            return Err(json_error(
+                StatusCode::BAD_REQUEST,
+                "ACL target id must be between 1 and 300 characters".to_owned(),
+            ));
+        }
+        if row.allow.len() > 100 || row.deny.len() > 100 {
+            return Err(json_error(
+                StatusCode::BAD_REQUEST,
+                "an ACL target may name at most 100 allowed and 100 denied permissions".to_owned(),
+            ));
+        }
+        for permission in row.allow.iter().chain(row.deny.iter()) {
+            if permission.is_empty() || permission.len() > 200 {
+                return Err(json_error(
+                    StatusCode::BAD_REQUEST,
+                    "ACL permission ids must be between 1 and 200 characters".to_owned(),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// `PUT /api/acl/resources/:kind/:id` — replace every overwrite on a resource.
 ///
 /// Whole-set replacement rather than per-row patching, deliberately: the editing
@@ -47391,6 +51769,7 @@ async fn acl_put_resource(
     Path((kind, id)): Path<(String, String)>,
     Json(body): Json<AclPutBody>,
 ) -> Result<Json<serde_json::Value>, axum::response::Response> {
+    validate_acl_resource(&kind, &id)?;
     let caller = verified_caller_from_headers(&headers).await;
     // Editing WHO may do what is itself a permission, and it is checked ON THIS
     // RESOURCE — otherwise anyone who could read a space could grant themselves
@@ -47398,6 +51777,8 @@ async fn acl_put_resource(
     if let Err(response) = enforce_node_acl_management(&state, &caller, &kind, &id).await {
         return Err(response);
     }
+
+    validate_acl_overwrites(&body.overwrites)?;
 
     // Reject unknown permission ids at the EDGE rather than storing them and
     // letting the resolver drop them silently — a rule that never applies but
@@ -47462,18 +51843,25 @@ async fn acl_list_resources(
 fn acl_principals_payload(
     teams: Vec<crate::sidecar::control_plane::OrgTeam>,
     members: Vec<crate::sidecar::control_plane::NotifyTargetUser>,
+    custom_roles: Vec<crate::sidecar::control_plane::OrgRole>,
 ) -> serde_json::Value {
     // Roles are LOCAL — the same ids `builtin_role_catalog` keys its base sets by.
     // They must be offered even on an unbound node, where the other two lists are
     // empty: a role overwrite resolves entirely in-process, so a picker with no
     // roles would hide the one target type that always works.
-    let roles: Vec<serde_json::Value> = crate::acl::vocabulary::builtin_role_ids()
+    let mut roles: Vec<serde_json::Value> = crate::acl::vocabulary::builtin_role_ids()
         .map(|id| {
             let mut label = id.to_owned();
             label[..1].make_ascii_uppercase();
             json!({ "id": id, "label": label })
         })
         .collect();
+    roles.extend(custom_roles.into_iter().map(|role| {
+        json!({
+            "id": role.id,
+            "label": role.name.unwrap_or_else(|| role.id.clone()),
+        })
+    }));
 
     json!({
         // The kinds this node actually enforces per-resource permissions on.
@@ -47553,15 +51941,47 @@ async fn acl_principals(
     }
 
     let teams = crate::sidecar::control_plane::resolve_teams(&state.client).await;
+    let custom_roles = crate::sidecar::control_plane::resolve_roles(&state.client).await;
     let members = crate::sidecar::control_plane::resolve_notify_targets(&state.client, None)
         .await
         .unwrap_or_default();
-    Ok(Json(acl_principals_payload(teams, members)))
+    Ok(Json(acl_principals_payload(teams, members, custom_roles)))
 }
 
 #[cfg(test)]
 mod per_resource_gate_tests {
-    use super::acl_principals_payload;
+    use super::{acl_principals_payload, resource_permission_admission};
+    use crate::identity_verify::{OrgRole, VerifiedCaller};
+    use axum::http::StatusCode;
+
+    #[test]
+    fn managed_unregistered_resource_permissions_fail_closed() {
+        let caller = VerifiedCaller {
+            user_id: "alice".to_owned(),
+            email: None,
+            org_id: Some("org1".to_owned()),
+            role: OrgRole::Member,
+            teams: Vec::new(),
+        };
+
+        assert_eq!(
+            resource_permission_admission(true, None, None),
+            Err(StatusCode::FORBIDDEN)
+        );
+        assert_eq!(
+            resource_permission_admission(true, None, Some(&caller)),
+            Err(StatusCode::FORBIDDEN)
+        );
+        assert_eq!(resource_permission_admission(false, None, None), Ok(()));
+        assert_eq!(
+            resource_permission_admission(false, None, Some(&caller)),
+            Ok(())
+        );
+        assert_eq!(
+            resource_permission_admission(true, Some("org1"), Some(&caller)),
+            Ok(())
+        );
+    }
 
     /// EVERY `/api/acl/*` read handler must check a permission.
     ///
@@ -47681,7 +52101,7 @@ mod per_resource_gate_tests {
         // An unbound personal node has no org directory, and an unreachable control
         // plane looks identical. Roles are LOCAL, so they must survive both — a
         // picker with no targets at all is an unusable editor, not a safe default.
-        let payload = acl_principals_payload(Vec::new(), Vec::new());
+        let payload = acl_principals_payload(Vec::new(), Vec::new(), Vec::new());
         assert_eq!(payload["teams"].as_array().unwrap().len(), 0);
         assert_eq!(payload["members"].as_array().unwrap().len(), 0);
         let roles = payload["roles"].as_array().unwrap();
@@ -47699,6 +52119,7 @@ mod per_resource_gate_tests {
                 member("u2", None, Some("grace@example.com")),
                 member("u3", None, None),
             ],
+            Vec::new(),
         );
         let members = payload["members"].as_array().unwrap();
         assert_eq!(members[0]["name"], "Ada");
@@ -47725,6 +52146,7 @@ mod per_resource_gate_tests {
                     name: None,
                 },
             ],
+            Vec::new(),
             Vec::new(),
         );
         let teams = payload["teams"].as_array().unwrap();
@@ -47919,6 +52341,157 @@ mod acp_selections_query_tests {
             parse_acp_selections(Some(r#"{"model":{"nested":true}}"#)).is_empty(),
             "values must be plain strings (ACP value ids)"
         );
+    }
+}
+
+#[cfg(test)]
+mod agent_resource_permission_runner_tests {
+    use super::{json_error, run_after_agent_resource_permission};
+    use crate::identity_verify::{OrgRole, VerifiedCaller};
+    use axum::http::StatusCode;
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
+
+    fn member(user_id: &str) -> VerifiedCaller {
+        VerifiedCaller {
+            user_id: user_id.to_owned(),
+            email: None,
+            org_id: Some("org1".to_owned()),
+            role: OrgRole::Member,
+            teams: Vec::new(),
+        }
+    }
+
+    const PERSISTED_AGENT_ID: &str = "security-acp-persisted-agent";
+    static ACL_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    struct RestoredAgentAcl {
+        key: crate::acl::store::ResourceKey,
+        previous: Vec<crate::acl::store::StoredOverwrite>,
+    }
+
+    impl Drop for RestoredAgentAcl {
+        fn drop(&mut self) {
+            let _ = crate::acl::store::set_overwrites(&self.key, self.previous.clone());
+        }
+    }
+
+    fn install_agent_acl() -> RestoredAgentAcl {
+        let key = crate::acl::store::ResourceKey::new(crate::acl::KIND_AGENT, PERSISTED_AGENT_ID);
+        let previous = crate::acl::store::stored_for(&key);
+        crate::acl::store::set_overwrites(
+            &key,
+            vec![crate::acl::store::StoredOverwrite {
+                target_type: "member".to_owned(),
+                target_id: "bob".to_owned(),
+                allow: Vec::new(),
+                deny: vec![
+                    crate::identity_verify::permissions::AGENT_VIEW.to_owned(),
+                    crate::identity_verify::permissions::AGENT_EDIT.to_owned(),
+                ],
+            }],
+        )
+        .expect("persist the agent ACL fixture");
+        assert_eq!(
+            crate::acl::store::stored_for(&key).len(),
+            1,
+            "the guard test must read the ACL from the persisted store"
+        );
+        RestoredAgentAcl { key, previous }
+    }
+
+    #[tokio::test]
+    async fn persisted_denied_agent_acl_skips_acp_and_vault_operations() {
+        let _lock = ACL_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let _restore = install_agent_acl();
+        let bob = member("bob");
+        for permission in [
+            crate::identity_verify::permissions::AGENT_VIEW,
+            crate::identity_verify::permissions::AGENT_EDIT,
+        ] {
+            let decision = crate::acl::decide_with_context(
+                &bob,
+                crate::acl::KIND_AGENT,
+                PERSISTED_AGENT_ID,
+                permission,
+                &std::collections::HashSet::new(),
+                &std::collections::HashSet::new(),
+            );
+            assert_eq!(decision, crate::acl::Decision::Denied);
+
+            let operation_calls = Arc::new(AtomicUsize::new(0));
+            let calls = Arc::clone(&operation_calls);
+            let result = run_after_agent_resource_permission(
+                async move {
+                    match decision {
+                        crate::acl::Decision::Allowed => Ok(()),
+                        crate::acl::Decision::Denied => Err(json_error(
+                            StatusCode::FORBIDDEN,
+                            format!("insufficient permissions: {permission}"),
+                        )),
+                    }
+                },
+                async move {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    "side effect"
+                },
+            )
+            .await;
+
+            let response = result.expect_err("a denied resource ACL must stop the operation");
+            assert_eq!(response.status(), StatusCode::FORBIDDEN);
+            assert_eq!(
+                operation_calls.load(Ordering::SeqCst),
+                0,
+                "ACP spawn or vault access must not run after an ACL denial"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn persisted_allowed_agent_acl_runs_the_operation_once() {
+        let _lock = ACL_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let _restore = install_agent_acl();
+        let carol = member("carol");
+        let permission = crate::identity_verify::permissions::AGENT_VIEW;
+        let decision = crate::acl::decide_with_context(
+            &carol,
+            crate::acl::KIND_AGENT,
+            PERSISTED_AGENT_ID,
+            permission,
+            &std::collections::HashSet::new(),
+            &std::collections::HashSet::new(),
+        );
+        assert_eq!(decision, crate::acl::Decision::Allowed);
+
+        let operation_calls = Arc::new(AtomicUsize::new(0));
+        let calls = Arc::clone(&operation_calls);
+        let result = run_after_agent_resource_permission(
+            async move {
+                match decision {
+                    crate::acl::Decision::Allowed => Ok(()),
+                    crate::acl::Decision::Denied => Err(json_error(
+                        StatusCode::FORBIDDEN,
+                        format!("insufficient permissions: {permission}"),
+                    )),
+                }
+            },
+            async move {
+                calls.fetch_add(1, Ordering::SeqCst);
+                "completed"
+            },
+        )
+        .await
+        .expect("an allowed resource ACL should run the operation");
+
+        assert_eq!(result, "completed");
+        assert_eq!(operation_calls.load(Ordering::SeqCst), 1);
     }
 }
 

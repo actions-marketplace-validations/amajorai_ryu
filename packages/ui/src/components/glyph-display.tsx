@@ -18,6 +18,11 @@ import { Icon } from "@ryu/ui/components/icon.tsx";
 import { Logo } from "@ryu/ui/components/logo";
 import { cn } from "@ryu/ui/lib/utils.ts";
 import type { ReactNode } from "react";
+import {
+	AVATAR_CONVERSATION_POSES,
+	type AvatarConversationState,
+	useAvatarConversationState,
+} from "./avatar-conversation.tsx";
 
 const DITHER_DIRECTIONS: GradientDirection[] = ["up", "down", "left", "right"];
 
@@ -59,6 +64,7 @@ export function GlyphDisplay({
 	animated = true,
 	animation,
 	thinking = false,
+	conversationState,
 }: {
 	/** Accessible alt for image-like glyphs; decorative when empty. */
 	alt?: string;
@@ -72,8 +78,10 @@ export function GlyphDisplay({
 	size?: number;
 	/** Runtime working state; expressive ghosts use the orbit animation to think. */
 	thinking?: boolean;
+	conversationState?: AvatarConversationState;
 	value: GlyphValue;
 }) {
+	const contextState = useAvatarConversationState();
 	if (value?.kind === "avatar") {
 		return (
 			// biome-ignore lint/performance/noImgElement: shared UI package; glyph is an inline data URL or remote image
@@ -138,23 +146,68 @@ export function GlyphDisplay({
 		);
 	}
 	if (value?.kind === "expressive") {
+		const reactive = value.behavior === "conversation";
+		const activity =
+			conversationState ?? (thinking ? "thinking" : contextState);
+		const pose = reactive
+			? AVATAR_CONVERSATION_POSES[activity]
+			: {
+					expression: value.expression,
+					animation: thinking
+						? ("orbit" as const)
+						: (animation ?? value.animation),
+				};
+		const variant = value.variant ?? "expressive";
+		const motion = animated && value.animated !== false;
+		const logoProps = {
+			animated: motion,
+			animation: pose.animation,
+			expression: pose.expression,
+			eyeScale: value.eyeScale,
+			animationDuration: value.animationDuration,
+			colors: value.colors,
+			size: `${size}px`,
+		};
 		return (
 			<span
 				aria-hidden={alt ? undefined : true}
 				aria-label={alt || undefined}
-				className={cn("inline-flex shrink-0", className)}
+				className={cn("relative inline-flex shrink-0", className)}
+				data-avatar-behavior={value.behavior ?? "custom"}
+				data-avatar-state={reactive ? activity : undefined}
 				role={alt ? "img" : undefined}
+				style={{
+					width: size,
+					height: size,
+					color:
+						variant === "default" || variant === "3d"
+							? undefined
+							: value.colors?.c1,
+					...(value.colors?.c1
+						? { "--muted-foreground": value.colors.c1 }
+						: {}),
+				}}
 			>
-				<Logo
-					animated={animated}
-					animation={thinking ? "orbit" : (animation ?? value.animation)}
-					expression={value.expression}
-					size={`${size}px`}
-					variant="expressive"
-				/>
+				{variant === "default" ? (
+					<>
+						<Logo {...logoProps} showEyes={false} variant="default" />
+						<span className="absolute inset-0">
+							<Logo {...logoProps} variant="expressive" />
+						</span>
+					</>
+				) : (
+					<span inert={variant === "3d"}>
+						<Logo
+							{...logoProps}
+							bodyStyle={value.bodyStyle ?? "orb"}
+							variant={variant === "outline" ? "expressive" : variant}
+						/>
+					</span>
+				)}
 			</span>
 		);
 	}
+
 	if (value?.kind === "dither") {
 		const { from, to, direction } = resolveDither(value.dither);
 		return (

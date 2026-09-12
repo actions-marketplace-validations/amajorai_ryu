@@ -3,6 +3,7 @@ import {
 	MARKETPLACE_BROWSE_KINDS,
 	MARKETPLACE_HOME_SHELVES,
 	MARKETPLACE_SECTION_TABS,
+	marketplaceBrowseKindLabel,
 	marketplaceHomeShelfDefinition,
 } from "./marketplace-sections.ts";
 
@@ -10,6 +11,7 @@ describe("Marketplace surface contract", () => {
 	test("owns one ordered built-in tab list", () => {
 		expect(MARKETPLACE_SECTION_TABS.map((tab) => tab.value)).toEqual([
 			"home",
+			"bundles",
 			"integrations",
 			"apps",
 			"plugins",
@@ -53,10 +55,18 @@ describe("Marketplace surface contract", () => {
 			"stack_template",
 			"workflow",
 			"theme",
+			"language_pack",
 			"space",
 			"profile",
 			"output_style",
 			"bundle",
 		]);
+		expect(
+			MARKETPLACE_BROWSE_KINDS.find((kind) => kind.value === "agent")?.label
+		).toBe("Agent Templates");
+		expect(
+			MARKETPLACE_SECTION_TABS.find((tab) => tab.value === "agents")?.label
+		).toBe("Agents");
+		expect(marketplaceBrowseKindLabel("agent")).toBe("Agent Templates");
 	});
 });

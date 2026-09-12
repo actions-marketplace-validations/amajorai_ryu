@@ -1435,19 +1435,12 @@ impl PluginManifest {
     /// `allow_core_routes` is a Core-owned provenance decision. `true` is reserved
     /// for an exact compiled/verified Core-tier manifest; `false` confines every
     /// source/action to this plugin's generic `/api/ext/<id>` owner mount.
-    pub fn validate_declarative_http_policy(
-        &self,
-        allow_core_routes: bool,
-    ) -> Result<(), String> {
+    pub fn validate_declarative_http_policy(&self, allow_core_routes: bool) -> Result<(), String> {
         let Some(contributes) = &self.contributes else {
             return Ok(());
         };
-        validate_declarative_http_contributions(
-            &self.id,
-            contributes,
-            allow_core_routes,
-        )
-        .map_err(|error| format!("plugin '{}': {error}", self.id))
+        validate_declarative_http_contributions(&self.id, contributes, allow_core_routes)
+            .map_err(|error| format!("plugin '{}': {error}", self.id))
     }
 
     /// Validate the publisher-controlled half of remote MCP OAuth.
@@ -3323,6 +3316,26 @@ fn default_widget_display_mode() -> String {
     "inline".to_owned()
 }
 
+/// How Core composes a contributed hook.
+///
+/// The historical `directive` mode runs each hook independently and preserves
+/// the existing first-writer-wins behavior at each phase. `middleware` mode
+/// composes hooks as an onion: the hook receives a `next(ctx)` continuation and
+/// may short-circuit, rewrite the context passed downstream, or inspect the
+/// downstream directive before returning its own result.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum HookMode {
+    Directive,
+    Middleware,
+}
+
+impl Default for HookMode {
+    fn default() -> Self {
+        Self::Directive
+    }
+}
+
 /// A server-side chat turn hook contributed by a plugin. The `code` is a JS body
 /// run in the plugin sandbox with `ctx` (the turn context) and `host` (the
 /// capability bridge: `host.sideModel`, `host.storage`, `host.log`) in scope; it
@@ -3341,6 +3354,10 @@ pub struct TurnHookContribution {
     pub id: String,
     /// The turn boundary this hook fires on. Today only `"post_assistant_turn"`.
     pub on: String,
+    /// Optional composition mode. Omitted means the backwards-compatible
+    /// independent directive hook. `middleware` enables the `next(ctx)` chain.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<HookMode>,
     /// Higher-priority hooks run first within a phase. Ties are resolved by
     /// plugin id and hook id, which makes first-writer-wins directives stable.
     #[serde(default)]
@@ -5707,7 +5724,10 @@ fn validate_declarative_http_value(
                 )?;
             }
             for (key, child) in object {
-                if matches!(key.as_str(), "http" | "body" | "args" | "payload" | "map" | "filter" | "cells") {
+                if matches!(
+                    key.as_str(),
+                    "http" | "body" | "args" | "payload" | "map" | "filter" | "cells"
+                ) {
                     continue;
                 }
                 let child_usage = if matches!(key.as_str(), "source" | "state_source") {
@@ -9023,7 +9043,10 @@ mod tests {
         }"#;
         let error = PluginManifest::parse_and_validate(raw)
             .expect_err("a protected data route cannot bypass the declared vocabulary");
-        assert!(error.contains("route '/items' has no permission"), "got: {error}");
+        assert!(
+            error.contains("route '/items' has no permission"),
+            "got: {error}"
+        );
     }
 
     /// Two levels with one id make a grant ambiguous: whichever the reader

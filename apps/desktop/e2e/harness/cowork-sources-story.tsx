@@ -3,7 +3,8 @@
 //
 // The section used to render one row per CONNECTOR ("Web search", "Local files")
 // and nothing else, so a user could see THAT the run searched the web without
-// ever seeing WHICH links or files. Each connector now expands in place.
+// ever seeing WHICH links or files. Each connector now expands in place, and
+// qualified MCP, app, and Composio calls are kept in the same inventory.
 //
 // This is a real-browser story rather than a unit test because the expansion is
 // nested inside the `BouncyAccordion`, whose open height comes from a
@@ -17,13 +18,29 @@
 
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { createRoot } from "react-dom/client";
-import { CoworkContextPanel } from "../../src/components/panels/CoworkContextPanel.tsx";
+import {
+	CoworkContextPanel,
+	SourcesWorkspacePanel,
+} from "../../src/components/panels/CoworkContextPanel.tsx";
 import "../../src/index.css";
 
 const MESSAGES = [
 	{
 		role: "user",
-		parts: [{ type: "text", text: "Look into the effort slider colours." }],
+		parts: [
+			{
+				filename: "Startup Runway v2.0.pdf",
+				mediaType: "application/pdf",
+				type: "file",
+			},
+			{
+				filename: "Startup_Runway_Weekly_Template_v2_Original.pptx",
+				mediaType:
+					"application/vnd.openxmlformats-officedocument.presentationml.presentation",
+				type: "file",
+			},
+			{ text: "Look into the effort slider colours.", type: "text" },
+		],
 	},
 	{
 		role: "assistant",
@@ -88,6 +105,30 @@ const MESSAGES = [
 				state: "output-available",
 				input: { name: "Brighten the dark-mode ramp" },
 			},
+			{
+				type: "dynamic-tool",
+				toolName: "composio.SLACK_SEND_MESSAGE",
+				state: "output-available",
+				input: {
+					arguments: { channel: "#design", text: "Review the new rail" },
+				},
+			},
+			{
+				type: "dynamic-tool",
+				toolName: "app.tauri.driver_session",
+				state: "output-available",
+				input: { name: "Sources proof" },
+			},
+			{
+				type: "tool-mcp-sentry.search_issues",
+				state: "output-available",
+				input: { query: "is:unresolved" },
+			},
+			{
+				type: "tool-expect.console_logs",
+				state: "output-available",
+				input: { query: "errors" },
+			},
 		],
 	},
 ];
@@ -97,13 +138,25 @@ const queryClient = new QueryClient();
 function Story() {
 	return (
 		<QueryClientProvider client={queryClient}>
-			<div className="h-screen w-[420px] bg-background text-foreground">
-				<CoworkContextPanel
-					maxItemsPerSection={5}
-					messages={MESSAGES}
-					runId={null}
-					target={{ url: "http://localhost:0", token: null }}
-				/>
+			<div className="dark grid min-h-screen grid-cols-[18rem_minmax(0,1fr)] bg-background text-foreground">
+				<div className="min-w-0 p-2" data-testid="pinned-summary-sources-proof">
+					<CoworkContextPanel
+						maxItemsPerSection={5}
+						messages={MESSAGES}
+						onOpenSources={() => {
+							document.body.dataset.sourcesOpened = "true";
+						}}
+						runId={null}
+						target={{ url: "http://localhost:0", token: null }}
+						variant="summary"
+					/>
+				</div>
+				<div
+					className="min-w-0 border-border border-l"
+					data-testid="workspace-sources-proof"
+				>
+					<SourcesWorkspacePanel messages={MESSAGES} />
+				</div>
 			</div>
 		</QueryClientProvider>
 	);

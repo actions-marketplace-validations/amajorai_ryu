@@ -28,7 +28,7 @@ use crate::sidecar::process::ProcessHandle;
 use crate::sidecar::providers::llamacpp::classify::CLASSIFY_SIDECAR_NAME;
 
 /// Default address the local gateway binds to and Core forwards chat to.
-/// Matches `apps/gateway` default bind (`0.0.0.0:7981`) on the loopback host.
+/// Matches the Gateway loopback bind; profiles offset the port consistently.
 pub const DEFAULT_GATEWAY_URL: &str = "http://127.0.0.1:7981";
 
 /// Env var pointing Core at the gateway base URL (no trailing `/v1`).
@@ -242,48 +242,93 @@ const ENV_CLASSIFY_MODEL_ID: &str = "RYU_CLASSIFY_MODEL_ID";
 /// (Under a non-release profile `profile::apply_env_defaults` also seeds
 /// `RYU_GATEWAY_URL`, so the env branch normally wins; the default is computed via
 /// the same `profile::port(7981)` so both agree.)
+static REJECTED_LOCAL_GATEWAY: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
 pub fn gateway_url() -> String {
+    if REJECTED_LOCAL_GATEWAY.load(std::sync::atomic::Ordering::Acquire)
+        && !remote_data_plane()
+        && is_managed()
+    {
+        return "http://127.0.0.1:0".to_owned();
+    }
+    configured_gateway_url()
+}
+
+fn configured_gateway_url() -> String {
     std::env::var(ENV_GATEWAY_URL)
         .ok()
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| format!("http://127.0.0.1:{}", crate::profile::port(7981)))
 }
 
-/// Optional bearer token Core presents to the gateway (only when the gateway
-/// runs with `require_auth`). This is the gateway token slot — never a provider
-/// API key.
+/// Inference-only bearer. Local managed nodes provision it automatically; remote
+/// nodes must receive their relay credential from enrollment or the operator.
 pub fn gateway_relay_token() -> Option<String> {
-    std::env::var(ENV_GATEWAY_TOKEN)
+    gateway_bearer()
+        .map_err(|error| {
+            tracing::error!(%error, "gateway relay credential unavailable");
+        })
         .ok()
-        .filter(|s| !s.is_empty())
 }
 
-/// Compatibility name used by the local-gateway call sites. On a managed
-/// remote data plane this resolves only the relay credential; node-control
-/// traffic reads `control_plane::gateway_key()` instead.
 pub fn gateway_token() -> Option<String> {
     gateway_relay_token()
 }
 
-/// Resolve the bearer Core presents to the gateway, fail-closed on a remote data
-/// plane (WS1).
-///
-/// On the normal local path a missing [`gateway_token`] falls back to the local
-/// gateway's `"ryu-local"` dev bearer (the local gateway accepts it). In
-/// [`remote_data_plane`] mode Core talks to a hosted, multi-tenant gateway fleet
-/// that MUST reject the shared `"ryu-local"` literal, so a missing token is a hard
-/// error instead of silently presenting a bearer the fleet would 401 — the caller
-/// fails closed with a clear reason rather than emitting the shared literal.
 pub fn gateway_bearer() -> anyhow::Result<String> {
-    if let Some(token) = gateway_relay_token() {
+    if let Ok(token) = std::env::var(ENV_GATEWAY_TOKEN) {
+        ryu_gw_credentials::validate(&token)?;
         return Ok(token);
     }
-    if remote_data_plane() {
-        anyhow::bail!(
-            "remote data plane requires RYU_GATEWAY_TOKEN; refusing to present the shared \"ryu-local\" bearer to a hosted multi-tenant gateway"
-        );
+    if remote_data_plane() || !is_managed() {
+        anyhow::bail!("an externally managed Gateway requires RYU_GATEWAY_TOKEN");
     }
-    Ok("ryu-local".to_owned())
+    ryu_gw_credentials::load_or_create(
+        &crate::paths::ryu_dir().join("gateway-relay.key"),
+        "gwrelay_",
+    )
+}
+
+/// Trusted inference forwarding is Core-only. Never inject this credential into
+/// agent, app, or plugin environments; those receive `gateway_bearer` instead.
+pub fn gateway_core_token() -> Option<String> {
+    required_gateway_core_token()
+        .map_err(|error| {
+            tracing::error!(%error, "gateway Core relay credential unavailable");
+        })
+        .ok()
+}
+
+pub fn required_gateway_core_token() -> anyhow::Result<String> {
+    if remote_data_plane() || !is_managed() {
+        return gateway_bearer();
+    }
+    ryu_gw_credentials::load_or_create(
+        &crate::paths::ryu_dir().join("gateway-core-relay.key"),
+        "gwcore_",
+    )
+}
+
+/// Export a signed identity without exporting Core's forwarding authority.
+/// Remote enrollment keeps its existing fleet bearer and agent-route proof.
+pub fn gateway_bearer_for_agent(
+    agent_id: Option<&str>,
+    user_id: Option<&str>,
+    session_id: Option<&str>,
+) -> anyhow::Result<String> {
+    if remote_data_plane() || !is_managed() {
+        return gateway_bearer();
+    }
+    let Some(agent_id) = agent_id else {
+        return gateway_bearer();
+    };
+    ryu_gw_credentials::InferenceScope {
+        agent_id: agent_id.to_owned(),
+        user_id: user_id.map(str::to_owned),
+        session_id: session_id.map(str::to_owned),
+    }
+    .sign(&required_gateway_core_token()?)
 }
 
 /// Mint the proof carried by an agent-scoped Gateway URL.
@@ -483,10 +528,7 @@ pub async fn call_managed_provider(
     let status = response.status().as_u16();
     let text = response.text().await.unwrap_or_default();
     if !(200..300).contains(&status) {
-        return Err(ryu_app_events::ProviderRouterError::Rejected {
-            status,
-            body: text,
-        });
+        return Err(ryu_app_events::ProviderRouterError::Rejected { status, body: text });
     }
     serde_json::from_str(&text).map_err(|error| {
         ryu_app_events::ProviderRouterError::Invalid(format!(
@@ -495,105 +537,56 @@ pub async fn call_managed_provider(
     })
 }
 
-/// Env var carrying the admin credential to the spawned gateway. Sets the
-/// gateway's `auth.master_key` WITHOUT flipping `require_auth` — see the block
-/// that reads it in `apps/gateway/src/config.rs`.
+/// Admin authority stays in Core and never enters an app's inference bearer.
 const ENV_GATEWAY_ADMIN_KEY: &str = "GATEWAY_ADMIN_KEY";
 
-/// The file the minted gateway admin key is persisted to, so the key survives a
-/// Core restart and a gateway respawn.
 fn gateway_admin_key_path() -> std::path::PathBuf {
     crate::paths::ryu_dir().join("gateway-admin.key")
 }
 
-/// The admin credential Core presents on the gateway's ADMIN surface
-/// (`/v1/config`, audit, budget/spend).
-///
-/// Why this exists at all: the gateway grants its admin surface to loopback
-/// callers only while loopback is trustworthy, and `admin_loopback_allowed`
-/// revokes that trust as soon as the MESH is on — a userspace mesh peer arrives
-/// as `127.0.0.1`, so keeping loopback trust would fail OPEN to the tailnet. The
-/// gate is right; the casualty was Core, which had no credential to fall back on.
-/// Every gateway settings tab (budgets, safety filters, cost tiers, account keys)
-/// answered `/api/gateway/config failed: 401` the moment the user enabled the
-/// mesh, and no bearer Core could invent would pass: `require_local_admin` only
-/// bypasses for a bearer equal to the real master key, so the shared
-/// `"ryu-local"` literal was never going to work.
-///
-/// NOT `gateway_bearer`, deliberately. That one is also handed to the plugin
-/// sandbox (`sandbox_host.rs`), and routing the admin key through it would give
-/// every sandboxed plugin the gateway's admin surface. This accessor is Core-only.
-///
-/// Precedence mirrors `node_token`: an operator's own key wins, then the key this
-/// machine minted earlier, then a fresh mint. Returns `None` only when no key
-/// could be established AND none could be persisted (an unwritable home) — which
-/// is not fatal, it just leaves the admin surface on its previous loopback-trust
-/// behaviour rather than refusing to boot.
-pub fn gateway_admin_key() -> Option<String> {
-    static ADMIN_KEY: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
-    ADMIN_KEY
-        .get_or_init(|| {
-            // 0. On a remote data plane Core talks to a hosted fleet it did not
-            //    spawn. Relay credentials may call inference and the narrowly
-            //    proof-bound tool-charge endpoint, but they are never admin keys.
-            if remote_data_plane() {
-                return None;
-            }
-
-            // 1. Operator-provisioned. A real master key outranks a minted admin
-            //    key, and the gateway applies the same precedence on its side.
-            for var in [ENV_GATEWAY_ADMIN_KEY, "GATEWAY_MASTER_KEY"] {
-                if let Ok(key) = std::env::var(var) {
-                    let trimmed = key.trim();
-                    if !trimmed.is_empty() {
-                        return Some(trimmed.to_owned());
-                    }
+fn required_gateway_admin_key() -> anyhow::Result<String> {
+    if remote_data_plane() {
+        anyhow::bail!("remote inference credentials do not grant Gateway administration");
+    }
+    // Match Gateway's master precedence: explicit env, operator TOML, admin env.
+    if let Ok(key) = std::env::var("GATEWAY_MASTER_KEY") {
+        ryu_gw_credentials::validate(&key)?;
+        return Ok(key);
+    }
+    // Core's profile initialization publishes the same path used by the child.
+    if let Some(path) = std::env::var_os("GATEWAY_CONFIG") {
+        match std::fs::read_to_string(path) {
+            Ok(content) => {
+                let config: toml::Value = toml::from_str(&content)?;
+                if let Some(key) = config
+                    .get("auth")
+                    .and_then(|auth| auth.get("master_key"))
+                    .and_then(toml::Value::as_str)
+                {
+                    ryu_gw_credentials::validate(key)?;
+                    return Ok(key.to_owned());
                 }
             }
-
-            let path = gateway_admin_key_path();
-
-            // 2. Minted earlier on this machine.
-            if let Ok(existing) = std::fs::read_to_string(&path) {
-                let trimmed = existing.trim();
-                if !trimmed.is_empty() {
-                    return Some(trimmed.to_owned());
-                }
-            }
-
-            // 3. Mint one. Same shape as the node auth token: a random opaque
-            //    secret, never derived from anything guessable.
-            let key = format!("gwadm_{}", uuid::Uuid::new_v4().simple());
-            match write_admin_key_file(&path, &key) {
-                Ok(()) => {
-                    tracing::info!(path = %path.display(), "gateway: minted admin key");
-                    Some(key)
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        path = %path.display(),
-                        "gateway: could not persist admin key ({e}); admin surface stays on loopback trust"
-                    );
-                    None
-                }
-            }
-        })
-        .clone()
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    if let Ok(key) = std::env::var(ENV_GATEWAY_ADMIN_KEY) {
+        ryu_gw_credentials::validate(&key)?;
+        return Ok(key);
+    }
+    ryu_gw_credentials::load_or_create(&gateway_admin_key_path(), "gwadm_")
 }
 
-/// Write the admin key `0600` (owner-only). A world-readable admin credential
-/// beside the data dir would be worse than the loopback trust it replaces.
-fn write_admin_key_file(path: &std::path::Path, key: &str) -> std::io::Result<()> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
+pub fn gateway_admin_key() -> Option<String> {
+    if remote_data_plane() {
+        return None;
     }
-    std::fs::write(path, key)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
-    }
-    Ok(())
+    required_gateway_admin_key()
+        .map_err(|error| {
+            tracing::error!(%error, "gateway admin credential unavailable");
+        })
+        .ok()
 }
 
 /// Route outbound message `text` through the Gateway firewall before it leaves
@@ -1383,7 +1376,7 @@ pub(crate) async fn push_config_with_actor(
     let resp = gateway_config_request_with_actor(
         client,
         &base,
-        gateway_token().as_deref(),
+        gateway_admin_key().as_deref(),
         patch,
         actor_id,
         actor_name,
@@ -1428,12 +1421,12 @@ fn gateway_config_get_request(
 /// …) so the PUT that follows preserves every field it does not intend to change,
 /// instead of reconstructing a partial section from Core's local disk (which is
 /// empty for a REMOTE gateway → a full-replacement PUT would clobber enforcement).
-/// Targets [`gateway_url`] and forwards [`gateway_token`] (the master key), so it
-/// works against a remote gateway exactly like the PUT. Errs on a transport failure
-/// or a non-2xx status.
+/// Targets [`gateway_url`] and forwards the Core-only admin key, so it
+/// remote inference relay credentials cannot administer fleet configuration.
+/// Errs on a transport failure or a non-2xx status.
 pub(crate) async fn fetch_config(client: &reqwest::Client) -> anyhow::Result<serde_json::Value> {
     let base = gateway_url();
-    let resp = gateway_config_get_request(client, &base, gateway_token().as_deref())
+    let resp = gateway_config_get_request(client, &base, gateway_admin_key().as_deref())
         .send()
         .await
         .map_err(|e| anyhow::anyhow!("gateway config read failed: {e}"))?;
@@ -1455,13 +1448,15 @@ fn gateway_spawn_env() -> Vec<(String, String)> {
     // Managed local Gateways receive only the relay URL/key and the explicit
     // product-analytics gate; no Ryu Axiom credential is ever forwarded.
     env.extend(crate::ryu_analytics::gateway_child_env());
-    // The admin credential for THIS gateway. Sets `auth.master_key` on the child
-    // without turning on `require_auth`, so the admin surface starts demanding a
-    // key while every ordinary call Core and its sidecars make (chat, media,
-    // titles, widgets, …) keeps working unauthenticated exactly as before. See
-    // `gateway_admin_key` for why loopback trust alone stopped being enough.
+    // Startup validates all three credentials before computing the child environment.
     if let Some(key) = gateway_admin_key() {
         env.push((ENV_GATEWAY_ADMIN_KEY.to_owned(), key));
+    }
+    if let Some(key) = gateway_token() {
+        env.push(("GATEWAY_RELAY_KEY".to_owned(), key));
+    }
+    if let Some(key) = gateway_core_token() {
+        env.push(("GATEWAY_CORE_RELAY_KEY".to_owned(), key));
     }
     if let Some(url) = local_engine_gateway_url() {
         tracing::info!(local_llm_url = %url, "gateway: registering active local engine as provider");
@@ -1732,8 +1727,10 @@ const ENV_CREDITS_WALLET_EMPTY_ACTION: &str = "GATEWAY_CREDITS_WALLET_EMPTY_ACTI
 /// Composio is not free, so on the managed plan each executed `composio.*` tool
 /// call debits the org wallet by this amount (at cost). Operator-provisioned on a
 /// managed node; same name on both sides — Core forwards it to the gateway.
-/// Default `0` ⇒ tool calls stay free until a deployment sets a real rate.
+/// Default `300` ⇒ the current standard $0.30/1,000 execution rate. Deployments
+/// using managed-app or premium-tool contracts can override it explicitly.
 const ENV_CREDITS_COST_PER_TOOL_CALL: &str = "GATEWAY_CREDITS_COST_PER_TOOL_CALL_MICRO_USD";
+const DEFAULT_CREDITS_COST_PER_TOOL_CALL_MICRO_USD: u64 = 300;
 
 /// Sandbox per-resource billing rates, in **nano-USD per unit-second** (`u64`),
 /// forwarded to the gateway alongside the credits hook. Rates are nano-USD (not
@@ -1908,13 +1905,13 @@ fn credits_spawn_env() -> Vec<(String, String)> {
         .filter(|s| s == "stop" || s == "downgrade")
         .unwrap_or_else(|| "stop".to_owned());
     // Per-tool-call (Composio) cost: forward the operator-provisioned rate,
-    // defaulting to "0" (free) when unset so non-managed installs are unchanged.
-    // Only a valid non-negative integer is honoured; anything else falls to 0.
-    let tool_call_cost = std::env::var(ENV_CREDITS_COST_PER_TOOL_CALL)
-        .ok()
-        .map(|s| s.trim().to_owned())
-        .filter(|s| s.parse::<u64>().is_ok())
-        .unwrap_or_else(|| "0".to_owned());
+    // defaulting to the current standard $0.30/1,000 execution rate. Only a
+    // valid non-negative integer is honoured; malformed input uses the safe
+    // non-zero default so a managed gateway cannot silently under-bill.
+    let tool_call_cost = resolve_u64_env_string(
+        ENV_CREDITS_COST_PER_TOOL_CALL,
+        DEFAULT_CREDITS_COST_PER_TOOL_CALL_MICRO_USD,
+    );
     tracing::info!(
         base_url = %base,
         wallet_empty_action = %action,
@@ -2052,9 +2049,27 @@ impl GatewayManager {
             return Ok(false);
         }
 
-        // Already healthy (e.g. a separately launched gateway on the same port)?
-        if health_check(&gateway_url()).await {
-            tracing::info!(url = %gateway_url(), "gateway: already running, reusing");
+        // Quarantine immediately: credential failures must not leave a previously
+        // running anonymous listener usable by Core's independent HTTP clients.
+        REJECTED_LOCAL_GATEWAY.store(true, std::sync::atomic::Ordering::Release);
+        let admin = required_gateway_admin_key()?;
+        let relay = gateway_bearer()?;
+        let core_relay = required_gateway_core_token()?;
+        anyhow::ensure!(
+            core_relay != admin && core_relay != relay,
+            "Core forwarding credentials must be distinct"
+        );
+        anyhow::ensure!(
+            admin != relay,
+            "Gateway admin and inference credentials must differ"
+        );
+        // A healthy old listener is not proof of the managed authentication contract.
+        let base = configured_gateway_url();
+        if health_check(&base).await {
+            REJECTED_LOCAL_GATEWAY.store(true, std::sync::atomic::Ordering::Release);
+            verify_managed_gateway(&base, &admin, &relay, &core_relay).await?;
+            REJECTED_LOCAL_GATEWAY.store(false, std::sync::atomic::Ordering::Release);
+            tracing::info!(url = %base, "gateway: authenticated existing listener verified");
             return Ok(true);
         }
 
@@ -2089,7 +2104,13 @@ impl GatewayManager {
 
         // Wait for health, polling for a short window.
         for _ in 0..30 {
-            if health_check(&gateway_url()).await {
+            if health_check(&base).await {
+                if let Err(error) = verify_managed_gateway(&base, &admin, &relay, &core_relay).await
+                {
+                    REJECTED_LOCAL_GATEWAY.store(true, std::sync::atomic::Ordering::Release);
+                    return Err(error);
+                }
+                REJECTED_LOCAL_GATEWAY.store(false, std::sync::atomic::Ordering::Release);
                 tracing::info!(url = %gateway_url(), "gateway: healthy");
                 return Ok(true);
             }
@@ -2138,7 +2159,7 @@ impl Default for GatewayManager {
 /// Derive the gateway `--bind=host:port` from the configured URL so the spawned
 /// process listens where Core forwards.
 fn gateway_bind_from_url() -> String {
-    let url = gateway_url();
+    let url = configured_gateway_url();
     let stripped = url
         .trim_end_matches('/')
         .trim_start_matches("http://")
@@ -2167,7 +2188,8 @@ pub async fn is_healthy() -> bool {
 //      if the gateway blinks here we log a warning but don't fail the caller).
 //
 // Env: `RYU_ALLOW_GATEWAY_FALLBACK=1` opts into fail-open on the pre-run gate
-// (identical semantics to the chat-path fallback env var).
+// (identical semantics to the chat-path fallback env var). The permanent-file
+// deletion guard is independent of that fallback and remains local/default-deny.
 
 /// Env var name: when set to `1`, a gateway-unreachable pre-run check allows
 /// execution instead of failing closed. Default: fail-closed.
@@ -2253,7 +2275,7 @@ async fn check_widget_budget_request(payload: serde_json::Value) -> ExecBudgetOu
         .post(&endpoint)
         .timeout(std::time::Duration::from_secs(5))
         .json(&payload);
-    if let Some(tok) = gateway_token() {
+    if let Some(tok) = gateway_core_token() {
         req = req.bearer_auth(tok);
     }
 
@@ -2295,7 +2317,7 @@ fn parse_widget_budget_response(body: serde_json::Value) -> ExecBudgetOutcome {
 async fn check_exec_budget_request(payload: serde_json::Value) -> ExecBudgetOutcome {
     let base = gateway_url();
     let endpoint = format!("{}/v1/exec/budget/check", base.trim_end_matches('/'));
-    let token = gateway_token();
+    let token = gateway_core_token();
 
     let client = reqwest::Client::new();
     let mut req = client
@@ -2371,7 +2393,9 @@ async fn check_exec_budget_request(payload: serde_json::Value) -> ExecBudgetOutc
 // triggers, healing, delegation) auto-approve permission requests, so without
 // this scan they get unattended arbitrary shell/file-write. When armed it is
 // fail-closed on the same terms as the budget gate: unreachable / non-2xx /
-// parse error => Deny unless `RYU_ALLOW_GATEWAY_FALLBACK=1`.
+// parse error => Deny unless `RYU_ALLOW_GATEWAY_FALLBACK=1`. Permanent file and
+// directory deletion is a stronger local hard stop and never follows that
+// fallback.
 
 /// Env var selecting the command-approval mode. An explicit `off`
 /// (case-insensitive) disables the scan entirely (Core does not call the gateway
@@ -2437,6 +2461,14 @@ pub async fn check_exec_scan(
     session_id: Option<&str>,
     agent: Option<&str>,
 ) -> ExecScanOutcome {
+    // Do this before the network call. A gateway outage plus the documented
+    // fallback must not turn a permanent deletion into an allowed command.
+    if let Some(rule) = ryu_deletion_guard::detect_command(command) {
+        return ExecScanOutcome::Deny(format!(
+            "permanent file deletion blocked by local Ryu guard: {rule}; move the target to the host Trash or Recycle Bin"
+        ));
+    }
+
     let (organization_id, project_id, managed_rules) = crate::fleet::command_scan_context();
     // The local off switch disables only the built-in risk scanner. Managed
     // rules remain enforceable, including after an LKG snapshot expires (when
@@ -2447,7 +2479,7 @@ pub async fn check_exec_scan(
 
     let base = gateway_url();
     let endpoint = format!("{}/v1/exec/scan", base.trim_end_matches('/'));
-    let token = gateway_token();
+    let token = gateway_core_token();
 
     let client = reqwest::Client::new();
     let mut req = client
@@ -2514,6 +2546,18 @@ pub async fn check_exec_scan(
 ///
 /// Best-effort: the exec already ran with permission, so if the gateway is
 /// unreachable we log a warning but do not fail the caller.
+#[derive(Debug, Clone, Default)]
+pub struct ExecAuditAttribution {
+    /// Stable Core agent id that performed the execution, when known.
+    pub agent_id: Option<String>,
+    /// Verified user id on whose behalf the execution ran, when known.
+    pub user_id: Option<String>,
+    /// Bounded display label for the verified user, when known.
+    pub user_name: Option<String>,
+    /// Product surface that initiated the execution, when known.
+    pub feature: Option<String>,
+}
+
 pub async fn report_exec_audit(
     backend: &str,
     command: &str,
@@ -2522,9 +2566,33 @@ pub async fn report_exec_audit(
     session_id: Option<String>,
     error: Option<String>,
 ) {
+    report_exec_audit_with_attribution(
+        backend,
+        command,
+        duration_ms,
+        exit_code,
+        session_id,
+        error,
+        ExecAuditAttribution::default(),
+    )
+    .await;
+}
+
+/// Report a completed execution with the verified agent/user attribution that
+/// was available at the Core boundary. The legacy helper above remains the
+/// compatibility path for callers that do not have that context yet.
+pub async fn report_exec_audit_with_attribution(
+    backend: &str,
+    command: &str,
+    duration_ms: u64,
+    exit_code: i32,
+    session_id: Option<String>,
+    error: Option<String>,
+    attribution: ExecAuditAttribution,
+) {
     let base = gateway_url();
     let endpoint = format!("{}/v1/exec/audit", base.trim_end_matches('/'));
-    let token = gateway_token();
+    let token = gateway_core_token();
 
     let client = reqwest::Client::new();
     let mut req = client
@@ -2537,6 +2605,10 @@ pub async fn report_exec_audit(
             "exit_code": exit_code,
             "session_id": session_id,
             "error": error,
+            "agent_id": attribution.agent_id,
+            "user_id": attribution.user_id,
+            "user_name": attribution.user_name,
+            "feature": attribution.feature,
         }));
     if let Some(tok) = token {
         req = req.bearer_auth(tok);
@@ -2601,7 +2673,7 @@ pub enum IdentityGrantOutcome {
 pub async fn check_identity_grant(scope: &str, context: &str) -> IdentityGrantOutcome {
     let base = gateway_url();
     let endpoint = format!("{}/v1/grants/validate", base.trim_end_matches('/'));
-    let token = gateway_token();
+    let token = gateway_core_token();
 
     let client = reqwest::Client::new();
     let mut req = client
@@ -2681,9 +2753,28 @@ pub async fn report_credential_read_audit(
     session_id: Option<String>,
     error: Option<String>,
 ) {
+    report_credential_read_audit_with_attribution(
+        source,
+        domain,
+        session_id,
+        error,
+        ExecAuditAttribution::default(),
+    )
+    .await;
+}
+
+/// Report a credential read with the agent/user attribution available at the
+/// tool-call boundary. The credential value itself is never included.
+pub async fn report_credential_read_audit_with_attribution(
+    source: &str,
+    domain: &str,
+    session_id: Option<String>,
+    error: Option<String>,
+    attribution: ExecAuditAttribution,
+) {
     let base = gateway_url();
     let endpoint = format!("{}/v1/exec/audit", base.trim_end_matches('/'));
-    let token = gateway_token();
+    let token = gateway_core_token();
 
     let client = reqwest::Client::new();
     let mut req = client
@@ -2699,6 +2790,10 @@ pub async fn report_credential_read_audit(
             "exit_code": 0,
             "session_id": session_id,
             "error": error,
+            "agent_id": attribution.agent_id,
+            "user_id": attribution.user_id,
+            "user_name": attribution.user_name,
+            "feature": attribution.feature,
         }));
     if let Some(tok) = token {
         req = req.bearer_auth(tok);
@@ -2751,6 +2846,111 @@ pub fn observed_gateway_version() -> Option<String> {
 /// body still counts as healthy, because liveness and version agreement are
 /// separate questions and conflating them would make a stale-but-working Gateway
 /// look dead.
+async fn verify_managed_gateway(
+    base: &str,
+    admin: &str,
+    relay: &str,
+    core_relay: &str,
+) -> anyhow::Result<()> {
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(Duration::from_secs(3))
+        .build()?;
+    let base = base.trim_end_matches('/');
+    // Prove key possession without sending any bearer to an untrusted listener.
+    // Binding the signature to its real socket prevents forwarding this nonce to
+    // a legitimate Gateway on a different port and then harvesting credentials.
+    let nonce = format!(
+        "{}{}",
+        uuid::Uuid::new_v4().simple(),
+        uuid::Uuid::new_v4().simple()
+    );
+    let mut response = client
+        .get(format!("{base}/v1/auth/readiness"))
+        .query(&[("nonce", &nonce)])
+        .send()
+        .await?;
+    anyhow::ensure!(
+        response.status().is_success(),
+        "existing Gateway cannot prove managed readiness; restart or replace the listener"
+    );
+    let peer = response
+        .remote_addr()
+        .ok_or_else(|| anyhow::anyhow!("Gateway readiness response has no peer address"))?;
+    const MAX_READINESS_BYTES: usize = 64 * 1024;
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response.chunk().await? {
+        anyhow::ensure!(
+            bytes.len().saturating_add(chunk.len()) <= MAX_READINESS_BYTES,
+            "Gateway readiness response exceeds the allowed size"
+        );
+        bytes.extend_from_slice(&chunk);
+    }
+    let proof: ryu_gw_credentials::ReadinessProof = serde_json::from_slice(&bytes)?;
+    proof.verify(
+        admin,
+        &nonce,
+        peer,
+        env!("CARGO_PKG_VERSION"),
+        relay,
+        core_relay,
+    )?;
+    let config = client
+        .get(format!("{base}/v1/config"))
+        .bearer_auth(admin)
+        .send()
+        .await?;
+    anyhow::ensure!(
+        config.status().is_success(),
+        "existing Gateway rejected the managed admin credential; restart it before using this node"
+    );
+    let config: serde_json::Value = config.json().await?;
+    anyhow::ensure!(config.pointer("/auth/require_auth").and_then(|v| v.as_bool()) == Some(true), "existing Gateway has inference authentication disabled; restart it with the managed credentials");
+    let anonymous = client.get(format!("{base}/v1/auth/status")).send().await?;
+    anyhow::ensure!(
+        anonymous.status() == reqwest::StatusCode::UNAUTHORIZED,
+        "existing Gateway accepts unauthenticated inference access"
+    );
+    let authenticated = client
+        .get(format!("{base}/v1/auth/status"))
+        .bearer_auth(relay)
+        .send()
+        .await?;
+    anyhow::ensure!(
+        authenticated.status().is_success(),
+        "existing Gateway rejected the managed inference credential"
+    );
+    let role: serde_json::Value = authenticated.json().await?;
+    anyhow::ensure!(
+        role["admin"] == false && role["trustedForwarder"] == false,
+        "exported Gateway relay must have inference-only authority"
+    );
+    let trusted = client
+        .get(format!("{base}/v1/auth/status"))
+        .bearer_auth(core_relay)
+        .send()
+        .await?;
+    anyhow::ensure!(
+        trusted.status().is_success(),
+        "existing Gateway rejected Core forwarding credential"
+    );
+    let role: serde_json::Value = trusted.json().await?;
+    anyhow::ensure!(
+        role["admin"] == false && role["trustedForwarder"] == true,
+        "Core Gateway relay must have forwarding-only authority"
+    );
+    let relay_admin = client
+        .get(format!("{base}/v1/config"))
+        .bearer_auth(relay)
+        .send()
+        .await?;
+    anyhow::ensure!(
+        relay_admin.status() == reqwest::StatusCode::UNAUTHORIZED,
+        "Gateway inference credential must not grant administration"
+    );
+    Ok(())
+}
+
 async fn health_check(base_url: &str) -> bool {
     let endpoint = format!("{}/health", base_url.trim_end_matches('/'));
     let client = reqwest::Client::new();
@@ -3004,8 +3204,8 @@ mod tests {
         assert_eq!(get(ENV_CREDITS_INTERNAL_SECRET), Some("top-secret"));
         // Markup pinned to 0 — margin is at deposit (B2).
         assert_eq!(get("GATEWAY_CREDITS_MARKUP_BPS"), Some("0"));
-        // Per-tool-call cost defaults to 0 (free) until a node provisions a rate.
-        assert_eq!(get(ENV_CREDITS_COST_PER_TOOL_CALL), Some("0"));
+        // Per-tool-call cost defaults to the current standard Composio rate.
+        assert_eq!(get(ENV_CREDITS_COST_PER_TOOL_CALL), Some("300"));
         // Wallet-empty action defaults to Stop.
         assert_eq!(get(ENV_CREDITS_WALLET_EMPTY_ACTION), Some("stop"));
         // Base derived from the control-plane URL + the `/api` mount.
@@ -3066,14 +3266,14 @@ mod tests {
             .map(|(_, v)| v.as_str());
         assert_eq!(cost, Some("1500"));
 
-        // Garbage → 0, never propagated as an invalid value.
+        // Garbage → the safe standard rate, never propagated as an invalid value.
         std::env::set_var(ENV_CREDITS_COST_PER_TOOL_CALL, "not-a-number");
         let env = credits_spawn_env();
         let cost = env
             .iter()
             .find(|(k, _)| k == ENV_CREDITS_COST_PER_TOOL_CALL)
             .map(|(_, v)| v.as_str());
-        assert_eq!(cost, Some("0"));
+        assert_eq!(cost, Some("300"));
     }
 
     #[test]
@@ -3729,6 +3929,7 @@ mod tests {
         ENV_EXEC_APPROVAL_MODE,
         ENV_GATEWAY_URL,
         ENV_ALLOW_GATEWAY_FALLBACK,
+        "RYU_ALLOW_PERMANENT_DELETE",
     ];
 
     #[test]
@@ -3785,8 +3986,39 @@ mod tests {
         std::env::set_var(ENV_EXEC_APPROVAL_MODE, "off");
         std::env::set_var(ENV_GATEWAY_URL, "http://127.0.0.1:1");
         std::env::remove_var(ENV_ALLOW_GATEWAY_FALLBACK);
-        let out = check_exec_scan("deno", "rm -rf /", Some("sess"), Some("ryu")).await;
+        let out = check_exec_scan("deno", "echo hi", Some("sess"), Some("ryu")).await;
         assert_eq!(out, ExecScanOutcome::Allow);
+    }
+
+    #[tokio::test]
+    async fn permanent_deletion_is_denied_before_gateway_fallback() {
+        let _lock = lock_scan_env();
+        let _g = EnvGuard::capture(SCAN_ENV);
+        std::env::set_var(ENV_EXEC_APPROVAL_MODE, "off");
+        std::env::set_var(ENV_GATEWAY_URL, "http://127.0.0.1:1");
+        std::env::set_var(ENV_ALLOW_GATEWAY_FALLBACK, "1");
+        let out = check_exec_scan("acp", "rm -rf ./disposable", None, Some("ryu")).await;
+        assert!(
+            matches!(&out, ExecScanOutcome::Deny(reason) if reason.contains("permanent file deletion")),
+            "permanent deletion must stay denied even with approval and gateway fallbacks: {out:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn legacy_permanent_deletion_policy_change_is_ignored() {
+        let _lock = lock_scan_env();
+        let _g = EnvGuard::capture(SCAN_ENV);
+        std::env::set_var(ENV_EXEC_APPROVAL_MODE, "off");
+        // A legacy deployment may still carry this variable. It must never
+        // weaken the deletion block after an upgrade.
+        std::env::set_var("RYU_ALLOW_PERMANENT_DELETE", "1");
+        std::env::set_var(ENV_GATEWAY_URL, "http://127.0.0.1:1");
+        std::env::set_var(ENV_ALLOW_GATEWAY_FALLBACK, "1");
+        let out = check_exec_scan("acp", "rm -rf ./disposable", None, Some("ryu")).await;
+        assert!(matches!(
+            out,
+            ExecScanOutcome::Deny(reason) if reason.contains("permanent file deletion")
+        ));
     }
 
     #[tokio::test]
@@ -3988,5 +4220,86 @@ mod tests {
             lower.contains("authorization: bearer secret-master-key"),
             "must forward the master-key bearer, got:\n{raw}"
         );
+    }
+}
+
+#[cfg(test)]
+mod managed_readiness_tests {
+    use super::*;
+    use axum::{
+        body::Body,
+        http::{Request, StatusCode},
+        response::IntoResponse,
+        routing::any,
+        Router,
+    };
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
+
+    async fn readiness_fixture(
+        forged_address: bool,
+    ) -> (String, Arc<AtomicUsize>, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let requests_with_bearer = Arc::new(AtomicUsize::new(0));
+        let observed = Arc::clone(&requests_with_bearer);
+        let app = Router::new().fallback(any(move |request: Request<Body>| {
+            let observed = Arc::clone(&observed);
+            async move {
+                let bearer = request.headers().get("authorization").and_then(|header| header.to_str().ok()).unwrap_or("");
+                if !bearer.is_empty() { observed.fetch_add(1, Ordering::SeqCst); }
+                let json = |value: serde_json::Value| axum::Json(value).into_response();
+                match request.uri().path() {
+                    "/v1/auth/readiness" => {
+                        let nonce = request.uri().query().unwrap_or("").strip_prefix("nonce=").unwrap_or("");
+                        let mut proof_address = address;
+                        if forged_address { proof_address.set_port(address.port().saturating_add(1)); }
+                        let proof = ryu_gw_credentials::ReadinessProof::sign(ryu_gw_credentials::Readiness {
+                            protocol: "ryu-gateway-readiness-v1".into(), version: env!("CARGO_PKG_VERSION").into(), nonce: nonce.into(),
+                            listener: proof_address, require_auth: true,
+                            inference_keys: vec![ryu_gw_credentials::fingerprint("relay")],
+                            core_keys: vec![ryu_gw_credentials::fingerprint("core")],
+                        }, "admin").unwrap();
+                        json(serde_json::to_value(proof).unwrap())
+                    }
+                    "/v1/config" if bearer == "Bearer admin" => json(serde_json::json!({"auth":{"require_auth":true}})),
+                    "/v1/auth/status" if bearer == "Bearer relay" || bearer == "Bearer core" => json(serde_json::json!({"admin":false,"trustedForwarder":bearer == "Bearer core"})),
+                    _ => StatusCode::UNAUTHORIZED.into_response(),
+                }
+            }
+        }));
+        let task = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        (format!("http://{address}"), requests_with_bearer, task)
+    }
+
+    #[tokio::test]
+    async fn managed_readiness_accepts_expected_listener_and_roles() {
+        let (url, bearers, task) = readiness_fixture(false).await;
+        let result = verify_managed_gateway(&url, "admin", "relay", "core").await;
+        task.abort();
+        result.unwrap();
+        assert_eq!(bearers.load(Ordering::SeqCst), 4);
+    }
+
+    #[tokio::test]
+    async fn managed_readiness_rejects_forwarded_or_fake_proof_before_sending_bearers() {
+        let (url, bearers, task) = readiness_fixture(true).await;
+        assert!(verify_managed_gateway(&url, "admin", "relay", "core")
+            .await
+            .is_err());
+        task.abort();
+        assert_eq!(bearers.load(Ordering::SeqCst), 0);
+        let (url, bearers, task) = readiness_fixture(false).await;
+        assert!(
+            verify_managed_gateway(&url, "different-admin", "relay", "core")
+                .await
+                .is_err()
+        );
+        task.abort();
+        assert_eq!(bearers.load(Ordering::SeqCst), 0);
     }
 }

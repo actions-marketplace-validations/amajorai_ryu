@@ -25,6 +25,7 @@ pub mod catalog;
 pub mod connect;
 pub mod execute;
 pub mod host;
+pub mod service;
 pub mod triggers;
 
 pub use host::{set_global_host, ComposioHost};

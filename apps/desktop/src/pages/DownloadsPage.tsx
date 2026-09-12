@@ -29,7 +29,7 @@ import { type ReactNode, useCallback, useState } from "react";
 import { useShallow } from "zustand/react/shallow";
 import { AvailableUpdates } from "@/src/components/downloads/AvailableUpdates.tsx";
 import { DownloadRow } from "@/src/components/downloads/DownloadRow.tsx";
-import { useTabsContext } from "@/src/contexts/TabsContext.tsx";
+import { useTabSelector } from "@/src/contexts/TabsContext.tsx";
 import { useActiveNode } from "@/src/hooks/useActiveNode.ts";
 import { useAvailableUpdates } from "@/src/hooks/useAvailableUpdates.ts";
 import {
@@ -70,7 +70,7 @@ function mergeHistory(
 export default function DownloadsPage() {
 	const tasks = useDownloadsStore(useShallow(selectOrderedTasks));
 	const [friendly] = useFriendlyMode();
-	const { openTab } = useTabsContext();
+	const openTab = useTabSelector((state) => state.openTab);
 	const { updates, loading, refresh } = useAvailableUpdates();
 	const node = useActiveNode();
 
@@ -124,7 +124,7 @@ export default function DownloadsPage() {
 			<div className="mx-auto flex w-full max-w-2xl flex-col gap-6 p-6">
 				<header className="flex items-center justify-between gap-3">
 					<div>
-						<h1 className="font-semibold text-xl">Downloads</h1>
+						<h1 className="font-medium text-xl">Downloads</h1>
 						<p className="text-muted-foreground text-sm">
 							Updates, active downloads, and everything you've downloaded
 							before.

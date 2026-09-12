@@ -1,3 +1,4 @@
+import { AgentAvailabilityProvider } from "@ryu/blocks/desktop/agent-availability";
 import { HotkeysProvider, useHotkey } from "@ryu/hotkeys/react";
 import {
 	SidebarInset,
@@ -28,9 +29,10 @@ import { MediaPipDock } from "@/src/components/media/MediaPip.tsx";
 import { ProjectDockHost } from "@/src/components/panels/ProjectDockHost.tsx";
 import { PrivacyDisclosure } from "@/src/components/settings/privacy-disclosure.tsx";
 import { SupportAccessBanner } from "@/src/components/settings/support-access-banner.tsx";
-import { NodeUnreachableBanner } from "@/src/components/shell/NodeUnreachableBanner.tsx";
+import { ConnectionStatusToast } from "@/src/components/shell/ConnectionStatusToast.tsx";
 import { ReconnectRetryBanner } from "@/src/components/shell/ReconnectRetryBanner.tsx";
 import { SafeModeBanner } from "@/src/components/shell/SafeModeBanner.tsx";
+import { SkillDistributionProvider } from "@/src/components/skills/SkillDistributionProvider.tsx";
 import { AutoUpdater } from "@/src/components/updater/AutoUpdater.tsx";
 import { useAppSurface } from "@/src/contexts/app-surface-context.tsx";
 import {
@@ -68,8 +70,10 @@ import { useCreditAlertEvents } from "@/src/hooks/useCreditAlertEvents.ts";
 import { useDesktopNotificationsStream } from "@/src/hooks/useDesktopNotificationsStream.ts";
 import { useDownloadsStream } from "@/src/hooks/useDownloadsStream.ts";
 import { useEditorUploader } from "@/src/hooks/useEditorUploader.ts";
+import { LoginApprovalEvents } from "@/src/hooks/useLoginApprovalEvents.tsx";
 import { useMeetingStream } from "@/src/hooks/useMeetingStream.ts";
 import { useMonitorAlertsStream } from "@/src/hooks/useMonitorAlertsStream.ts";
+import { useNavigationEvents } from "@/src/hooks/useNavigationEvents.ts";
 import { useNotificationEvents } from "@/src/hooks/useNotificationEvents.ts";
 import {
 	usePluginContributionRoutes,
@@ -88,6 +92,7 @@ import {
 	SIDEBAR_WIDTH_KEY,
 } from "@/src/hooks/useThemePreset.ts";
 import { useTitleBarClearsContent } from "@/src/hooks/useTitleBarClearsContent.ts";
+import { useUserAvailability } from "@/src/hooks/useUserAvailability.ts";
 import { setCrashRoute } from "@/src/lib/crash-context.ts";
 import {
 	DASHBOARDS_HOME_BUTTON_ID,
@@ -98,6 +103,10 @@ import { DESKTOP_HOTKEYS } from "@/src/lib/hotkeys/actions.ts";
 import { coreKvHotkeyStorage } from "@/src/lib/hotkeys/storage.ts";
 import { onboardingInitialTab } from "@/src/lib/onboarding-navigation.ts";
 import { useProductMode } from "@/src/lib/product-mode.ts";
+import {
+	isDetachedTabWindow,
+	readTabTransfer,
+} from "@/src/lib/tab-transfer.ts";
 import { windowChromeLayout } from "@/src/lib/window-chrome-layout.ts";
 import { useLiveActivities } from "@/src/live/useLiveActivities.ts";
 import { useAssistantStore } from "@/src/store/useAssistantStore.ts";
@@ -266,7 +275,8 @@ function LayoutContent({
 }: LayoutContentProps) {
 	const productMode = useProductMode();
 	const botProduct = productMode === "bot";
-	const osProduct = productMode === "os";
+	const detachedWindow = isDetachedTabWindow();
+	const osProduct = productMode === "os" && !detachedWindow;
 	const activeNode = useActiveNode();
 	const { canSwitchToConsole } = useConsoleAccess(activeNode);
 	const { canUpdateDesktopApp } = useAppSurface();
@@ -318,6 +328,10 @@ function LayoutContent({
 	// live Inbox feed. Distinct from the broadcast stream above (Core filters
 	// user-targeted pings out of /api/events/all), so the two never double-toast.
 	useNotificationEvents();
+
+	// App-wide subscription to agent/app shell navigation requests. Only the main
+	// window consumes them; tear-off and companion windows stay independent.
+	useNavigationEvents();
 
 	// Opt-in plugin host for chats that were interrupted by a Wi-Fi/LAN or node
 	// outage. The hook stays app-wide so background tabs are included; its feature
@@ -723,6 +737,9 @@ function LayoutContent({
 	useHotkey("chat.toggle-right-panel", () => {
 		useChatHotkeyTargets.getState().toggleRightPanel?.();
 	});
+	useHotkey("chat.search", () => {
+		useChatHotkeyTargets.getState().toggleSearch?.();
+	});
 	// The floating Ryu chat. `open("floating")` explicitly, never the bare
 	// `open()`: that restores the LAST layout, and when that was `sidebar` the
 	// AssistantDock renders nothing — the key would look broken.
@@ -775,6 +792,7 @@ function LayoutContent({
 
 	return (
 		<TabDndProvider>
+			<LoginApprovalEvents />
 			{!(botProduct || osProduct) && <CommandPalette />}
 			{/* One instance for every split menu that offers "Save layout as
 			    preset" — a context menu unmounts on click, so it cannot host its
@@ -784,13 +802,13 @@ function LayoutContent({
 			<MediaPipDock />
 			<PrivacyDisclosure />
 			{!(botProduct || osProduct) && <SupportAccessBanner />}
-			{!(botProduct || osProduct) && <NodeUnreachableBanner />}
+			<ConnectionStatusToast />
 			{!osProduct && <ReconnectRetryBanner state={reconnectRetryState} />}
 			{/* Mounted app-wide, not per-page: Safe Mode changes what the whole node
 			    loads, and a missing app must be explained wherever the user notices
 			    it is missing. */}
 			{!(botProduct || osProduct) && <SafeModeBanner />}
-			{!osProduct && (
+			{!osProduct && (!detachedWindow || sidebarShown) && (
 				<AppSidebar
 					activeConversationId={activeConversationId}
 					onDeleteConversation={handleDeleteConversation}
@@ -844,7 +862,7 @@ function LayoutContent({
 			    equivalent, and a 288px panel pinned over a 375px viewport would just
 			    shadow the Sheet that `<AppSidebar>` already renders at this width —
 			    so the whole hand-rolled float stands down on mobile. */}
-			{!(open || isMobile) && (
+			{!(open || isMobile || detachedWindow) && (
 				<div
 					className="fixed top-0 left-0 z-50 h-full"
 					style={{ pointerEvents: "none", width: `${sidebarWidth + 16}px` }}
@@ -1073,6 +1091,10 @@ function getSavedSidebarWidth(): number {
     conversation/node instead of a blank chat. Read once at mount. */
 function readInitialTab(): InitialTab | undefined {
 	try {
+		const transfer = readTabTransfer();
+		if (transfer) {
+			return { ...transfer.tab, node: transfer.node, transfer };
+		}
 		const p = new URLSearchParams(window.location.search);
 		if (p.get("window") !== "tab") {
 			return undefined;
@@ -1090,6 +1112,7 @@ function readInitialTab(): InitialTab | undefined {
 
 export default function Layout() {
 	const { nativeWindowChrome } = useAppSurface();
+	const availability = useUserAvailability();
 	const location = useLocation();
 	const botProduct = useProductMode() === "bot";
 	const appRouteInitialTab =
@@ -1098,9 +1121,11 @@ export default function Layout() {
 			? { path: location.pathname }
 			: undefined;
 	const initialTabRef = useRef(
-		botProduct
-			? { path: "/chat", title: "New chat" }
-			: (readInitialTab() ??
+		readTabTransfer()
+			? readInitialTab()
+			: botProduct
+				? { path: "/chat", title: "New chat" }
+				: (readInitialTab() ??
 					appRouteInitialTab ??
 					onboardingInitialTab(location.state))
 	);
@@ -1123,41 +1148,46 @@ export default function Layout() {
 	}, []);
 
 	return (
-		<TooltipProvider delay={0}>
-			<ChatDisplayPrefs>
-				<TabsProvider initialTab={initialTabRef.current}>
-					<TitleBarProvider>
-						<SidebarProvider
-							style={
-								{
-									"--sidebar-width": `${sidebarWidth}px`,
-								} as React.CSSProperties
-							}
-						>
-							<ChatHistoryProvider>
-								<SpacesProvider>
-									<SystemStatusProvider>
-										<HotkeysProvider
-											registry={DESKTOP_HOTKEYS}
-											storage={coreKvHotkeyStorage}
-										>
-											<DesktopReportHost>
-												<ProjectDockHost>
-													<LayoutContent
-														nativeWindowChrome={nativeWindowChrome}
-														onSidebarWidthChange={handleSidebarWidthChange}
-														sidebarWidth={sidebarWidth}
-													/>
-												</ProjectDockHost>
-											</DesktopReportHost>
-										</HotkeysProvider>
-									</SystemStatusProvider>
-								</SpacesProvider>
-							</ChatHistoryProvider>
-						</SidebarProvider>
-					</TitleBarProvider>
-				</TabsProvider>
-			</ChatDisplayPrefs>
-		</TooltipProvider>
+		<AgentAvailabilityProvider status={availability.status}>
+			<TooltipProvider delay={0}>
+				<ChatDisplayPrefs>
+					<TabsProvider initialTab={initialTabRef.current}>
+						<SkillDistributionProvider>
+							<TitleBarProvider>
+								<SidebarProvider
+									defaultOpen={!isDetachedTabWindow()}
+									style={
+										{
+											"--sidebar-width": `${sidebarWidth}px`,
+										} as React.CSSProperties
+									}
+								>
+									<ChatHistoryProvider>
+										<SpacesProvider>
+											<SystemStatusProvider>
+												<HotkeysProvider
+													registry={DESKTOP_HOTKEYS}
+													storage={coreKvHotkeyStorage}
+												>
+													<DesktopReportHost>
+														<ProjectDockHost>
+															<LayoutContent
+																nativeWindowChrome={nativeWindowChrome}
+																onSidebarWidthChange={handleSidebarWidthChange}
+																sidebarWidth={sidebarWidth}
+															/>
+														</ProjectDockHost>
+													</DesktopReportHost>
+												</HotkeysProvider>
+											</SystemStatusProvider>
+										</SpacesProvider>
+									</ChatHistoryProvider>
+								</SidebarProvider>
+							</TitleBarProvider>
+						</SkillDistributionProvider>
+					</TabsProvider>
+				</ChatDisplayPrefs>
+			</TooltipProvider>
+		</AgentAvailabilityProvider>
 	);
 }

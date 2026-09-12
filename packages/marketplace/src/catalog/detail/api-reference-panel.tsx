@@ -115,7 +115,7 @@ function ContributionList({ items }: { items: CatalogContribution[] }) {
 						</p>
 					) : null}
 					{item.name ? null : (
-						<p className="mt-0.5 text-amber-600 text-xs dark:text-amber-500">
+						<p className="mt-0.5 text-status-warning text-xs">
 							Declared but not shipped by this plugin.
 						</p>
 					)}
@@ -186,7 +186,7 @@ function SidecarList({ sidecars }: { sidecars: CatalogSidecar[] }) {
 									className="flex items-baseline gap-2 text-xs"
 									key={`${sidecar.name}:${route.path}`}
 								>
-									<span className="shrink-0 font-mono font-semibold text-muted-foreground">
+									<span className="shrink-0 font-medium font-mono text-muted-foreground">
 										{(route.methods ?? ["ANY"]).join("/")}
 									</span>
 									<code className="min-w-0 flex-1 truncate font-mono">
@@ -196,7 +196,7 @@ function SidecarList({ sidecars }: { sidecars: CatalogSidecar[] }) {
 										<span
 											className={
 												route.auth === "none" || route.auth === "public"
-													? "shrink-0 text-amber-600 dark:text-amber-500"
+													? "shrink-0 text-status-warning"
 													: "shrink-0 text-muted-foreground"
 											}
 										>

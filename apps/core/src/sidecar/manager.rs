@@ -449,6 +449,11 @@ impl SidecarManager {
         if !is_local_engine(name) {
             return Err(anyhow::anyhow!("'{name}' is not a local engine"));
         }
+        // Reject unsupported engines before stopping or replacing the resident.
+        // A stale installation marker from another machine must not bypass this.
+        if !crate::catalog::registry::supported_on_node(name) {
+            return Err(anyhow::anyhow!("'{name}' is not supported on this node"));
+        }
         if !self.sidecars.contains_key(name) {
             return Err(anyhow::anyhow!("unknown sidecar: {name}"));
         }
@@ -558,6 +563,8 @@ impl SidecarManager {
             .map(|(n, s)| (n.clone(), Arc::clone(s)))
             .collect();
         for (name, sidecar) in dynamic {
+            let lock = self.start_lock_for(&name);
+            let _guard = lock.lock().await;
             if let Err(e) = sidecar.stop().await {
                 tracing::warn!("error stopping manifest sidecar {name}: {e}");
             }
@@ -572,20 +579,22 @@ impl SidecarManager {
     ///
     /// Unlike [`start_sidecar`], this does NOT consult `SetupManager::is_installed`
     /// — a manifest sidecar self-installs on `start()` (it downloads its binary /
-    /// provisions its venv). Idempotent: if the same name is already registered and
-    /// running, it is a no-op (so the boot pass and a later enable don't double-spawn).
+    /// provisions its venv). Idempotent: if the same name is already registered, the
+    /// callers converge on that lifecycle owner (so the boot pass and a later enable
+    /// don't replace an in-flight sidecar or double-spawn).
     pub async fn register_and_start(
         self: &Arc<Self>,
         sidecar: Arc<dyn Sidecar>,
     ) -> anyhow::Result<()> {
         let name = sidecar.name().to_string();
-        // Register (claim port + insert). Idempotent: already-running → no-op.
-        if self.register_inner(&sidecar, false)? {
-            return Ok(());
-        }
-        // Start + monitor, serialized by the per-name start lock so a concurrent
-        // enable / first-proxy-wake of the same name cannot double-start the child.
-        self.start_dynamic_locked(&name).await
+        // Hold the per-name lock across registration AND start. Registering before
+        // taking it left a small but real enable/reconcile window in which two
+        // callers could each observe a not-yet-running name and then start their
+        // own process. The lock is now the complete lifecycle admission boundary.
+        let lock = self.start_lock_for(&name);
+        let _guard = lock.lock().await;
+        self.register_inner(&sidecar, false)?;
+        self.start_dynamic_unlocked(&name).await
     }
 
     /// **Register-only** (the lazy / spawn-on-first-use half): claim the port and
@@ -604,15 +613,24 @@ impl SidecarManager {
 
     /// Shared register step for [`register_and_start`] (eager) and [`register`]
     /// (lazy). Claims the port, inserts into `dynamic`, and records/clears the lazy
-    /// mark. Returns `Ok(true)` when the sidecar was already registered AND running
-    /// (the caller short-circuits — nothing to start). Never starts the process.
+    /// mark. Returns `Ok(true)` when the name was already registered, regardless of
+    /// whether its first start is still in flight. Never starts the process.
     fn register_inner(&self, sidecar: &Arc<dyn Sidecar>, lazy: bool) -> anyhow::Result<bool> {
         let name = sidecar.name().to_string();
-        // Idempotency: already registered and running → no-op (port claim already held).
-        if let Some(existing) = self.dynamic.read().unwrap().get(&name) {
-            if existing.is_running() {
-                return Ok(true);
+        // Idempotency: a name is the lifecycle identity. Do not replace an existing
+        // sidecar while its first start is in flight: the start lock below serializes
+        // the process transition, but replacing the value in `dynamic` would let the
+        // first caller start the old object and the next caller start the replacement,
+        // leaving two children bound to the same declared port.
+        let already_registered = self.dynamic.read().unwrap().contains_key(&name);
+        if already_registered {
+            let mut set = self.lazy_registered.write().unwrap();
+            if lazy {
+                set.insert(name.clone());
+            } else {
+                set.remove(&name);
             }
+            return Ok(true);
         }
         // Port registry: claim the declared port BEFORE inserting, so a collision
         // with a built-in (already bound) or another plugin fails fast. Idempotent
@@ -692,6 +710,14 @@ impl SidecarManager {
     async fn start_dynamic_locked(self: &Arc<Self>, name: &str) -> anyhow::Result<()> {
         let lock = self.start_lock_for(name);
         let _guard = lock.lock().await;
+        self.start_dynamic_unlocked(name).await
+    }
+
+    /// Start the already-registered dynamic sidecar while its per-name start lock
+    /// is held by the caller. Keeping this as a separate helper lets
+    /// [`Self::register_and_start`] cover registration and start with one lock
+    /// acquisition, so no duplicate child can be admitted between the two steps.
+    async fn start_dynamic_unlocked(self: &Arc<Self>, name: &str) -> anyhow::Result<()> {
         let Some(sidecar) = self.dynamic.read().unwrap().get(name).map(Arc::clone) else {
             return Ok(());
         };
@@ -748,6 +774,14 @@ impl SidecarManager {
     /// registry — the counterpart of [`register_and_start`], called on
     /// plugin-disable. Cancels its health monitor first. A no-op for an unknown name.
     pub async fn stop_and_deregister(self: &Arc<Self>, name: &str) -> anyhow::Result<()> {
+        // Keep the lifecycle lock for the complete removal + stop transition. A
+        // concurrent wake/restart must not observe a half-removed entry, create a
+        // new lock, and re-register the old sidecar while its process is still
+        // stopping. The lock entry is intentionally retained after deregistration:
+        // deleting it while another caller can obtain the old Arc would recreate
+        // the exact race this guard closes.
+        let lock = self.start_lock_for(name);
+        let _guard = lock.lock().await;
         if let Some(handle) = self.health_monitors.lock().unwrap().remove(name) {
             handle.abort();
         }
@@ -761,11 +795,12 @@ impl SidecarManager {
         // registration, so keeping the reason would make a disabled app read as a
         // failing one forever (and `start()` — the other clear — never runs again).
         crate::sidecar::manifest_sidecar::clear_crash_reason(name);
-        // Drop the idle/lazy/start-lock bookkeeping so a re-enable starts clean and
-        // a stale idle clock can't fire against a name that no longer exists.
+        // Drop idle/lazy/activity bookkeeping so a re-enable starts clean and a
+        // stale idle clock can't fire against a name that no longer exists. Keep
+        // the per-name lifecycle lock permanently: it is the identity boundary
+        // that prevents a later re-enable from racing with this stop transition.
         self.lazy_registered.write().unwrap().remove(name);
         self.idle_overrides.lock().unwrap().remove(name);
-        self.start_locks.lock().unwrap().remove(name);
         self.activity.lock().unwrap().remove(name);
         if let Some(sc) = sidecar {
             sc.stop().await?;
@@ -805,6 +840,8 @@ impl SidecarManager {
             self.spawn_health_monitor(name);
             return Ok(());
         }
+        let lock = self.start_lock_for(name);
+        let _guard = lock.lock().await;
         let Some(sidecar) = self.dynamic.read().unwrap().get(name).map(Arc::clone) else {
             return Ok(());
         };
@@ -819,7 +856,7 @@ impl SidecarManager {
         // be a silent no-op.
         sidecar.stop().await?;
         self.register_inner(&sidecar, was_lazy)?;
-        self.start_dynamic_locked(name).await
+        self.start_dynamic_unlocked(name).await
     }
 
     /// Mark a sidecar as installed so `start_sidecar` / `start_all` will run it.
@@ -1580,6 +1617,79 @@ mod tests {
     use crate::sidecar::BoxFuture;
     use std::sync::atomic::{AtomicBool, Ordering};
 
+    #[tokio::test]
+    async fn freetoken_unsupported_engine_swap_preserves_resident_selection() {
+        let manager = SidecarManager::new_noop();
+        *manager.active_engine.lock().await = Some("llamacpp".to_owned());
+        let unsupported = if crate::catalog::registry::supported_on_node("freetoken") {
+            "mlx"
+        } else {
+            "freetoken"
+        };
+        let error = manager.set_active_local_engine(unsupported).await.unwrap_err();
+        assert!(error.to_string().contains("not supported on this node"));
+        assert_eq!(manager.active_engine.lock().await.as_deref(), Some("llamacpp"));
+    }
+
+    #[tokio::test]
+    async fn typed_team_client_never_dials_a_refused_or_stopped_sidecar() {
+        let manager = SidecarManager::new_noop();
+        let name = "@ryu/teams/ryu-teams";
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let client = crate::teams_client::TeamsClient::new(Arc::clone(&manager));
+        assert!(manager
+            .register_and_start(FakeSidecar::with_port(name, port))
+            .await
+            .is_err());
+        assert!(client
+            .get("test-team")
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("not registered"));
+        assert_eq!(
+            listener.accept().unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+
+        drop(listener);
+        let sidecar = FakeSidecar::with_port(name, port);
+        manager.register_and_start(sidecar.clone()).await.unwrap();
+        // The same client now resolves the live registration instead of retaining
+        // its initial unavailable state or a manifest port.
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", port))
+            .await
+            .unwrap();
+        let server = tokio::spawn(async move {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = [0u8; 4096];
+            let read = stream.read(&mut request).await.unwrap();
+            assert!(
+                String::from_utf8_lossy(&request[..read]).starts_with("GET /api/teams/test-team ")
+            );
+            let body = r#"{"team":{"id":"test-team","name":"Test","members":[],"coordination":"broadcast"}}"#;
+            stream.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
+            listener
+        });
+        let team = tokio::time::timeout(Duration::from_secs(5), client.get("test-team"))
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(team.id, "test-team");
+        let listener = server.await.unwrap();
+        sidecar.running.store(false, Ordering::SeqCst);
+        assert!(client.get("test-team").await.is_err());
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), listener.accept())
+                .await
+                .is_err()
+        );
+    }
+
     /// A minimal in-memory [`Sidecar`] for exercising the runtime-registration
     /// (dynamic) path without a real process, download, or network.
     struct FakeSidecar {
@@ -1685,6 +1795,35 @@ mod tests {
                 .all(|s| s.name != "com.acme.tool/engine"),
             "deregistered sidecar must be gone from statuses"
         );
+    }
+
+    /// A register-only sidecar remains the lifecycle owner while its first start is
+    /// pending. A later eager registration for the same name must start that original
+    /// object, not replace it and leave two callers able to spawn children for one
+    /// declared port (the boot-reconcile versus enable race).
+    #[tokio::test]
+    async fn eager_registration_does_not_replace_a_registered_sidecar() {
+        let mgr = SidecarManager::new_noop();
+        let first = FakeSidecar::new("com.acme.race/engine");
+        let replacement = FakeSidecar::new("com.acme.race/engine");
+
+        mgr.register(first.clone()).unwrap();
+        mgr.register_and_start(replacement.clone()).await.unwrap();
+
+        assert!(
+            first.is_running(),
+            "the original registration must be started"
+        );
+        assert!(
+            !replacement.is_running(),
+            "a duplicate registration must not replace the lifecycle owner"
+        );
+        assert_eq!(first.start_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(replacement.start_calls.load(Ordering::SeqCst), 0);
+
+        mgr.stop_and_deregister("com.acme.race/engine")
+            .await
+            .unwrap();
     }
 
     /// A [`Sidecar`] backed by a REAL [`crate::sidecar::process::ProcessHandle`].

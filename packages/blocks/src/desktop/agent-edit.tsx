@@ -102,10 +102,16 @@ import {
 
 // ── Memory / Spaces slot (live) ────────────────────────────────────────────────
 
-/** The three memory scope levels an agent may recall from. Leaving all three
- * unchecked means "all levels" — the back-compat default Core applies for
- * agents configured before this slot existed. */
+/** The five memory scope levels an agent may recall from. Leaving all personal
+ * levels unchecked means "all personal levels" — the back-compat default Core
+ * applies for agents configured before this slot existed. Organization memory
+ * stays explicit because it is shared with every member of the organization. */
 const MEMORY_READ_LEVELS: { hint: string; label: string; value: string }[] = [
+	{
+		value: "agent",
+		label: "Agent",
+		hint: "Memories scoped to this agent.",
+	},
 	{
 		value: "user",
 		label: "User",
@@ -120,6 +126,11 @@ const MEMORY_READ_LEVELS: { hint: string; label: string; value: string }[] = [
 		value: "project",
 		label: "Project",
 		hint: "Memories scoped to the active project.",
+	},
+	{
+		value: "org",
+		label: "Organization",
+		hint: "Memories shared across this organization.",
 	},
 ];
 
@@ -199,7 +210,7 @@ export function MemorySpacesCard({
 					<span className="font-medium text-sm">Memory levels</span>
 					<p className="text-muted-foreground text-xs">
 						Which memory scopes this agent may recall from. Leave all unchecked
-						to allow all three levels.
+						to allow all personal levels (agent, user, node, and project).
 					</p>
 					<div className="flex flex-col gap-2">
 						{MEMORY_READ_LEVELS.map((level) => {
@@ -330,7 +341,7 @@ export function AgentPreviewCard({
 					<RyuLogo className="text-foreground" size="24px" variant="outline" />
 				</div>
 				<div className="flex min-w-0 flex-col">
-					<span className="truncate font-semibold text-base leading-tight">
+					<span className="truncate font-medium text-base leading-tight">
 						{heading}
 					</span>
 					<span className="truncate text-muted-foreground text-xs">
@@ -654,7 +665,7 @@ function CredentialHint({ meta }: { meta: PiProviderMeta }) {
 		return (
 			<span className="flex items-center gap-1 text-muted-foreground text-xs">
 				<HugeiconsIcon
-					className="size-3 text-emerald-500"
+					className="size-3 text-status-success"
 					icon={CheckmarkBadge04Icon}
 				/>
 				Credential configured
@@ -781,7 +792,7 @@ function PiModelPicker({
 			/>
 			<PopoverContent
 				align="start"
-				className="w-[min(300px,var(--radix-popover-content-available-width))] p-0"
+				className="w-[min(300px,var(--available-width))] p-0"
 			>
 				<div className="flex max-h-80 flex-col">
 					<div className="sticky top-0 z-10">
@@ -865,7 +876,7 @@ export function RyuPiConfigView({
 	}
 	if (error) {
 		return (
-			<div className="rounded-lg border border-destructive/40 bg-destructive/5 p-4 text-destructive text-sm">
+			<div className="rounded-lg border border-destructive/40 bg-destructive/5 p-4 text-sm text-status-destructive">
 				Failed to load Pi configuration: {error}
 			</div>
 		);
@@ -987,7 +998,7 @@ export function RyuPiConfigView({
 				) : null}
 
 				{saveError ? (
-					<p className="text-destructive text-xs">{saveError}</p>
+					<p className="text-status-destructive text-xs">{saveError}</p>
 				) : null}
 				<div className="flex items-center gap-3">
 					<Button
@@ -999,7 +1010,7 @@ export function RyuPiConfigView({
 						Save Pi config
 					</Button>
 					{saved && !saving ? (
-						<span className="flex items-center gap-1 text-emerald-500 text-xs">
+						<span className="flex items-center gap-1 text-status-success text-xs">
 							<HugeiconsIcon className="size-3" icon={CheckmarkBadge04Icon} />
 							Saved
 						</span>
@@ -1061,7 +1072,7 @@ export function AgentByoaView({
 					</div>
 				) : null}
 				{!loading && error ? (
-					<p className="text-destructive text-xs">{error}</p>
+					<p className="text-status-destructive text-xs">{error}</p>
 				) : null}
 				{loading || error ? null : (
 					<div className="flex flex-col gap-3">
@@ -1082,7 +1093,7 @@ export function AgentByoaView({
 									>
 										{copied === "url" ? (
 											<HugeiconsIcon
-												className="size-3 text-green-600"
+												className="size-3 text-status-success"
 												icon={Tick01Icon}
 											/>
 										) : (
@@ -1108,7 +1119,7 @@ export function AgentByoaView({
 							<div className="flex flex-col gap-1.5">
 								<Label className="flex items-center gap-1 text-xs">
 									Gateway API key
-									<span className="rounded bg-amber-100 px-1 text-[10px] text-amber-700 dark:bg-amber-900/30 dark:text-amber-400">
+									<span className="rounded bg-warning/10 px-1 text-[10px] text-status-warning dark:bg-warning/30">
 										Copy now — not shown again
 									</span>
 								</Label>
@@ -1126,7 +1137,7 @@ export function AgentByoaView({
 									>
 										{copied === "key" ? (
 											<HugeiconsIcon
-												className="size-3 text-green-600"
+												className="size-3 text-status-success"
 												icon={Tick01Icon}
 											/>
 										) : (
@@ -1276,7 +1287,7 @@ export function AgentIntegrationsView({
 							{copied ? (
 								<HugeiconsIcon
 									aria-hidden="true"
-									className="size-3 text-green-600"
+									className="size-3 text-status-success"
 									icon={Tick01Icon}
 								/>
 							) : (
@@ -1476,7 +1487,7 @@ function EvalStatCard({ label, value, tone }: EvalStat) {
 			<span className="text-[10px] text-muted-foreground uppercase tracking-wide">
 				{label}
 			</span>
-			<span className={`font-semibold text-sm ${tone ?? ""}`}>{value}</span>
+			<span className={`font-medium text-sm ${tone ?? ""}`}>{value}</span>
 		</div>
 	);
 }
@@ -1527,7 +1538,7 @@ export function AgentEvalsView({
 					</div>
 
 					{runError ? (
-						<p className="text-destructive text-xs">{runError}</p>
+						<p className="text-status-destructive text-xs">{runError}</p>
 					) : null}
 
 					{catalog ? (
@@ -1814,6 +1825,10 @@ export interface AgentSettingsFormProps {
 	formError?: string | null;
 	/** Injected: generic GatewayRoutingConfig for BYO/other ACP agents. */
 	gatewayRoutingConfig?: ReactNode;
+	/** Compact health grade shown in the agent profile header. */
+	healthBadge?: ReactNode;
+	/** Injected deterministic configuration health scorecard. */
+	healthPanel?: ReactNode;
 	/** Injected: the per-agent run-history view (chats + automated runs),
 	 *  rendered as its own tab. Omit to hide the tab. */
 	historyPanel?: ReactNode;
@@ -1833,8 +1848,9 @@ export interface AgentSettingsFormProps {
 	launchConfig?: ReactNode;
 
 	// Memory / Spaces slot
-	/** Memory scope levels the agent may recall from (subset of user/node/project).
-	 * Empty = all three levels (the back-compat default). */
+	/** Memory scope levels the agent may recall from (subset of
+	 * agent/user/node/project/org). Empty = all personal levels (the back-compat
+	 * default); organization memory must be explicit. */
 	memoryReadLevels: Set<string>;
 	/** Space IDs the agent may read for retrieval. Empty = no Spaces injected. */
 	memorySpaceIds: Set<string>;
@@ -1882,6 +1898,9 @@ export interface AgentSettingsFormProps {
 	onTriggerSlugChange?: (v: string) => void;
 	onWeeklyDayChange?: (v: string) => void;
 	onWeeklyTimeChange?: (v: string) => void;
+	/** Injected: the traceable identity + activity ledger for this agent,
+	 *  rendered as its own tab beside run history. */
+	passportPanel?: ReactNode;
 
 	// Persona
 	personaDisplayName: string;
@@ -1898,6 +1917,9 @@ export interface AgentSettingsFormProps {
 	/** Injected: the Prompt Studio editor, rendered as its own tab. Omit to hide
 	 *  the tab (e.g. for brand-new agents that have no record yet). */
 	promptStudioPanel?: ReactNode;
+
+	/** Injected: persistent agent routines with run destinations and controls. */
+	routinesPanel?: ReactNode;
 
 	// Rules
 	rules: string[];
@@ -2011,7 +2033,7 @@ function DitherLayer({ className }: { className?: string }) {
 function ProfileStat({ label, value }: { label: string; value: ReactNode }) {
 	return (
 		<span className="inline-flex items-baseline gap-1 text-sm">
-			<span className="font-semibold text-foreground">{value}</span>
+			<span className="font-medium text-foreground">{value}</span>
 			<span className="text-muted-foreground">{label}</span>
 		</span>
 	);
@@ -2025,6 +2047,7 @@ function ProfileHeader({
 	bannerDirection,
 	builtIn,
 	description,
+	healthBadge,
 	isNew,
 	isLocked,
 	modelLabel,
@@ -2048,6 +2071,7 @@ function ProfileHeader({
 	builtIn: boolean;
 	agentTitle: string;
 	description?: string;
+	healthBadge?: ReactNode;
 	isNew: boolean;
 	isLocked: boolean;
 	modelLabel: string;
@@ -2149,7 +2173,7 @@ function ProfileHeader({
 							Name
 						</Label>
 						<Input
-							className="h-auto border-0 bg-transparent px-0 font-bold text-2xl shadow-none focus-visible:ring-0"
+							className="h-auto border-0 bg-transparent px-0 font-medium text-2xl shadow-none focus-visible:ring-0"
 							disabled={isLocked}
 							id="agent-name"
 							onChange={(e) => onNameChange?.(e.target.value)}
@@ -2195,6 +2219,7 @@ function ProfileHeader({
 						<ProfileStat label="tools" value={selectedTools.size} />
 						<ProfileStat label="skills" value={selectedSkills.size} />
 						<ProfileStat label="status" value={builtIn ? "Core" : "Custom"} />
+						{healthBadge}
 						{isLocked ? (
 							<Badge className="gap-1" variant="secondary">
 								<HugeiconsIcon className="size-3" icon={LockedIcon} />
@@ -2230,6 +2255,10 @@ export function AgentSettingsForm(props: AgentSettingsFormProps) {
 		evalsPanel,
 		calendarPanel,
 		historyPanel,
+		healthPanel,
+		healthBadge,
+		passportPanel,
+		routinesPanel,
 		systemPrompt,
 		onOpenPromptStudio,
 		rules,
@@ -2332,7 +2361,7 @@ export function AgentSettingsForm(props: AgentSettingsFormProps) {
 	const [activeTab, setActiveTab] = useState<AgentSettingsTab>(
 		initialTab ?? "behavior"
 	);
-	// Sixty-odd settings behind eight pills: the same "which tab is it under"
+	// Sixty-odd settings behind nine pills: the same "which tab is it under"
 	// problem the settings dialogs already solved with a row-level index. Same
 	// answer here — `agent-settings-search.ts` indexes the ROWS, and picking a hit
 	// switches to its tab and flashes it.
@@ -2366,6 +2395,9 @@ export function AgentSettingsForm(props: AgentSettingsFormProps) {
 		engineOptions.find((option) => option.id === chatModel)?.label ?? chatModel;
 	const hasMergedSetup = Boolean(agentSetupComposer);
 	const showStandaloneModelPanel = showModelPanel && !hasMergedSetup;
+	const guidedStepCount =
+		(hasMergedSetup ? 3 : showStandaloneModelPanel ? 4 : 3) +
+		(healthPanel ? 1 : 0);
 
 	// ── Panels ───────────────────────────────────────────────────────────────────
 	// Each panel is built once and then placed twice: into the tab strip below
@@ -2470,130 +2502,132 @@ export function AgentSettingsForm(props: AgentSettingsFormProps) {
 	const triggersPanel = (
 		<>
 			{/* 3. Trigger — schedule + Composio event triggers */}
-			<SettingsSection
-				caption="Run this agent automatically on a schedule."
-				title="Schedule"
-			>
-				<SettingsGroup>
-					<SettingsItem
-						actions={
-							<Switch
-								checked={scheduleEnabled}
-								disabled={isLocked}
-								id="schedule-toggle"
-								onCheckedChange={onScheduleEnabledChange}
+			{routinesPanel ?? (
+				<SettingsSection
+					caption="Run this agent automatically on a schedule."
+					title="Schedule"
+				>
+					<SettingsGroup>
+						<SettingsItem
+							actions={
+								<Switch
+									checked={scheduleEnabled}
+									disabled={isLocked}
+									id="schedule-toggle"
+									onCheckedChange={onScheduleEnabledChange}
+								/>
+							}
+							title="Run on a schedule"
+						/>
+						{scheduleEnabled ? (
+							<SettingsItem
+								actions={
+									<Select
+										disabled={isLocked}
+										items={SCHEDULE_PHRASE_ITEMS}
+										onValueChange={(v) => onSchedulePhraseChange?.(v ?? "")}
+										value={schedulePhrase}
+									>
+										<SelectTrigger
+											className="h-8 w-44 flex-shrink-0 text-sm"
+											id="schedule-phrase"
+										>
+											<SelectValue />
+										</SelectTrigger>
+										<SelectContent>
+											{SCHEDULE_PHRASE_ITEMS.map((opt) => (
+												<SelectItem key={opt.value} value={opt.value}>
+													{opt.label}
+												</SelectItem>
+											))}
+										</SelectContent>
+									</Select>
+								}
+								title="Frequency"
 							/>
-						}
-						title="Run on a schedule"
-					/>
-					{scheduleEnabled ? (
-						<SettingsItem
-							actions={
-								<Select
-									disabled={isLocked}
-									items={SCHEDULE_PHRASE_ITEMS}
-									onValueChange={(v) => onSchedulePhraseChange?.(v ?? "")}
-									value={schedulePhrase}
-								>
-									<SelectTrigger
-										className="h-8 w-44 flex-shrink-0 text-sm"
-										id="schedule-phrase"
+						) : null}
+						{scheduleEnabled && showTimeField ? (
+							<SettingsItem
+								actions={
+									<Input
+										aria-label="Time"
+										className="h-8 w-32"
+										disabled={isLocked}
+										id="daily-time"
+										onChange={(e) => onDailyTimeChange?.(e.target.value)}
+										type="time"
+										value={dailyTime}
+									/>
+								}
+								title="Time"
+							/>
+						) : null}
+						{scheduleEnabled && schedulePhrase === "weekly" ? (
+							<SettingsItem
+								actions={
+									<Select
+										disabled={isLocked}
+										items={WEEKDAYS.map((d) => ({
+											value: d,
+											label: d.charAt(0).toUpperCase() + d.slice(1),
+										}))}
+										onValueChange={(v) => onWeeklyDayChange?.(v ?? "")}
+										value={weeklyDay}
 									>
-										<SelectValue />
-									</SelectTrigger>
-									<SelectContent>
-										{SCHEDULE_PHRASE_ITEMS.map((opt) => (
-											<SelectItem key={opt.value} value={opt.value}>
-												{opt.label}
-											</SelectItem>
-										))}
-									</SelectContent>
-								</Select>
-							}
-							title="Frequency"
-						/>
-					) : null}
-					{scheduleEnabled && showTimeField ? (
-						<SettingsItem
-							actions={
-								<Input
-									aria-label="Time"
-									className="h-8 w-32"
-									disabled={isLocked}
-									id="daily-time"
-									onChange={(e) => onDailyTimeChange?.(e.target.value)}
-									type="time"
-									value={dailyTime}
-								/>
-							}
-							title="Time"
-						/>
-					) : null}
-					{scheduleEnabled && schedulePhrase === "weekly" ? (
-						<SettingsItem
-							actions={
-								<Select
-									disabled={isLocked}
-									items={WEEKDAYS.map((d) => ({
-										value: d,
-										label: d.charAt(0).toUpperCase() + d.slice(1),
-									}))}
-									onValueChange={(v) => onWeeklyDayChange?.(v ?? "")}
-									value={weeklyDay}
-								>
-									<SelectTrigger
-										className="h-8 w-36 flex-shrink-0 text-sm"
-										id="weekly-day"
-									>
-										<SelectValue />
-									</SelectTrigger>
-									<SelectContent>
-										{WEEKDAYS.map((d) => (
-											<SelectItem key={d} value={d}>
-												{d.charAt(0).toUpperCase() + d.slice(1)}
-											</SelectItem>
-										))}
-									</SelectContent>
-								</Select>
-							}
-							title="Day"
-						/>
-					) : null}
-					{scheduleEnabled && schedulePhrase === "weekly" ? (
-						<SettingsItem
-							actions={
-								<Input
-									aria-label="Time"
-									className="h-8 w-32"
-									disabled={isLocked}
-									id="weekly-time"
-									onChange={(e) => onWeeklyTimeChange?.(e.target.value)}
-									type="time"
-									value={weeklyTime}
-								/>
-							}
-							title="Time"
-						/>
-					) : null}
-					{scheduleEnabled && schedulePhrase === "custom" ? (
-						<SettingsItem
-							actions={
-								<Input
-									aria-label="Cron expression"
-									className="h-8 w-44 font-mono"
-									disabled={isLocked}
-									id="custom-cron"
-									onChange={(e) => onCustomCronChange?.(e.target.value)}
-									placeholder="e.g. 0 9 * * 1-5"
-									value={customCron}
-								/>
-							}
-							description="Standard 5-field cron: minute hour day month weekday."
-							title="Cron expression"
-						/>
-					) : null}
-				</SettingsGroup>
-			</SettingsSection>
+										<SelectTrigger
+											className="h-8 w-36 flex-shrink-0 text-sm"
+											id="weekly-day"
+										>
+											<SelectValue />
+										</SelectTrigger>
+										<SelectContent>
+											{WEEKDAYS.map((d) => (
+												<SelectItem key={d} value={d}>
+													{d.charAt(0).toUpperCase() + d.slice(1)}
+												</SelectItem>
+											))}
+										</SelectContent>
+									</Select>
+								}
+								title="Day"
+							/>
+						) : null}
+						{scheduleEnabled && schedulePhrase === "weekly" ? (
+							<SettingsItem
+								actions={
+									<Input
+										aria-label="Time"
+										className="h-8 w-32"
+										disabled={isLocked}
+										id="weekly-time"
+										onChange={(e) => onWeeklyTimeChange?.(e.target.value)}
+										type="time"
+										value={weeklyTime}
+									/>
+								}
+								title="Time"
+							/>
+						) : null}
+						{scheduleEnabled && schedulePhrase === "custom" ? (
+							<SettingsItem
+								actions={
+									<Input
+										aria-label="Cron expression"
+										className="h-8 w-44 font-mono"
+										disabled={isLocked}
+										id="custom-cron"
+										onChange={(e) => onCustomCronChange?.(e.target.value)}
+										placeholder="e.g. 0 9 * * 1-5"
+										value={customCron}
+									/>
+								}
+								description="Standard 5-field cron: minute hour day month weekday."
+								title="Cron expression"
+							/>
+						) : null}
+					</SettingsGroup>
+				</SettingsSection>
+			)}
 
 			{showComposioTriggers ? (
 				<SettingsSection
@@ -2671,7 +2705,9 @@ export function AgentSettingsForm(props: AgentSettingsFormProps) {
 									</p>
 								</div>
 								{triggerError ? (
-									<p className="text-destructive text-xs">{triggerError}</p>
+									<p className="text-status-destructive text-xs">
+										{triggerError}
+									</p>
 								) : null}
 								<Button
 									className="self-start"
@@ -3288,6 +3324,13 @@ export function AgentSettingsForm(props: AgentSettingsFormProps) {
 	// already done, so they share one "Activity" tab with an inner strip instead
 	// of spending three pills of the top-level tab bar.
 	const activityViews: { content: ReactNode; id: string; label: string }[] = [];
+	if (passportPanel) {
+		activityViews.push({
+			content: passportPanel,
+			id: "passport",
+			label: "Agent passport",
+		});
+	}
 	if (evalsPanel) {
 		activityViews.push({
 			content: evalsPanel,
@@ -3332,10 +3375,10 @@ export function AgentSettingsForm(props: AgentSettingsFormProps) {
 			</Tabs>
 		) : null;
 
-	// Eight groups, each answering one question a person actually has, with the
+	// Nine groups, each answering one question a person actually has, with the
 	// answer spelled out under the strip. This replaces an eleven-pill row whose
-	// labels (Model · Trigger · Tools · Connections · Integrations · Rules · Instructions ·
-	// Advanced · Prompt Studio · Evals · Calendar · History) gave no hint which
+	// labels (Behavior · Health · Model · Tools & knowledge · Connections · Integrations ·
+	// Triggers · Activity · Advanced) gave no hint which
 	// one held the setting you were looking for.
 	const editorTabs: {
 		content: ReactNode;
@@ -3349,6 +3392,16 @@ export function AgentSettingsForm(props: AgentSettingsFormProps) {
 			id: "behavior",
 			label: "Behavior",
 		},
+		...(healthPanel
+			? [
+					{
+						content: healthPanel,
+						hint: "Common setup checks that update as you edit this agent.",
+						id: "health",
+						label: "Health",
+					},
+				]
+			: []),
 		...(showStandaloneModelPanel
 			? [
 					{
@@ -3445,7 +3498,7 @@ export function AgentSettingsForm(props: AgentSettingsFormProps) {
 	const actions = (
 		<>
 			{formError ? (
-				<p className="text-destructive text-sm">{formError}</p>
+				<p className="text-sm text-status-destructive">{formError}</p>
 			) : null}
 
 			<div className="flex gap-2">
@@ -3483,7 +3536,7 @@ export function AgentSettingsForm(props: AgentSettingsFormProps) {
 	);
 
 	// A brand-new agent starts in the guided flow: four named steps over the same
-	// panels, so nobody has to guess which of seven tabs is mandatory. "Set it up
+	// panels, so nobody has to guess which setup step is mandatory. "Set it up
 	// myself" drops straight into the full editor for anyone who'd rather browse.
 	if (isNew && guided) {
 		return (
@@ -3500,10 +3553,9 @@ export function AgentSettingsForm(props: AgentSettingsFormProps) {
 				}
 				header={
 					<div className="flex flex-col gap-1">
-						<h1 className="font-semibold text-xl">Create an agent</h1>
+						<h1 className="font-medium text-xl">Create an agent</h1>
 						<p className="text-muted-foreground text-sm">
-							{hasMergedSetup ? "Three" : showModelPanel ? "Four" : "Three"}{" "}
-							steps. Nothing here is permanent.
+							{guidedStepCount} steps. Nothing here is permanent.
 						</p>
 					</div>
 				}
@@ -3554,6 +3606,17 @@ export function AgentSettingsForm(props: AgentSettingsFormProps) {
 						label: "Abilities",
 						title: "Choose what it can use",
 					},
+					...(healthPanel
+						? [
+								{
+									content: healthPanel,
+									hint: "Review common setup checks before you create the agent.",
+									id: "health",
+									label: "Health",
+									title: "Check the setup",
+								},
+							]
+						: []),
 				]}
 			/>
 		);
@@ -3625,6 +3688,7 @@ export function AgentSettingsForm(props: AgentSettingsFormProps) {
 					badge={employeeBadge}
 					builtIn={isBuiltIn}
 					description={description}
+					healthBadge={healthBadge}
 					isLocked={isLocked}
 					isNew={isNew}
 					modelLabel={modelLabel}
@@ -3705,7 +3769,7 @@ export function AgentPromptStudioView({
 		<div className="mx-auto flex max-w-2xl flex-col gap-6">
 			{editor ?? (
 				<section className="flex flex-col gap-2">
-					<h2 className="font-semibold text-base">Prompt Studio</h2>
+					<h2 className="font-medium text-base">Prompt Studio</h2>
 					<p className="text-muted-foreground text-xs">
 						PlateJS markdown editor for the system prompt.
 					</p>
@@ -3716,7 +3780,7 @@ export function AgentPromptStudioView({
 			)}
 
 			{formError ? (
-				<p className="text-destructive text-sm">{formError}</p>
+				<p className="text-sm text-status-destructive">{formError}</p>
 			) : null}
 
 			<div className="flex gap-2">

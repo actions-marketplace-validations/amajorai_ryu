@@ -348,6 +348,9 @@ impl UsageSnapshot {
 enum Engine {
     Claude,
     Codex,
+    /// Native ChatGPT-account provider. It uses the ChatGPT account usage
+    /// surface, but remains distinct from the Codex provider in the client/UI.
+    ChatGpt,
     Copilot,
     Grok,
     /// Z.ai's GLM Coding Plan (`acp:glm`).
@@ -403,6 +406,9 @@ const ENGINE_SUBSTRINGS: &[(&str, Engine)] = &[
 /// for agents with no readable subscription window.
 fn engine_for_agent(agent_id: &str) -> Option<Engine> {
     let id = agent_id.trim().to_ascii_lowercase();
+    if id == "chatgpt" {
+        return Some(Engine::ChatGpt);
+    }
     if let Some((_, engine)) = AGENT_ENGINES.iter().find(|(candidate, _)| *candidate == id) {
         return Some(*engine);
     }
@@ -421,6 +427,11 @@ pub async fn fetch_usage(agent_id: &str) -> UsageSnapshot {
     match engine {
         Engine::Claude => claude::fetch(agent_id).await,
         Engine::Codex => codex::fetch(agent_id).await,
+        Engine::ChatGpt => {
+            let mut snapshot = codex::fetch(agent_id).await;
+            snapshot.engine = "chatgpt".to_owned();
+            snapshot
+        }
         Engine::Copilot => copilot::fetch(agent_id).await,
         Engine::Grok => grok::fetch(agent_id).await,
         Engine::Glm => glm::fetch(agent_id).await,
@@ -439,6 +450,11 @@ pub async fn fetch_ryu_provider_usage(provider_id: &str) -> UsageSnapshot {
     match engine {
         Engine::Claude => claude::fetch_ryu(provider_id).await,
         Engine::Codex => codex::fetch_ryu(provider_id).await,
+        Engine::ChatGpt => {
+            let mut snapshot = codex::fetch_ryu(provider_id).await;
+            snapshot.engine = "chatgpt".to_owned();
+            snapshot
+        }
         Engine::Copilot => copilot::fetch_ryu(provider_id).await,
         // Ryu currently exposes OAuth login providers for these three engines.
         // Keep the fallback conservative if a future provider is routed here
@@ -464,6 +480,11 @@ pub async fn fetch_ryu_provider_usage_for_credential(
     match engine {
         Engine::Claude => claude::fetch_ryu_with_credential(provider_id, credential).await,
         Engine::Codex => codex::fetch_ryu_with_credential(provider_id, credential).await,
+        Engine::ChatGpt => {
+            let mut snapshot = codex::fetch_ryu_with_credential(provider_id, credential).await;
+            snapshot.engine = "chatgpt".to_owned();
+            snapshot
+        }
         Engine::Copilot => copilot::fetch_ryu_with_credential(provider_id, credential).await,
         // Ryu's provider catalog currently exposes account-backed logins for
         // Claude, Codex, and Copilot only. Keep future engines conservative

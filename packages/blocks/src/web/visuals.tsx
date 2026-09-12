@@ -118,7 +118,7 @@ export function CliVisual() {
 				{ prompt: true, text: "ryu run refactor-auth --worktree" },
 				{ text: "→ spawned acp session · 3 tools allowed", muted: true },
 				{ text: "→ diff ready · 12 files · ryu apply", muted: true },
-				{ prompt: true, text: "ryu nodes" },
+				{ prompt: true, text: "ryu servers" },
 				{ text: "● localhost  ● studio.lan  ○ cloud", muted: true },
 			]}
 		/>
@@ -173,7 +173,7 @@ export function AgentsVisual() {
 		<MinimalCard>
 			<div className="space-y-3">
 				<div className="flex items-center gap-3">
-					<div className="flex size-10 items-center justify-center rounded-lg border border-border bg-foreground/5 font-semibold text-foreground text-sm">
+					<div className="flex size-10 items-center justify-center rounded-lg border border-border bg-foreground/5 font-medium text-foreground text-sm">
 						Pi
 					</div>
 					<div>
@@ -202,7 +202,7 @@ export function WorkflowsVisual() {
 			<div className="relative flex min-h-44 items-center">
 				<svg
 					aria-hidden="true"
-					className="pointer-events-none absolute inset-0 h-full w-full text-foreground"
+					className="pointer-events-none absolute inset-0 hidden h-full w-full text-foreground sm:block"
 					fill="none"
 				>
 					{[0, 1, 2, 3].map((i) => (
@@ -221,12 +221,11 @@ export function WorkflowsVisual() {
 						/>
 					))}
 				</svg>
-				<div className="flex w-full items-center justify-between gap-2">
-					{nodes.map((n, i) => (
+				<div className="grid w-full grid-cols-1 items-center gap-3 sm:grid-cols-5 sm:gap-2">
+					{nodes.map((n) => (
 						<div
-							className="shrink-0 animate-node-pulse rounded-md border border-border bg-muted/50 px-2 py-1.5 text-center text-[11px] text-foreground/80"
+							className="min-w-0 rounded-md bg-muted/50 px-2 py-1.5 text-center text-[11px] text-foreground"
 							key={n}
-							style={{ animationDelay: `${i * 0.5}s` }}
 						>
 							{n}
 						</div>
@@ -543,7 +542,7 @@ export function CloudVisual() {
 		<MinimalCard>
 			<div className="space-y-3">
 				<div className="flex items-center justify-between">
-					<span className="font-medium text-foreground text-sm">Nodes</span>
+					<span className="font-medium text-foreground text-sm">Servers</span>
 					<span className="inline-flex items-center gap-1.5 text-[11px] text-muted-foreground">
 						<span className="size-1.5 animate-pulse rounded-full bg-foreground" />
 						24/7 · agents that don't sleep
@@ -573,6 +572,52 @@ export function CloudVisual() {
 					<Node emphasis>Ryu Cloud</Node>
 					<Wire className="flex-1" delays={[0.3, 0.7]} />
 					<Node>Fleet</Node>
+				</div>
+			</div>
+		</MinimalCard>
+	);
+}
+
+/** Early-access exchange visual shared by the Compute and Share product pages. */
+export function ComputeExchangeVisual({
+	mode = "compute",
+}: {
+	mode?: "compute" | "share";
+}) {
+	const compute = mode === "compute";
+	return (
+		<MinimalCard>
+			<div className="space-y-3">
+				<div className="flex items-center justify-between">
+					<span className="font-medium text-foreground text-sm">
+						Ryu {compute ? "Compute" : "Share"}
+					</span>
+					<span className="font-mono text-[10px] text-muted-foreground">
+						early access
+					</span>
+				</div>
+				<div className="flex items-center gap-2">
+					<Node emphasis>{compute ? "Workcell" : "Your node"}</Node>
+					<Wire className="flex-1" delays={[0.2, 0.7]} />
+					<Node>{compute ? "GPU lane" : "Idle window"}</Node>
+				</div>
+				<div className="grid grid-cols-3 gap-2">
+					{(compute
+						? ["15 min", "1 hour", "4 hours"]
+						: ["Compute", "Agent", "Payout"]
+					).map((label, index) => (
+						<div
+							className={cn(
+								"rounded-md border px-2 py-2 text-center font-mono text-[10px]",
+								index === 0
+									? "border-foreground/30 bg-foreground/[0.04] text-foreground"
+									: "border-border bg-muted/30 text-muted-foreground"
+							)}
+							key={label}
+						>
+							{label}
+						</div>
+					))}
 				</div>
 			</div>
 		</MinimalCard>
@@ -730,31 +775,32 @@ export function OsVisual() {
 	const apps = ["Chat", "Spaces", "Tools", "Skills", "Apps"];
 	return (
 		<WindowFrame title="Ryu OS">
-			<div className="relative min-h-52 overflow-hidden rounded-lg bg-[#17152a] p-4 text-white">
-				<div className="absolute inset-0 bg-[radial-gradient(circle_at_75%_20%,rgba(143,123,242,0.32),transparent_38%),radial-gradient(circle_at_20%_90%,rgba(45,212,191,0.16),transparent_40%)]" />
-				<div className="relative flex items-center justify-between text-[10px] text-white/55">
+			<div className="relative min-h-52 overflow-hidden rounded-lg bg-muted p-4 text-foreground">
+				<div className="relative flex items-center justify-between text-[10px] text-muted-foreground">
 					<span>Ryu workspace</span>
-					<span>Mission Control · ⌘K</span>
+					<span>App Launcher · ⌘K</span>
 				</div>
-				<div className="relative mt-6 rounded-xl border border-white/10 bg-white/10 p-3 shadow-2xl backdrop-blur">
+				<div className="relative mt-6 rounded-xl border border-border bg-card p-3 shadow-sm">
 					<div className="flex items-center gap-1.5">
-						<span className="size-2 rounded-full bg-[#ff6b6b]" />
-						<span className="size-2 rounded-full bg-[#ffd166]" />
-						<span className="size-2 rounded-full bg-[#6ee7b7]" />
-						<span className="ml-2 text-[10px] text-white/65">
+						<span className="size-2 rounded-full bg-destructive" />
+						<span className="size-2 rounded-full bg-warning" />
+						<span className="size-2 rounded-full bg-success" />
+						<span className="ml-2 text-[10px] text-muted-foreground">
 							Policy Summary
 						</span>
 					</div>
-					<div className="mt-5 h-2 w-2/3 rounded-full bg-white/15" />
-					<div className="mt-2 h-2 w-5/6 rounded-full bg-white/10" />
-					<div className="mt-2 h-2 w-1/2 rounded-full bg-white/10" />
+					<div className="mt-5 h-2 w-2/3 rounded-full bg-foreground/15" />
+					<div className="mt-2 h-2 w-5/6 rounded-full bg-foreground/10" />
+					<div className="mt-2 h-2 w-1/2 rounded-full bg-foreground/10" />
 				</div>
-				<div className="relative mx-auto mt-5 flex w-fit items-center gap-1.5 rounded-2xl border border-white/15 bg-black/25 px-2 py-1.5 backdrop-blur">
+				<div className="relative mx-auto mt-5 flex w-fit items-center gap-1.5 rounded-2xl border border-border bg-background/80 px-2 py-1.5">
 					{apps.map((app, index) => (
 						<span
 							className={cn(
 								"flex size-7 items-center justify-center rounded-lg font-medium text-[8px]",
-								index === 0 ? "bg-[#8f7bf2]" : "bg-white/15"
+								index === 0
+									? "bg-primary text-primary-foreground"
+									: "bg-muted text-muted-foreground"
 							)}
 							key={app}
 						>
@@ -768,7 +814,11 @@ export function OsVisual() {
 }
 
 /** A visual for the standalone tool/Skill execution gateway. */
-export function ToolGatewayVisual() {
+export function ToolGatewayVisual({
+	serviceName = "Ryu Gateway",
+}: {
+	serviceName?: string;
+}) {
 	return (
 		<MinimalCard>
 			<div className="space-y-3">
@@ -783,12 +833,56 @@ export function ToolGatewayVisual() {
 				<div className="flex items-center gap-2">
 					<Node>Any system</Node>
 					<Wire className="flex-1" />
-					<Node emphasis>Ryu Gateway</Node>
+					<Node emphasis>{serviceName}</Node>
 					<Wire className="flex-1" delays={[0.25, 0.65]} />
 					<Node>Tool + Skill</Node>
 				</div>
 				<div className="rounded-lg border border-border bg-foreground/[0.03] px-3 py-2 font-mono text-[11px] text-muted-foreground">
 					tools.github.create_issue({"{ title }"})
+				</div>
+			</div>
+		</MinimalCard>
+	);
+}
+
+/** The four-lane standalone integration boundary: MCP, Skills, tools, and Composio. */
+export function ConnectVisual() {
+	const lanes = [
+		{ label: "MCP hosting", value: "/mcp/*" },
+		{ label: "Skills", value: "SKILL.md" },
+		{ label: "Tool gateway", value: "/v1/exec/tool" },
+		{ label: "Composio", value: "provider call" },
+	];
+	return (
+		<MinimalCard>
+			<div className="space-y-3">
+				<div className="flex items-center justify-between">
+					<span className="font-medium text-foreground text-sm">
+						Ryu Connect
+					</span>
+					<span className="font-mono text-[10px] text-muted-foreground">
+						one tenant edge
+					</span>
+				</div>
+				<div className="grid grid-cols-2 gap-2">
+					{lanes.map((lane) => (
+						<div
+							className="rounded-lg border border-border bg-muted/30 px-3 py-2"
+							key={lane.label}
+						>
+							<p className="text-foreground/80 text-xs">{lane.label}</p>
+							<p className="mt-1 font-mono text-[10px] text-muted-foreground">
+								{lane.value}
+							</p>
+						</div>
+					))}
+				</div>
+				<div className="flex items-center gap-2">
+					<Node>Product</Node>
+					<Wire className="flex-1" delays={[0.2, 0.6]} />
+					<Node emphasis>Connect</Node>
+					<Wire className="flex-1" delays={[0.4, 0.8]} />
+					<Node>MCP + Composio</Node>
 				</div>
 			</div>
 		</MinimalCard>
@@ -805,7 +899,7 @@ export function BoxVisual() {
 						box_7f3a
 					</span>
 					<span className="inline-flex items-center gap-1.5 text-[10px] text-foreground/55">
-						<span className="size-1.5 rounded-full bg-emerald-500" />
+						<span className="size-1.5 rounded-full bg-success" />
 						ready
 					</span>
 				</div>
@@ -827,6 +921,101 @@ export function BoxVisual() {
 						Events
 					</span>
 				</div>
+			</div>
+		</WindowFrame>
+	);
+}
+
+/** The standalone event inbox and live stream behind Ryu Notify. */
+export function NotifyVisual() {
+	const events = [
+		{ label: "Deploy complete", source: "github-actions", tone: "success" },
+		{ label: "Payment received", source: "billing", tone: "info" },
+		{ label: "Backup failed", source: "infra", tone: "error" },
+	];
+	return (
+		<WindowFrame title="Ryu Notify · event inbox">
+			<div className="space-y-3">
+				<div className="flex items-center justify-between rounded-lg border border-border bg-muted/30 px-3 py-2">
+					<span className="font-mono text-[11px] text-foreground/75">
+						/v1/events
+					</span>
+					<span className="inline-flex items-center gap-1.5 text-[10px] text-foreground/55">
+						<span className="size-1.5 animate-pulse rounded-full bg-emerald-500" />
+						live
+					</span>
+				</div>
+				<div className="space-y-2">
+					{events.map((event) => (
+						<div
+							className="flex items-center gap-2 rounded-lg border border-border bg-foreground/[0.03] px-3 py-2"
+							key={event.label}
+						>
+							<span
+								className={cn(
+									"size-1.5 rounded-full",
+									event.tone === "error"
+										? "bg-red-500"
+										: event.tone === "success"
+											? "bg-emerald-500"
+											: "bg-sky-500"
+								)}
+							/>
+							<span className="min-w-0 flex-1">
+								<span className="block truncate text-[11px] text-foreground/75">
+									{event.label}
+								</span>
+								<span className="block truncate font-mono text-[9px] text-muted-foreground">
+									{event.source}
+								</span>
+							</span>
+							<span className="font-mono text-[9px] text-muted-foreground/70">
+								ack
+							</span>
+						</div>
+					))}
+				</div>
+			</div>
+		</WindowFrame>
+	);
+}
+
+/** The API-first Agent Inboxes product, distinct from the event inbox. */
+export function MailVisual() {
+	const messages = [
+		{ from: "claims@client.co", subject: "Documents attached" },
+		{ from: "ops@example.com", subject: "Re: weekly report" },
+		{ from: "agent@ryu.mail", subject: "Draft ready to review" },
+	];
+	return (
+		<WindowFrame title="Ryu Mail · agent inbox">
+			<div className="space-y-2">
+				<div className="flex items-center justify-between px-1 pb-1">
+					<span className="font-medium text-[11px] text-foreground/75">
+						Agent Inboxes
+					</span>
+					<span className="font-mono text-[9px] text-muted-foreground">
+						mail API
+					</span>
+				</div>
+				{messages.map((message, index) => (
+					<div
+						className={cn(
+							"rounded-lg border px-3 py-2",
+							index === 0
+								? "border-foreground/25 bg-foreground/[0.04]"
+								: "border-border bg-muted/30"
+						)}
+						key={message.from}
+					>
+						<span className="block truncate font-mono text-[9px] text-muted-foreground">
+							{message.from}
+						</span>
+						<span className="mt-0.5 block truncate text-[11px] text-foreground/75">
+							{message.subject}
+						</span>
+					</div>
+				))}
 			</div>
 		</WindowFrame>
 	);

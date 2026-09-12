@@ -1,6 +1,9 @@
+"use client";
+
 import { Accordion as AccordionPrimitive } from "@base-ui/react/accordion";
 import { ArrowDown01Icon, ArrowUp01Icon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
+import { useLocalizedText } from "@ryu/i18n/react";
 import { cn } from "@ryu/ui/lib/utils.ts";
 import { FadeOverflowTextChildren } from "./fade-overflow-text.tsx";
 
@@ -8,7 +11,7 @@ function Accordion({ className, ...props }: AccordionPrimitive.Root.Props) {
 	return (
 		<AccordionPrimitive.Root
 			className={cn(
-				"flex w-full flex-col overflow-hidden rounded-2xl border",
+				"corner-squircle flex w-full flex-col overflow-hidden rounded-2xl border",
 				className
 			)}
 			data-slot="accordion"
@@ -32,6 +35,7 @@ function AccordionTrigger({
 	children,
 	...props
 }: AccordionPrimitive.Trigger.Props) {
+	const localizedChildren = useLocalizedText(children, { literal: true });
 	return (
 		<AccordionPrimitive.Header className="flex">
 			<AccordionPrimitive.Trigger
@@ -43,7 +47,7 @@ function AccordionTrigger({
 				{...props}
 			>
 				<FadeOverflowTextChildren className="flex-1">
-					{children}
+					{localizedChildren}
 				</FadeOverflowTextChildren>
 				<HugeiconsIcon
 					className="pointer-events-none shrink-0 group-aria-expanded/accordion-trigger:hidden"
@@ -62,14 +66,23 @@ function AccordionTrigger({
 	);
 }
 
+type AccordionContentProps = AccordionPrimitive.Panel.Props & {
+	/** Override the panel wrapper layout without changing the inner content styles. */
+	panelClassName?: string;
+};
+
 function AccordionContent({
 	className,
+	panelClassName,
 	children,
 	...props
-}: AccordionPrimitive.Panel.Props) {
+}: AccordionContentProps) {
 	return (
 		<AccordionPrimitive.Panel
-			className="overflow-hidden px-4 text-sm data-closed:animate-accordion-up data-open:animate-accordion-down"
+			className={cn(
+				"overflow-hidden px-4 text-sm data-closed:animate-accordion-up data-open:animate-accordion-down",
+				panelClassName
+			)}
 			data-slot="accordion-content"
 			{...props}
 		>

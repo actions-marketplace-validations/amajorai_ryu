@@ -539,7 +539,7 @@ export function CutToConfirm({
 						// moving 44px target five times. 64px of target always overlaps the
 						// step, at every card width the dialog can produce.
 						"before:absolute before:-inset-2.5 before:rounded-full before:content-['']",
-						"border border-destructive/50 bg-background/90 text-destructive shadow-lg backdrop-blur-sm",
+						"border border-destructive/50 bg-background/90 text-status-destructive shadow-lg backdrop-blur-sm",
 						"outline-none focus-visible:ring-2 focus-visible:ring-destructive focus-visible:ring-offset-2",
 						disabled
 							? "pointer-events-none opacity-40"

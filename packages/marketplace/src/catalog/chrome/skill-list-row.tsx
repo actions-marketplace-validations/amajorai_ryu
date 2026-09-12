@@ -76,7 +76,7 @@ function renderInstalledMark(skill: SkillListRowData) {
 	return (
 		<HugeiconsIcon
 			aria-label="Added"
-			className="size-3.5 shrink-0 text-success"
+			className="size-3.5 shrink-0 text-status-success"
 			icon={CheckmarkCircle02Icon}
 		/>
 	);

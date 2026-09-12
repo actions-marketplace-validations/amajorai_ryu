@@ -68,7 +68,7 @@ function TodoHeaderIcon({ complete }: { complete: boolean }) {
 				{complete ? (
 					<motion.svg
 						animate={{ opacity: 1, scale: 1 }}
-						className="absolute size-5.5 overflow-visible text-emerald-500"
+						className="absolute size-5.5 overflow-visible text-status-success"
 						exit={{ opacity: 0 }}
 						initial={reduce ? { opacity: 1 } : { opacity: 0, scale: 0.72 }}
 						key="complete"
@@ -125,7 +125,7 @@ function TodoStatusIcon({
 			className={cn(
 				"mx-0.5 size-5 shrink-0 overflow-visible text-muted-foreground",
 				status === "in-progress" && "text-foreground",
-				status === "cancelled" && "text-rose-600 dark:text-rose-400"
+				status === "cancelled" && "text-status-destructive"
 			)}
 			initial={false}
 			viewBox="0 0 24 24"
@@ -301,7 +301,7 @@ export function TodoList({
 				<span
 					className={cn(
 						"shrink-0 font-medium text-muted-foreground text-xs tabular-nums",
-						allComplete && "text-emerald-600 dark:text-emerald-400"
+						allComplete && "text-status-success"
 					)}
 				>
 					<span className="sr-only">

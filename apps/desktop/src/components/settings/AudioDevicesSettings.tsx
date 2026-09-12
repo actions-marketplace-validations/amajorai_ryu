@@ -169,7 +169,7 @@ export function AudioDevicesSettings() {
 
 			{permission === "denied" && (
 				<div className="space-y-2 px-3 pt-2">
-					<p className="text-destructive text-xs">
+					<p className="text-status-destructive text-xs">
 						Microphone access is blocked, so device names are hidden. Turn it on
 						in your system settings, then retry.
 					</p>

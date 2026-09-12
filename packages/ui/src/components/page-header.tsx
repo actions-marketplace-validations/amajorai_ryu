@@ -1,5 +1,6 @@
 "use client";
 
+import { useLocalizedText } from "@ryu/i18n/react";
 import { useInView } from "motion/react";
 import type { CSSProperties, ReactNode } from "react";
 import { useRef } from "react";
@@ -23,6 +24,7 @@ interface PageHeaderProps {
 	stagger?: boolean;
 	style?: CSSProperties;
 	subtitle?: ReactNode;
+	subtitleClassName?: string;
 	title: ReactNode;
 	titleClassName?: string;
 }
@@ -49,10 +51,13 @@ export function PageHeader({
 	titleClassName,
 	stagger = true,
 	style,
+	subtitleClassName,
 }: PageHeaderProps) {
 	const ref = useRef<HTMLDivElement>(null);
 	const inView = useInView(ref, { once: true });
 	const shown = stagger && inView;
+	const localizedTitle = useLocalizedText(title, { literal: true });
+	const localizedSubtitle = useLocalizedText(subtitle, { literal: true });
 
 	return (
 		<div
@@ -72,16 +77,17 @@ export function PageHeader({
 					titleClassName
 				)}
 			>
-				{title}
+				{localizedTitle}
 			</Heading>
 			{subtitle ? (
 				<p
 					className={cn(
 						"font-medium text-muted-foreground text-xl",
-						stagger && "t-stagger-line t-stagger-line--2"
+						stagger && "t-stagger-line t-stagger-line--2",
+						subtitleClassName
 					)}
 				>
-					{subtitle}
+					{localizedSubtitle}
 				</p>
 			) : null}
 		</div>

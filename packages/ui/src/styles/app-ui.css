@@ -12,6 +12,11 @@
 
 @import "@ryu/ui/companion-theme.css";
 
+/* Tailwind does not discover workspace dependencies through node_modules.
+ * Bundle the canonical controls' utilities with every Companion, including
+ * portaled dialogs, instead of copying their classes into app-local markup. */
+@source "../components";
+
 :root {
 	--ryu-app-gutter: 1rem;
 	--ryu-app-toolbar-height: 3rem;
@@ -34,7 +39,7 @@ body,
 }
 
 body {
-	font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+	font-family: var(--font-sans);
 	font-size: 14px;
 	line-height: 1.45;
 	color: var(--foreground);
@@ -48,13 +53,22 @@ body {
 	min-width: 0;
 	height: 100%;
 	min-height: 100%;
-	font-family: inherit;
+	font-family: var(--font-sans);
 	font-size: inherit;
 	-webkit-font-smoothing: antialiased;
 	font-synthesis: none;
 	line-height: inherit;
 	color: var(--foreground);
 	background: var(--background);
+}
+
+:where([data-ryu-app-ui="v1"], .ryu-app-shell) :where(h1, h2, h3, h4) {
+	font-family: var(--font-heading);
+}
+
+:where([data-ryu-app-ui="v1"], .ryu-app-shell)
+	:where(h1, h2, h3, h4, h5, h6, strong, b) {
+	font-weight: 500;
 }
 
 :where([data-ryu-app-ui="v1"], .ryu-app-shell) *,
@@ -170,7 +184,7 @@ body {
 	overflow: hidden;
 	text-overflow: ellipsis;
 	font-size: 0.9375rem;
-	font-weight: 600;
+	font-weight: 500;
 	line-height: 1.25;
 	white-space: nowrap;
 }
@@ -204,7 +218,7 @@ body {
 
 .ryu-app-section__heading {
 	font-size: 0.8125rem;
-	font-weight: 600;
+	font-weight: 500;
 	color: var(--muted-foreground);
 }
 
@@ -230,7 +244,7 @@ body {
 .ryu-app-list__section-title {
 	padding: 0.75rem var(--ryu-app-gutter) 0.4rem;
 	font-size: 0.6875rem;
-	font-weight: 600;
+	font-weight: 500;
 	color: var(--muted-foreground);
 	text-transform: uppercase;
 	letter-spacing: 0.08em;
@@ -319,7 +333,7 @@ body {
 
 .ryu-app-empty__title {
 	font-size: 0.9375rem;
-	font-weight: 600;
+	font-weight: 500;
 }
 
 .ryu-app-empty__description,

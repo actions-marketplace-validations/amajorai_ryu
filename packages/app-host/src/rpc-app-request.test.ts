@@ -51,3 +51,41 @@ describe("asAppRequestArg", () => {
 		).rejects.toMatchObject({ code: "denied" });
 	});
 });
+
+test("only own-app reads receive the host document lifetime", async () => {
+	const controller = new AbortController();
+	const signals: (AbortSignal | undefined)[] = [];
+	const host = services(async (_input, signal) => {
+		signals.push(signal);
+		return null;
+	});
+	const grants = capabilitiesFromGrants(["app:http"]);
+	for (const method of [undefined, "GET", "POST", "PUT", "PATCH", "DELETE"]) {
+		await dispatchRpc(
+			"app.request",
+			[{ path: "/status", method }],
+			grants,
+			host,
+			controller.signal
+		);
+	}
+	expect(signals).toEqual([
+		controller.signal,
+		controller.signal,
+		undefined,
+		undefined,
+		undefined,
+		undefined,
+	]);
+	controller.abort();
+	await expect(
+		dispatchRpc(
+			"app.request",
+			[{ path: "/status" }],
+			grants,
+			host,
+			controller.signal
+		)
+	).rejects.toThrow();
+	expect(signals).toHaveLength(6);
+});

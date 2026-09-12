@@ -33,9 +33,9 @@ const QUICK_LINKS = [
 ] as const;
 
 const STATUS_META: Record<PopupCoreStatus, { color: string; label: string }> = {
-	running: { color: "bg-emerald-500", label: "Running" },
-	starting: { color: "bg-amber-500", label: "Starting" },
-	stopped: { color: "bg-red-500", label: "Stopped" },
+	running: { color: "bg-success", label: "Running" },
+	starting: { color: "bg-warning", label: "Starting" },
+	stopped: { color: "bg-destructive", label: "Stopped" },
 };
 
 function initialsFor(user: PopupUser): string {
@@ -91,7 +91,7 @@ export function ExtensionPopup({
 			<div className="flex items-center justify-between border-border border-b px-4 py-3">
 				<div className="flex items-center gap-2.5">
 					<RyuLogo size="24px" variant="outline" />
-					<span className="font-heading font-semibold text-sm tracking-tight">
+					<span className="font-heading font-medium text-sm tracking-tight">
 						Ryu
 					</span>
 				</div>

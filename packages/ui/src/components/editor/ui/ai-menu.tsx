@@ -252,7 +252,7 @@ export function AIMenu() {
 
 					{errorMessage && (
 						<div
-							className="flex select-none items-start gap-2 border-b bg-destructive/10 p-2 text-destructive text-sm"
+							className="flex select-none items-start gap-2 border-b bg-destructive/10 p-2 text-sm text-status-destructive"
 							role="alert"
 						>
 							<TriangleAlertIcon className="mt-0.5 size-4 shrink-0" />
@@ -731,7 +731,7 @@ export function AILoadingBar() {
 	if (status === "error" && !open) {
 		return (
 			<div
-				className="absolute bottom-4 left-1/2 z-50 flex max-w-md -translate-x-1/2 items-start gap-2 rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-destructive text-sm shadow-md"
+				className="absolute start-1/2 bottom-4 z-50 flex max-w-md -translate-x-1/2 items-start gap-2 rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-status-destructive shadow-md rtl:translate-x-1/2"
 				role="alert"
 			>
 				<TriangleAlertIcon className="mt-0.5 size-4 shrink-0" />
@@ -757,7 +757,7 @@ export function AILoadingBar() {
 		return (
 			<div
 				className={cn(
-					"absolute bottom-4 left-1/2 z-20 flex -translate-x-1/2 items-center gap-3 rounded-md border border-border bg-muted px-3 py-1.5 text-muted-foreground text-sm shadow-md transition-all duration-300"
+					"absolute start-1/2 bottom-4 z-20 flex -translate-x-1/2 items-center gap-3 rounded-md border border-border bg-muted px-3 py-1.5 text-muted-foreground text-sm shadow-md transition-all duration-300 rtl:translate-x-1/2"
 				)}
 			>
 				<span className="h-4 w-4 animate-spin rounded-full border-2 border-muted-foreground border-t-transparent" />
@@ -770,7 +770,7 @@ export function AILoadingBar() {
 				>
 					<PauseIcon className="h-4 w-4" />
 					Stop
-					<kbd className="ml-1 rounded bg-border px-1 font-mono text-[10px] text-muted-foreground shadow-sm">
+					<kbd className="ms-1 rounded bg-border px-1 font-mono text-[10px] text-muted-foreground shadow-sm">
 						Esc
 					</kbd>
 				</Button>
@@ -782,7 +782,7 @@ export function AILoadingBar() {
 		return (
 			<div
 				className={cn(
-					"absolute bottom-4 left-1/2 z-50 flex -translate-x-1/2 flex-col items-center gap-0 rounded-xl border border-border/50 bg-popover p-1 text-muted-foreground text-sm shadow-xl backdrop-blur-sm",
+					"absolute start-1/2 bottom-4 z-50 flex -translate-x-1/2 flex-col items-center gap-0 rounded-xl border border-border/50 bg-popover p-1 text-muted-foreground text-sm shadow-xl backdrop-blur-sm rtl:translate-x-1/2",
 					"p-3"
 				)}
 			>

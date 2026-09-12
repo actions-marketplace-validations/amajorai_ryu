@@ -234,8 +234,8 @@ export function RichPatchDiff({
 				return null;
 			}
 			return (
-				<div className="my-1 flex max-w-[42rem] flex-col gap-1 rounded-lg border border-amber-500/30 bg-amber-500/8 p-2 text-xs">
-					<div className="flex items-center gap-1.5 text-amber-700 dark:text-amber-300">
+				<div className="my-1 flex max-w-[42rem] flex-col gap-1 rounded-lg border border-warning/30 bg-warning/8 p-2 text-xs">
+					<div className="flex items-center gap-1.5 text-status-warning">
 						<HugeiconsIcon className="size-3.5" icon={Message01Icon} />
 						<span className="font-medium">Review comment</span>
 						<span className="text-muted-foreground">

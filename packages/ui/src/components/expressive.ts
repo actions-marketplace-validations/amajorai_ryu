@@ -24,14 +24,18 @@ export const EXPRESSIVE_EXPRESSION_IDS = [
 	"shy",
 	"unimpressed",
 	"sleepy",
+	"dead",
 ] as const;
 
 export type ExpressiveExpression = (typeof EXPRESSIVE_EXPRESSION_IDS)[number];
 export type ExpressiveExpressionSelection = ExpressiveExpression | "random";
 
+export type ExpressiveEyeShape = "oval" | "x";
+
 export interface ExpressiveEye {
 	height: number;
 	open: number;
+	shape: ExpressiveEyeShape;
 	tilt: number;
 	width: number;
 }
@@ -56,8 +60,11 @@ const eye = (
 	width: number,
 	height: number,
 	tilt = 0,
-	open = 1
-): ExpressiveEye => ({ height, open, tilt, width });
+	open = 1,
+	shape: ExpressiveEyeShape = "oval"
+): ExpressiveEye => ({ height, open, shape, tilt, width });
+
+const xEye = (size: number): ExpressiveEye => eye(size, size, 0, 1, "x");
 
 /** Measured, base-24 controls for the Ryu ghost's two independent eyes. */
 export const EXPRESSIVE_EXPRESSIONS = {
@@ -173,6 +180,13 @@ export const EXPRESSIVE_EXPRESSIONS = {
 		gaze: { roll: -3, x: 0.2, y: 0.1 },
 		label: "Sleepy",
 	},
+	dead: {
+		description: "Crossed-out eyes for a fully crashed-out Ryu.",
+		eyes: [xEye(2.4), xEye(2.4)],
+		gap: 4.4,
+		gaze: { roll: 0, x: 0, y: 0 },
+		label: "Dead",
+	},
 } as const satisfies Record<ExpressiveExpression, ExpressiveExpressionFrame>;
 
 const EXPRESSIVE_EXPRESSION_SET = new Set<string>(EXPRESSIVE_EXPRESSION_IDS);
@@ -243,12 +257,14 @@ export function blendExpressiveFrames(
 			{
 				height: lerp(from.eyes[0].height, to.eyes[0].height, t),
 				open: lerp(from.eyes[0].open, to.eyes[0].open, t),
+				shape: t < 0.5 ? from.eyes[0].shape : to.eyes[0].shape,
 				tilt: lerp(from.eyes[0].tilt, to.eyes[0].tilt, t),
 				width: lerp(from.eyes[0].width, to.eyes[0].width, t),
 			},
 			{
 				height: lerp(from.eyes[1].height, to.eyes[1].height, t),
 				open: lerp(from.eyes[1].open, to.eyes[1].open, t),
+				shape: t < 0.5 ? from.eyes[1].shape : to.eyes[1].shape,
 				tilt: lerp(from.eyes[1].tilt, to.eyes[1].tilt, t),
 				width: lerp(from.eyes[1].width, to.eyes[1].width, t),
 			},

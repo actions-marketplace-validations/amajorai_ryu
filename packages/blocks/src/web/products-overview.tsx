@@ -7,8 +7,12 @@ import {
 	products,
 	productsByCategory,
 } from "./data/products.tsx";
-import { landingSurfaceCardXlClass } from "./landing-card-tones.ts";
+import {
+	landingSurfaceCardXlClass,
+	landingVisualFrameClass,
+} from "./landing-card-tones.ts";
 import { Reveal } from "./reveal.tsx";
+import { AgentsVisual, CoreVisual, ToolGatewayVisual } from "./visuals.tsx";
 
 function ProductCard({
 	product,
@@ -17,32 +21,53 @@ function ProductCard({
 	product: Product;
 	featured?: boolean;
 }) {
-	const { Icon } = product;
+	const preview =
+		product.slug === "console" ? (
+			<CoreVisual />
+		) : product.slug === "bot" ? (
+			<AgentsVisual />
+		) : product.slug === "gateway" ? (
+			<ToolGatewayVisual />
+		) : (
+			product.hero.visual
+		);
 	return (
-		<Link
+		<article
 			className={cn(
 				"group flex flex-col gap-4",
 				landingSurfaceCardXlClass,
 				featured && "md:col-span-2 md:row-span-1"
 			)}
-			href={`/products/${product.slug}`}
 		>
-			{featured && product.overviewVisual ? (
-				<div className="min-h-0 flex-1">{product.overviewVisual}</div>
+			{product.hero.visual ? (
+				<div
+					aria-hidden="true"
+					className={`${landingVisualFrameClass} flex h-64 items-center [&>*]:w-full`}
+					data-product-visual
+					inert
+				>
+					{product.overviewVisual ?? preview}
+				</div>
 			) : null}
-			<div className="flex items-start justify-between gap-3">
-				<Icon className="size-5 text-foreground" strokeWidth={1.75} />
-				<ArrowUpRight className="size-4 text-muted-foreground/40 transition-colors group-hover:text-foreground" />
-			</div>
+
 			<div>
-				<h3 className="font-semibold text-base text-foreground">
-					{product.name}
+				<h3 className="font-medium text-base text-foreground">
+					<Link
+						className="flex items-center justify-between gap-4 outline-offset-4 hover:underline focus-visible:outline-2 focus-visible:outline-ring"
+						href={`/products/${product.slug}`}
+					>
+						{product.name}
+						<ArrowUpRight
+							aria-hidden="true"
+							className="size-4 text-muted-foreground"
+						/>
+					</Link>
 				</h3>
 				<p className="mt-1 text-muted-foreground text-sm leading-relaxed">
 					{product.tagline}
 				</p>
 			</div>
-		</Link>
+		</article>
 	);
 }
 
@@ -53,7 +78,7 @@ export function ProductsOverview({
 }) {
 	if (!showCategoryHeadings) {
 		return (
-			<div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
+			<div className="grid grid-cols-1 gap-x-12 gap-y-6 sm:grid-cols-2 lg:grid-cols-3">
 				{products.map((p, i) => (
 					<Reveal delay={(i % 3) * 0.06} key={p.slug}>
 						<ProductCard product={p} />
@@ -64,13 +89,13 @@ export function ProductsOverview({
 	}
 
 	return (
-		<div className="space-y-12">
+		<div className="space-y-16">
 			{productCategories.map((category) => (
 				<div key={category}>
-					<h3 className="mb-4 font-medium font-mono text-muted-foreground/70 text-xs uppercase tracking-widest">
+					<h2 className="mb-6 font-heading font-medium text-2xl tracking-tight">
 						{category}
-					</h3>
-					<div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
+					</h2>
+					<div className="grid grid-cols-1 gap-x-12 gap-y-6 sm:grid-cols-2 lg:grid-cols-3">
 						{productsByCategory(category).map((p, i) => (
 							<Reveal delay={(i % 3) * 0.06} key={p.slug}>
 								<ProductCard product={p} />

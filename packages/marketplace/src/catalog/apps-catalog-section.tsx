@@ -148,7 +148,7 @@ import {
  *  exist (tools/agents/channels/policies, turn hooks, capability providers, settings
  *  tabs, sidebar sections). "all" = the historical unsplit tab, which web still uses.
  *
- *  Notably NOT app-ness: shipping a sidecar (the four `document.parse` providers each
+ *  Notably NOT app-ness: shipping a sidecar (the five `document.parse` providers each
  *  ship one and nobody opens Docling), living under `apps-store/` (that is a
  *  PACKAGING root — items published as their own satellite repo), or declaring a
  *  `category`. The rule is adjudicated server-side by `manifest_declares_destination`
@@ -937,7 +937,9 @@ function PluginSourcePicker({
 								value={name}
 							/>
 						</div>
-						{addError && <p className="text-destructive text-xs">{addError}</p>}
+						{addError && (
+							<p className="text-status-destructive text-xs">{addError}</p>
+						)}
 						<Button
 							loading={addingMarketplace}
 							onClick={() => {
@@ -1097,7 +1099,8 @@ function AppList({
 	// Resolved HERE, not inside `card`: `card` is a plain render function, not a
 	// component, so a hook inside it would run a variable number of times per
 	// render. The host's floors are one value for the whole grid anyway.
-	const { hostVersions } = useCatalogHost();
+	const host = useCatalogHost();
+	const { hostVersions } = host;
 	const incompatibilityOf = (it: AppCatalogItem) =>
 		describeIncompatibility(
 			evaluateCompatibility(
@@ -1168,6 +1171,18 @@ function AppList({
 			onClick={() => onSelect(it.entry.id)}
 			orgVerified={it.entry.org_verified}
 			orgVerifiedTier={it.entry.org_verified_tier}
+			publisher={
+				host.renderPublisher &&
+				it.entry.publisher_org_id &&
+				it.entry.publisher_org_name
+					? host.renderPublisher({
+							id: it.entry.publisher_org_id,
+							logo: it.entry.publisher_org_logo ?? null,
+							name: it.entry.publisher_org_name,
+							slug: it.entry.publisher_org_slug ?? null,
+						})
+					: undefined
+			}
 			publisherTrust={it.entry.publisher_trust}
 			publisherVerification={it.entry.publisher_verification}
 			seedId={it.entry.id}
@@ -1495,7 +1510,7 @@ function CommunityShelf({
 							{/* Each marketplace's SMALLER sub-heading — the category
 							    treatment at one size down, so it reads as nested under
 							    "Community Marketplaces". */}
-							<h3 className="px-1 font-semibold text-sm tracking-tight">
+							<h3 className="px-1 font-medium text-sm tracking-tight">
 								{marketplace.name}
 							</h3>
 							<StoreCardGrid>{marketplace.items.map(card)}</StoreCardGrid>
@@ -1975,7 +1990,7 @@ function AppPrimaryAction({
 					value={channel}
 				/>
 				<InstallButton
-					busyLabel="Adding…"
+					busyLabel="Installing…"
 					idleVariant="default"
 					installing={installing}
 					onClick={runInstall}
@@ -1989,7 +2004,7 @@ function AppPrimaryAction({
 					}}
 				>
 					<HugeiconsIcon className="size-4" icon={Download01Icon} />
-					Add
+					Get
 				</InstallButton>
 			</>
 		);
@@ -2061,7 +2076,7 @@ export function AuthBridgeConsent({
 	providers: CatalogModelProvider[];
 }) {
 	return (
-		<div className="rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-sm">
+		<div className="rounded-md border border-warning/40 bg-warning/10 px-3 py-2 text-sm">
 			<p className="font-medium">Handles provider credentials and traffic</p>
 			<p className="mt-1 text-muted-foreground text-xs leading-relaxed">
 				This plugin runs a local process that can handle the listed provider
@@ -2180,7 +2195,7 @@ function AppSecondaryActions({
 					</span>
 				) : null}
 			</div>
-			{error && <p className="text-destructive text-sm">{error}</p>}
+			{error && <p className="text-sm text-status-destructive">{error}</p>}
 
 			{/* Channel-switch confirmation. The version delta is the whole point of
 			    asking: every prerelease sorts BELOW its stable release, so moving
@@ -2297,6 +2312,7 @@ function AppDetailPanel({
 }) {
 	const host = useCatalogHost();
 	const runScan = host.runCatalogScan;
+	const auditNode = host.useActiveNode();
 	const { Markdown, fetchVersionDetail: hostFetchVersionDetail } = host;
 	// How much of this listing the user has asked to see. Read ONCE here and
 	// threaded down as a narrow boolean: a detail panel must not learn the ladder,
@@ -2546,7 +2562,7 @@ function AppDetailPanel({
 				<Spinner className="size-4" />
 			) : null}
 			{detailError && !isIntegrationDescriptor ? (
-				<p className="text-destructive text-sm">{detailError}</p>
+				<p className="text-sm text-status-destructive">{detailError}</p>
 			) : null}
 
 			<ListingDetailTabs
@@ -2556,10 +2572,12 @@ function AppDetailPanel({
 						? () =>
 								runScan({
 									description: detail?.description ?? entry.description,
+									files: detail?.designSystem?.files ?? undefined,
 									id: entry.id,
 									kind: "plugin",
 									metadata: {
 										developer: detail?.developer ?? entry.developer,
+										designSystemNavigation: detail?.designSystem?.navigation,
 										license: detail?.license ?? entry.license,
 										origin: detail?.origin ?? entry.origin,
 										repositoryUrl: detail?.repositoryUrl ?? entry.repo_url,
@@ -2588,7 +2606,9 @@ function AppDetailPanel({
 						? (version) => installVersion(entry.id, version)
 						: undefined
 				}
+				key={auditNode.url}
 				Markdown={Markdown}
+				onOpenAuditConversation={host.openAuditConversation}
 				onTabChange={setTab}
 				overview={overview}
 				reviewsService={reviewsService}
@@ -3113,7 +3133,7 @@ function DescriptorDetail({
 			<h3 className="font-medium text-sm">Integration details</h3>
 			{detailLoading ? <Spinner className="size-4" /> : null}
 			{detailError ? (
-				<p className="text-destructive text-sm">{detailError}</p>
+				<p className="text-sm text-status-destructive">{detailError}</p>
 			) : null}
 			{integrationUrl ? (
 				<p className="break-all font-mono text-muted-foreground text-xs">
@@ -3154,7 +3174,7 @@ function AppStatusBadge({
 		return (
 			<Badge className="shrink-0 gap-1" variant="secondary">
 				<HugeiconsIcon
-					className="size-3.5 text-success"
+					className="size-3.5 text-status-success"
 					icon={CheckmarkCircle02Icon}
 				/>
 				Enabled

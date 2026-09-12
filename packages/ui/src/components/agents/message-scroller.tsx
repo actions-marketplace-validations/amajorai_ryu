@@ -130,7 +130,7 @@ function CollapsedMessageRail({
 		<Popover onOpenChange={setOpen} open={open}>
 			<PopoverTrigger
 				aria-label={`Browse ${items.length} messages`}
-				className="absolute top-1/2 right-1 z-20 flex h-[5.5rem] w-7 -translate-y-1/2 flex-col items-center justify-center gap-1.5 rounded-full border border-border/70 bg-background/80 text-muted-foreground shadow-sm backdrop-blur-md transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
+				className="absolute top-1/2 left-1 z-20 flex h-[5.5rem] w-7 -translate-y-1/2 flex-col items-center justify-center gap-1.5 rounded-full border border-border/70 bg-background/80 text-muted-foreground shadow-sm backdrop-blur-md transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
 				data-active-message-id={activeId}
 				data-count={items.length}
 				data-slot="message-navigation-collapsed-rail"
@@ -151,7 +151,7 @@ function CollapsedMessageRail({
 				align="center"
 				className="w-[min(22rem,calc(100vw-2rem))] gap-0 overflow-hidden p-0"
 				data-message-navigation-popover="true"
-				side="left"
+				side="right"
 				sideOffset={10}
 			>
 				<div className="flex items-center justify-between border-border/60 border-b px-3 py-2.5">
@@ -818,13 +818,13 @@ export function MessageScroller({
 					onItemSelect={scrollToRailItem}
 					previewClassName={
 						renderPreview
-							? "mr-1 w-72 max-w-full"
-							: "mr-1 w-64 max-w-full [&_[data-slot=preview-rail-card]]:h-20 [&_[data-slot=preview-rail-card]]:overflow-hidden [&_[data-slot=preview-rail-card]]:p-3 [&_[data-slot=preview-rail-title]]:line-clamp-1 [&_[data-slot=preview-rail-title]]:text-xs [&_[data-slot=preview-rail-title]]:leading-4 [&_[data-slot=preview-rail-description]]:line-clamp-2 [&_[data-slot=preview-rail-description]]:text-xs [&_[data-slot=preview-rail-description]]:leading-4"
+							? "ml-1 w-72 max-w-full"
+							: "ml-1 w-64 max-w-full [&_[data-slot=preview-rail-card]]:h-20 [&_[data-slot=preview-rail-card]]:overflow-hidden [&_[data-slot=preview-rail-card]]:p-3 [&_[data-slot=preview-rail-title]]:line-clamp-1 [&_[data-slot=preview-rail-title]]:text-xs [&_[data-slot=preview-rail-title]]:leading-4 [&_[data-slot=preview-rail-description]]:line-clamp-2 [&_[data-slot=preview-rail-description]]:text-xs [&_[data-slot=preview-rail-description]]:leading-4"
 					}
-					previewContainerClassName="right-8 left-3"
-					previewSide="before"
+					previewContainerClassName="right-3 left-8"
+					previewSide="after"
 					railClassName={cn(
-						"absolute inset-y-3 right-1 w-7 content-center py-1 [&_[data-slot=preview-rail-item]]:w-7 [&_[data-slot=preview-rail-item]]:justify-end [&_[data-slot=preview-rail-tick]]:h-px [&_[data-slot=preview-rail-tick]]:w-4 [&_[data-slot=preview-rail-tick]]:origin-right",
+						"absolute inset-y-3 left-1 w-7 content-center py-1 [&_[data-slot=preview-rail-item]]:w-7 [&_[data-slot=preview-rail-item]]:justify-start [&_[data-slot=preview-rail-tick]]:h-px [&_[data-slot=preview-rail-tick]]:w-4 [&_[data-slot=preview-rail-tick]]:origin-left",
 						railOverflowing
 							? "pointer-events-auto opacity-100"
 							: "pointer-events-none opacity-0",

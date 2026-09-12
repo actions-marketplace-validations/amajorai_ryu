@@ -13,6 +13,7 @@ import {
 	DropdownMenuItem,
 	DropdownMenuTrigger,
 } from "@ryu/ui/components/dropdown-menu";
+import { cn } from "@ryu/ui/lib/utils.ts";
 import {
 	GripVerticalIcon,
 	MoreVerticalIcon,
@@ -36,6 +37,8 @@ export function WidgetCard({
 	error,
 	onRefresh,
 	onRemove,
+	interaction,
+	motionEnabled = true,
 }: {
 	widget: Widget;
 	/** Live value (from SSE) or the cached last value. */
@@ -43,12 +46,29 @@ export function WidgetCard({
 	error?: string | null;
 	onRefresh: () => void;
 	onRemove: () => void;
+	/** The active grid/canvas gesture, used for tactile feedback on the card. */
+	interaction?: "drag" | "resize";
+	/** App + OS motion preference resolved by the owning surface. */
+	motionEnabled?: boolean;
 }) {
+	const interactionClass =
+		motionEnabled && interaction === "drag"
+			? "-translate-y-px scale-[1.015] shadow-xl ring-2 ring-primary/25"
+			: motionEnabled && interaction === "resize"
+				? "ring-2 ring-primary/25"
+				: "";
+
 	return (
-		<Card className="group flex h-full flex-col gap-0 overflow-hidden rounded-2xl border-border/60 py-0 shadow-sm transition-shadow duration-200 hover:shadow-md">
-			<div className="widget-drag-handle /50 flex cursor-grab items-center gap-1.5 border-b bg-muted/20 px-3 py-2 active:cursor-grabbing">
+		<Card
+			className={cn(
+				"group flex h-full flex-col gap-0 overflow-hidden rounded-2xl border-border/60 py-0 shadow-sm transition-[transform,box-shadow,opacity,ring-color] duration-200 ease-[cubic-bezier(0.23,1,0.32,1)] hover:shadow-md",
+				interactionClass
+			)}
+			data-dashboard-interaction={interaction ?? "idle"}
+		>
+			<div className="widget-drag-handle flex cursor-grab select-none items-center gap-1.5 border-b bg-muted/20 px-3 py-2 active:cursor-grabbing">
 				<GripVerticalIcon className="size-3.5 shrink-0 text-muted-foreground opacity-0 transition-opacity group-hover:opacity-100" />
-				<span className="flex-1 truncate font-semibold text-sm tracking-tight">
+				<span className="flex-1 truncate font-medium text-sm tracking-tight">
 					{widget.title || "Untitled"}
 				</span>
 				<DropdownMenu>
@@ -57,7 +77,7 @@ export function WidgetCard({
 							variant: "ghost",
 							size: "icon",
 							className:
-								"size-6 text-muted-foreground opacity-0 transition-opacity focus-visible:opacity-100 group-hover:opacity-100 data-[state=open]:opacity-100",
+								"size-6 text-muted-foreground opacity-0 transition-opacity focus-visible:opacity-100 group-hover:opacity-100 aria-expanded:opacity-100",
 						})}
 						onPointerDown={(e) => e.stopPropagation()}
 					>
@@ -75,7 +95,7 @@ export function WidgetCard({
 			</div>
 			<CardContent className="min-h-0 flex-1 overflow-hidden p-3">
 				{error ? (
-					<div className="flex h-full items-center justify-center text-center text-destructive text-xs">
+					<div className="flex h-full items-center justify-center text-center text-status-destructive text-xs">
 						{error}
 					</div>
 				) : (

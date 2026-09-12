@@ -446,7 +446,7 @@ async fn classify_llm(config: &AgentAutoConfig, user_text: &str) -> Option<usize
         // starves an interactive reply.
         .header("x-ryu-priority", "background")
         .json(&payload);
-    if let Some(token) = crate::sidecar::gateway::gateway_token() {
+    if let Some(token) = crate::sidecar::gateway::gateway_core_token() {
         builder = builder.bearer_auth(token);
     }
 

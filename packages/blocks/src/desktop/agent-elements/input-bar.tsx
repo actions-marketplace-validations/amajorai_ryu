@@ -14,6 +14,7 @@ import {
 	PopoverTrigger,
 } from "@ryu/ui/components/popover";
 import { Wave } from "@ryu/ui/components/wave";
+import { SPRING_MORPH } from "@ryu/ui/lib/ease";
 import { formatNumber } from "@ryu/ui/lib/number-format.ts";
 import { cn } from "@ryu/ui/lib/utils";
 import type { ChatStatus } from "ai";
@@ -157,6 +158,13 @@ export interface ComposerDraftControls {
 	onSave: (text: string) => void;
 }
 
+/** Explicit promotion action for a temporary chat that is currently in memory. */
+export interface TemporaryChatSaveControls {
+	disabled?: boolean;
+	onSave: () => void;
+	saving?: boolean;
+}
+
 export interface AttachedFile {
 	filename: string;
 	id: string;
@@ -198,8 +206,6 @@ export interface InputBarProps {
 		deletions: number;
 	};
 	className?: string;
-	/** Remove the composer field's card chrome when embedded in voice mode. */
-	seamless?: boolean;
 
 	/**
 	 * Responsive compact composer used once a conversation has history. A plain
@@ -263,7 +269,7 @@ export interface InputBarProps {
 	expandComposer?: boolean;
 
 	/**
-	 * Ghost (temporary/incognito) chat active. When true, the composer box gets a
+	 * Temporary (incognito) chat active. When true, the composer box gets a
 	 * persistent violet ring so it's visually obvious the current thread isn't
 	 * being saved — mirroring the temporary-chat cue in ChatGPT / Grok.
 	 */
@@ -273,7 +279,7 @@ export interface InputBarProps {
 	 * Temporary-chat toggle for the composer "+" dropdown. When provided, the
 	 * dropdown gains a "Temporary chat" row that flips {@link ghost}. Separate from
 	 * `ghost` (which only drives the violet ring) so the host can hide the toggle
-	 * — e.g. once a thread has messages — while still showing the active-ghost ring.
+	 * — e.g. once a thread has messages — while still showing the temporary ring.
 	 */
 	ghostControls?: GhostControls;
 
@@ -296,6 +302,11 @@ export interface InputBarProps {
 	leftActions?: React.ReactNode;
 	/** Resolved @ mentions used to paint the live composer preview. */
 	mentionItems?: MentionItem[];
+	onAnnotateImage?: (image: {
+		filename?: string;
+		id: string;
+		url: string;
+	}) => void;
 
 	// Attachment support
 	onAttach?: () => void;
@@ -328,6 +339,8 @@ export interface InputBarProps {
 		content: string;
 		followUpMode?: "opposite";
 	}) => void;
+	/** Open the app-owned sketch dialog. */
+	onSketch?: () => void;
 	onStop: () => void;
 	/** Optional host-level keyboard handling for the composer editor. */
 	onTextareaKeyDown?: (e: React.KeyboardEvent<HTMLElement>) => void;
@@ -365,6 +378,8 @@ export interface InputBarProps {
 	queueBar?: QueueBarProps;
 	/** Content rendered on the right of the toolbar, before the send button. */
 	rightActions?: React.ReactNode;
+	/** Remove the composer field's card chrome when embedded in voice mode. */
+	seamless?: boolean;
 	status: ChatStatus;
 	suggestions?:
 		| SuggestionItem[]
@@ -373,6 +388,8 @@ export interface InputBarProps {
 				className?: string;
 				itemClassName?: string;
 		  };
+	/** Save the client-held temporary transcript as a normal conversation. */
+	temporaryChatSaveControls?: TemporaryChatSaveControls;
 	/** Live todo list and file edits derived from the current user turn. */
 	turnProgress?: InputBarTurnProgress;
 
@@ -449,10 +466,10 @@ function TurnProgressFile({
 		>
 			<FileTypeIcon className="size-4 shrink-0" path={file.path} />
 			<span className="min-w-0 flex-1 truncate">{file.path}</span>
-			<span className="text-emerald-600 tabular-nums dark:text-emerald-400">
+			<span className="text-status-success tabular-nums">
 				+{formatNumber(file.insertions)}
 			</span>
-			<span className="text-red-600 tabular-nums dark:text-red-400">
+			<span className="text-status-destructive tabular-nums">
 				−{formatNumber(file.deletions)}
 			</span>
 		</button>
@@ -496,6 +513,8 @@ export const InputBar = memo(function InputBar({
 	placeholderSuggestion,
 	className,
 	onAttach,
+	onAnnotateImage,
+	onSketch,
 	attachedImages = [],
 	attachedFiles = [],
 	changeSummary,
@@ -541,6 +560,7 @@ export const InputBar = memo(function InputBar({
 	onComposerMenuSelect,
 	onHeightChange,
 	onTextareaKeyDown,
+	temporaryChatSaveControls,
 }: InputBarProps) {
 	const [internalInput, setInternalInput] = useState("");
 	const [isInfoBarOpen, setIsInfoBarOpen] = useState(true);
@@ -585,14 +605,7 @@ export const InputBar = memo(function InputBar({
 		textareaRef.current?.focus();
 	}, [markdownComposer]);
 	const reduceMotion = !animationsEnabled || (useReducedMotion() ?? false);
-	const composerTransition = reduceMotion
-		? { duration: 0 }
-		: {
-				damping: 34,
-				mass: 0.75,
-				stiffness: 420,
-				type: "spring" as const,
-			};
+	const composerTransition = reduceMotion ? { duration: 0 } : SPRING_MORPH;
 
 	useEffect(() => {
 		if (!onHeightChange) {
@@ -839,6 +852,7 @@ export const InputBar = memo(function InputBar({
 
 	const infoBarNode = shouldShowInfoBar ? (
 		<div
+			aria-live={isDestructiveInfoBar ? undefined : "polite"}
 			className={cn(
 				"mx-3 flex h-[34px] items-center justify-between gap-3 px-3",
 				"overflow-hidden transition-[max-height,opacity] duration-150 ease-out",
@@ -851,7 +865,7 @@ export const InputBar = memo(function InputBar({
 			<div
 				className={cn(
 					"min-w-0 truncate text-xs",
-					isDestructiveInfoBar ? "text-destructive" : "text-foreground"
+					isDestructiveInfoBar ? "text-status-destructive" : "text-foreground"
 				)}
 			>
 				{infoBarData.title && (
@@ -861,7 +875,7 @@ export const InputBar = memo(function InputBar({
 					<span
 						className={
 							isDestructiveInfoBar
-								? "text-destructive/80"
+								? "text-status-destructive/80"
 								: "text-muted-foreground/80"
 						}
 					>
@@ -900,7 +914,7 @@ export const InputBar = memo(function InputBar({
 						className={cn(
 							"size-6 shrink-0",
 							isDestructiveInfoBar
-								? "text-destructive/70 hover:text-destructive"
+								? "text-status-destructive/70 hover:text-status-destructive"
 								: "text-muted-foreground/70 hover:text-foreground"
 						)}
 						onClick={handleInfoBarClose}
@@ -935,14 +949,39 @@ export const InputBar = memo(function InputBar({
 		</div>
 	) : null;
 
-	// Ghost (temporary) chat: a top info-bar strip signalling the thread isn't being
+	// Temporary chat: a top info-bar strip signalling the thread isn't being
 	// saved. Neutral styling (no bg/border of its own) so it shows the frame color
 	// like the other bars — the ghost icon + copy carry the signal.
 	const ghostBarNode = ghost ? (
-		<div className="flex h-[34px] items-center gap-2 rounded-t-2xl px-3 text-[12px] text-muted-foreground">
+		<div className="flex h-[34px] min-w-0 items-center gap-2 rounded-t-2xl px-3 text-[12px] text-muted-foreground">
 			<IconGhost2 className="size-3.5 shrink-0" />
-			<span className="font-medium text-foreground">Ghost chat</span>
-			<span className="truncate">Messages in this chat won't be saved.</span>
+			<span className="shrink-0 font-medium text-foreground">
+				Temporary chat
+			</span>
+			<span className="min-w-0 flex-1 truncate">
+				Messages in this chat won't be saved.
+			</span>
+			{temporaryChatSaveControls ? (
+				<Button
+					aria-label={
+						temporaryChatSaveControls.saving
+							? "Saving temporary chat"
+							: "Save temporary chat"
+					}
+					className="h-7 shrink-0 gap-1.5 px-2 text-xs"
+					disabled={
+						temporaryChatSaveControls.disabled ||
+						temporaryChatSaveControls.saving
+					}
+					onClick={temporaryChatSaveControls.onSave}
+					title="Save this temporary chat to your history"
+					type="button"
+					variant="ghost"
+				>
+					<IconBookmark className="size-3.5" />
+					{temporaryChatSaveControls.saving ? "Saving…" : "Save chat"}
+				</Button>
+			) : null}
 		</div>
 	) : null;
 
@@ -1252,10 +1291,7 @@ export const InputBar = memo(function InputBar({
 						{mention.item.label}
 					</MentionToken>
 				) : (
-					<span
-						className="font-semibold text-primary"
-						key={`${index}-${token}`}
-					>
+					<span className="font-medium text-primary" key={`${index}-${token}`}>
 						<IconWorld
 							aria-hidden="true"
 							className="mr-1 inline-flex size-3.5 align-[-2px]"
@@ -1396,17 +1432,44 @@ export const InputBar = memo(function InputBar({
 		);
 	}
 
-	// The controls are inline around a single-line compact textarea, then return to
-	// the standard row below as soon as that textarea wraps.
+	// Keep the editor in one stable Motion slot. The toolbar changes its grid/flex
+	// topology around that slot when a compact draft reaches a second visible line,
+	// allowing the shared layout transition to morph the card instead of replacing
+	// the textarea and controls with a new subtree.
+	const composerEditor = (
+		<div
+			className={cn(
+				"w-full",
+				isCompactSingleRow
+					? "flex min-h-8 min-w-0 flex-1 items-center"
+					: isExpanded
+						? "min-h-[320px] pt-4 pr-14 pb-3 pl-5"
+						: "flex min-h-[64px] flex-col justify-center py-2.5 pr-3 pl-3.5"
+			)}
+		>
+			{inputContent}
+		</div>
+	);
+	const shouldRenderToolbar = Boolean(
+		compact ||
+			leftActions ||
+			rightActions ||
+			showAttach ||
+			voice ||
+			voiceMode ||
+			onGenerateImage ||
+			onGenerateVideo ||
+			onSketch ||
+			goalControls ||
+			ghostControls ||
+			pluginControls?.length ||
+			composerMenuGroups?.some((group) => group.items.length > 0) ||
+			contextMeter ||
+			expandComposer
+	);
 	const composerToolbar = (
 		<ComposerToolbar
-			center={
-				isCompactSingleRow ? (
-					<div className="flex min-h-8 min-w-0 flex-1 items-center">
-						{inputContent}
-					</div>
-				) : undefined
-			}
+			center={composerEditor}
 			compact={isCompactSingleRow}
 			contextMeter={contextMeter}
 			contextMeterOnOpen={contextMeterOnOpen}
@@ -1428,6 +1491,7 @@ export const InputBar = memo(function InputBar({
 			isStreaming={isStreaming}
 			isTranscribing={isTranscribing}
 			leftActions={leftActions}
+			motionEnabled={!reduceMotion}
 			onAttach={onAttach}
 			onDirectorySelect={(item) => {
 				const start = plusMenuQueryStart ?? input.length;
@@ -1447,6 +1511,7 @@ export const InputBar = memo(function InputBar({
 					requestAnimationFrame(focusComposer);
 				}
 			}}
+			onSketch={onSketch}
 			onStartVoice={startVoice}
 			onStop={onStop}
 			onStopVoice={stopVoice}
@@ -1521,6 +1586,7 @@ export const InputBar = memo(function InputBar({
 				</>
 			}
 			showAttach={showAttach}
+			transition={composerTransition}
 			voiceDisabled={voice?.disabled}
 			voiceMode={voiceMode}
 		/>
@@ -1544,11 +1610,15 @@ export const InputBar = memo(function InputBar({
 		<motion.div
 			className={cn(
 				"composer-container relative cursor-text",
-				seamless ? "bg-transparent" : "rounded-2xl bg-muted",
-				expanded && !seamless && "border border-border/70 shadow-sm",
-				isDragOver && "ring-2 ring-primary ring-inset"
+				seamless
+					? "bg-transparent"
+					: "rounded-2xl border border-border/60 bg-muted/90 shadow-sm",
+				expanded && !seamless && "border-border/80 shadow-md",
+				isDragOver && "ring-2 ring-primary ring-inset",
+				ghost && "ring-1 ring-violet-500/70"
 			)}
 			initial={false}
+			layout={!reduceMotion}
 			onClick={handleContainerClick}
 			transition={composerTransition}
 		>
@@ -1587,6 +1657,7 @@ export const InputBar = memo(function InputBar({
 						exit={{ opacity: 0, scale: 0.985, y: 6 }}
 						initial={reduceMotion ? false : { opacity: 0, scale: 0.985, y: -8 }}
 						key="composer-input"
+						layout={!reduceMotion}
 						transition={{ duration: reduceMotion ? 0 : 0.2 }}
 					>
 						{/* Composer header (e.g. pending quote preview), above the chips. */}
@@ -1600,7 +1671,10 @@ export const InputBar = memo(function InputBar({
 						>
 							<div className="overflow-hidden">
 								{showContextItems && (
-									<div className="flex flex-wrap items-center gap-[6px] px-2.5 pt-2.5 pb-0.5">
+									<div
+										className="flex flex-wrap items-center gap-[6px] px-2.5 pt-2.5 pb-0.5"
+										data-slot="composer-attachments"
+									>
 										{attachedImages.map((img) => (
 											<FileAttachment
 												display={imageDisplayMode}
@@ -1609,6 +1683,7 @@ export const InputBar = memo(function InputBar({
 												id={img.id}
 												isImage
 												key={img.id}
+												onAnnotate={onAnnotateImage}
 												onRemove={
 													onRemoveImage
 														? () => onRemoveImage(img.id)
@@ -1648,42 +1723,7 @@ export const InputBar = memo(function InputBar({
 							</div>
 						)}
 
-						{isCompactSingleRow ? (
-							composerToolbar
-						) : (
-							<>
-								{/* Full layout: textarea above, every control below. Compact
-								    drafts arrive here automatically once they wrap. */}
-								<div
-									className={
-										expanded
-											? "min-h-[320px] pt-4 pr-14 pb-3 pl-5"
-											: "flex min-h-[56px] flex-col justify-center py-2 pr-3 pl-3.5"
-									}
-								>
-									{inputContent}
-								</div>
-
-								{/* Controls row, INSIDE the composer box (Codex-style): the
-								    "+", agent selector, voice/image, and send button all share
-								    the textarea's rounded card and background. */}
-								{(compact ||
-									leftActions ||
-									rightActions ||
-									showAttach ||
-									voice ||
-									voiceMode ||
-									onGenerateImage ||
-									onGenerateVideo ||
-									goalControls ||
-									ghostControls ||
-									pluginControls?.length ||
-									composerMenuGroups?.some((group) => group.items.length > 0) ||
-									contextMeter ||
-									expandComposer) &&
-									composerToolbar}
-							</>
-						)}
+						{shouldRenderToolbar ? composerToolbar : composerEditor}
 					</motion.div>
 				)}
 			</AnimatePresence>
@@ -1695,7 +1735,7 @@ export const InputBar = memo(function InputBar({
 			<motion.div
 				className={cn(
 					"mx-auto w-full",
-					isExpanded ? "max-w-[900px]" : "max-w-[720px]"
+					isExpanded ? "max-w-[980px]" : "max-w-[880px]"
 				)}
 				transition={composerTransition}
 			>
@@ -1771,10 +1811,10 @@ export const InputBar = memo(function InputBar({
 										{formatNumber(effectiveChangeSummary.files)} file
 										{effectiveChangeSummary.files === 1 ? "" : "s"} changed
 									</span>
-									<span className="font-medium text-emerald-600 dark:text-emerald-400">
+									<span className="font-medium text-status-success">
 										+{formatNumber(effectiveChangeSummary.insertions)}
 									</span>
-									<span className="font-medium text-red-600 dark:text-red-400">
+									<span className="font-medium text-status-destructive">
 										-{formatNumber(effectiveChangeSummary.deletions)}
 									</span>
 								</PopoverTrigger>
@@ -1801,7 +1841,7 @@ export const InputBar = memo(function InputBar({
 						// (distinct from the input box), so the bars — which carry no bg of
 						// their own — show this color, and the sliver at the input box's
 						// rounded corners is the same color as the bars (seamless).
-						!seamless && (shouldShowInfoBar || goalBar || workspaceBar)
+						!seamless && (shouldShowInfoBar || goalBar || workspaceBar || ghost)
 							? "rounded-2xl bg-card"
 							: null
 					)}

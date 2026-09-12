@@ -107,6 +107,18 @@ export interface CoreApi {
 	fetchApps: (t: ApiTarget) => Promise<AppInfo[]>;
 	fetchAppsCatalog: (t: ApiTarget) => Promise<CatalogEntry[]>;
 	installApp: (t: ApiTarget, id: string) => Promise<AppRecord>;
+	/** Preview a supported app/plugin lifecycle operation without changing Core. */
+	previewAppLifecycle?: (
+		t: ApiTarget,
+		id: string,
+		action: "install" | "enable" | "disable" | "uninstall" | "update",
+		options?: {
+			cascade?: boolean;
+			channel?: string;
+			force?: boolean;
+			version?: string;
+		}
+	) => Promise<unknown>;
 	streamChat: (
 		t: ApiTarget,
 		turns: ChatTurn[],

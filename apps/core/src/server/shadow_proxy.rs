@@ -39,6 +39,7 @@ const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 /// undeclared paths are never forwarded (the ext-proxy's exact-route safety).
 const GET_ALLOWLIST: &[&str] = &[
     "timeline",
+    "transcripts",
     "journal",
     "journal/weekly",
     "frame",

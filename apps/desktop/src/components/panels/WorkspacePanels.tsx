@@ -32,7 +32,7 @@ import type {
 	ContextMenuItem as FileTreeContextMenuItem,
 	ContextMenuOpenContext as FileTreeContextMenuOpenContext,
 } from "@pierre/trees";
-import { FileTree, useFileTree } from "@pierre/trees/react";
+import { FileTree, useFileTree, useFileTreeSearch } from "@pierre/trees/react";
 import {
 	ContextMenu,
 	ContextMenuContent,
@@ -154,6 +154,7 @@ import {
 	sidebarFloatingChrome,
 	useSidebarVariant,
 } from "@/src/hooks/useSidebarVariant.ts";
+import { useTerminalPanelLocation } from "@/src/hooks/useTerminalPanelLocation.ts";
 import { useTitleBarClearsContent } from "@/src/hooks/useTitleBarClearsContent.ts";
 import { apiUrl, makeHeaders, toTarget } from "@/src/lib/api/client.ts";
 import { fetchGitFileDiff } from "@/src/lib/api/git.ts";
@@ -181,7 +182,15 @@ import type {
 import PluginCompanionPage from "@/src/pages/PluginCompanionPage.tsx";
 import PluginViewPage from "@/src/pages/PluginViewPage.tsx";
 import { useAssistantStore } from "@/src/store/useAssistantStore.ts";
-import { useDockPanelRequestStore } from "@/src/store/useDockPanelRequestStore.ts";
+import { useBrowserOpenRequestStore } from "@/src/store/useBrowserOpenRequestStore.ts";
+import {
+	type TerminalCommandRequest,
+	useDockPanelRequestStore,
+} from "@/src/store/useDockPanelRequestStore.ts";
+import {
+	type FileTreeSearchRequest,
+	useFileTreeSearchStore,
+} from "@/src/store/useFileTreeSearchStore.ts";
 import {
 	type ProjectDockTab,
 	useProjectDockStore,
@@ -542,6 +551,7 @@ function EditorIcon({ def }: { def: EditorDef }) {
 
 function EditorButtonGroup({ folder }: { folder?: string | null }) {
 	const { canUseNativeShell } = useAppSurface();
+	const [terminalPanelLocation] = useTerminalPanelLocation();
 	const defaultFileOpener = useWorkspaceStore((s) => s.defaultFileOpener);
 	const setDefaultFileOpener = useWorkspaceStore((s) => s.setDefaultFileOpener);
 	const [activeId, setActiveId] = useState(() =>
@@ -569,6 +579,12 @@ function EditorButtonGroup({ folder }: { folder?: string | null }) {
 
 	const run = async (id: string) => {
 		setActiveId(id);
+		if (id === "terminal") {
+			useDockPanelRequestStore
+				.getState()
+				.open("terminal", "Terminal", terminalPanelLocation);
+			return;
+		}
 		const opener = defaultFileOpenerForEditorId(id);
 		if (opener) {
 			setDefaultFileOpener(opener);
@@ -650,6 +666,9 @@ interface PanelTab {
 	 *  artifact gets its OWN tab — opening a second artifact never replaces the
 	 *  first (the dock's artifact surface has no one-at-a-time limit). */
 	artifact?: Artifact;
+	/** One-shot command queued when an environment action opens a terminal tab. */
+	initialCommand?: TerminalCommandRequest;
+	initialCommandNonce?: number;
 	kind: TabKind;
 	label: string;
 	/** True when this tab is project-shared (visible in every chat for the folder). */
@@ -682,6 +701,7 @@ const BOTTOM_TAB_TYPES: TabTypeDef[] = [
 ];
 
 const RIGHT_TAB_TYPES: TabTypeDef[] = [
+	{ kind: "terminal", label: "Terminal", icon: ComputerTerminal01Icon },
 	{ kind: "files", label: "Files", icon: FolderOpenIcon },
 	{ kind: "codereview", label: "Changes", icon: FileCodeIcon },
 	{ kind: "gitgraph", label: "Git graph", icon: GitBranchIcon },
@@ -784,7 +804,9 @@ function makeTab(
 	label: string,
 	n?: number,
 	artifact?: Artifact,
-	uid?: string
+	uid?: string,
+	initialCommand?: TerminalCommandRequest,
+	initialCommandNonce?: number
 ): PanelTab {
 	tabCounter += 1;
 	const suppliedUidMatch = uid?.match(/^tab-(\d+)$/);
@@ -796,6 +818,7 @@ function makeTab(
 		kind,
 		label: n == null ? label : `${label} ${n}`,
 		artifact,
+		...(initialCommand ? { initialCommand, initialCommandNonce } : {}),
 	};
 }
 
@@ -916,16 +939,38 @@ function usePanelTabs(initial: PanelTab[]) {
 	// label) or create it. Used to surface a clicked subagent's transcript without
 	// stacking a new tab per click.
 	const openTab = useCallback(
-		(kind: TabKind, label: string) => {
+		(
+			kind: TabKind,
+			label: string,
+			initialCommand?: TerminalCommandRequest,
+			initialCommandNonce?: number
+		) => {
 			const existing = tabs.find((t) => t.kind === kind);
 			if (existing) {
 				setTabs((prev) =>
-					prev.map((t) => (t.uid === existing.uid ? { ...t, label } : t))
+					prev.map((t) =>
+						t.uid === existing.uid
+							? {
+									...t,
+									label,
+									initialCommand,
+									initialCommandNonce,
+								}
+							: t
+					)
 				);
 				setActiveUid(existing.uid);
 				return;
 			}
-			const tab = makeTab(kind, label);
+			const tab = makeTab(
+				kind,
+				label,
+				undefined,
+				undefined,
+				undefined,
+				initialCommand,
+				initialCommandNonce
+			);
 			setTabs((prev) => [...prev, tab]);
 			setActiveUid(tab.uid);
 		},
@@ -1298,10 +1343,19 @@ function PanelEmptyState({
 
 // ── File tree panel (@pierre/trees) ──────────────────────────────────────────
 
-export function FileTreePanel({ folder }: { folder?: string | null }) {
+export function FileTreePanel({
+	active = true,
+	folder,
+}: {
+	active?: boolean;
+	folder?: string | null;
+}) {
 	const [paths, setPaths] = useState<readonly string[]>([]);
 	const [loading, setLoading] = useState(false);
 	const terminalShell = useWorkspaceStore((s) => s.terminalShell);
+	const searchRequest = useFileTreeSearchStore((state) =>
+		active ? state.request : null
+	);
 
 	useEffect(() => {
 		if (!folder) {
@@ -1324,7 +1378,11 @@ export function FileTreePanel({ folder }: { folder?: string | null }) {
 	}, [folder, terminalShell]);
 
 	const prefs = useFileTreePrefs();
-	const options = useMemo(() => fileTreePrefsToOptions(prefs), [prefs]);
+	const searchEnabled = prefs.showSearch || searchRequest !== null;
+	const options = useMemo(
+		() => fileTreePrefsToOptions({ ...prefs, showSearch: searchEnabled }),
+		[prefs, searchEnabled]
+	);
 	const themeStyles = useFileTreeThemeStyles(prefs);
 	const availableEditorIds = useAvailableEditorIds();
 	const availableEditors = useMemo(
@@ -1425,6 +1483,7 @@ export function FileTreePanel({ folder }: { folder?: string | null }) {
 					key={JSON.stringify(options)}
 					options={options}
 					paths={paths}
+					searchRequest={searchRequest}
 					style={themeStyles}
 				/>
 			</div>
@@ -1442,18 +1501,43 @@ function FileTreeView({
 	folder,
 	paths,
 	options,
+	searchRequest,
 	style,
 }: {
 	availableEditors: readonly EditorDef[];
 	folder: string;
 	options: ReturnType<typeof fileTreePrefsToOptions>;
 	paths: readonly string[];
+	searchRequest: FileTreeSearchRequest | null;
 	style?: CSSProperties;
 }) {
 	const { model } = useFileTree({ ...options, paths });
+	const fileTreeSearch = useFileTreeSearch(model);
+	const requestWasActiveRef = useRef(false);
+	const lastRequestNonceRef = useRef<number | null>(null);
 	useEffect(() => {
 		model.resetPaths(paths);
 	}, [paths, model]);
+	useEffect(() => {
+		if (!searchRequest) {
+			if (requestWasActiveRef.current) {
+				requestWasActiveRef.current = false;
+				lastRequestNonceRef.current = null;
+				fileTreeSearch.close();
+			}
+			return;
+		}
+
+		requestWasActiveRef.current = true;
+		if (lastRequestNonceRef.current !== searchRequest.nonce) {
+			lastRequestNonceRef.current = searchRequest.nonce;
+			fileTreeSearch.open(searchRequest.query);
+			return;
+		}
+		if (fileTreeSearch.value !== searchRequest.query) {
+			fileTreeSearch.setValue(searchRequest.query);
+		}
+	}, [fileTreeSearch, searchRequest]);
 	return (
 		<FileTree
 			className="h-full w-full"
@@ -1845,7 +1929,7 @@ export function PatchDiffPanel({
 	} else if (diffError) {
 		body = (
 			<div
-				className="flex h-full items-center justify-center p-4 text-center text-destructive text-xs"
+				className="flex h-full items-center justify-center p-4 text-center text-status-destructive text-xs"
 				role="alert"
 			>
 				{diffError}
@@ -2067,6 +2151,11 @@ function IframePanel({
 	const [slow, setSlow] = useState(false);
 
 	useEffect(() => {
+		setSrc(initialUrl);
+		setInputVal(initialUrl);
+	}, [initialUrl]);
+
+	useEffect(() => {
 		setLoading(true);
 		setSlow(false);
 		const t = setTimeout(() => setSlow(true), 4000);
@@ -2156,11 +2245,36 @@ export function BrowserTabPanel({
 	title: string;
 }) {
 	const { apps } = useApps();
+	const pendingOpen = useBrowserOpenRequestStore((state) => state.pending);
+	const clearPendingOpen = useBrowserOpenRequestStore((state) => state.clear);
+	const [consumedOpen, setConsumedOpen] = useState<{
+		nonce: number;
+		url: string;
+	} | null>(null);
+	useEffect(() => {
+		if (!pendingOpen) {
+			return;
+		}
+		setConsumedOpen(pendingOpen);
+		clearPendingOpen();
+	}, [clearPendingOpen, pendingOpen]);
+	const requestedOpen = pendingOpen ?? consumedOpen;
 	const enabled = apps.some((a) => a.id === BROWSER_PLUGIN_ID && a.enabled);
 	if (enabled) {
-		return <BrowserSidecarPanel active={active} />;
+		return (
+			<BrowserSidecarPanel
+				active={active}
+				requestedNonce={requestedOpen?.nonce}
+				requestedUrl={requestedOpen?.url}
+			/>
+		);
 	}
-	return <IframePanel initialUrl="https://www.google.com" title={title} />;
+	return (
+		<IframePanel
+			initialUrl={requestedOpen?.url ?? "https://www.google.com"}
+			title={title}
+		/>
+	);
 }
 
 function formatBrowserContext(context: BrowserContextResult | null): string {
@@ -2214,7 +2328,15 @@ function formatBrowserContext(context: BrowserContextResult | null): string {
 	return lines.join("\n");
 }
 
-function BrowserSidecarPanel({ active = true }: { active?: boolean }) {
+function BrowserSidecarPanel({
+	active = true,
+	requestedNonce,
+	requestedUrl,
+}: {
+	active?: boolean;
+	requestedNonce?: number;
+	requestedUrl?: string;
+}) {
 	const node = useActiveNode();
 	const [tabs, setTabs] = useState<SidecarTab[]>([]);
 	const [activeId, setActiveId] = useState<string | null>(null);
@@ -2361,6 +2483,13 @@ function BrowserSidecarPanel({ active = true }: { active?: boolean }) {
 		},
 		[call, headers, refresh]
 	);
+
+	useEffect(() => {
+		if (!requestedUrl) {
+			return;
+		}
+		openTab(requestedUrl).catch(() => undefined);
+	}, [openTab, requestedNonce, requestedUrl]);
 
 	const screenshot = useCallback(
 		async (id: string) => {
@@ -2613,7 +2742,7 @@ function BrowserSidecarPanel({ active = true }: { active?: boolean }) {
 				</ul>
 				<div className="relative flex min-w-0 flex-1">
 					{error && (
-						<div className="pointer-events-none absolute top-2 right-2 left-2 z-10 rounded-md border border-destructive/30 bg-background/95 px-2 py-1 text-center text-destructive text-xs shadow-sm">
+						<div className="pointer-events-none absolute top-2 right-2 left-2 z-10 rounded-md border border-destructive/30 bg-background/95 px-2 py-1 text-center text-status-destructive text-xs shadow-sm">
 							{error}
 						</div>
 					)}
@@ -2996,7 +3125,7 @@ function SimDeviceList({
 										className={cn(
 											"size-1.5 shrink-0 rounded-full",
 											d.state === "booted"
-												? "bg-emerald-500"
+												? "bg-success"
 												: "bg-muted-foreground/40"
 										)}
 									/>
@@ -3021,7 +3150,15 @@ interface TerminalLine {
 	type: "prompt" | "output" | "error";
 }
 
-function SimpleTerminal({ cwd }: { cwd?: string | null }) {
+function SimpleTerminal({
+	cwd,
+	initialCommand,
+	initialCommandNonce,
+}: {
+	cwd?: string | null;
+	initialCommand?: TerminalCommandRequest;
+	initialCommandNonce?: number;
+}) {
 	const [lines, setLines] = useState<TerminalLine[]>([
 		{
 			type: "output",
@@ -3035,6 +3172,7 @@ function SimpleTerminal({ cwd }: { cwd?: string | null }) {
 	const [history, setHistory] = useState<string[]>([]);
 	const [histIdx, setHistIdx] = useState(-1);
 	const [currentCwd, setCurrentCwd] = useState(cwd ?? "");
+	const consumedInitialCommand = useRef<number | null>(null);
 	const terminalShell = useWorkspaceStore((s) => s.terminalShell);
 	const outputRef = useRef<HTMLDivElement>(null);
 	const inputRef = useRef<HTMLInputElement>(null);
@@ -3057,17 +3195,25 @@ function SimpleTerminal({ cwd }: { cwd?: string | null }) {
 		: "$ ";
 
 	const runCommand = useCallback(
-		async (cmd: string) => {
+		async (cmd: string, request?: TerminalCommandRequest) => {
+			const commandCwd = request ? (request.cwd ?? "") : currentCwd;
+			const commandPrompt = commandCwd
+				? `${commandCwd.split(PATH_SEPARATOR_RE).at(-1) ?? commandCwd} $ `
+				: "$ ";
 			if (!cmd.trim()) {
-				setLines((prev) => [...prev, { type: "prompt", text: promptLabel }]);
+				setLines((prev) => [...prev, { type: "prompt", text: commandPrompt }]);
 				return;
 			}
 			setLines((prev) => [
 				...prev,
-				{ type: "prompt", text: `${promptLabel}${cmd}` },
+				{ type: "prompt", text: `${commandPrompt}${cmd}` },
 			]);
 			setRunning(true);
-			const shellArg = terminalShell === "auto" ? null : terminalShell;
+			const shellArg = request
+				? request.shell
+				: terminalShell === "auto"
+					? null
+					: terminalShell;
 			try {
 				const result = await invoke<{
 					stdout: string;
@@ -3075,7 +3221,8 @@ function SimpleTerminal({ cwd }: { cwd?: string | null }) {
 					code: number;
 				}>("shell_execute", {
 					command: cmd,
-					cwd: currentCwd || null,
+					cwd: commandCwd || null,
+					env: request?.env,
 					shell: shellArg,
 				});
 				const next: TerminalLine[] = [];
@@ -3091,8 +3238,19 @@ function SimpleTerminal({ cwd }: { cwd?: string | null }) {
 			}
 			setRunning(false);
 		},
-		[currentCwd, promptLabel, terminalShell]
+		[currentCwd, terminalShell]
 	);
+
+	useEffect(() => {
+		if (
+			!(initialCommand && initialCommandNonce !== undefined) ||
+			consumedInitialCommand.current === initialCommandNonce
+		) {
+			return;
+		}
+		consumedInitialCommand.current = initialCommandNonce;
+		void runCommand(initialCommand.command, initialCommand);
+	}, [initialCommand, initialCommandNonce, runCommand]);
 
 	const handleKeyDown = (e: KeyboardEvent<HTMLInputElement>) => {
 		if (e.key === "Enter") {
@@ -3137,7 +3295,7 @@ function SimpleTerminal({ cwd }: { cwd?: string | null }) {
 					if (line.type === "prompt") {
 						lineClassName = "text-primary";
 					} else if (line.type === "error") {
-						lineClassName = "text-destructive";
+						lineClassName = "text-status-destructive";
 					}
 					return (
 						// biome-ignore lint/suspicious/noArrayIndexKey: stable sequential terminal lines
@@ -3436,7 +3594,13 @@ function TabContent({
 		return <DockRoutePage kind={tab.kind} label={tab.label} uid={tab.uid} />;
 	}
 	if (tab.kind === "terminal") {
-		return <SimpleTerminal cwd={folder} />;
+		return (
+			<SimpleTerminal
+				cwd={folder}
+				initialCommand={tab.initialCommand}
+				initialCommandNonce={tab.initialCommandNonce}
+			/>
+		);
 	}
 	if (tab.kind === "context") {
 		return <ContextPanel view={contextView} />;
@@ -3500,7 +3664,13 @@ function TabContent({
 		);
 	}
 	if (tab.kind === "files") {
-		return <FileTreePanel folder={folder} key={`${tab.uid}-${folder}`} />;
+		return (
+			<FileTreePanel
+				active={active}
+				folder={folder}
+				key={`${tab.uid}-${folder}`}
+			/>
+		);
 	}
 	if (tab.kind === "gitgraph") {
 		return (
@@ -3659,6 +3829,8 @@ export interface PanelToggleButtonsProps {
 	/** Pinned summary toggle — omitted (no button) when the pair isn't provided. */
 	pinnedSummaryOpen?: boolean;
 	rightOpen: boolean;
+	/** Whether the chat header should expose the bottom-panel button. */
+	showBottomPanelToggle?: boolean;
 }
 
 export function PanelToggleButtons({
@@ -3669,6 +3841,7 @@ export function PanelToggleButtons({
 	folder,
 	pinnedSummaryOpen,
 	onPinnedSummaryToggle,
+	showBottomPanelToggle = true,
 }: PanelToggleButtonsProps) {
 	return (
 		<>
@@ -3697,24 +3870,26 @@ export function PanelToggleButtons({
 					<TooltipContent>{`${pinnedSummaryOpen ? "Hide" : "Show"} pinned summary`}</TooltipContent>
 				</Tooltip>
 			) : null}
-			<Tooltip>
-				<TooltipTrigger
-					render={
-						<button
-							className="flex size-8 shrink-0 items-center justify-center rounded-xl text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
-							onClick={onBottomToggle}
-							type="button"
-						>
-							{bottomOpen ? (
-								<BottomPanelIconOpen className="size-4" />
-							) : (
-								<BottomPanelIconClosed className="size-4" />
-							)}
-						</button>
-					}
-				/>
-				<TooltipContent>{`${bottomOpen ? "Hide" : "Show"} bottom panel`}</TooltipContent>
-			</Tooltip>
+			{showBottomPanelToggle ? (
+				<Tooltip>
+					<TooltipTrigger
+						render={
+							<button
+								className="flex size-8 shrink-0 items-center justify-center rounded-xl text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+								onClick={onBottomToggle}
+								type="button"
+							>
+								{bottomOpen ? (
+									<BottomPanelIconOpen className="size-4" />
+								) : (
+									<BottomPanelIconClosed className="size-4" />
+								)}
+							</button>
+						}
+					/>
+					<TooltipContent>{`${bottomOpen ? "Hide" : "Show"} bottom panel`}</TooltipContent>
+				</Tooltip>
+			) : null}
 			<Tooltip>
 				<TooltipTrigger
 					render={
@@ -3765,6 +3940,8 @@ export interface WorkspacePanelsProps {
 	cowork?: CoworkData;
 	/** Opens a path-scoped Changes view for one completed assistant turn. */
 	fileReviewRequest?: FileReviewRequest | null;
+	/** Request from the focused chat to open and drive the Files tree search. */
+	fileSearchRequest?: FileTreeSearchRequest | null;
 	folder?: string | null;
 	/**
 	 * A request to inspect a raw message part (tool call / image / citations) in
@@ -3825,6 +4002,7 @@ export function WorkspacePanels(props: WorkspacePanelsProps) {
 function WorkspacePanelsImpl({
 	children,
 	fileReviewRequest,
+	fileSearchRequest,
 	folder,
 	cowork,
 	bottomOpen,
@@ -4169,8 +4347,27 @@ function WorkspacePanelsImpl({
 	// Open (or re-focus) the subagent tab when ChatPage requests one. `openTab` is
 	// re-created each render, so hold it in a ref and depend only on the request —
 	// the effect fires once per click (the nonce makes each request distinct).
+	const openBottomTabRef = useRef(bottomLocal.openTab);
+	openBottomTabRef.current = bottomLocal.openTab;
 	const openRightTabRef = useRef(rightLocal.openTab);
 	openRightTabRef.current = rightLocal.openTab;
+	const fileSearchNonce = fileSearchRequest?.nonce;
+	useEffect(() => {
+		if (fileSearchNonce === undefined) {
+			return;
+		}
+		const projectFiles = visibleRightProject.find(
+			(tab) => tab.kind === "files"
+		);
+		if (projectFiles) {
+			setRightActiveUid(projectFiles.uid);
+		} else {
+			openRightTabRef.current("files", "Files");
+		}
+		if (!rightOpen) {
+			onRightOpenChange(true);
+		}
+	}, [fileSearchNonce, onRightOpenChange, rightOpen, visibleRightProject]);
 	useEffect(() => {
 		setSubagentView(null);
 	}, [cowork?.runId]);
@@ -4290,26 +4487,49 @@ function WorkspacePanelsImpl({
 			return;
 		}
 		clearPendingDockPanel();
-		const pinnedSame = visibleRightProject.find(
+		const side = pendingDockPanel.side ?? "right";
+		const isBottom = side === "bottom";
+		const projectTabs = isBottom ? visibleBottomProject : visibleRightProject;
+		const pinnedSame = projectTabs.find(
 			(tab) => tab.kind === pendingDockPanel.kind
 		);
-		if (pinnedSame) {
-			setRightActiveUid(pinnedSame.uid);
+		if (pinnedSame && !pendingDockPanel.command) {
+			if (isBottom) {
+				setBottomActiveUid(pinnedSame.uid);
+			} else {
+				setRightActiveUid(pinnedSame.uid);
+			}
+		} else if (isBottom) {
+			openBottomTabRef.current(
+				pendingDockPanel.kind as TabKind,
+				pendingDockPanel.label,
+				pendingDockPanel.command,
+				pendingDockPanel.nonce
+			);
 		} else {
 			openRightTabRef.current(
 				pendingDockPanel.kind as TabKind,
-				pendingDockPanel.label
+				pendingDockPanel.label,
+				pendingDockPanel.command,
+				pendingDockPanel.nonce
 			);
 		}
-		if (!rightOpen) {
-			onRightOpenChange(true);
+		if (isBottom ? !bottomOpen : !rightOpen) {
+			if (isBottom) {
+				onBottomOpenChange(true);
+			} else {
+				onRightOpenChange(true);
+			}
 		}
 	}, [
 		pendingDockPanel,
 		isFocusedWindowTab,
 		clearPendingDockPanel,
+		visibleBottomProject,
 		visibleRightProject,
+		bottomOpen,
 		rightOpen,
+		onBottomOpenChange,
 		onRightOpenChange,
 	]);
 
@@ -4582,6 +4802,7 @@ function WorkspacePanelsImpl({
 					<ProjectDockContentSlot active uid={activeBottomTab.uid} />
 				) : activeBottomTab ? (
 					<TabContent
+						active={isFocusedWindowTab}
 						contextView={contextView}
 						dockPanels={dockPanels}
 						fileReviewRequest={fileReviewRequest}
@@ -4626,6 +4847,7 @@ function WorkspacePanelsImpl({
 					<ProjectDockContentSlot active uid={activeRightTab.uid} />
 				) : activeRightTab ? (
 					<TabContent
+						active={isFocusedWindowTab}
 						contextView={contextView}
 						cowork={cowork}
 						dockPanels={dockPanels}

@@ -2,6 +2,7 @@
 
 import { SearchIcon, Tick02Icon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
+import { useLocalizedString, useLocalizedText } from "@ryu/i18n/react";
 import {
 	Dialog,
 	DialogContent,
@@ -24,7 +25,7 @@ function Command({
 	return (
 		<CommandPrimitive
 			className={cn(
-				"flex size-full flex-col overflow-hidden rounded-4xl p-1 text-popover-foreground",
+				"corner-squircle flex size-full flex-col overflow-hidden rounded-4xl p-1 text-popover-foreground",
 				className
 			)}
 			data-slot="command"
@@ -55,7 +56,7 @@ function CommandDialog({
 			</DialogHeader>
 			<DialogContent
 				className={cn(
-					"top-1/3 translate-y-0 animate-none! overflow-hidden rounded-4xl! p-0 duration-0",
+					"corner-squircle top-1/3 translate-y-0 animate-none! overflow-hidden rounded-4xl! p-0 duration-0",
 					className
 				)}
 				overlayClassName="animate-none! duration-0"
@@ -71,6 +72,7 @@ function CommandInput({
 	className,
 	...props
 }: React.ComponentProps<typeof CommandPrimitive.Input>) {
+	const localizedPlaceholder = useLocalizedString(props.placeholder);
 	return (
 		<div data-slot="command-input-wrapper">
 			<InputGroup className="sticky top-0 z-20 h-9 border-0 border-b bg-transparent! shadow-none! backdrop-blur supports-backdrop-filter:bg-transparent!">
@@ -81,6 +83,7 @@ function CommandInput({
 					)}
 					data-slot="command-input"
 					{...props}
+					placeholder={localizedPlaceholder}
 				/>
 				<InputGroupAddon>
 					<HugeiconsIcon
@@ -112,21 +115,29 @@ function CommandList({
 
 function CommandEmpty({
 	className,
+	children,
 	...props
 }: React.ComponentProps<typeof CommandPrimitive.Empty>) {
+	const localizedChildren = useLocalizedText(children, { literal: true });
 	return (
 		<CommandPrimitive.Empty
 			className={cn("py-4 text-center text-sm", className)}
 			data-slot="command-empty"
 			{...props}
-		/>
+		>
+			{localizedChildren}
+		</CommandPrimitive.Empty>
 	);
 }
 
 function CommandGroup({
 	className,
+	heading,
 	...props
 }: React.ComponentProps<typeof CommandPrimitive.Group>) {
+	const localizedHeading = useLocalizedString(
+		typeof heading === "string" ? heading : undefined
+	);
 	return (
 		<CommandPrimitive.Group
 			className={cn(
@@ -136,6 +147,7 @@ function CommandGroup({
 			)}
 			data-slot="command-group"
 			{...props}
+			heading={typeof heading === "string" ? localizedHeading : heading}
 		/>
 	);
 }
@@ -158,18 +170,19 @@ function CommandItem({
 	children,
 	...props
 }: React.ComponentProps<typeof CommandPrimitive.Item>) {
+	const localizedChildren = useLocalizedText(children, { literal: true });
 	return (
 		<CommandPrimitive.Item
 			className={cn(
-				"group/command-item relative flex cursor-default select-none items-center gap-1.5 in-data-[slot=dialog-content]:rounded-3xl rounded-2xl px-1.5 py-1 font-medium text-sm outline-hidden data-[disabled=true]:pointer-events-none data-selected:bg-accent data-selected:text-foreground data-[disabled=true]:opacity-50 [&_svg:not([class*='size-'])]:size-4 [&_svg]:pointer-events-none [&_svg]:shrink-0 data-selected:*:[svg]:text-foreground",
+				"group/command-item in-data-[slot=dialog-content]:corner-squircle corner-squircle relative flex cursor-default select-none items-center gap-1.5 in-data-[slot=dialog-content]:rounded-3xl rounded-2xl px-1.5 py-1 font-medium text-sm outline-hidden data-[disabled=true]:pointer-events-none data-selected:bg-accent data-selected:text-foreground data-[disabled=true]:opacity-50 [&_svg:not([class*='size-'])]:size-4 [&_svg]:pointer-events-none [&_svg]:shrink-0 data-selected:*:[svg]:text-foreground",
 				className
 			)}
 			data-slot="command-item"
 			{...props}
 		>
-			{children}
+			{localizedChildren}
 			<HugeiconsIcon
-				className="ml-auto opacity-0 group-has-data-[slot=command-shortcut]/command-item:hidden group-data-[checked=true]/command-item:opacity-100"
+				className="ms-auto opacity-0 group-has-data-[slot=command-shortcut]/command-item:hidden group-data-[checked=true]/command-item:opacity-100"
 				icon={Tick02Icon}
 				strokeWidth={2}
 			/>
@@ -184,7 +197,7 @@ function CommandShortcut({
 	return (
 		<span
 			className={cn(
-				"ml-auto text-muted-foreground text-xs tracking-widest group-data-selected/command-item:text-foreground",
+				"ms-auto text-muted-foreground text-xs tracking-widest group-data-selected/command-item:text-foreground",
 				className
 			)}
 			data-slot="command-shortcut"

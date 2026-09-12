@@ -103,7 +103,7 @@ export function ModelLaunchConfigSection({
 				onClick={() => setOpen((o) => !o)}
 				type="button"
 			>
-				<span className="font-semibold text-sm">Engine / Hardware</span>
+				<span className="font-medium text-sm">Engine / Hardware</span>
 				{subtitle ? (
 					<span
 						className="truncate text-muted-foreground text-xs"
@@ -413,7 +413,7 @@ export function ModelLaunchConfigSection({
 										<span className="text-muted-foreground text-xs">Saved</span>
 									) : null}
 									{saveMutation.isError ? (
-										<span className="text-destructive text-xs">
+										<span className="text-status-destructive text-xs">
 											Could not save (the backend may not support this yet)
 										</span>
 									) : null}

@@ -5,6 +5,7 @@
   "type": "module",
   "exports": {
     "./app-bridge": "./src/app-bridge.ts",
+    "./media-recording": "./src/media-recording.ts",
     "./standalone": "./src/standalone.ts",
     "./companion-theme": "./src/companion-theme.ts",
     "./rpc": "./src/rpc.ts",
@@ -23,6 +24,7 @@
     "test": "bun test src"
   },
   "dependencies": {
+    "@ryu/i18n": "workspace:*",
     "@ryuhq/core-client": "workspace:*",
     "zustand": "^5"
   },

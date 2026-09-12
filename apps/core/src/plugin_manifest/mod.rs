@@ -53,8 +53,8 @@ pub(crate) fn read_contained_package_file(base: &Path, rel: &str) -> Result<Stri
     let canonical_base = std::fs::canonicalize(base)
         .map_err(|e| format!("{}: cannot resolve package root: {e}", base.display()))?;
     let joined = base.join(rel);
-    let canonical_target = std::fs::canonicalize(&joined)
-        .map_err(|e| format!("{}: {e}", joined.display()))?;
+    let canonical_target =
+        std::fs::canonicalize(&joined).map_err(|e| format!("{}: {e}", joined.display()))?;
     if !canonical_target.starts_with(&canonical_base) {
         return Err(format!(
             "{}: resolved target '{}' escapes package root '{}'",
@@ -196,6 +196,10 @@ pub const MANIFEST_FILE_NAME: &str = MANIFEST_FILE_NAMES[0];
 ///   tool, backed by a BYO `spider` CLI reached through the command-tool
 ///   allowlist. The native `sidecar/mcp/spider.rs` provider was deleted, so the
 ///   fixture is the SOLE owner of the tool (see the exception note below).
+/// - `ripgrep.manifest.json` — the exact local-search sibling of `spider` and
+///   `rtk`: two fixed `command` tools backed by the BYO `rg` binary, with no
+///   bundled MCP server or Core Rust provider. Its arguments are paths and
+///   regular expressions only; the command tool passes them as an argv array.
 /// - `scrapling.manifest.json` — Scrapling adaptive page extraction (BYO local
 ///   install, no API key). The THIRD `web.extract` provider, `selectable` and
 ///   claiming no `default` (`spider` keeps it). Three things about it are
@@ -228,6 +232,9 @@ pub const MANIFEST_FILE_NAME: &str = MANIFEST_FILE_NAMES[0];
 ///   list you already have). Same reasoning as `firecrawl`'s absent crawl entry — a
 ///   partial `tools` map would join resolution and could win the pick away from
 ///   `spider`, silently killing a layer that works. Absent, not empty.
+/// - `zvec-grep.manifest.json` — zvec-grep's local-first hybrid workspace search.
+///   It is an opt-in Core-tier MCP plugin whose pinned `npx` stdio bridge starts
+///   or reuses the upstream daemon and exposes its default indexed-search tool.
 /// - `agentbrowser.manifest.json` — Agent Browser web-browsing tool (system plugin, npx MCP-backed).
 /// - `exa.manifest.json` — Exa neural search tool plugin (U040, BYOK). Provides the
 ///   selectable `web.search` capability and is its declared default.
@@ -290,11 +297,11 @@ pub const MANIFEST_FILE_NAME: &str = MANIFEST_FILE_NAMES[0];
 /// (`fire_activation_event` → the Tool handler in `server/mod.rs`). Do not
 /// re-add tool runnables to these fixtures.
 ///
-/// EXCEPTION: `spider`, `rtk`, `advisor` and `shadow` CARRY their tool runnables,
+/// EXCEPTION: `spider`, `rtk`, `ripgrep`, `advisor` and `shadow` CARRY their tool runnables,
 /// because their Rust providers were deleted — the fixture is the only owner, so
 /// there is nothing to double-list. The "no runnables" rule above exists solely to
 /// avoid double-listing a provider-owned tool; it does not apply once the provider
-/// is gone. `spider`/`rtk` are declarative `command`-backend tools; `advisor`
+/// is gone. `spider`/`rtk`/`ripgrep` are declarative `command`-backend tools; `advisor`
 /// (`advisor.consult`) and `shadow` (`shadow.search`/`semantic_search`/`timeline`/
 /// `recent_context`) are declarative `http`-backend tools reaching Core loopback
 /// bridges (`/api/advisor/consult` and the `/api/shadow/*` proxy). `spider`/`rtk`
@@ -444,71 +451,77 @@ pub const MANIFEST_FILE_NAME: &str = MANIFEST_FILE_NAMES[0];
 // Safe Actions is a shipped satellite, so its manifest is part of both the
 // hermetic validation catalog and the production system set.
 const SAFE_ACTIONS_MANIFEST: &str =
-    include_str!("../../../../apps-store/safe-actions/manifest.json");
+    include_str!("../../../../generated/ryu-runtime/apps-store/safe-actions/manifest.json");
+
+const VIDEO_STUDIO_MANIFEST: &str =
+    include_str!("../../../../generated/ryu-runtime/apps-store/video-studio/manifest.json");
 
 #[cfg(test)]
 const BUILTIN_MANIFESTS: &[&str] = &[
+    include_str!("../../../../generated/ryu-runtime/apps-store/life-recorder/manifest.json"),
+    VIDEO_STUDIO_MANIFEST,
     SAFE_ACTIONS_MANIFEST,
     // Backstage is a Core-tier satellite, so the hermetic test catalog must
     // carry the same manifest identity as the production runtime set. Keeping
     // it here makes CORE_PLUGINS -> manifest and seed grant checks exercise the
     // external-repository Companion instead of passing only in release builds.
-    include_str!("../../../../apps-store/backstage/manifest.json"),
-    include_str!("../../../../plugins-store/plugins/spider/manifest.json"),
-    include_str!("../../../../plugins-store/plugins/scrapling/manifest.json"),
-    include_str!("../../../../plugins-store/plugins/agentbrowser/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/apps-store/backstage/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/plugins-store/plugins/spider/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/plugins-store/plugins/scrapling/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/plugins-store/plugins/zvec-grep/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/plugins-store/plugins/agentbrowser/manifest.json"),
     // Ego Browser is the opt-in inline-Deno browser.control provider. Its
     // manifest is compiled into test catalogs so the Core tier and capability
     // binding invariants cover the same package that the marketplace ships.
-    include_str!("../../../../plugins-store/plugins/ego-browser/manifest.json"),
-    include_str!("../../../../plugins-store/plugins/expect/manifest.json"),
-    include_str!("../../../../plugins-store/plugins/agentation/manifest.json"),
-    include_str!("../../../../plugins-store/plugins/exa/manifest.json"),
-    include_str!("../../../../plugins-store/plugins/tavily/manifest.json"),
-    include_str!("../../../../plugins-store/plugins/brave/manifest.json"),
-    include_str!("../../../../plugins-store/plugins/serper/manifest.json"),
-    include_str!("../../../../plugins-store/plugins/parallel/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/plugins-store/plugins/ego-browser/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/plugins-store/plugins/expect/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/plugins-store/plugins/agentation/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/plugins-store/plugins/exa/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/plugins-store/plugins/tavily/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/plugins-store/plugins/brave/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/plugins-store/plugins/serper/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/plugins-store/plugins/parallel/manifest.json"),
     // `docs` is the read-only docs MCP plugin: it declares a REMOTE HTTP server
     // (`docs` → https://docs.ryuhq.com/mcp) serving search + page content from
     // the docs site itself — the same content /llms.txt exposes, as MCP tools.
     // Nothing to spawn, nothing to install: Core-tier so the server registers
     // (see the `CORE_PLUGINS` row), pre-installed so every agent can look up docs.
-    include_str!("../../../../plugins-store/plugins/docs/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/plugins-store/plugins/docs/manifest.json"),
     // Composio Connect is a hosted OAuth MCP bridge. Keep the fixture in the
     // hermetic catalog so its remote transport, OAuth declaration, and reserved
     // governance grants are validated with every built-in manifest.
-    include_str!("../../../../plugins-store/external_plugins/composio-connect/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/plugins-store/external_plugins/composio-connect/manifest.json"),
     // Generic workflow fan-out tool. Core owns the host bridge and delegation
     // engine; the plugin contributes only the validated inline tool surface.
-    include_str!("../../../../plugins-store/plugins/dynamic-workflows/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/plugins-store/plugins/dynamic-workflows/manifest.json"),
     // Declarative message reactions: the desktop owns the safe native renderer
     // while this manifest owns whether the action is contributed at all.
-    include_str!("../../../../plugins-store/plugins/reactions/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/plugins-store/plugins/reactions/manifest.json"),
     // Side questions and temporary chats are host-rendered chat features. Their
     // manifests own discoverability and lifecycle even though Core keeps the
     // side-model bridge and the desktop chat implementation.
-    include_str!("../../../../plugins-store/plugins/side-chats/manifest.json"),
-    include_str!("../../../../plugins-store/plugins/ghost-chats/manifest.json"),
-    include_str!("../../../../plugins-store/plugins/expanded-composer/manifest.json"),
-    include_str!("../../../../plugins-store/plugins/stats/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/plugins-store/plugins/side-chats/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/plugins-store/plugins/ghost-chats/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/plugins-store/plugins/expanded-composer/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/plugins-store/plugins/stats/manifest.json"),
     // Reconnect Retry contributes a bounded desktop host feature. Its retry
     // authorization remains Core-owned; this fixture keeps the package in the
     // hermetic manifest/catalog validation set without making it pre-installed.
-    include_str!("../../../../plugins-store/plugins/reconnect-retry/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/plugins-store/plugins/reconnect-retry/manifest.json"),
     include_str!("fixtures/layers.manifest.json"),
-    include_str!("../../../../plugins-store/plugins/ghost/manifest.json"),
-    include_str!("../../../../plugins-store/plugins/shadow/manifest.json"),
-    include_str!("../../../../plugins-store/plugins/headroom/manifest.json"),
-    include_str!("../../../../plugins-store/plugins/usage-pacer/manifest.json"),
-    include_str!("../../../../plugins-store/plugins/effort-escalator/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/plugins-store/plugins/ghost/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/plugins-store/plugins/shadow/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/plugins-store/plugins/headroom/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/plugins-store/plugins/usage-pacer/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/plugins-store/plugins/effort-escalator/manifest.json"),
     // The other cost-reduction plugin, and the other shape: `headroom` compresses
     // gateway-routed messages through a Core-hosted transform, while `pxpipe` is a
     // loopback proxy the user points a provider at, imaging the static half of a
     // request so it bills as vision tokens. Core-tier (its managed sidecar would be
     // refused at Community — see the plugin's README), never pre-installed: it needs
     // Node on PATH and a hand-configured provider before it does anything.
-    include_str!("../../../../plugins-store/plugins/pxpipe/manifest.json"),
-    include_str!("../../../../plugins-store/plugins/firewall/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/plugins-store/plugins/pxpipe/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/plugins-store/plugins/firewall/manifest.json"),
     include_str!("fixtures/routing.manifest.json"),
     include_str!("fixtures/sandbox.manifest.json"),
     include_str!("fixtures/engines.manifest.json"),
@@ -516,12 +529,12 @@ const BUILTIN_MANIFESTS: &[&str] = &[
     // System-wide predictive typing on/off (Policy-gated, Core-local). Opt-in like
     // firewall/routing/sandbox: enabling the plugin is the single switch for the
     // /api/predict/* brain — there is no separate config toggle.
-    include_str!("../../../../apps-store/predict/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/apps-store/predict/manifest.json"),
     // System-wide dictation + agent-ask (Policy-gated, Core-local). Pre-installed:
     // Island hosts the OS surface; enabling the plugin is the single switch.
     // Formerly hardcoded into Island — extracted as an apps-store app so settings
     // register via contributes.settings_tabs like predict.
-    include_str!("../../../../apps-store/dictation/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/apps-store/dictation/manifest.json"),
     // The Island companion overlay itself — a desktop-owned Electron sidecar the
     // shell installs and launches (never a Core sidecar), so its record is a pure
     // settings governance shell: opt-in and install-on-demand (`CORE_PLUGINS` only),
@@ -536,27 +549,27 @@ const BUILTIN_MANIFESTS: &[&str] = &[
     // their features work on every surface with zero setup, gated cheaply by each
     // hook's `match` block (or preference read for chat-title); `advisor` stays
     // Community (install-then-enable).
-    include_str!("../../../../plugins-store/plugins/double-check/manifest.json"),
-    include_str!("../../../../plugins-store/plugins/goal/manifest.json"),
-    include_str!("../../../../plugins-store/plugins/chat-title/manifest.json"),
-    include_str!("../../../../plugins-store/plugins/advisor/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/plugins-store/plugins/double-check/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/plugins-store/plugins/goal/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/plugins-store/plugins/chat-title/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/plugins-store/plugins/advisor/manifest.json"),
     // `proof` is `goal`'s stronger sibling: instead of a one-line transcript
     // judge, each round spawns an INDEPENDENT verifier sub-agent (grant
     // `hook:run-agent`) that gathers real evidence with tools before deciding.
-    include_str!("../../../../plugins-store/plugins/proof/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/plugins-store/plugins/proof/manifest.json"),
     // `receipts` is `proof`'s VISUAL sibling: the verifier sub-agent judges a
     // captured screenshot or screen recording instead of re-reading the workspace,
     // so a round leaves behind an artifact a human can look at afterwards. The hook
     // has no capture capability of its own (no HTTP, no callTool in the sandbox),
     // so the artifact arrives as an absolute path printed in the turn text.
-    include_str!("../../../../plugins-store/plugins/receipts/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/plugins-store/plugins/receipts/manifest.json"),
     // `recap` is the read-side counterpart to those three: instead of steering the
     // turn, it summarizes the one that just finished (`post_assistant_turn` → a
     // `note`), and owns `/recap` on the `pre_user_turn` phase — returning `handled`,
     // so the command is answered by the side model without a main-model turn. Not in
     // `CORE_PREINSTALLED`: unlike the `match`-gated hooks above, a recap is a real
     // model call per long turn, so it has to be a thing the user asked for.
-    include_str!("../../../../plugins-store/plugins/recap/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/plugins-store/plugins/recap/manifest.json"),
     // `no-more-mistakes` is the memory counterpart to those: instead of steering or
     // summarizing a turn, it mines the moment the user CORRECTS one. A `pre_user_turn`
     // hook turns the correction into one durable rule and files it as a document in a
@@ -568,7 +581,7 @@ const BUILTIN_MANIFESTS: &[&str] = &[
     // capture hook cannot be `match`-gated — the pre-gate grammar has no "this message
     // reads like a complaint" — so it costs a sandbox spawn per user turn, `recap`'s
     // reason exactly.
-    include_str!("../../../../plugins-store/plugins/no-more-mistakes/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/plugins-store/plugins/no-more-mistakes/manifest.json"),
     // `no-ai-slop` bundles the editing skill of the same name and runs it on the
     // turn that just finished. It is the one turn hook here with NO `match` gate:
     // "every completed answer" is the feature, so it cannot pre-gate on a flag or a
@@ -580,7 +593,7 @@ const BUILTIN_MANIFESTS: &[&str] = &[
     // degrades to fewer passes instead of a loop that stops mid-rewrite. Not in
     // `CORE_PREINSTALLED` for `recap`'s reason, doubled: a sandbox spawn per turn AND
     // a sub-agent per reviewed answer, on the user's budget.
-    include_str!("../../../../plugins-store/plugins/no-ai-slop/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/plugins-store/plugins/no-ai-slop/manifest.json"),
     // `agent-comms` is the agent-to-agent mailbox: `agents.directory` /
     // `agents.send` / `agents.thread`, shipped as ordinary
     // registry tools so EVERY agent gets them (Pi through its MCP extension, an
@@ -602,25 +615,25 @@ const BUILTIN_MANIFESTS: &[&str] = &[
     // delivery hook has no `match` gate (the inbox is keyed by agent, and
     // `stateful` matches on the conversation), so it costs a sandbox spawn per
     // turn.
-    include_str!("../../../../plugins-store/plugins/agent-comms/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/plugins-store/plugins/agent-comms/manifest.json"),
     // `rules` discovers Cursor- and Claude-style project rules and exposes the
     // agent-edit panel contract. Its context hook injects normalized project
     // rules plus per-agent base rules into the outbound context, deduplicating
     // stale blocks for both OpenAI messages and ACP prompts.
-    include_str!("../../../../plugins-store/plugins/rules/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/plugins-store/plugins/rules/manifest.json"),
     // `agents-md-tail` is an experimental, opt-in context hook. It repeats the
     // current project instructions at the outbound tail while keeping the
     // chat-visible transcript unchanged; ACP requests a fresh session so old
     // hidden tails cannot accumulate in the agent's private history. Rules runs
     // first when both are enabled because context rewrites are first-writer-wins.
-    include_str!("../../../../plugins-store/plugins/agents-md-tail/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/plugins-store/plugins/agents-md-tail/manifest.json"),
     // `plan-continue` keeps a plan moving while the composer's plan-mode pill is
     // on, by injecting its own follow-up turn when one finishes. Community and
     // NOT in `CORE_PREINSTALLED` for the reason the others are on: this one spends
     // the user's tokens unattended, so it has to be a thing they asked for. Its
     // hook still pre-gates on `match.flag`, and the flag is the completeness
     // signal too — an approved `ExitPlanMode` writes it back off.
-    include_str!("../../../../plugins-store/plugins/plan-continue/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/plugins-store/plugins/plan-continue/manifest.json"),
     // `auto-continue` is `plan-continue`'s general sibling: instead of keying on
     // the plan-mode pill, its hook arms per-conversation via `/auto-continue` and
     // asks a LOCAL scanner sub-agent (`hook:run-agent`, `code_read` preset) to read
@@ -631,7 +644,7 @@ const BUILTIN_MANIFESTS: &[&str] = &[
     // they asked for. Its `match.stateful` gate is the arming switch — presence of
     // the KV record — so an unarmed conversation costs one KV read, not a sandbox
     // spawn, and the loop is off by default.
-    include_str!("../../../../plugins-store/plugins/auto-continue/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/plugins-store/plugins/auto-continue/manifest.json"),
     // The two Pi capabilities Core used to hardcode into every managed-Pi spawn,
     // now plugins the user can turn off: `pi-shell` (background bash) and
     // `pi-subagent` (the `Task` tool). Each ships ONE `contributes.pi_extensions`
@@ -647,8 +660,8 @@ const BUILTIN_MANIFESTS: &[&str] = &[
     // arrival. Both are also in `CORE_PREINSTALLED`, because they were unconditional
     // before this move and not pre-installed would silently strip background bash and
     // sub-agents from the flagship agent on every fresh install.
-    include_str!("../../../../plugins-store/plugins/pi-shell/manifest.json"),
-    include_str!("../../../../plugins-store/plugins/pi-subagent/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/plugins-store/plugins/pi-shell/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/plugins-store/plugins/pi-subagent/manifest.json"),
     // `pi-monitor` is the third Pi capability: a from-scratch `monitor` tool
     // (the same idea as Claude Code's `Monitor`) for the managed Pi agent —
     // watch a command or WebSocket, stream every line, and end on an `until`
@@ -659,7 +672,7 @@ const BUILTIN_MANIFESTS: &[&str] = &[
     // Community-tier plugin needs the operator-only `pi:extension` grant) and
     // in `CORE_PREINSTALLED` like the other two, because a not pre-installed capability
     // that mirrors a first-class Claude Code tool would read as a regression.
-    include_str!("../../../../plugins-store/plugins/pi-monitor/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/plugins-store/plugins/pi-monitor/manifest.json"),
     // `rtk` surfaces the built-in RTK (Rust Token Killer) command-wrapping tool
     // (`rtk.run`) as an installable plugin. Like `spider`, it is a fully
     // declarative `command`-backend tool: the fixture CARRIES its runnable (the
@@ -668,19 +681,24 @@ const BUILTIN_MANIFESTS: &[&str] = &[
     // through the command-tool allowlist. The fixture also contributes the Phase-2
     // auto-wrap settings that drive `crate::rtk_config` (NOT a tool). Community-tier,
     // opt-in.
-    include_str!("../../../../plugins-store/plugins/rtk/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/plugins-store/plugins/rtk/manifest.json"),
+    // `ripgrep` exposes the upstream `rg` binary as fixed, read-only command
+    // tools (`ripgrep.search` and `ripgrep.files`). It is BYO and Community-tier:
+    // the Gateway approves the reviewed `tool:command:rg` grant, while the node
+    // owner supplies the absolute binary path through the command allowlist.
+    include_str!("../../../../generated/ryu-runtime/plugins-store/plugins/ripgrep/manifest.json"),
     // `security-guidance` ports Anthropic's security-guidance Claude Code plugin
     // onto Ryu's turn-hook substrate: a flag-gated `post_assistant_turn` hook that
     // (1) runs a ~22-rule regex pattern scan over the last answer and (2) does a
     // second-model diff review via `host.sideModel` (grant `hook:side-model`),
     // surfacing findings as an out-of-band note. Toggle + `/security` command +
     // reviewer-model picker mirror `double-check`. Community-tier, opt-in.
-    include_str!("../../../../plugins-store/plugins/security-guidance/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/plugins-store/plugins/security-guidance/manifest.json"),
     // security-scanner is a model-agnostic, read-only security workbench:
     // independent architecture, hunt, configuration, and attack-path delegates;
     // report synthesis; diff mode; finding verification; and patch proposals
     // that never apply a change. No vendor-specific model is embedded.
-    include_str!("../../../../plugins-store/plugins/security-scanner/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/plugins-store/plugins/security-scanner/manifest.json"),
     // `bitwarden` surfaces the Bitwarden Secrets Manager CLI (`bws`) as four
     // declarative `command`-backend tools (`bitwarden.status` / `__projects` /
     // `__list` / `__get`). Faithful to Hermes's Bitwarden Secrets Manager feature:
@@ -692,7 +710,7 @@ const BUILTIN_MANIFESTS: &[&str] = &[
     // through the command-tool allowlist (seeded at `~/.ryu/bin/bws`). The optional
     // `BWS_SERVER_URL` env mirrors Hermes's `secrets.bitwarden.server_url` region
     // knob. Community-tier, opt-in.
-    include_str!("../../../../plugins-store/plugins/bitwarden/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/plugins-store/plugins/bitwarden/manifest.json"),
     // `auto-expand` is the first `pre_user_turn` hook: before a message is sent it
     // calls a configurable model (`hook:side-model`) to rewrite the prompt into a
     // clearer form and returns a `replace` directive, so the improved prompt is
@@ -709,7 +727,7 @@ const BUILTIN_MANIFESTS: &[&str] = &[
     // reference fixtures (`tool-firewall`, `hook-observers`) are deliberately NOT
     // registered here so those hot paths (esp. per tool call) stay lookup-free
     // until a user installs a plugin that actually uses them.
-    include_str!("../../../../plugins-store/plugins/hook-session-context/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/plugins-store/plugins/hook-session-context/manifest.json"),
     // RAG capability: the default in-process embeddings+retrieval provider. Declares
     // `provides: [rag]` + `requires: [engines]` so the capability graph resolves
     // rag→engines for real (disable-safety: engines can't be disabled out from under
@@ -720,7 +738,7 @@ const BUILTIN_MANIFESTS: &[&str] = &[
     // generic ext-proxy `public_mount` mechanism — the acceptance test proving the
     // generic loader replaces the retired hand-coded `sidecar/mail.rs`. Pre-installed,
     // so the externally-committed inbound-webhook URL resolves out of the box.
-    include_str!("../../../../apps-store/mail/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/apps-store/mail/manifest.json"),
     // Browser (W9): a real-Chromium Electron browser Core runs as a `local` sidecar
     // and exposes as the grant-gated `browser.control` capability (list/open/navigate
     // tabs, screenshot, read titles, privileged JS eval). CORE built-in — listed in
@@ -729,8 +747,8 @@ const BUILTIN_MANIFESTS: &[&str] = &[
     // the fallback iframe). `lazy` + idle-stop keep the Electron GUI cold until the
     // desktop Browser panel first calls it through the ext-proxy — it does not spawn on
     // boot, only on first use.
-    include_str!("../../../../apps-store/browser/manifest.json"),
-    include_str!("../../../../apps-store/whatsapp/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/apps-store/browser/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/apps-store/whatsapp/manifest.json"),
     // Simulators: iOS Simulator (`simctl`, macOS + Xcode) + Android Emulator (`adb`)
     // control Core runs as a dependency-free `local` sidecar, exposing the grant-gated
     // `simulator.control` capability. OPT-IN like the browser — NOT in `CORE_PREINSTALLED`,
@@ -738,7 +756,7 @@ const BUILTIN_MANIFESTS: &[&str] = &[
     // idle-stop keep it cold until the desktop Simulator panel calls it through the
     // ext-proxy. Availability is a RUNTIME probe (`/capabilities`): iOS shows only on a
     // Mac with Xcode; Android wherever the SDK is present.
-    include_str!("../../../../apps-store/simulator/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/apps-store/simulator/manifest.json"),
     // Virtual Desktop: an interactive headless desktop for any node. The `ryu-desktop`
     // sidecar brings up Xvfb + a window manager + a loopback VNC server, and Core's
     // generic WebSocket ext-proxy (`/api/ext/ws/<plugin>/<route>`) carries the desktop
@@ -748,7 +766,7 @@ const BUILTIN_MANIFESTS: &[&str] = &[
     // watch/control one screen. OPT-IN like the browser/simulator — NOT in
     // `CORE_PREINSTALLED`, because the virtual-desktop toolchain (xvfb/tigervnc) is not
     // on a normal install; the panel prompts to enable + install it.
-    include_str!("../../../../apps-store/desktop/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/apps-store/desktop/manifest.json"),
     // UGC: a creator-marketing campaign tracker (campaign briefs + budgets, a creator
     // roster, post submissions with approve/reject review, per-post metric snapshots
     // refreshed through a curated Composio action map, and CPM/flat payouts accrued,
@@ -760,7 +778,7 @@ const BUILTIN_MANIFESTS: &[&str] = &[
     // spawned unless a user enables the app. Its client surface is a desktop DOCK PANEL
     // (`contributes.dock_panels`, `panel: "native"`), not a companion, so it ships no UI
     // bundle and needs no `plugins::seed` row.
-    include_str!("../../../../apps-store/ugc/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/apps-store/ugc/manifest.json"),
     // Outpost — social scheduling + publishing. Manifest-driven exactly like Mail and
     // UGC: the whole surface (workspaces, accounts, drafts, the durable retrying publish
     // queue, the reply inbox, engagement history, templates) lives out-of-process in the
@@ -772,16 +790,26 @@ const BUILTIN_MANIFESTS: &[&str] = &[
     // `social:crud` bridge forwarder, so it ships a UI bundle and DOES need a
     // `plugins::seed` row. OPT-IN: not in `CORE_PREINSTALLED`, so a normal install never
     // spawns the sidecar unless a user enables the app.
-    include_str!("../../../../apps-store/social/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/apps-store/social/manifest.json"),
+    // Autopilot is a full-page Companion over the generic agent, storage, catalog,
+    // shell, and toast host bridges. It owns the company brief and cycle ledger;
+    // the selected Ryu agent owns the actual tool loop. It is opt-in because a
+    // cycle can spend model budget and propose work across enabled apps.
+    include_str!("../../../../generated/ryu-runtime/apps-store/autopilot/manifest.json"),
     // Content — a local-first short-form content app. It owns no
     // sidecar; its frame talks only through the generic model/media/storage bridges
     // and can optionally hand captions to Outpost through `social:crud`.
-    include_str!("../../../../apps-store/content/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/apps-store/content/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/apps-store/convert/manifest.json"),
     // Token Table — a cosmetic six-seat Hold'em Companion over the generic
     // `app:http` + `app:realtime` bridges. Its authoritative SQLite game state
     // lives in the standalone `ryu-token-table` sidecar; Core only loads the
     // manifest and generic transport contracts.
-    include_str!("../../../../apps-store/token-table/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/apps-store/token-table/manifest.json"),
+    // Rooms is Core-tier so its active-node sidecar may run through Core's
+    // generic lifecycle; keep the manifest in the hermetic test catalog too so
+    // the Core-tier ↔ built-in-manifest invariant covers the shipped app.
+    include_str!("../../../../generated/ryu-runtime/apps-store/rooms/manifest.json"),
     // Harbor — an object-first CRM over the `ryu-crm` sidecar (a `local` sibling binary
     // on 8009; 8007 was contested by three concurrently built apps and 8008 taken by
     // `@ryu/news`). Same zero-coupling posture as Outpost above — Core links no CRM code
@@ -791,7 +819,7 @@ const BUILTIN_MANIFESTS: &[&str] = &[
     // generic ext-proxy directly, so there is no `ui_code` bundle, no `plugins::seed`
     // row, and none of the per-app bridge rows in `rpc.ts`/`host_api.rs` that a
     // CSP-sandboxed companion would have forced. OPT-IN: not in `CORE_PREINSTALLED`.
-    include_str!("../../../../apps-store/crm/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/apps-store/crm/manifest.json"),
     // Deep Read — Recursive Language Models over the `ryu-rlm` sidecar (a `local`
     // sibling binary on 8014). Same zero-coupling posture as Outpost: Core links no
     // RLM code, the crate does not path-depend on `apps/core`, and the one line back
@@ -801,24 +829,28 @@ const BUILTIN_MANIFESTS: &[&str] = &[
     // and DOES need a `plugins::seed` row. It also contributes a `post_assistant_turn`
     // hook, so it has a `builtin_code` row. OPT-IN: not in `CORE_PREINSTALLED`, so a
     // normal install never spawns the sidecar unless a user enables the app.
-    include_str!("../../../../apps-store/rlm/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/apps-store/rlm/manifest.json"),
     // The Whiteboard app — a full-page Companion (`ui_format:"html"`, Path B) that
     // OWNS its Space documents via `spaces:docs`. Ships pre-installed with a UI bundle
     // + host-bridge grants seeded in `main.rs` (the generic CORE_PREINSTALLED loop
     // seeds neither, so it has a dedicated seed block). Replaces the built-in
     // whiteboard editor.
-    include_str!("../../../../apps-store/whiteboard/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/apps-store/whiteboard/manifest.json"),
     // The Canvas app — a full-page Companion (`ui_format:"html"`, Path B) that owns
     // its Space documents via `spaces:docs` and runs generation nodes through the
     // window.ryu media/agent bridge (`media:generate` / `media:transcribe` /
     // `hook:run-agent` / `hook:side-model`) + reads catalogs via `core:list_agents`.
     // Ships pre-installed with a UI bundle + those grants seeded in `main.rs`. Replaces
     // the built-in creative-canvas board.
-    include_str!("../../../../apps-store/canvas/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/apps-store/canvas/manifest.json"),
+    // Drawesome is a lightweight sketching Companion over the generic app-scoped
+    // storage bridge. It is opt-in like the other creative editors and carries a
+    // compiled UI so Install → Enable can work without a remote bundle fetch.
+    include_str!("../../../../generated/ryu-runtime/apps-store/drawesome/manifest.json"),
     // Slides — an opt-in full-page Companion for local visual slide and thumbnail
     // editing. It has no sidecar: persistence, upload, model, and media work use
     // the generic host bridges, and the bundled UI is seeded on explicit install.
-    include_str!("../../../../apps-store/slides/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/apps-store/slides/manifest.json"),
     // The Fine-tuning app — a full-page Companion (`ui_format:"html"`, Path B) that
     // drives Core's fine-tune orchestration + durable job store via the
     // `finetune:runs` bridge and OWNS its Unsloth training sidecar (a
@@ -826,7 +858,7 @@ const BUILTIN_MANIFESTS: &[&str] = &[
     // declares no `sidecar:process` grant — the Gateway denies that grant at enable).
     // Ships pre-installed with a UI bundle + those grants seeded in `main.rs`. Replaces
     // the built-in fine-tuning page.
-    include_str!("../../../../apps-store/finetune/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/apps-store/finetune/manifest.json"),
     // Spaces + Meetings — the first REAL plugin→plugin dependency edge.
     //
     // Both have zero runnables (like ghost/shadow), so the record governs them —
@@ -846,7 +878,7 @@ const BUILTIN_MANIFESTS: &[&str] = &[
     // Core-side `MeetingIngest`/spaces seam). Disabling Spaces under it would leave that
     // write path pointing at a disabled capability, which is exactly what
     // `plugins::graph` now refuses.
-    include_str!("../../../../apps-store/meetings/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/apps-store/meetings/manifest.json"),
     // Five clean LEAF features turned into out-of-process sidecar Apps (2026-07-18).
     // Each serves its own `/api/<feature>/*` surface OUT-OF-PROCESS via a `public_mount`
     // sidecar bin + the generic ext-proxy loader; no in-process routes remain. The
@@ -860,11 +892,11 @@ const BUILTIN_MANIFESTS: &[&str] = &[
     // `ghost` automation app (Ghost owns the RecipeStore) — both real, satisfiable
     // edges (shadow/ghost are pre-installed), so the graph refuses to disable the
     // dependency out from under them.
-    include_str!("../../../../apps-store/research/manifest.json"),
-    include_str!("../../../../apps-store/dashboards/manifest.json"),
-    include_str!("../../../../apps-store/teams/manifest.json"),
-    include_str!("../../../../apps-store/clips/manifest.json"),
-    include_str!("../../../../apps-store/recipes/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/apps-store/research/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/apps-store/dashboards/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/apps-store/teams/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/apps-store/clips/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/apps-store/recipes/manifest.json"),
     // Wave-2: five more leaf features turned into Apps (toggle via the plugin lifecycle).
     // Of these `quests` + `healing` now serve `/api/<feature>/*` OUT-OF-PROCESS via a
     // `public_mount` sidecar + the generic ext-proxy loader; `approvals`/`skills`/`learning`
@@ -883,11 +915,11 @@ const BUILTIN_MANIFESTS: &[&str] = &[
     // surface compiles out behind the `healing` cargo feature; its manifest + id must
     // always be present so the pre-installed seed never references a missing manifest —
     // exactly like `research`/clips/recipes (feature-gated module, always-on fixture).
-    include_str!("../../../../apps-store/quests/manifest.json"),
-    include_str!("../../../../apps-store/approvals/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/apps-store/quests/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/apps-store/approvals/manifest.json"),
     include_str!("fixtures/skills.manifest.json"),
-    include_str!("../../../../apps-store/learning/manifest.json"),
-    include_str!("../../../../apps-store/healing/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/apps-store/learning/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/apps-store/healing/manifest.json"),
     // Wave-3: two more leaf features turned into Apps (toggle via the plugin lifecycle).
     // `monitors` now serves `/api/monitors/*` OUT-OF-PROCESS via a `public_mount` sidecar
     // + the generic ext-proxy loader; `hardware` stays IN-PROCESS and gates its route
@@ -900,7 +932,7 @@ const BUILTIN_MANIFESTS: &[&str] = &[
     // `hardware` gates ONLY the PROTECTED `/api/hardware/devices*` device-registry
     // CRUD; the PUBLIC device channel (`/api/hardware/{ws,pair,display}`) stays ungated
     // because physical ESP32 devices connect there and gating it would break pairing.
-    include_str!("../../../../apps-store/monitors/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/apps-store/monitors/manifest.json"),
     include_str!("fixtures/hardware.manifest.json"),
     // Wave-4: two more leaf features turned into governance-shell Apps (toggle via
     // the plugin lifecycle + route gate; impl stays in-crate). Both pre-installed so the
@@ -917,7 +949,7 @@ const BUILTIN_MANIFESTS: &[&str] = &[
     // LOAD-BEARING (see `plugins::builtins::LOAD_BEARING_PLUGINS`): the composer fetches
     // the agent list on boot, so a disabled Agents app would break chat. The ACP
     // routing/execution substrate that serves a chat turn is kernel and stays untouched.
-    include_str!("../../../../apps-store/workflows/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/apps-store/workflows/manifest.json"),
     include_str!("fixtures/agents.manifest.json"),
     // W0 honest-gating baseline: three data-path governance shells whose
     // `/api/{voice,images+video+gifs,memory}/*` routes were mounted RAW before this
@@ -931,7 +963,7 @@ const BUILTIN_MANIFESTS: &[&str] = &[
     // (`/api/media/:file` + `/api/media/upload`) stays ungated kernel storage (it also
     // serves TTS audio + chat uploads). `memory` gates ONLY the HTTP CRUD surface; the
     // in-process chat auto-recall path is kernel. None declares `requires`.
-    include_str!("../../../../apps-store/voice/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/apps-store/voice/manifest.json"),
     include_str!("fixtures/media.manifest.json"),
     include_str!("fixtures/memory.manifest.json"),
     // W7 frontend extraction: the webhooks page moved to a sandboxed companion app
@@ -939,43 +971,43 @@ const BUILTIN_MANIFESTS: &[&str] = &[
     // `/api/webhook-ingress/status` reads stay ungated on the main router (the host
     // calls them directly, monitors pattern), so this manifest exists only to seed
     // the companion's UI bundle + `webhooks:crud` grant, not to gate a route surface.
-    include_str!("../../../../apps-store/webhooks/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/apps-store/webhooks/manifest.json"),
     // W7 frontend extraction: the activity-feed page moved to a sandboxed companion
     // app (`apps-store/activity/ui`). Pre-installed, no `requires` — its read-only
     // `/api/activity` stays ungated on the main router (the host calls it directly,
     // monitors pattern), so this manifest exists only to seed the companion's UI
     // bundle + `activity:read` grant, not to gate a route surface.
-    include_str!("../../../../apps-store/activity/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/apps-store/activity/manifest.json"),
     // Help Center is a first-party Space-backed desktop companion. Its manifest is
     // compiled into the catalog so the pre-installed seed can resolve its identity.
-    include_str!("../../../../apps-store/help-center/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/apps-store/help-center/manifest.json"),
     // Sites is the first-party public-edge workspace. Its companion owns the
     // project/deployment/domain/connector control surface; the future managed
     // edge remains a generic RyuRelay/control-plane seam rather than app-specific
     // Core routing.
-    include_str!("../../../../apps-store/sites/manifest.json"),
-    // Bookmarks is an extension contribution that owns app-scoped Space documents.
-    // It intentionally declares no Companion until the satellite ships a packed UI
-    // payload; Core owns the RAG index, visibility, and tenancy checks.
-    include_str!("../../../../apps-store/bookmarks/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/apps-store/sites/manifest.json"),
+    // Bookmarks is an extension contribution and desktop Companion that owns
+    // app-scoped Space documents; Core owns the RAG index, visibility, and tenancy
+    // checks.
+    include_str!("../../../../generated/ryu-runtime/apps-store/bookmarks/manifest.json"),
     // W7 frontend extraction: the timeline page moved to a sandboxed companion app
     // (`apps-store/timeline/ui`). Pre-installed, no `requires` — Shadow's device-local
     // `/timeline` + `/journal` + `/frame` live on the Shadow sidecar (:3030), not the
     // Core router, and the desktop host calls them directly (monitors pattern), so this
     // manifest exists only to seed the companion's UI bundle + `timeline:read` grant,
     // not to gate a route surface.
-    include_str!("../../../../apps-store/timeline/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/apps-store/timeline/manifest.json"),
     // The Calendar app — a sandboxed companion (`ui_format:"html"`). It was already
     // in the pre-installed seed set (`plugins::seed` maps CALENDAR_UI_HTML) and routed
     // in the desktop (`/calendar`), but its MANIFEST was never registered here, so
     // the record seeded with no manifest and calendar could not appear in
     // `/api/plugins`, plugin contributions, or the marketplace Apps catalog. Register
     // it so it loads like every other companion.
-    include_str!("../../../../apps-store/calendar/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/apps-store/calendar/manifest.json"),
     // Chat Broadcast is a desktop-only companion. Core embeds its manifest so the
     // pre-installed host bridge and sidebar contribution are available before the
     // marketplace is reachable.
-    include_str!("../../../../apps-store/chat-broadcast/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/apps-store/chat-broadcast/manifest.json"),
     // The Warmup app — a sandboxed companion (`ui_format:"html"`) that schedules a
     // keep-alive ping to each subscription agent so its rolling usage window is
     // already open when the user starts work. Opt-in (seeded DISABLED): it spends
@@ -983,13 +1015,13 @@ const BUILTIN_MANIFESTS: &[&str] = &[
     // for someone. No `requires` and no route surface of its own — the desktop host
     // drives `/api/agents` + `/heartbeat/jobs` for it (the monitors pattern), so this
     // manifest exists to seed the companion's UI bundle + `warmup:crud` grant.
-    include_str!("../../../../apps-store/warmup/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/apps-store/warmup/manifest.json"),
     // W7 frontend extraction: the SKILL.md authoring editor moved to a sandboxed
     // companion app (`apps-store/skill-editor/ui`). Pre-installed, no `requires` — the
     // `/api/skills` authoring endpoints stay ungated on the Core router (the desktop host
     // calls them directly, monitors pattern), so this manifest exists only to seed the
     // companion's UI bundle + `skills:crud` grant, not to gate a route surface.
-    include_str!("../../../../apps-store/skill-editor/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/apps-store/skill-editor/manifest.json"),
     // The Agent Status app — three sidebar sections (Working / Needs input / Done)
     // over runs and pending approvals. Opt-in, and the leanest shape an app can
     // have: PURE MANIFEST. No runnables, no sidecar, no UI bundle and no route
@@ -999,11 +1031,11 @@ const BUILTIN_MANIFESTS: &[&str] = &[
     // routes rather than an owner ext mount; a Community manifest may not do that.
     // It remains the reference for "an app that only rearranges what the shell
     // already knows".
-    include_str!("../../../../apps-store/agent-status/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/apps-store/agent-status/manifest.json"),
     // Ambient Elevator — a desktop-only declarative audio contribution. The
     // desktop consumes its opaque live-activity spec and owns the singleton
     // player; Core only forwards the manifest contract.
-    include_str!("../../../../plugins-store/plugins/ambient-elevator/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/plugins-store/plugins/ambient-elevator/manifest.json"),
     // The Drafts app — a durable outbox. Owns one `sidebar_sections` entry over its
     // own store and one app-shell page, and its state lives OUT-OF-PROCESS in the
     // `ryu-drafts` sidecar (`public_mount` at `/api/drafts`, App-gated via the ext
@@ -1013,7 +1045,7 @@ const BUILTIN_MANIFESTS: &[&str] = &[
     // install does not have. Nothing about drafts exists in Core beyond this
     // registration: the shell's dispatcher does the sending, because a manifest
     // sidecar is deliberately spawned without `RYU_TOKEN`.
-    include_str!("../../../../apps-store/drafts/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/apps-store/drafts/manifest.json"),
     // `sample-widget` — the REFERENCE third-party MCP widget plugin (a dev
     // template; source lives at `plugins-store/plugins/sample-widget/`). It declares a
     // local Node MCP server (`node server.mjs`) whose `render` tool advertises
@@ -1024,9 +1056,9 @@ const BUILTIN_MANIFESTS: &[&str] = &[
     // is NOT in `plugins::builtins::CORE_PREINSTALLED`, so it never seeds enabled and
     // its `node` server is never spawned unless a developer installs it. The
     // canonical copy under `plugins-store/` and this fixture are byte-identical.
-    include_str!("../../../../plugins-store/plugins/sample-widget/manifest.json"),
-    // The eleven built-in personality profiles (ELI5, I have ADHD, Explanatory, Learning,
-    // Proactive, Plain text, Plain Technical, No AI slop, No Hype, Bro, Gen Z). Zero runnables
+    include_str!("../../../../generated/ryu-runtime/plugins-store/plugins/sample-widget/manifest.json"),
+    // The twelve built-in personality profiles (ELI5, I have ADHD, Concise, Explanatory,
+    // Learning, Proactive, Plain text, Plain Technical, No AI slop, No Hype, Bro, Gen Z). Zero runnables
     // and zero `permission_grants`: a profile body is inert prose appended to (or
     // replacing) the agent's base instructions
     // for a turn, so nothing evaluates it — the same argument `ThemeContribution`
@@ -1039,12 +1071,12 @@ const BUILTIN_MANIFESTS: &[&str] = &[
     // `builtin_code::BUILTIN_OUTPUT_STYLES` — a built-in ships only this manifest,
     // so an un-embedded style file would resolve to nothing.
     //
-    // Pre-installed but INERT: agents default to their own voice and none of the eleven
+    // Pre-installed but INERT: agents default to their own voice and none of the twelve
     // sets `force-for-plugin`, so registering it changes no prompt until a user assigns
     // one in the agent editor or browses the Store's Personality Profiles tab.
-    include_str!("../../../../plugins-store/plugins/output-styles/manifest.json"),
-    include_str!("../../../../plugins-store/plugins/firecrawl/manifest.json"),
-    include_str!("../../../../plugins-store/plugins/mem0/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/plugins-store/plugins/output-styles/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/plugins-store/plugins/firecrawl/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/plugins-store/plugins/mem0/manifest.json"),
     // `spidercloud` is the SECOND `web.crawl` provider, which is what finally makes
     // that layer swappable rather than merely marked selectable: the local `spider`
     // CLI stays the declared default, and this one runs the same engine hosted, so a
@@ -1057,32 +1089,32 @@ const BUILTIN_MANIFESTS: &[&str] = &[
     // `depth: 0` as "no limit will be applied", the inverse of the canonical "0 = the
     // start page only", and a clamp would hide a semantic inversion instead of
     // declaring the argument unsupported.
-    include_str!("../../../../plugins-store/plugins/spidercloud/manifest.json"),
-    include_str!("../../../../plugins-store/plugins/honcho/manifest.json"),
-    include_str!("../../../../plugins-store/plugins/bytebot/manifest.json"),
-    // The four `document.parse` providers. Each is an apps-store satellite
-    // (`apps-store/{markitdown,unstructured,docling,mineru}/`) wrapping a different
-    // extraction library in its own Python sidecar, registered exactly like
+    include_str!("../../../../generated/ryu-runtime/plugins-store/plugins/spidercloud/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/plugins-store/plugins/honcho/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/plugins-store/plugins/bytebot/manifest.json"),
+    // The five `document.parse` providers. Each is an apps-store satellite
+    // (`apps-store/{anydoc,markitdown,unstructured,docling,mineru}/`) wrapping a different
+    // extraction library in its own sidecar, registered exactly like
     // `finetune`: Core-tier so each is governed and disable-able, and each with an
     // EMPTY `permission_grants` — a Core-tier built-in that asked for
     // `sidecar:process` would be DENIED at enable and the enable itself would fail
     // (`plugins::lifecycle`). The contract every provider copies — provides block,
-    // ports (8093-8096, dev-shifted to 9093-9096), wire format — is
+    // ports (8093-8097, dev-shifted to 9093-9097), wire format — is
     // `docs/document-parsing.md` §3-§4.
     //
     // **Exactly one carries `"default": true`, and it is `markitdown`** (see its
     // `provides` block). That is not decoration: with several providers ENABLED and
     // no default, `plugins::binding` falls through to the lexicographically-lowest
-    // plugin id, which elects `@ryu/docling` — an alphabetical accident, not a
+    // plugin id, which elects `@ryu/anydoc` — an alphabetical accident, not a
     // product decision. Adding a second `"default": true` does not make that provider
-    // win; it re-runs the same tiebreak and lands on docling again. So: never add a
+    // win; it re-runs the same tiebreak and lands on AnyDoc again. So: never add a
     // second default, and never drop markitdown's.
     //
     // The flag is dormant on a stock install. Only `markitdown` is in
     // `plugins::builtins::CORE_PREINSTALLED`, so it is the sole ENABLED provider and
     // binding resolves it by "single provider" without ever consulting the flag; the
     // default only decides anything once a user enables a second backend from the
-    // Store. The other three are deliberately not pre-installed because they are heavy —
+    // Store. The other four are deliberately not pre-installed because they are opt-in —
     // `unstructured[all-docs]` is a 1-2 GB pip install whose native helpers
     // (poppler/tesseract/libreoffice/pandoc) pip cannot supply, and `docling`/`mineru`
     // download ML models on first parse. markitdown is the one small pure-Python
@@ -1093,10 +1125,11 @@ const BUILTIN_MANIFESTS: &[&str] = &[
     // `plugins::binding` exactly like `web.search`, so a fifth backend stays pure
     // manifest data. Do not add a second call site; route new surfaces through the
     // facade.
-    include_str!("../../../../apps-store/unstructured/manifest.json"),
-    include_str!("../../../../apps-store/markitdown/manifest.json"),
-    include_str!("../../../../apps-store/docling/manifest.json"),
-    include_str!("../../../../apps-store/mineru/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/apps-store/anydoc/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/apps-store/unstructured/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/apps-store/markitdown/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/apps-store/docling/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/apps-store/mineru/manifest.json"),
     // Automated Reasoning — the app that decides whether an answer FOLLOWS from a
     // written policy, using a decision procedure rather than a second model's
     // opinion (`apps-store/reasoning/backend`: exact rational arithmetic, a
@@ -1117,7 +1150,7 @@ const BUILTIN_MANIFESTS: &[&str] = &[
     // top-level `permission_grants`: the host callback authorizes on declared ∩
     // Gateway-approved, so a manifest carrying only one of the two 403s at runtime
     // with nothing at parse time to say why.
-    include_str!("../../../../apps-store/reasoning/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/apps-store/reasoning/manifest.json"),
     // Mission Control: the project-level view over many chats — recent sessions and
     // what each accomplished, per-day activity, the files several chats keep returning
     // to, and the to-dos left outstanding in threads nobody reopened. Fully
@@ -1139,21 +1172,21 @@ const BUILTIN_MANIFESTS: &[&str] = &[
     // top-level `permission_grants`, for the reason spelled out on Reasoning above. It
     // buys only the optional narrative summary: every number the dashboard shows is an
     // indexed fact, so a node with no model still gets a working page.
-    include_str!("../../../../apps-store/mission-control/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/apps-store/mission-control/manifest.json"),
     // Feedback Board — public customer requests plus a private product workspace
     // that connects request triage to Ryu Spaces, Blueprint, and configurable
     // workflow execution. The public board is served through the app's manifest
     // public_mount; Core owns only this manifest registration and generic proxy.
-    include_str!("../../../../apps-store/feedback-board/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/apps-store/feedback-board/manifest.json"),
     // Pull Requests — a GitHub-first review inbox. The app-owned Bun sidecar invokes
     // the user's authenticated `gh` CLI and is reached only through the generic
     // ext-proxy; Core owns no GitHub client, route, port or provider behavior.
-    include_str!("../../../../apps-store/pull-requests/manifest.json"),
-    include_str!("../../../../apps-store/mpp/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/apps-store/pull-requests/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/apps-store/mpp/manifest.json"),
     // Checks — a local-first verification workspace. Its companion owns the
     // project, exploration, check, report, list, and schedule surfaces; Core owns
     // no external provider client, route, port, or remote execution behavior.
-    include_str!("../../../../apps-store/checks/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/apps-store/checks/manifest.json"),
     // Blueprint — visual plan review. An agent publishes its plan over the app's own
     // MCP server (`blueprint.plan_publish`), a human reads it as rendered markdown
     // blocks plus a dependency graph derived from `steps[].depends_on`, annotates it,
@@ -1171,7 +1204,7 @@ const BUILTIN_MANIFESTS: &[&str] = &[
     // (`output-styles/visual-planning.md`, embedded in
     // `builtin_code::BUILTIN_OUTPUT_STYLES`): without a style telling the agent to
     // publish before it edits, nothing ever calls the tool and the app is inert.
-    include_str!("../../../../apps-store/blueprint/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/apps-store/blueprint/manifest.json"),
     // Tuition — a tutor for one learner. Turns the learner's own syllabus and notes
     // into a prerequisite graph of skills, each carrying a Bayesian Knowledge Tracing
     // posterior, and drills the weakest thing they are ready for. The interesting
@@ -1191,12 +1224,12 @@ const BUILTIN_MANIFESTS: &[&str] = &[
     // hook runs in a sandbox with no HTTP and cannot call the sidecar, so the two hand
     // work to each other through Core's own KV. One grant without the other 403s at
     // runtime with nothing at parse time to say why.
-    include_str!("../../../../apps-store/tuition/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/apps-store/tuition/manifest.json"),
     // Expenses — the local-first ledger app. Its agent and companion share the
     // `ryu-expenses` sidecar through the generic `app:http` bridge; the agent-facing
     // tool surface is the manifest-owned `expenses` MCP server. It is opt-in and
     // carries no Core-specific route or client implementation.
-    include_str!("../../../../apps-store/expenses/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/apps-store/expenses/manifest.json"),
     // Wire — a personal newsroom. Pulls feeds in on a schedule, collapses the same
     // story across every outlet covering it, writes a brief from those clusters, and
     // fires watches on a burst it can explain. Ingest, dedupe (URL canonicalization
@@ -1210,11 +1243,11 @@ const BUILTIN_MANIFESTS: &[&str] = &[
     // returns. Same generic seams as `tuition` above, with the KV handoff running the
     // other way — the sidecar publishes a ranked snapshot the `pre_user_turn` hook
     // reads.
-    include_str!("../../../../apps-store/news/manifest.json"),
-    include_str!("../../../../apps-store/outreach/manifest.json"),
-    include_str!("../../../../apps-store/projects/manifest.json"),
-    include_str!("../../../../apps-store/invoices/manifest.json"),
-    include_str!("../../../../apps-store/people/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/apps-store/news/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/apps-store/outreach/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/apps-store/projects/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/apps-store/invoices/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/apps-store/people/manifest.json"),
     // Subtitles — pick a video on this machine, transcribe it, translate the
     // transcript, and write a timed `.srt`/`.vtt` beside the file. Same zero-coupling
     // posture as Outpost: the whole pipeline (container demux, the 16 kHz downmix,
@@ -1234,7 +1267,7 @@ const BUILTIN_MANIFESTS: &[&str] = &[
     // a UI bundle and DOES need a `plugins::seed` row. OPT-IN: not in
     // `CORE_PREINSTALLED`, so a normal install never spawns the sidecar unless a user
     // enables the app.
-    include_str!("../../../../apps-store/subtitles/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/apps-store/subtitles/manifest.json"),
     // ── Language-server plugins: one per language, mirroring Claude Code ──────
     //
     // These twelve are the `contributes.lsp_servers` binding of Anthropic's
@@ -1250,104 +1283,136 @@ const BUILTIN_MANIFESTS: &[&str] = &[
     // Pi's config (spawned lazily on the first touched file), so seeding all
     // twelve on a fresh install would write a twelve-server table nobody asked
     // for. The user enables the one language they actually use.
-    include_str!("../../../../plugins-store/lsp/clangd-lsp/manifest.json"),
-    include_str!("../../../../plugins-store/lsp/csharp-lsp/manifest.json"),
-    include_str!("../../../../plugins-store/lsp/gopls-lsp/manifest.json"),
-    include_str!("../../../../plugins-store/lsp/jdtls-lsp/manifest.json"),
-    include_str!("../../../../plugins-store/lsp/kotlin-lsp/manifest.json"),
-    include_str!("../../../../plugins-store/lsp/lua-lsp/manifest.json"),
-    include_str!("../../../../plugins-store/lsp/php-lsp/manifest.json"),
-    include_str!("../../../../plugins-store/lsp/pyright-lsp/manifest.json"),
-    include_str!("../../../../plugins-store/lsp/ruby-lsp/manifest.json"),
-    include_str!("../../../../plugins-store/lsp/rust-analyzer-lsp/manifest.json"),
-    include_str!("../../../../plugins-store/lsp/swift-lsp/manifest.json"),
-    include_str!("../../../../plugins-store/lsp/typescript-lsp/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/plugins-store/lsp/clangd-lsp/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/plugins-store/lsp/csharp-lsp/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/plugins-store/lsp/gopls-lsp/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/plugins-store/lsp/jdtls-lsp/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/plugins-store/lsp/kotlin-lsp/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/plugins-store/lsp/lua-lsp/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/plugins-store/lsp/php-lsp/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/plugins-store/lsp/pyright-lsp/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/plugins-store/lsp/ruby-lsp/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/plugins-store/lsp/rust-analyzer-lsp/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/plugins-store/lsp/swift-lsp/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/plugins-store/lsp/typescript-lsp/manifest.json"),
 ];
 
-// Production Core embeds the small first-party set needed before the
-// marketplace is available, plus the Core-only runtime substrate. The latter
-// has no marketplace package to materialize: engines → RAG → Spaces and the
-// mandatory capability peers must be present before app seeding and dependency
-// resolution run.
+// Production Core embeds every first-party manifest that must be available before
+// the marketplace is reachable: system apps, mandatory capabilities, and the
+// CORE_PREINSTALLED defaults. The remaining compiled catalog is still available
+// for discovery and explicit install, but is not loaded into the runtime until a
+// user installs it. Keeping the preinstalled set here prevents a fresh node from
+// trying to materialize its own defaults over the network.
 const CORE_RUNTIME_BUILTIN_MANIFESTS: &[&str] = &[
+    VIDEO_STUDIO_MANIFEST,
     SAFE_ACTIONS_MANIFEST,
-    include_str!("../../../../plugins-store/plugins/ghost/manifest.json"),
-    include_str!("../../../../plugins-store/plugins/shadow/manifest.json"),
-    include_str!("../../../../plugins-store/plugins/agentbrowser/manifest.json"),
-    include_str!("../../../../plugins-store/plugins/ambient-elevator/manifest.json"),
-    include_str!("../../../../apps-store/browser/manifest.json"),
+    // These packages are part of CORE_PREINSTALLED. Keep their manifests in the
+    // production registry as well as the hermetic test catalog so a fresh node
+    // does not try to materialize its own first-party defaults from a remote
+    // marketplace before the catalog is reachable.
+    include_str!("fixtures/durable.manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/plugins-store/plugins/goal/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/plugins-store/plugins/proof/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/plugins-store/plugins/receipts/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/plugins-store/plugins/double-check/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/plugins-store/plugins/chat-title/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/plugins-store/plugins/side-chats/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/plugins-store/plugins/ghost-chats/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/plugins-store/plugins/expanded-composer/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/plugins-store/plugins/stats/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/plugins-store/plugins/reactions/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/plugins-store/plugins/rules/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/plugins-store/plugins/pi-shell/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/plugins-store/plugins/pi-subagent/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/plugins-store/plugins/pi-monitor/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/plugins-store/plugins/spider/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/plugins-store/plugins/exa/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/plugins-store/plugins/docs/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/plugins-store/external_plugins/composio-connect/manifest.json"),
+    include_str!("fixtures/auto-expand.manifest.json"),
+    include_str!("fixtures/agents.manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/plugins-store/plugins/output-styles/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/plugins-store/plugins/ghost/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/plugins-store/plugins/shadow/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/plugins-store/plugins/agentbrowser/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/plugins-store/plugins/ambient-elevator/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/apps-store/browser/manifest.json"),
     // WhatsApp has no process: the manifest contributes a native workspace entry
     // over the existing Gateway channel adapters.
-    include_str!("../../../../apps-store/whatsapp/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/apps-store/whatsapp/manifest.json"),
     // Chat Broadcast has no process or sidecar: its desktop companion uses the
     // trusted host bridge to list visible conversations and enqueue real user turns.
-    include_str!("../../../../apps-store/chat-broadcast/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/apps-store/chat-broadcast/manifest.json"),
     // Every apps-store satellite is also a valid standalone-app carriage. Keeping
     // its manifest in the generic production registry lets the standalone host
     // use the normal built-in lifecycle path (and therefore preserve Core-tier
     // sidecar/MCP authority) without adding an app-specific Core route, client, or
     // port. The satellite still owns its sidecar and UI; this list only establishes
     // the compiled manifest identity used by the generic loader.
-    include_str!("../../../../apps-store/agent-status/manifest.json"),
-    include_str!("../../../../apps-store/approvals/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/apps-store/agent-status/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/apps-store/approvals/manifest.json"),
     // Backstage is authored in its own repository, but its exact manifest is
     // compiled here so Marketplace installs and standalone bundles retain the
     // same first-party identity without adding an app-specific Core route.
-    include_str!("../../../../apps-store/backstage/manifest.json"),
-    include_str!("../../../../apps-store/blueprint/manifest.json"),
-    include_str!("../../../../apps-store/bookmarks/manifest.json"),
-    include_str!("../../../../apps-store/calendar/manifest.json"),
-    include_str!("../../../../apps-store/canvas/manifest.json"),
-    include_str!("../../../../apps-store/checks/manifest.json"),
-    include_str!("../../../../apps-store/clips/manifest.json"),
-    include_str!("../../../../apps-store/content/manifest.json"),
-    include_str!("../../../../apps-store/crm/manifest.json"),
-    include_str!("../../../../apps-store/dashboards/manifest.json"),
-    include_str!("../../../../apps-store/dictation/manifest.json"),
-    include_str!("../../../../apps-store/docling/manifest.json"),
-    include_str!("../../../../apps-store/drafts/manifest.json"),
-    include_str!("../../../../apps-store/desktop/manifest.json"),
-    include_str!("../../../../apps-store/expenses/manifest.json"),
-    include_str!("../../../../apps-store/feedback-board/manifest.json"),
-    include_str!("../../../../apps-store/finetune/manifest.json"),
-    include_str!("../../../../apps-store/healing/manifest.json"),
-    include_str!("../../../../apps-store/help-center/manifest.json"),
-    include_str!("../../../../apps-store/learning/manifest.json"),
-    include_str!("../../../../apps-store/mail/manifest.json"),
-    include_str!("../../../../apps-store/markitdown/manifest.json"),
-    include_str!("../../../../apps-store/mineru/manifest.json"),
-    include_str!("../../../../apps-store/mission-control/manifest.json"),
-    include_str!("../../../../apps-store/monitors/manifest.json"),
-    include_str!("../../../../apps-store/mpp/manifest.json"),
-    include_str!("../../../../apps-store/news/manifest.json"),
-    include_str!("../../../../apps-store/outreach/manifest.json"),
-    include_str!("../../../../apps-store/projects/manifest.json"),
-    include_str!("../../../../apps-store/invoices/manifest.json"),
-    include_str!("../../../../apps-store/people/manifest.json"),
-    include_str!("../../../../apps-store/predict/manifest.json"),
-    include_str!("../../../../apps-store/pull-requests/manifest.json"),
-    include_str!("../../../../apps-store/quests/manifest.json"),
-    include_str!("../../../../apps-store/reasoning/manifest.json"),
-    include_str!("../../../../apps-store/reelfarm/manifest.json"),
-    include_str!("../../../../apps-store/research/manifest.json"),
-    include_str!("../../../../apps-store/rlm/manifest.json"),
-    include_str!("../../../../apps-store/recipes/manifest.json"),
-    include_str!("../../../../apps-store/simulator/manifest.json"),
-    include_str!("../../../../apps-store/sites/manifest.json"),
-    include_str!("../../../../apps-store/slides/manifest.json"),
-    include_str!("../../../../apps-store/social/manifest.json"),
-    include_str!("../../../../apps-store/subtitles/manifest.json"),
-    include_str!("../../../../apps-store/teams/manifest.json"),
-    include_str!("../../../../apps-store/timeline/manifest.json"),
-    include_str!("../../../../apps-store/token-table/manifest.json"),
-    include_str!("../../../../apps-store/tuition/manifest.json"),
-    include_str!("../../../../apps-store/ugc/manifest.json"),
-    include_str!("../../../../apps-store/unstructured/manifest.json"),
-    include_str!("../../../../apps-store/voice/manifest.json"),
-    include_str!("../../../../apps-store/warmup/manifest.json"),
-    include_str!("../../../../apps-store/webhooks/manifest.json"),
-    include_str!("../../../../apps-store/whiteboard/manifest.json"),
-    include_str!("../../../../apps-store/workflows/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/apps-store/backstage/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/apps-store/blueprint/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/apps-store/bookmarks/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/apps-store/calendar/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/apps-store/canvas/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/apps-store/checks/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/apps-store/clips/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/apps-store/content/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/apps-store/convert/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/apps-store/crm/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/apps-store/dashboards/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/apps-store/dictation/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/apps-store/anydoc/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/apps-store/docling/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/apps-store/drafts/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/apps-store/desktop/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/apps-store/drawesome/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/apps-store/expenses/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/apps-store/feedback-board/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/apps-store/finetune/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/apps-store/healing/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/apps-store/help-center/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/apps-store/learning/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/apps-store/mail/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/apps-store/markitdown/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/apps-store/mineru/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/apps-store/mission-control/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/apps-store/monitors/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/apps-store/mpp/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/apps-store/news/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/apps-store/outreach/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/apps-store/projects/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/apps-store/invoices/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/apps-store/people/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/apps-store/predict/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/apps-store/pull-requests/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/apps-store/quests/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/apps-store/reasoning/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/apps-store/rooms/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/apps-store/reelfarm/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/apps-store/research/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/apps-store/rlm/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/apps-store/recipes/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/apps-store/simulator/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/apps-store/sites/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/apps-store/slides/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/apps-store/social/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/apps-store/subtitles/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/apps-store/teams/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/apps-store/timeline/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/apps-store/token-table/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/apps-store/tuition/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/apps-store/ugc/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/apps-store/unstructured/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/apps-store/voice/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/apps-store/warmup/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/apps-store/webhooks/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/apps-store/whiteboard/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/apps-store/workflows/manifest.json"),
     include_str!("fixtures/engines.manifest.json"),
     include_str!("fixtures/hardware.manifest.json"),
     include_str!("fixtures/layers.manifest.json"),
@@ -1368,13 +1433,13 @@ const BUILTIN_MANIFESTS: &[&str] = CORE_RUNTIME_BUILTIN_MANIFESTS;
 // materialized. Keep the sidecar declarations needed for those clients available
 // during bootstrap without making the packages runtime-installed or pre-installed.
 const BOOTSTRAP_MANIFESTS: &[&str] = &[
-    include_str!("../../../../apps-store/finetune/manifest.json"),
-    include_str!("../../../../apps-store/meetings/manifest.json"),
-    include_str!("../../../../apps-store/dashboards/manifest.json"),
-    include_str!("../../../../apps-store/teams/manifest.json"),
-    include_str!("../../../../apps-store/quests/manifest.json"),
-    include_str!("../../../../apps-store/healing/manifest.json"),
-    include_str!("../../../../apps-store/monitors/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/apps-store/finetune/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/apps-store/meetings/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/apps-store/dashboards/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/apps-store/teams/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/apps-store/quests/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/apps-store/healing/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/apps-store/monitors/manifest.json"),
 ];
 
 /// IDs whose manifest bytes are trusted because they are compiled into Core.
@@ -1399,6 +1464,18 @@ pub const CANVAS_PLUGIN_ID: &str = "@ryu/canvas";
 /// `ui_code` on a fresh install. Rebuild with `bun run --cwd packages/canvas-app
 /// build` and copy `dist/index.html` to `fixtures/canvas.ui.html` to refresh it.
 pub const CANVAS_UI_HTML: &str = include_str!("fixtures/canvas.ui.html");
+
+/// The Drawesome app's plugin id and prebuilt Companion bundle. The bundle is
+/// sourced from `apps-store/drawesome/ui` and attached by the normal explicit
+/// install path, just like the other opt-in Companion apps.
+pub const DRAWSOME_PLUGIN_ID: &str = "@ryu/drawesome";
+pub const DRAWSOME_UI_HTML: &str = include_str!("fixtures/drawesome.ui.html");
+
+/// The Convert app's plugin id and prebuilt Companion bundle. The app owns
+/// browser-local file conversion and uses only the generic storage/toast bridges
+/// for its small metadata surface.
+pub const CONVERT_PLUGIN_ID: &str = "@ryu/convert";
+pub const CONVERT_UI_HTML: &str = include_str!("fixtures/convert.ui.html");
 
 /// The Slides app's prebuilt, self-contained UI bundle. Seeded for explicit app
 /// installs through the same compiled-in companion table as the other Path B apps.
@@ -1473,6 +1550,10 @@ pub const NEWS_UI_HTML: &str = include_str!("fixtures/news.ui.html");
 /// as the other opt-in apps. Refresh with
 /// `scripts/sync-app-fixtures.sh outreach`.
 pub const OUTREACH_UI_HTML: &str = include_str!("fixtures/outreach.ui.html");
+
+/// The Autopilot app's prebuilt, self-contained UI bundle. Refresh with
+/// `scripts/sync-app-fixtures.sh autopilot` after changing the Companion.
+pub const AUTOPILOT_UI_HTML: &str = include_str!("fixtures/autopilot.ui.html");
 
 /// The Projects app's prebuilt, self-contained UI bundle. Refresh with
 /// `scripts/sync-app-fixtures.sh projects`.
@@ -1599,7 +1680,7 @@ pub const SITES_UI_HTML: &str = include_str!("fixtures/sites.ui.html");
 /// public HTTP surface. Rebuild with `bun run --cwd apps-store/chat-broadcast/ui
 /// build` and copy `dist/index.html` to `ui/companion.html` to refresh it.
 pub const CHAT_BROADCAST_UI_HTML: &str =
-    include_str!("../../../../apps-store/chat-broadcast/ui/companion.html");
+    include_str!("../../../../generated/ryu-runtime/apps-store/chat-broadcast/ui/companion.html");
 
 /// The Warmup app's prebuilt, self-contained UI bundle (a `vite-plugin-singlefile`
 /// build of `apps-store/warmup/ui`, all JS/CSS — incl. the tree-shaken `@ryu/ui`
@@ -1655,6 +1736,14 @@ pub const SOCIAL_UI_HTML: &str = include_str!("fixtures/social.ui.html");
 /// `bun run --cwd apps-store/rlm/ui build` (or `scripts/sync-app-fixtures.sh rlm`)
 /// and copy `dist/index.html` to `fixtures/rlm.ui.html` to refresh it.
 pub const RLM_UI_HTML: &str = include_str!("fixtures/rlm.ui.html");
+
+/// The Clips app's prebuilt, self-contained UI bundle (a
+/// `vite-plugin-singlefile` build of `apps-store/clips/ui`, all JS/CSS and the
+/// local demo media asset inlined). It is attached on explicit install through the
+/// generic companion table; the frame reaches its own sidecar through `app:http`.
+/// Rebuild with `bun run --cwd apps-store/clips/ui build` (or
+/// `scripts/sync-app-fixtures.sh clips`) and refresh `fixtures/clips.ui.html`.
+pub const CLIPS_UI_HTML: &str = include_str!("fixtures/clips.ui.html");
 
 /// The Subtitles app's prebuilt, self-contained UI bundle (a
 /// `vite-plugin-singlefile` build of `apps-store/subtitles/ui`, all JS/CSS — incl.
@@ -2105,11 +2194,13 @@ impl PluginManifestLoader {
         let mut seen_ids = HashSet::new();
         BOOTSTRAP_MANIFESTS
             .iter()
-            .filter_map(|raw| match Self::parse_and_validate(raw, "<bootstrap>", None, &mut seen_ids) {
-                Ok(manifest) => Some(manifest),
-                Err(error) => {
-                    tracing::warn!(%error, "bootstrap manifest skipped");
-                    None
+            .filter_map(|raw| {
+                match Self::parse_and_validate(raw, "<bootstrap>", None, &mut seen_ids) {
+                    Ok(manifest) => Some(manifest),
+                    Err(error) => {
+                        tracing::warn!(%error, "bootstrap manifest skipped");
+                        None
+                    }
                 }
             })
             .collect()
@@ -2438,7 +2529,7 @@ mod tests {
     use crate::runnable::RunnableKind;
 
     const SAMPLE_JSON: &str =
-        include_str!("../../../../plugins-store/plugins/sample/manifest.json");
+        include_str!("../../../../generated/ryu-runtime/plugins-store/plugins/sample/manifest.json");
 
     /// The multi-kind fixture lives in `apps/core/tests/manifest_fixtures/` so it
     /// doubles as the integration-test input and the in-module round-trip fixture.
@@ -2451,7 +2542,13 @@ mod tests {
 
         let temp = tempfile::tempdir().expect("tempdir");
         let package = temp.path().join("plugin");
-        for dir in ["hooks", "adapters", "output-styles", "pi-extensions", "real"] {
+        for dir in [
+            "hooks",
+            "adapters",
+            "output-styles",
+            "pi-extensions",
+            "real",
+        ] {
             std::fs::create_dir_all(package.join(dir)).expect("create package dir");
         }
         let external = temp.path().join("outside.txt");
@@ -2522,12 +2619,12 @@ mod tests {
                 .map(|category| {
                     (
                         format!("{root}/{category}"),
-                        repo_root.join(root).join(category),
+                        repo_root.join("generated/ryu-runtime").join(root).join(category),
                     )
                 })
                 .collect()
         } else {
-            vec![(root.to_owned(), repo_root.join(root))]
+            vec![(root.to_owned(), repo_root.join("generated/ryu-runtime").join(root))]
         };
 
         let mut dirs = Vec::new();
@@ -2605,18 +2702,30 @@ mod tests {
     }
 
     #[test]
-    fn bootstrap_manifests_keep_loopback_clients_constructible_without_packages() {
+    fn bootstrap_manifests_declare_app_sidecar_bind_ports() {
         let manifests = PluginManifestLoader::load_bootstrap();
-        let resolved = [
-            crate::dashboards_client::sidecar_port(&manifests),
-            crate::finetune_client::sidecar_port(&manifests),
-            crate::healing_client::sidecar_port(&manifests),
-            crate::meetings_client::sidecar_port(&manifests),
-            crate::monitors_client::sidecar_port(&manifests),
-            crate::quests_client::sidecar_port(&manifests),
-            crate::teams_client::sidecar_port(&manifests),
-        ];
-        assert!(resolved.iter().all(|port| *port != 0));
+        for app in [
+            "dashboards",
+            "finetune",
+            "healing",
+            "meetings",
+            "monitors",
+            "quests",
+            "teams",
+        ] {
+            let plugin_id = format!("@ryu/{app}");
+            let sidecar_name = format!("ryu-{app}");
+            let manifest = manifests
+                .iter()
+                .find(|manifest| manifest.id == plugin_id)
+                .unwrap_or_else(|| panic!("missing bootstrap manifest {plugin_id}"));
+            let port = manifest
+                .sidecars
+                .iter()
+                .find(|spec| spec.name == sidecar_name)
+                .map(|spec| spec.port);
+            assert!(port.is_some_and(|port| port != 0), "{app} has no bind port");
+        }
     }
 
     #[test]
@@ -2688,6 +2797,7 @@ mod tests {
             .iter()
             .copied()
             .chain(std::iter::once(crate::plugins::builtins::ENGINES_PLUGIN_ID))
+            .chain(crate::plugins::builtins::CORE_PREINSTALLED.iter().copied())
         {
             assert!(
                 ids.contains(id),
@@ -2698,8 +2808,9 @@ mod tests {
 
     /// Every packaged app/plugin manifest has exactly ONE home — its package
     /// directory (`<root>/<x>/manifest.json`, what the owning team edits). Only
-    /// the small Core system set is embedded; ordinary official packages are
-    /// installed from the signed marketplace package.
+    /// the production runtime embeds the first-party defaults that are required
+    /// before marketplace materialization; ordinary opt-in packages are installed
+    /// from the signed marketplace package.
     ///
     /// It used to be duplicated as a byte-identical fixture copy under
     /// `src/plugin_manifest/fixtures/<x>.manifest.json`, purely so `apps/core` would
@@ -2783,12 +2894,12 @@ mod tests {
                 // `..` segments is a compile error, but a path pointing at the WRONG
                 // package root would silently compile in someone else's manifest.
                 let expected =
-                    format!("include_str!(\"../../../../{package_root}/manifest.json\")");
-                let multiline = format!("\"../../../../{package_root}/manifest.json\"");
+                    format!("include_str!(\"../../../../generated/ryu-runtime/{package_root}/manifest.json\")");
+                let multiline = format!("\"../../../../generated/ryu-runtime/{package_root}/manifest.json\"");
                 assert!(
                     sources.contains(&expected) || sources.contains(&multiline),
                     "system package {package_root} is not embedded in Core — no `include_str!` \
-                         names `../../../../{package_root}/manifest.json`"
+                         names `../../../../generated/ryu-runtime/{package_root}/manifest.json`"
                 );
             }
             checked += 1;
@@ -2797,7 +2908,7 @@ mod tests {
         // Gate the zero-escape on the DIRECTORIES being absent, not on reads failing:
         // otherwise a tree where every package vanished is indistinguishable from the
         // mirror, and this guard passes having checked nothing.
-        if repo_root.join("apps-store").is_dir() || repo_root.join("plugins-store").is_dir() {
+        if repo_root.join("generated/ryu-runtime/apps-store").is_dir() || repo_root.join("generated/ryu-runtime/plugins-store").is_dir() {
             assert!(
                 checked > 0,
                 "a package root is present, so at least one manifest must have been checked"
@@ -2966,7 +3077,7 @@ mod tests {
             assert!(
                 builtin_code::BUILTIN_CODE_FILES.is_empty()
                     || !std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                        .join("../../plugins-store")
+                        .join("../../generated/ryu-runtime/plugins-store")
                         .is_dir(),
                 "no package manifest references a code_file, but BUILTIN_CODE_FILES has {} \
                  row(s) — they embed code nothing can reach",
@@ -3049,7 +3160,7 @@ mod tests {
             assert!(
                 builtin_code::BUILTIN_PI_EXTENSIONS.is_empty()
                     || !std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                        .join("../../plugins-store")
+                        .join("../../generated/ryu-runtime/plugins-store")
                         .is_dir(),
                 "no package manifest declares a pi extension, but BUILTIN_PI_EXTENSIONS has \
                  {} row(s) — they embed code nothing can reach",
@@ -3071,7 +3182,7 @@ mod tests {
                  ships only its manifest — its package directory is NOT on the user's machine \
                  — so without an include_str! row the extension does not exist at runtime. \
                  Add:\n    (\n        \"{id}\",\n        \"{rel}\",\n        \
-                 include_str!(\"../../../../plugins-store/{dir}/{rel}\"),\n    ),"
+                 include_str!(\"../../../../generated/ryu-runtime/plugins-store/{dir}/{rel}\"),\n    ),"
             );
         }
 
@@ -3133,7 +3244,7 @@ mod tests {
             assert!(
                 builtin_code::BUILTIN_OUTPUT_STYLES.is_empty()
                     || !std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                        .join("../../plugins-store")
+                        .join("../../generated/ryu-runtime/plugins-store")
                         .is_dir(),
                 "no package manifest contributes an output style, but BUILTIN_OUTPUT_STYLES has \
                  {} row(s) — they embed prose nothing can reach",
@@ -3155,7 +3266,7 @@ mod tests {
                  only its manifest — its package directory is NOT on the user's machine — so \
                  without an include_str! row the style cannot be hydrated and the whole manifest \
                  fails to load. Add:\n    (\n        \"{id}\",\n        \"{rel}\",\n        \
-                 include_str!(\"../../../../plugins-store/{dir}/{rel}\"),\n    ),"
+                 include_str!(\"../../../../generated/ryu-runtime/plugins-store/{dir}/{rel}\"),\n    ),"
             );
         }
 
@@ -3233,7 +3344,7 @@ mod tests {
             offenders.join("\n  ")
         );
 
-        if repo_root.join("apps-store").is_dir() || repo_root.join("plugins-store").is_dir() {
+        if repo_root.join("generated/ryu-runtime/apps-store").is_dir() || repo_root.join("generated/ryu-runtime/plugins-store").is_dir() {
             assert!(
                 checked > 0,
                 "a package root is present but nothing was checked"
@@ -3395,7 +3506,7 @@ mod tests {
             offenders.join("\n  ")
         );
 
-        if repo_root.join("apps-store").is_dir() || repo_root.join("plugins-store").is_dir() {
+        if repo_root.join("generated/ryu-runtime/apps-store").is_dir() || repo_root.join("generated/ryu-runtime/plugins-store").is_dir() {
             assert!(
                 checked > 0,
                 "a package root is present but nothing was checked"
@@ -3570,11 +3681,11 @@ mod tests {
     fn monitors_and_meetings_declare_their_danger_zone_categories() {
         for (raw, expected) in [
             (
-                include_str!("../../../../apps-store/monitors/manifest.json"),
+                include_str!("../../../../generated/ryu-runtime/apps-store/monitors/manifest.json"),
                 "monitors",
             ),
             (
-                include_str!("../../../../apps-store/meetings/manifest.json"),
+                include_str!("../../../../generated/ryu-runtime/apps-store/meetings/manifest.json"),
                 "meetings",
             ),
         ] {

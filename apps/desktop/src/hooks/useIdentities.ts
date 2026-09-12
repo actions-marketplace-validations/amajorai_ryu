@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useCallback } from "react";
+import { useCallback, useMemo } from "react";
 import { useActiveNode } from "@/src/hooks/useActiveNode.ts";
 import type { ApiTarget } from "@/src/lib/api/client.ts";
 import {
@@ -35,57 +35,83 @@ export interface UseIdentitiesResult {
 	remove: (id: string) => Promise<void>;
 }
 
+const EMPTY_PROFILES: Profile[] = [];
+interface Scoped<T> {
+	target: ApiTarget;
+	value: T;
+}
+const identityListKey = (target: ApiTarget) =>
+	[
+		"identities",
+		"list",
+		target.url,
+		target.token ?? null,
+		target.userJwt ?? null,
+	] as const;
+
 export function useIdentities(): UseIdentitiesResult {
 	const node = useActiveNode();
-	const target: ApiTarget = {
-		url: node.url,
-		token: node.token,
-		userJwt: node.userJwt ?? null,
-	};
+	const target = useMemo<ApiTarget>(
+		() => ({
+			url: node.url,
+			token: node.token ?? null,
+			userJwt: node.userJwt ?? null,
+		}),
+		[node.url, node.token, node.userJwt]
+	);
 	const qc = useQueryClient();
-
-	const listKey = ["identities", "list", target.url] as const;
-
+	const listKey = useMemo(() => identityListKey(target), [target]);
 	const listQuery = useQuery({
 		queryKey: listKey,
-		queryFn: () => listIdentities(target),
+		queryFn: ({ signal }) => listIdentities(target, signal),
 	});
-
 	const invalidate = useCallback(() => {
-		Promise.resolve(qc.invalidateQueries({ queryKey: listKey })).catch(
-			() => undefined
-		);
+		void qc.invalidateQueries({ queryKey: listKey }).catch(() => undefined);
 	}, [qc, listKey]);
-
+	const invalidateMutation = useCallback(
+		(_result: unknown, variables: { target: ApiTarget }) => {
+			const queryKey = identityListKey(variables.target);
+			void qc
+				.cancelQueries({ queryKey })
+				.then(() => qc.invalidateQueries({ queryKey }))
+				.catch(() => undefined);
+		},
+		[qc]
+	);
+	const currentTarget = (other?: ApiTarget) =>
+		other?.url === target.url &&
+		(other?.token ?? null) === target.token &&
+		(other?.userJwt ?? null) === target.userJwt;
 	const createMutation = useMutation({
-		mutationFn: (input: CreateConnectionInput) =>
-			createConnection(target, input),
-		onSuccess: invalidate,
+		mutationFn: ({ target, value }: Scoped<CreateConnectionInput>) =>
+			createConnection(target, value),
+		onSuccess: invalidateMutation,
 	});
-
 	const deleteMutation = useMutation({
-		mutationFn: (id: string) => deleteConnection(target, id),
-		onSuccess: invalidate,
+		mutationFn: ({ target, value }: Scoped<string>) =>
+			deleteConnection(target, value),
+		onSuccess: invalidateMutation,
 	});
-
 	const loginMutation = useMutation({
-		mutationFn: (id: string) => beginLogin(target, id),
-		onSuccess: invalidate,
+		mutationFn: ({ target, value }: Scoped<string>) =>
+			beginLogin(target, value),
+		onSuccess: invalidateMutation,
 	});
-
 	const importMutation = useMutation({
-		mutationFn: ({ id, state }: { id: string; state: string }) =>
-			importConnection(target, id, state),
-		onSuccess: invalidate,
+		mutationFn: ({ target, value }: Scoped<{ id: string; state: string }>) =>
+			importConnection(target, value.id, value.state),
+		onSuccess: invalidateMutation,
 	});
-
 	const pollMutation = useMutation({
-		mutationFn: (id: string) => pollConnection(target, id),
-		onSuccess: invalidate,
+		mutationFn: ({ target, value }: Scoped<string>) =>
+			pollConnection(target, value),
+		onSuccess: invalidateMutation,
 	});
-
-	const profiles = listQuery.data ?? [];
-	const profileIds = profiles.map((p) => p.profile_id);
+	const profiles = listQuery.data ?? EMPTY_PROFILES;
+	const profileIds = useMemo(
+		() => profiles.map((p) => p.profile_id),
+		[profiles]
+	);
 
 	return {
 		profiles,
@@ -93,23 +119,33 @@ export function useIdentities(): UseIdentitiesResult {
 		loading: listQuery.isLoading,
 		error: listQuery.error instanceof Error ? listQuery.error.message : null,
 		refetch: invalidate,
-		create: (input) => createMutation.mutateAsync(input),
-		creating: createMutation.isPending,
-		remove: (id) => deleteMutation.mutateAsync(id),
-		deleting: deleteMutation.isPending
-			? (deleteMutation.variables ?? null)
-			: null,
-		login: (id) => loginMutation.mutateAsync(id),
-		loggingIn: loginMutation.isPending
-			? (loginMutation.variables ?? null)
-			: null,
+		create: (input) => createMutation.mutateAsync({ target, value: input }),
+		creating:
+			createMutation.isPending &&
+			currentTarget(createMutation.variables?.target),
+		remove: (id) => deleteMutation.mutateAsync({ target, value: id }),
+		deleting:
+			deleteMutation.isPending &&
+			currentTarget(deleteMutation.variables?.target)
+				? (deleteMutation.variables?.value ?? null)
+				: null,
+		login: (id) => loginMutation.mutateAsync({ target, value: id }),
+		loggingIn:
+			loginMutation.isPending && currentTarget(loginMutation.variables?.target)
+				? (loginMutation.variables?.value ?? null)
+				: null,
 		importState: async (id, state) => {
-			await importMutation.mutateAsync({ id, state });
+			await importMutation.mutateAsync({ target, value: { id, state } });
 		},
-		importing: importMutation.isPending,
+		importing:
+			importMutation.isPending &&
+			currentTarget(importMutation.variables?.target),
 		poll: async (id) => {
-			await pollMutation.mutateAsync(id);
+			await pollMutation.mutateAsync({ target, value: id });
 		},
-		polling: pollMutation.isPending ? (pollMutation.variables ?? null) : null,
+		polling:
+			pollMutation.isPending && currentTarget(pollMutation.variables?.target)
+				? (pollMutation.variables?.value ?? null)
+				: null,
 	};
 }

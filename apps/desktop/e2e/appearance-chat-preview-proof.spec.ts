@@ -17,6 +17,16 @@ test("proves the appearance controls, motion gate, and translucent chips", async
 	await expect(
 		page.getByTestId("bot-mode-preview").locator('[aria-live="polite"]')
 	).toHaveCount(1);
+	const chatPreviewMorph = page
+		.getByTestId("chat-preview")
+		.locator("[torph-root]");
+	await expect(chatPreviewMorph).toHaveCount(1);
+	await expect(chatPreviewMorph.locator("[torph-sr]")).toHaveText(
+		"You: Review the latest changes"
+	);
+	await expect
+		.poll(() => chatPreviewMorph.locator("[torph-sr]").textContent())
+		.toBe("In progress");
 
 	const statusChips = page.getByTestId("status-chips");
 	await expect(statusChips).toHaveClass(/border-border\/30/);

@@ -11,9 +11,9 @@ import { RecordingIndicator } from "./recording-indicator.tsx";
 
 function StatusDot({ up, label }: { label: string; up: boolean }) {
 	return (
-		<span className="flex items-center gap-1.5 text-neutral-300 text-xs">
+		<span className="flex items-center gap-1.5 text-muted-foreground text-xs">
 			<span
-				className={`size-2 rounded-full ${up ? "bg-emerald-400" : "bg-neutral-600"}`}
+				className={`size-2 rounded-full ${up ? "bg-success" : "bg-muted-foreground"}`}
 			/>
 			{label}
 		</span>
@@ -61,7 +61,7 @@ export function SidecarStatusView({
 		contextReadAllowed && snapshot.coreUp && !snapshot.shadowUp;
 
 	return (
-		<section className="flex flex-col gap-2 rounded-2xl bg-white/5 p-3">
+		<section className="flex flex-col gap-2 rounded-2xl bg-card p-3">
 			<div className="flex items-center justify-between">
 				<div className="flex gap-3">
 					<StatusDot label="Core" up={snapshot.coreUp} />
@@ -73,13 +73,13 @@ export function SidecarStatusView({
 						recording={snapshot.recording}
 					/>
 				) : (
-					<span className="text-[11px] text-neutral-500">Capture off</span>
+					<span className="text-[11px] text-muted-foreground">Capture off</span>
 				)}
 			</div>
 
 			{showStartShadow ? (
 				<button
-					className="rounded-full bg-white/10 px-3 py-1 font-medium text-neutral-100 text-xs hover:bg-white/20 disabled:opacity-50"
+					className="rounded-full bg-muted px-3 py-1 font-medium text-foreground text-xs hover:bg-accent disabled:opacity-50"
 					disabled={starting}
 					onClick={onStartShadow}
 					type="button"
@@ -90,7 +90,7 @@ export function SidecarStatusView({
 
 			{contextReadAllowed && snapshot.shadowUp ? (
 				<button
-					className="rounded-full bg-white/10 px-3 py-1 font-medium text-neutral-100 text-xs hover:bg-white/20 disabled:opacity-50"
+					className="rounded-full bg-muted px-3 py-1 font-medium text-foreground text-xs hover:bg-accent disabled:opacity-50"
 					disabled={pausing}
 					onClick={onTogglePause}
 					type="button"

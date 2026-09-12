@@ -1,8 +1,13 @@
 # Ryu agent skills
 
-A collection of external agent skills that teach an AI coding agent (Claude Code, Cursor, and any other SKILL.md-aware client) how to set up and drive Ryu for a user.
+The maintained source tree for Ryu's Agent Skills. Direct skill folders are
+usable by Claude Code, Cursor, and any other `SKILL.md`-aware client. Selected
+folders are also embedded into Ryu Core for offline installation into the
+universal Skills home.
 
-These are external skills. They are not installed into Ryu's own skills registry - they live as instructions an agent loads. Driving a Ryu node from inside the agent is done through the `apps/mcp` MCP server, which these skills configure.
+The `pstack/` directory preserves Cursor's MIT-licensed skill pack as a bundle;
+its members live under `pstack/skills/` so the upstream playbooks, references,
+and scripts remain beside the `SKILL.md` that uses them.
 
 ## The SKILL.md format
 
@@ -40,6 +45,14 @@ The `description` is what a loading agent reads to decide whether to open the sk
 - [ryu-local-model](ryu-local-model/SKILL.md) - search, download, and serve a local GGUF model via the models and engines REST surface.
 - [ryu-author-skill](ryu-author-skill/SKILL.md) - author a new skill in this same SKILL.md format so the ecosystem is self-extending.
 
+- [ryu-app-icon](ryu-app-icon/SKILL.md) - design layered app and plugin artwork with Icon Composer.
+- [pdf](pdf/SKILL.md) - create, render, inspect, and transform PDFs with a React-first pdfcn path and reliable local tooling.
+- [pstack](pstack/README.md) - MIT-licensed rigorous engineering workflows, playbooks, and principles bundled as built-in skills.
+
 ## Adding a skill
 
-See [ryu-author-skill](ryu-author-skill/SKILL.md). In short: create `apps/skills/<slug>/SKILL.md` with `name` and `description` frontmatter, write skimmable and verified instructions, add a line to this index, and run `bun install` to confirm the workspace still resolves.
+See [ryu-author-skill](ryu-author-skill/SKILL.md). In short: create
+`apps/skills/<slug>/SKILL.md` with `name` and `description` frontmatter, write
+skimmable and verified instructions, add a line to this index, and run
+`bun install` to confirm the workspace still resolves. Preserve an upstream pack's
+own directory layout when its skills use relative resources.

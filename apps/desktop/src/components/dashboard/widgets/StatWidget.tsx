@@ -22,7 +22,7 @@ export function StatBody({
 	return (
 		<div className="flex h-full flex-col justify-center gap-2">
 			<div className="flex items-baseline gap-1.5">
-				<span className="font-semibold text-4xl tabular-nums tracking-tight">
+				<span className="font-medium text-4xl tabular-nums tracking-tight">
 					{display}
 				</span>
 				{cfg.unit && (
@@ -36,8 +36,8 @@ export function StatBody({
 				<span
 					className={
 						delta >= 0
-							? "inline-flex w-fit items-center gap-1 rounded-full bg-success/10 px-2 py-0.5 font-medium text-success text-xs dark:text-success"
-							: "inline-flex w-fit items-center gap-1 rounded-full bg-destructive/10 px-2 py-0.5 font-medium text-destructive text-xs"
+							? "inline-flex w-fit items-center gap-1 rounded-full bg-success/10 px-2 py-0.5 font-medium text-status-success text-xs dark:text-status-success"
+							: "inline-flex w-fit items-center gap-1 rounded-full bg-destructive/10 px-2 py-0.5 font-medium text-status-destructive text-xs"
 					}
 				>
 					{delta >= 0 ? "▲" : "▼"} {formatNumber(Math.abs(delta))}

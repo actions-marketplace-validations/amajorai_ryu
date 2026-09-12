@@ -27,8 +27,10 @@ import type { PlanId } from "./plans.ts";
  */
 export const PLANS_INCLUDING_BASE_NODE: readonly PlanId[] = [
 	"pro",
+	"plus",
 	"max",
 	"teams",
+	"teams-lite",
 	"business",
 ];
 
@@ -46,10 +48,12 @@ export const planIncludesBaseNode = (
 /**
  * The Hetzner type each plan's FREE node is provisioned at.
  *
- * Max gets a genuinely bigger machine — this is one of the things a top-up
- * cannot sell you, and therefore one of the reasons Max exists at all now that
- * it is no longer a credit pack. `cx33` is 4 vCPU · 8 GB · 80 GB against the
- * `cx23`'s 2 vCPU · 4 GB · 40 GB: double the compute and memory.
+ * Each paid managed tier gets a deliberately larger included machine — this is
+ * one of the things a top-up cannot sell you, and therefore one of the reasons
+ * the tiers exist at all now that they are no longer credit packs. The default
+ * EU ladder is Pro `cx23` (2 vCPU · 4 GB · 40 GB), Max `cx33` (4 vCPU · 8 GB ·
+ * 80 GB), Teams `cx43` (8 vCPU · 16 GB · 160 GB), and Business `cx53` (16 vCPU
+ * · 32 GB · 320 GB).
  *
  * NOT `cpx22`, which reads like the obvious upgrade and is a trap: Hetzner's
  * June 2026 repricing took it from €7.99 to **€19.49**, while `cx33` is €8.49
@@ -59,29 +63,33 @@ export const planIncludesBaseNode = (
  */
 export const BASE_NODE_TYPE_BY_PLAN: Readonly<Record<string, string>> = {
 	pro: "cx23",
+	plus: "cx23",
 	max: "cx33",
-	teams: "cx23",
-	business: "cpx32",
+	teams: "cx43",
+	"teams-lite": "cx43",
+	business: "cx53",
 };
 
 /**
- * Singapore's catalog does not offer the EU `cx23`. Keep the same Pro compute
- * promise there with the regional `cpx22`; Max already uses the dedicated
- * `ccx13`, which is available in Singapore. This is a runtime placement choice,
- * not a billing boundary: the organization still owns one included node.
+ * Singapore's catalog does not offer the EU `cx23`, and its available shapes are
+ * materially more expensive than the EU defaults. Teams and Business have
+ * enough organization-seat margin to include their regional profiles. Pro and
+ * Max do not: their global prices cannot safely absorb a Singapore node on the
+ * annual term, so those customers can still choose Singapore through a priced
+ * cloud-instance add-on but are not promised a free regional node.
  */
 export const BASE_NODE_TYPE_BY_PLAN_IN_SINGAPORE: Readonly<
 	Record<string, string>
 > = {
-	pro: "cpx22",
-	max: "ccx13",
 	teams: "cpx22",
+	"teams-lite": "cpx22",
 	business: "cpx32",
 };
 
 /**
  * The type a plan's included node is provisioned at, or null when it gets none.
- * Teams resolves through the seat ladder; everything else is fixed per plan.
+ * Teams resolves through the seat ladder; Business has a fixed performance
+ * profile and everything else is fixed per plan.
  */
 export const baseNodeTypeForPlan = (
 	plan: PlanId | null | undefined,
@@ -90,7 +98,7 @@ export const baseNodeTypeForPlan = (
 	if (!(plan && planIncludesBaseNode(plan))) {
 		return null;
 	}
-	if (plan === "teams") {
+	if (plan === "teams" || plan === "teams-lite") {
 		return teamsNodeTierForSeats(seats).type;
 	}
 	return BASE_NODE_TYPE_BY_PLAN[plan] ?? "cx23";
@@ -106,10 +114,10 @@ export const baseNodeTypeForPlanAtLocation = (
 		return null;
 	}
 	if (location?.trim().toLowerCase() === "sin") {
-		if (plan === "teams") {
+		if (plan === "teams" || plan === "teams-lite") {
 			return BASE_NODE_TYPE_BY_PLAN_IN_SINGAPORE.teams ?? "cpx22";
 		}
-		return BASE_NODE_TYPE_BY_PLAN_IN_SINGAPORE[plan] ?? "cpx22";
+		return BASE_NODE_TYPE_BY_PLAN_IN_SINGAPORE[plan] ?? null;
 	}
 	return baseNodeTypeForPlan(plan, seats);
 };
@@ -128,9 +136,10 @@ export const baseNodeTypeForPlanAtLocation = (
  * seats are licences, compute is sized separately). This ladder is the second
  * thing, not the first.
  *
- * The cost stays trivial against revenue — ~$77/mo of hardware at 100 seats
- * against $4,165 of subscription — and it is both cheaper AND more useful than
- * ten idle `cx23`s.
+ * The cost stays controlled against revenue because the shared node is sized by
+ * plan and seat band, not one idle VM per person. Teams uses one `cx43` through
+ * 49 seats and two at the 50-seat ceiling; Business uses one `cx53` across its
+ * self-serve range.
  *
  * REVERSIBILITY IS WHY THIS IS SAFE TO SCALE DOWN. Hetzner's `change_type` can
  * move a server between types in place, but a resize that GROWS THE DISK is
@@ -156,10 +165,8 @@ export interface TeamsNodeTier {
  * reversibility note above; a `cx23` resized up keeps its 40 GB.
  */
 export const TEAMS_NODE_TIERS: readonly TeamsNodeTier[] = [
-	{ minSeats: 5, type: "cx23", count: 1 },
-	{ minSeats: 10, type: "cx33", count: 1 },
-	{ minSeats: 25, type: "cpx32", count: 1 },
-	{ minSeats: 50, type: "cpx32", count: 2 },
+	{ minSeats: 5, type: "cx43", count: 1 },
+	{ minSeats: 50, type: "cx43", count: 2 },
 ];
 
 /** The Teams node tier in force at `seats` — the highest one reached. */
@@ -176,13 +183,9 @@ export const teamsNodeTierForSeats = (seats: number): TeamsNodeTier => {
 /**
  * How many free nodes a plan grants at `seats`.
  *
- * Everything except Teams gets exactly one, which is what the platform enforces
- * today: `POST /api/servers` refuses a second node for an org with a 409.
- *
- * NOTE FOR WHOEVER IMPLEMENTS THE 2-NODE TIER: that 409 is currently
- * unconditional, so granting more than one requires relaxing it to read this
- * function rather than assuming 1. Until then the 50+ tier's second node is a
- * DECLARED entitlement, not a provisioned one.
+ * Everything except Teams gets exactly one. Teams reaches two included nodes at
+ * the 50-seat tier; the server route and the slot index both resolve that count
+ * from this function so the declared capacity is provisioned and race-safe.
  */
 export const baseNodeCountForPlan = (
 	plan: PlanId | null | undefined,
@@ -191,23 +194,37 @@ export const baseNodeCountForPlan = (
 	if (!(plan && planIncludesBaseNode(plan))) {
 		return 0;
 	}
-	if (plan !== "teams") {
+	if (plan !== "teams" && plan !== "teams-lite") {
 		return 1;
 	}
 	return teamsNodeTierForSeats(seats).count;
 };
 
 /**
+ * How many included nodes a plan grants in a specific region. A null regional
+ * type means the plan has no included node there and the customer must use a
+ * priced cloud-instance add-on.
+ */
+export const baseNodeCountForPlanAtLocation = (
+	plan: PlanId | null | undefined,
+	location: string | null | undefined,
+	seats = 1
+): number =>
+	baseNodeTypeForPlanAtLocation(plan, location, seats) === null
+		? 0
+		: baseNodeCountForPlan(plan, seats);
+
+/**
  * How the qualifying plans are NAMED in customer-facing copy ("…is included
- * with Pro, Max or Teams"). Presentational only — never parse it. Every string
+ * with Plus, Pro, Max, Teams or Business"). Presentational only — never parse it. Every string
  * that used to hardcode "Max" reads this, so widening or narrowing the set is
  * one edit here plus {@link PLANS_INCLUDING_BASE_NODE}, not a nine-file sed.
  */
-export const BASE_NODE_PLANS_LABEL = "Pro, Max or Teams";
+export const BASE_NODE_PLANS_LABEL = "Plus, Pro, Max, Teams or Business";
 
 /**
- * The same set in a conjunctive sentence position ("included with Pro, Max and
- * Teams"). Two constants rather than one because English needs both and a
+ * The same set in a conjunctive sentence position ("included with Plus, Pro, Max,
+ * Teams and Business"). Two constants rather than one because English needs both and a
  * caller that picks the wrong one reads as a typo to a customer.
  */
-export const BASE_NODE_PLANS_LABEL_ALL = "Pro, Max and Teams";
+export const BASE_NODE_PLANS_LABEL_ALL = "Plus, Pro, Max, Teams and Business";

@@ -1,4 +1,5 @@
 import { deflateSync } from "node:zlib";
+import { planTierColors } from "../components/plan-badge.tsx";
 import { fnv1a, xorshift32 } from "../components/dither-kit/pixel.ts";
 
 // The Prism backdrop behind every social card. This server-safe generator lives in the shared UI package so all OG surfaces use the same background.
@@ -352,4 +353,36 @@ export const prismField = (
 export const prismBackgroundDataUri = (seed: string): string => {
 	const { width, height, rgb } = prismField(seed);
 	return `data:image/png;base64,${encodePng(width, height, rgb).toString("base64")}`;
+};
+
+/** Keep the original Prism geometry, recolored with the complete Pro palette. */
+export const proBadgeBackgroundDataUri = (): string => {
+ const colors = planTierColors("pro").map((hex) => ({
+  r: Number.parseInt(hex.slice(1, 3), 16) / 255,
+  g: Number.parseInt(hex.slice(3, 5), 16) / 255,
+  b: Number.parseInt(hex.slice(5, 7), 16) / 255,
+ }));
+ const { time } = prismRoll("ryu");
+ const shapes = new Float64Array(FIELD_WIDTH * FIELD_HEIGHT);
+ let minimum = Number.POSITIVE_INFINITY;
+ let maximum = Number.NEGATIVE_INFINITY;
+ for (let y = 0; y < FIELD_HEIGHT; y++) {
+  for (let x = 0; x < FIELD_WIDTH; x++) {
+   const shape = warpShape(((x + 0.5) / FIELD_WIDTH) * CARD_WIDTH, ((y + 0.5) / FIELD_HEIGHT) * CARD_HEIGHT, time);
+   shapes[y * FIELD_WIDTH + x] = shape;
+   minimum = Math.min(minimum, shape);
+   maximum = Math.max(maximum, shape);
+  }
+ }
+ const rgb = new Uint8Array(FIELD_WIDTH * FIELD_HEIGHT * 3);
+ const range = maximum - minimum || 1;
+ for (let i = 0; i < shapes.length; i++) {
+  // The frozen frame samples only part of the shader range. Span the palette
+  // across that frame so the full Pro spectrum appears, not just its greens.
+  const { r, g, b } = shadeAt(((shapes[i] ?? minimum) - minimum) / range, colors);
+  rgb[i * 3] = onWhite(r);
+  rgb[i * 3 + 1] = onWhite(g);
+  rgb[i * 3 + 2] = onWhite(b);
+ }
+ return `data:image/png;base64,${encodePng(FIELD_WIDTH, FIELD_HEIGHT, rgb).toString("base64")}`;
 };

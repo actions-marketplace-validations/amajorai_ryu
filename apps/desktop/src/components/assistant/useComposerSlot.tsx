@@ -26,7 +26,10 @@ import type { ReactNode } from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useComposerAgentControls } from "@/components/agent-elements/input/composer-agent-controls.tsx";
 import type { ComposerSettingsSection } from "@/components/agent-elements/input/composer-settings-menu.tsx";
-import type { GhostControls } from "@/components/agent-elements/input/goal-plus-button.tsx";
+import type {
+	GhostControls,
+	PluginComposerControlRow,
+} from "@/components/agent-elements/input/goal-plus-button.tsx";
 import { useComposerAcpSections } from "@/components/agent-elements/input/use-composer-acp-sections.ts";
 import {
 	type AttachedImage,
@@ -49,6 +52,11 @@ import { useComposerShortcutBindings } from "@/src/hooks/useComposerShortcutBind
 import { useInterfaceLevel } from "@/src/hooks/useInterfaceLevel.ts";
 import { useVoiceMode } from "@/src/hooks/useVoiceMode.ts";
 import type { ApiTarget } from "@/src/lib/api/client.ts";
+import {
+	getVoiceInputPrefs,
+	subscribePreferenceChanges,
+	VOICE_PREF_KEY,
+} from "@/src/lib/api/preferences.ts";
 import type { Team } from "@/src/lib/api/teams.ts";
 import { stageImageUpload } from "@/src/lib/api/uploads.ts";
 import { transcribeAudio } from "@/src/lib/api/voice.ts";
@@ -160,7 +168,7 @@ export interface ComposerSlotOptions {
 	/** Bind voice-mode turns to this conversation so history persists. */
 	conversationId?: string;
 	/**
-	 * Temporary-chat ("ghost") toggle for the "+" dropdown. Only a new-chat surface
+	 * Temporary-chat toggle for the "+" dropdown. Only a new-chat surface
 	 * can offer it — an existing thread can't retroactively become unsaved — so it's
 	 * opt-in per surface, not derived here.
 	 */
@@ -191,6 +199,8 @@ export interface ComposerSlotOptions {
 	onSelectTeam?: (teamId: string) => void;
 	/** Composer placeholder override (builders use "Describe what to build…"). */
 	placeholder?: string;
+	/** Plugin-registered toggle rows for this composer. */
+	pluginControls?: PluginComposerControlRow[];
 	/** Browser model-selection namespace for this shared composer surface. */
 	surface?: BrowserSurface;
 	/** Node target for voice STT + realtime voice mode. */
@@ -227,6 +237,7 @@ export function useComposerSlot(
 		isWorking = false,
 		teamId,
 		teams,
+		pluginControls,
 	} = options;
 	const { agents } = useAgents();
 	const interfaceLevel = useInterfaceLevel();
@@ -447,9 +458,40 @@ export function useComposerSlot(
 	// so the memoized slot never remounts and drops textarea focus.
 	const targetRef = useRef(target);
 	targetRef.current = target;
+	const [voiceInputEngine, setVoiceInputEngine] = useState<
+		string | undefined
+	>();
+	useEffect(() => {
+		let cancelled = false;
+		const load = () => {
+			getVoiceInputPrefs(target)
+				.then((prefs) => {
+					if (!cancelled) {
+						setVoiceInputEngine(prefs.engine);
+					}
+				})
+				.catch(() => undefined);
+		};
+		load();
+		const unsubscribe = subscribePreferenceChanges((key) => {
+			if (key === VOICE_PREF_KEY) {
+				load();
+			}
+		});
+		return () => {
+			cancelled = true;
+			unsubscribe();
+		};
+	}, [target]);
 	const transcribe = useCallback(
-		(audio: Blob) => transcribeAudio(targetRef.current, audio),
-		[]
+		(audio: Blob) =>
+			transcribeAudio(
+				targetRef.current,
+				audio,
+				"recording.wav",
+				voiceInputEngine
+			),
+		[voiceInputEngine]
 	);
 
 	// ChatGPT-style continuous voice mode — its own entry point, separate from the
@@ -461,6 +503,7 @@ export function useComposerSlot(
 		agentId: runtime.agentId ?? undefined,
 		agentName: agents.find((agent) => agent.id === runtime.agentId)?.name,
 		conversationId,
+		sttEngine: voiceInputEngine,
 	});
 	const composerShortcuts = useComposerShortcutBindings();
 
@@ -474,6 +517,7 @@ export function useComposerSlot(
 		onStartVoiceMode: () => void;
 		infoBar: InputBarInfoBar | undefined;
 		placeholder?: string;
+		pluginControls?: PluginComposerControlRow[];
 		right: ReactNode;
 		sections: ComposerSettingsSection[];
 		shortcuts: typeof composerShortcuts;
@@ -488,6 +532,7 @@ export function useComposerSlot(
 		onGenerateImage,
 		onStartVoiceMode: voiceModeState.start,
 		placeholder,
+		pluginControls,
 		right: rightActions,
 		sections,
 		shortcuts: composerShortcuts,
@@ -501,6 +546,7 @@ export function useComposerSlot(
 		onGenerateImage,
 		onStartVoiceMode: voiceModeState.start,
 		placeholder,
+		pluginControls,
 		right: rightActions,
 		sections,
 		shortcuts: composerShortcuts,
@@ -531,6 +577,7 @@ export function useComposerSlot(
 							props.onTextareaKeyDown?.(event);
 						}}
 						placeholder={live.placeholder ?? props.placeholder}
+						pluginControls={live.pluginControls}
 						rightActions={live.minimal ? null : live.right}
 						voice={{ transcribe }}
 						voiceMode={

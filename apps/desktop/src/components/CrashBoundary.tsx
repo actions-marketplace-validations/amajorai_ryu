@@ -29,8 +29,6 @@
 // state — see the comment on `episode` for why putting it in state would silently
 // unbound the retries.
 
-import { Alert02Icon } from "@hugeicons/core-free-icons";
-import { HugeiconsIcon } from "@hugeicons/react";
 import { Button } from "@ryu/ui/components/button";
 import {
 	Empty,
@@ -40,6 +38,7 @@ import {
 	EmptyMedia,
 	EmptyTitle,
 } from "@ryu/ui/components/empty";
+import { Logo } from "@ryu/ui/components/logo";
 import { Spinner } from "@ryu/ui/components/spinner";
 import { Component, type ErrorInfo, Fragment, type ReactNode } from "react";
 import { isDeveloperMode } from "@/src/hooks/useDeveloperMode.ts";
@@ -402,18 +401,12 @@ export class CrashBoundary extends Component<
 	render(): ReactNode {
 		if (this.state.phase === "recovering") {
 			return this.renderShell(
-				<Empty>
+				<Empty className="gap-3 p-8">
 					<EmptyHeader>
 						<EmptyMedia variant="icon">
 							<Spinner className="size-6" />
 						</EmptyMedia>
-						{/* No alarm and no error text: the app is mid-remount and will
-						    almost certainly come back. If it doesn't, the terminal screen
-						    below says so properly. */}
 						<EmptyTitle>Recovering…</EmptyTitle>
-						<EmptyDescription>
-							The app hit a hiccup and is reloading this screen.
-						</EmptyDescription>
 					</EmptyHeader>
 				</Empty>
 			);
@@ -421,20 +414,22 @@ export class CrashBoundary extends Component<
 
 		if (this.state.phase === "terminal") {
 			return this.renderShell(
-				<Empty>
-					<EmptyHeader>
-						<EmptyMedia variant="icon">
-							<HugeiconsIcon className="size-6" icon={Alert02Icon} />
+				<Empty className="gap-5 p-8">
+					<EmptyHeader className="gap-3">
+						<EmptyMedia className="mb-0 text-status-destructive">
+							<Logo
+								animated={false}
+								animation="idle"
+								expression="dead"
+								size="96px"
+								variant="expressive"
+							/>
 						</EmptyMedia>
-						<EmptyTitle>Something went wrong</EmptyTitle>
-						<EmptyDescription>
-							The app hit an unexpected error. Reloading usually fixes it. If
-							you have crash reports on, a scrubbed report was sent so we can
-							fix it.
-						</EmptyDescription>
+						<EmptyTitle>Something broke</EmptyTitle>
+						<EmptyDescription>Try again or reload.</EmptyDescription>
 					</EmptyHeader>
-					<EmptyContent>
-						<div className="flex items-center gap-2">
+					<EmptyContent className="gap-2">
+						<div className="flex flex-wrap items-center justify-center gap-2">
 							{/* Try again first: it remounts in place and keeps app state,
 							    where Reload throws the whole renderer away. */}
 							<Button onClick={this.handleRetry} size="sm">
@@ -473,7 +468,7 @@ export class CrashBoundary extends Component<
 	private renderShell(content: ReactNode): ReactNode {
 		return (
 			<div
-				className="/50 flex h-screen w-full items-center justify-center overflow-hidden rounded-[var(--ryu-window-radius-base,2rem)] bg-background backdrop-blur-xl"
+				className="flex h-screen w-full items-center justify-center overflow-hidden rounded-[var(--ryu-window-radius-base,2rem)] bg-background backdrop-blur-xl"
 				data-tauri-drag-region
 			>
 				{content}

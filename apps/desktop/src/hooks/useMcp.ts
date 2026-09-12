@@ -1,5 +1,7 @@
-import { useCallback, useEffect, useState } from "react";
-import { type AgentSummary, fetchAgents } from "@/src/lib/api/agents.ts";
+import { useQuery } from "@tanstack/react-query";
+import { useCallback, useMemo, useState } from "react";
+import { agentListOptions } from "@/src/lib/agent-list-query.ts";
+import type { AgentSummary } from "@/src/lib/api/agents.ts";
 import type { ApiTarget } from "@/src/lib/api/client.ts";
 import {
 	callMcpTool as apiCallMcpTool,
@@ -17,6 +19,7 @@ import {
 	type UpdateMcpServerResult,
 } from "@/src/lib/api/mcp.ts";
 import { useCoreRefresh } from "@/src/lib/core-refresh.ts";
+import { queryClient } from "@/src/lib/query-client.ts";
 import { useActiveNode } from "./useActiveNode.ts";
 
 export interface UseMcpResult {
@@ -35,8 +38,12 @@ export interface UseMcpResult {
 	loading: boolean;
 	reload: () => Promise<void>;
 	servers: McpServer[];
+	serversError: string | null;
+	serversLoading: boolean;
 	setAgentFilter: (agentId: string | null) => void;
 	tools: McpTool[];
+	toolsError: string | null;
+	toolsLoading: boolean;
 	updateServer: (
 		name: string,
 		input: UpdateMcpServerInput
@@ -56,36 +63,77 @@ export function useMcp(): UseMcpResult {
 	};
 	const { url, token, userJwt } = target;
 
-	const [servers, setServers] = useState<McpServer[]>([]);
-	const [tools, setTools] = useState<McpTool[]>([]);
-	const [agents, setAgents] = useState<AgentSummary[]>([]);
 	const [agentFilter, setAgentFilter] = useState<string | null>(null);
-	const [loading, setLoading] = useState(true);
-	const [error, setError] = useState<string | null>(null);
-
+	const scope = useMemo(
+		() => [url, token, userJwt] as const,
+		[url, token, userJwt]
+	);
+	const serversKey = useMemo(() => ["mcp-servers", ...scope], [scope]);
+	const toolsPrefix = useMemo(() => ["mcp-tools", ...scope], [scope]);
+	const agentsOptions = useMemo(
+		() => agentListOptions({ url, token, userJwt }),
+		[url, token, userJwt]
+	);
+	const agentsKey = agentsOptions.queryKey;
+	const serversQuery = useQuery(
+		{
+			queryKey: serversKey,
+			queryFn: ({ signal }) => fetchMcpServers({ url, token, userJwt }, signal),
+			staleTime: 30_000,
+		},
+		queryClient
+	);
+	const toolsQuery = useQuery(
+		{
+			queryKey: [...toolsPrefix, agentFilter],
+			queryFn: ({ signal }) =>
+				fetchMcpTools(
+					{ url, token, userJwt },
+					agentFilter ?? undefined,
+					signal
+				),
+			staleTime: 30_000,
+		},
+		queryClient
+	);
+	const agentsQuery = useQuery(agentsOptions, queryClient);
+	const servers = serversQuery.data ?? [];
+	const tools = toolsQuery.data ?? [];
+	const agents = agentsQuery.data ?? [];
+	// Agent options are supplemental; a slow roster must not block server/tool browsing.
+	const loading = serversQuery.isPending || toolsQuery.isPending;
+	const describeError = (failure: unknown): string | null =>
+		failure
+			? failure instanceof Error
+				? failure.message
+				: "Failed to load MCP registry"
+			: null;
+	const serversError = describeError(serversQuery.error);
+	const toolsError = describeError(toolsQuery.error);
+	const error = serversError ?? toolsError;
 	const reload = useCallback(async () => {
-		setLoading(true);
-		setError(null);
-		const node: ApiTarget = { url, token, userJwt };
-		try {
-			const [serverList, toolList, agentList] = await Promise.all([
-				fetchMcpServers(node),
-				fetchMcpTools(node, agentFilter ?? undefined),
-				fetchAgents(node).catch(() => []),
-			]);
-			setServers(serverList);
-			setTools(toolList);
-			setAgents(agentList);
-		} catch (e) {
-			setError(e instanceof Error ? e.message : "Failed to load MCP registry");
-		} finally {
-			setLoading(false);
-		}
-	}, [url, token, agentFilter]);
-
-	useEffect(() => {
-		reload().catch(() => undefined);
-	}, [reload]);
+		await Promise.all(
+			[serversKey, toolsPrefix, agentsKey].map((queryKey) =>
+				queryClient.refetchQueries(
+					{ queryKey, type: "active" },
+					{ cancelRefetch: false }
+				)
+			)
+		);
+	}, [serversKey, toolsPrefix, agentsKey]);
+	const refreshRegistry = useCallback(async () => {
+		// A successful mutation supersedes reads started before it, including first loads.
+		await Promise.all(
+			[serversKey, toolsPrefix].map((queryKey) =>
+				queryClient.cancelQueries({ queryKey })
+			)
+		);
+		await Promise.all(
+			[serversKey, toolsPrefix].map((queryKey) =>
+				queryClient.invalidateQueries({ queryKey })
+			)
+		);
+	}, [serversKey, toolsPrefix]);
 
 	// Auto-recover when Core reconnects or the user hits "Refresh all".
 	useCoreRefresh(reload);
@@ -96,7 +144,7 @@ export function useMcp(): UseMcpResult {
 				{ url, token, userJwt },
 				{ tool, agentId, arguments: args }
 			),
-		[url, token]
+		[url, token, userJwt]
 	);
 
 	const createServer = useCallback(
@@ -105,11 +153,11 @@ export function useMcp(): UseMcpResult {
 			if (result.ok) {
 				// Reload the server + tool list so the new server appears without
 				// requiring a manual refresh.
-				await reload();
+				await refreshRegistry();
 			}
 			return result;
 		},
-		[url, token, reload]
+		[url, token, userJwt, refreshRegistry]
 	);
 
 	const updateServer = useCallback(
@@ -123,22 +171,22 @@ export function useMcp(): UseMcpResult {
 				input
 			);
 			if (result.ok) {
-				await reload();
+				await refreshRegistry();
 			}
 			return result;
 		},
-		[url, token, reload]
+		[url, token, userJwt, refreshRegistry]
 	);
 
 	const deleteServer = useCallback(
 		async (name: string) => {
 			const result = await apiDeleteMcpServer({ url, token, userJwt }, name);
 			if (result.ok) {
-				await reload();
+				await refreshRegistry();
 			}
 			return result;
 		},
-		[url, token, reload]
+		[url, token, userJwt, refreshRegistry]
 	);
 
 	return {
@@ -148,6 +196,10 @@ export function useMcp(): UseMcpResult {
 		agentFilter,
 		setAgentFilter,
 		loading,
+		serversLoading: serversQuery.isPending,
+		toolsLoading: toolsQuery.isPending,
+		serversError,
+		toolsError,
 		error,
 		reload,
 		callTool,

@@ -22,7 +22,7 @@ export interface ChatDisplayPrefs {
 	composerSendShortcut: ComposerSendShortcut;
 	/**
 	 * How much room the transcript gives each turn.
-	 * - "comfortable" (default): the full desktop chat — centred 720px column,
+	 * - "comfortable" (default): the full desktop chat — centred 880px column,
 	 *   generous padding, floating table of contents, pinned user message.
 	 * - "compact": the same components in a narrow surface (the island's mini
 	 *   chat, a companion popover). Tighter padding, no centring column, and the
@@ -130,8 +130,9 @@ export interface ChatDisplayPrefs {
 	 */
 	openAtBottom: boolean;
 	/**
-	 * When true, the latest scrolled-past user message stays pinned at the top of
-	 * the chat while reading a long assistant reply (Cursor-style). Default: true.
+	 * When true, the latest scrolled-past user message appears in a compact pinned
+	 * bar while scrolling upward through a long assistant reply (Cursor-style),
+	 * and hides again when the reader scrolls down. Default: true.
 	 */
 	pinUserMessage: boolean;
 	/**

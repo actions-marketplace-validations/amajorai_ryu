@@ -74,7 +74,7 @@ export function UpsellModal({
 				<DialogHeader>
 					<div className="flex items-center gap-2">
 						<HugeiconsIcon
-							className="text-warning"
+							className="text-status-warning"
 							icon={SparklesIcon}
 							strokeWidth={2}
 						/>

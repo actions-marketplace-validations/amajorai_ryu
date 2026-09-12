@@ -1,0 +1,36 @@
+:root {
+	--tabs-dur: 250ms;
+	--tabs-ease: cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+/* Base UI owns the active tab measurements; the shared component loads this
+   motion stylesheet even in hosts that provide their own theme and reset. */
+.t-tabs-trigger {
+	transition: color var(--tabs-dur) var(--tabs-ease);
+}
+
+.t-tabs-indicator {
+	position: absolute;
+	top: 0;
+	left: 0;
+	width: var(--active-tab-width);
+	height: var(--active-tab-height);
+	pointer-events: none;
+	transform: translate(var(--active-tab-left), var(--active-tab-top));
+	transition:
+		transform var(--tabs-dur) var(--tabs-ease),
+		width var(--tabs-dur) var(--tabs-ease),
+		height var(--tabs-dur) var(--tabs-ease);
+	will-change: transform, width, height;
+}
+
+.t-tabs-indicator[data-resizing] {
+	transition: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+	.t-tabs-indicator,
+	.t-tabs-trigger {
+		transition: none !important;
+	}
+}

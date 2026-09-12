@@ -23,6 +23,53 @@ fn header_string(headers: &HeaderMap, name: &str) -> Option<String> {
         .map(str::to_owned)
 }
 
+fn forwarded_request_id(headers: &HeaderMap, trusted_forwarder: bool) -> Option<String> {
+    if !trusted_forwarder {
+        return None;
+    }
+    let Some(request_id) = header_string(headers, "x-ryu-request-id") else {
+        return None;
+    };
+    if request_id.len() <= 200
+        && request_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"._:-".contains(&byte))
+    {
+        Some(request_id)
+    } else {
+        None
+    }
+}
+
+fn forwarded_project_id(headers: &HeaderMap, trusted_forwarder: bool) -> Option<String> {
+    if !trusted_forwarder {
+        return None;
+    }
+    let project_id = header_string(headers, "x-ryu-project-id")?;
+    if project_id.len() <= 160
+        && project_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"._:-".contains(&byte))
+    {
+        Some(project_id)
+    } else {
+        None
+    }
+}
+
+fn apply_forwarded_identity(headers: &HeaderMap, ctx: &mut pipeline::RequestContext) {
+    let trusted_forwarder = ctx
+        .key_config
+        .as_ref()
+        .is_some_and(|config| config.trusted_forwarder);
+    if let Some(request_id) = forwarded_request_id(headers, trusted_forwarder) {
+        ctx.request_id = request_id;
+    }
+    if let Some(project_id) = forwarded_project_id(headers, trusted_forwarder) {
+        ctx.project_id = Some(project_id);
+    }
+}
+
 /// Parse the node's routing preferences off `x-ryu-node-routing` (see
 /// `api::chat` for the discipline: unparseable is ignored, never rejected).
 ///
@@ -68,7 +115,7 @@ pub async fn image_generations(
     let slot_model = header_string(&headers, "x-ryu-slot-image-model");
     let node_routing = node_routing_prefs(&state, &headers);
 
-    let ctx = authenticate(
+    let mut ctx = authenticate(
         &state,
         AuthInputs {
             raw_api_key: raw_key,
@@ -81,6 +128,7 @@ pub async fn image_generations(
         },
     )
     .await?;
+    apply_forwarded_identity(&headers, &mut ctx);
     debug!(request_id = %ctx.request_id, "image_generations: authenticated");
 
     let output = pipeline::run_multimodal(state, ctx, body, Modality::Image).await?;
@@ -113,7 +161,7 @@ pub async fn audio_speech(
     let slot_model = header_string(&headers, "x-ryu-slot-tts-model");
     let node_routing = node_routing_prefs(&state, &headers);
 
-    let ctx = authenticate(
+    let mut ctx = authenticate(
         &state,
         AuthInputs {
             raw_api_key: raw_key,
@@ -126,6 +174,7 @@ pub async fn audio_speech(
         },
     )
     .await?;
+    apply_forwarded_identity(&headers, &mut ctx);
     debug!(request_id = %ctx.request_id, "audio_speech: authenticated");
 
     let output = pipeline::run_multimodal(state, ctx, body, Modality::Tts).await?;
@@ -158,7 +207,7 @@ pub async fn audio_transcriptions(
     let slot_model = header_string(&headers, "x-ryu-slot-stt-model");
     let node_routing = node_routing_prefs(&state, &headers);
 
-    let ctx = authenticate(
+    let mut ctx = authenticate(
         &state,
         AuthInputs {
             raw_api_key: raw_key,
@@ -171,6 +220,7 @@ pub async fn audio_transcriptions(
         },
     )
     .await?;
+    apply_forwarded_identity(&headers, &mut ctx);
     debug!(request_id = %ctx.request_id, "audio_transcriptions: authenticated");
 
     let output = pipeline::run_multimodal(state, ctx, body, Modality::Stt).await?;
@@ -205,7 +255,7 @@ pub async fn video_generations(
     let slot_model = header_string(&headers, "x-ryu-slot-video-model");
     let node_routing = node_routing_prefs(&state, &headers);
 
-    let ctx = authenticate(
+    let mut ctx = authenticate(
         &state,
         AuthInputs {
             raw_api_key: raw_key,
@@ -218,6 +268,7 @@ pub async fn video_generations(
         },
     )
     .await?;
+    apply_forwarded_identity(&headers, &mut ctx);
     debug!(request_id = %ctx.request_id, "video_generations: authenticated");
 
     let output = pipeline::submit_video_job(state, ctx, body).await?;
@@ -270,4 +321,52 @@ pub async fn list_modalities(State(state): State<SharedState>) -> impl IntoRespo
     .collect();
 
     (StatusCode::OK, Json(json!({ "modalities": entries })))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{forwarded_project_id, forwarded_request_id};
+    use axum::http::{HeaderMap, HeaderValue};
+
+    #[test]
+    fn forwarded_request_id_requires_a_trusted_forwarder() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-ryu-request-id", HeaderValue::from_static("generation-1"));
+
+        assert_eq!(forwarded_request_id(&headers, false), None);
+        assert_eq!(
+            forwarded_request_id(&headers, true).as_deref(),
+            Some("generation-1")
+        );
+    }
+
+    #[test]
+    fn forwarded_request_id_rejects_unsafe_or_oversized_values() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-ryu-request-id", HeaderValue::from_static("generation/1"));
+        assert_eq!(forwarded_request_id(&headers, true), None);
+
+        let mut oversized = HeaderMap::new();
+        let value = "x".repeat(201);
+        oversized.insert(
+            "x-ryu-request-id",
+            HeaderValue::from_str(&value).expect("valid header value"),
+        );
+        assert_eq!(forwarded_request_id(&oversized, true), None);
+    }
+
+    #[test]
+    fn forwarded_project_id_is_trusted_only_from_core_and_bounded() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-ryu-project-id", HeaderValue::from_static("project-42"));
+        assert_eq!(forwarded_project_id(&headers, false), None);
+        assert_eq!(
+            forwarded_project_id(&headers, true).as_deref(),
+            Some("project-42")
+        );
+
+        let mut unsafe_headers = HeaderMap::new();
+        unsafe_headers.insert("x-ryu-project-id", HeaderValue::from_static("project/42"));
+        assert_eq!(forwarded_project_id(&unsafe_headers, true), None);
+    }
 }

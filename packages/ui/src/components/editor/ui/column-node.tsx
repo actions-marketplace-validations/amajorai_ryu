@@ -63,7 +63,7 @@ export const ColumnElement = withHOC(
 				{!(readOnly || isSelectionAreaVisible) && (
 					<div
 						className={cn(
-							"absolute top-2 left-1/2 z-50 -translate-x-1/2 -translate-y-1/2",
+							"absolute start-1/2 top-2 z-50 -translate-x-1/2 -translate-y-1/2 rtl:translate-x-1/2",
 							"pointer-events-auto flex items-center",
 							"opacity-0 transition-opacity group-hover/column:opacity-100"
 						)}
@@ -75,7 +75,7 @@ export const ColumnElement = withHOC(
 
 				<PlateElement
 					{...props}
-					className="h-full px-2 pt-2 group-first/column:pl-0 group-last/column:pr-0"
+					className="h-full px-2 pt-2 group-first/column:ps-0 group-last/column:pe-0"
 					ref={useComposedRef(props.ref, previewRef, nodeRef)}
 				>
 					<div
@@ -130,9 +130,9 @@ function DropLine() {
 				"slate-dropLine",
 				"reorder-drop-indicator absolute bg-brand/50",
 				dropLine === "left" &&
-					"inset-y-0 left-[-10.5px] w-1 group-first/column:-left-1",
+					"inset-y-0 start-[-10.5px] w-1 group-first/column:-start-1",
 				dropLine === "right" &&
-					"inset-y-0 right-[-11px] w-1 group-last/column:-right-1"
+					"inset-y-0 end-[-11px] w-1 group-last/column:-end-1"
 			)}
 		/>
 	);

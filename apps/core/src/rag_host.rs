@@ -147,7 +147,7 @@ pub fn embedder_from_config(base_url: &str, model: &str, dims: usize) -> Embedde
 /// API key directly to a provider when this path is selected.
 pub fn gateway_embedder(model: &str, dims: usize) -> Embedder {
     let base_url = crate::sidecar::gateway::gateway_url();
-    let token = crate::sidecar::gateway::gateway_bearer().ok();
+    let token = crate::sidecar::gateway::required_gateway_core_token().ok();
     // Keep provider identity in the stored vector tag. Gateway removes this
     // namespace before model routing, so a local `model-x` and cloud
     // `gateway/model-x` can never silently share vectors.
@@ -210,7 +210,7 @@ pub fn reranker_from_registry(registry: &ModelRegistry) -> Reranker {
         return Reranker::remote(
             &base_url,
             &format!("gateway/{}", registry.reranker.id),
-            crate::sidecar::gateway::gateway_bearer().ok(),
+            crate::sidecar::gateway::required_gateway_core_token().ok(),
         );
     }
     match std::env::var("RYU_RERANKER_BASE_URL")

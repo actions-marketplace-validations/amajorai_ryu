@@ -4,10 +4,10 @@
   "navLabel": "Paralegal",
   "category": "Legal & Compliance",
   "icon": "FileText",
-  "tagline": "Cite-check, summarize, and organize case files with skills that keep matter data on your machine.",
+  "tagline": "Organize case records, prepare chronologies, and draft summaries for legal review.",
   "heroEyebrow": "Ryu for Paralegal",
-  "heroTitle": "An AI assistant that does the legwork.",
-  "heroSubtitle": "Summarize records, build chronologies, and prep filings with reusable skills that run on your own machine. Matter data never leaves your device unless you say so, and every model call is governed, logged, and auditable.",
+  "heroTitle": "Ryu for paralegal",
+  "heroSubtitle": "Organize case records, prepare chronologies, and draft summaries for legal review.",
   "visualKey": "SkillsVisual",
   "intro": "Paralegals carry the document-heavy legwork of a matter: summaries, chronologies, cite-checks, and exhibit prep, all on confidential files that can't go into a public chatbot. Ryu lets you package these repeatable tasks as skills that run locally, ground them on the matter's own documents, and log every call, so the routine work goes faster while an attorney reviews the result.",
   "highlights": [

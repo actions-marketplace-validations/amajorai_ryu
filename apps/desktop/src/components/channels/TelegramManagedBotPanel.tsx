@@ -401,10 +401,12 @@ export function TelegramManagedBotPanel({
 					</p>
 				) : null}
 				{failure ? (
-					<p className="text-destructive text-xs">{failure.message}</p>
+					<p className="text-status-destructive text-xs">{failure.message}</p>
 				) : null}
 				<div className="flex gap-2">
 					<Button
+						aria-label={`Connect @${created.botUsername}`}
+						className="whitespace-nowrap"
 						onClick={() => {
 							accept().catch(() => undefined);
 						}}
@@ -432,7 +434,7 @@ export function TelegramManagedBotPanel({
 	if (phase === "expired") {
 		return (
 			<div className="space-y-3">
-				<p className="text-destructive text-xs">
+				<p className="text-status-destructive text-xs">
 					{failure?.kind === "expired"
 						? failure.message
 						: "That link expired before the bot was created. Nothing was saved."}
@@ -453,7 +455,7 @@ export function TelegramManagedBotPanel({
 	if (phase === "failed" && failure) {
 		return (
 			<div className="space-y-3">
-				<p className="text-destructive text-xs">{failure.message}</p>
+				<p className="text-status-destructive text-xs">{failure.message}</p>
 				<Button
 					onClick={() => {
 						start().catch(() => undefined);

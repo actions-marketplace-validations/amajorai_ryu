@@ -230,8 +230,20 @@ pub fn tools() -> Vec<RegistryTool> {
 /// Dispatch a sandbox tool call. `tool` is the bare name (stripped of the
 /// `sandbox.` prefix by the registry).
 pub async fn dispatch(tool: &str, arguments: Value) -> Result<Value> {
+    dispatch_with_context(tool, arguments, None, None).await
+}
+
+/// Dispatch a sandbox call while preserving the calling agent and Core session
+/// for the Gateway audit row. The original two-argument helper remains for
+/// agent-less callers and tests.
+pub async fn dispatch_with_context(
+    tool: &str,
+    arguments: Value,
+    agent_id: Option<&str>,
+    session_id: Option<String>,
+) -> Result<Value> {
     match tool {
-        "sandbox_exec" => run_sandbox_exec(arguments).await,
+        "sandbox_exec" => run_sandbox_exec(arguments, agent_id, session_id).await,
         "sandbox_create" => run_sandbox_create(arguments).await,
         "sandbox_run" => run_sandbox_run(arguments).await,
         "sandbox_destroy" => run_sandbox_destroy(arguments).await,
@@ -310,7 +322,11 @@ async fn run_sandbox_destroy(arguments: Value) -> Result<Value> {
 /// 1. Pre-run: ask the gateway whether this exec is permitted (fail-closed).
 /// 2. Run the backend (wasmtime or stub when feature is off).
 /// 3. Post-run: report the completed event to the gateway audit store (best-effort).
-async fn run_sandbox_exec(arguments: Value) -> Result<Value> {
+async fn run_sandbox_exec(
+    arguments: Value,
+    agent_id: Option<&str>,
+    session_id: Option<String>,
+) -> Result<Value> {
     if !is_enabled() {
         return Ok(unavailable(
             "The sandbox is disabled. \
@@ -322,7 +338,7 @@ async fn run_sandbox_exec(arguments: Value) -> Result<Value> {
     // node default (RYU_SANDBOX_BACKEND, falling back to wasmtime).
     let backend = resolve_backend(&arguments)?;
     if !matches!(backend, SandboxBackend::Wasmtime) {
-        return run_process_exec(backend, arguments).await;
+        return run_process_exec(backend, arguments, agent_id, session_id).await;
     }
 
     // ── wasmtime path (default): a base-64 WASM module ───────────────────────
@@ -381,7 +397,7 @@ async fn run_sandbox_exec(arguments: Value) -> Result<Value> {
 
     #[cfg(feature = "sandbox-wasmtime")]
     {
-        use crate::sidecar::gateway::report_exec_audit;
+        use crate::sidecar::gateway::{report_exec_audit_with_attribution, ExecAuditAttribution};
         use crate::sidecar::sandbox::wasmtime::WasmtimeSandbox;
         use crate::sidecar::sandbox::{ExecSpec, SandboxCapabilities};
 
@@ -412,39 +428,47 @@ async fn run_sandbox_exec(arguments: Value) -> Result<Value> {
         .map_err(|e| anyhow::anyhow!("sandbox task panicked: {e}"));
 
         let duration_ms = start.elapsed().as_millis() as u64;
+        let attribution = ExecAuditAttribution {
+            agent_id: agent_id.map(str::to_owned),
+            feature: Some("agent".to_owned()),
+            ..Default::default()
+        };
 
         // ── Step 3: post-run audit report (best-effort) ──────────────────────
         match &exec_result {
             Ok(Ok(output)) => {
-                report_exec_audit(
+                report_exec_audit_with_attribution(
                     backend_name,
                     command_name,
                     duration_ms,
                     output.exit_code,
-                    None, // session_id — not threaded through sandbox tool yet
+                    session_id.clone(),
                     None,
+                    attribution.clone(),
                 )
                 .await;
             }
             Ok(Err(e)) => {
-                report_exec_audit(
+                report_exec_audit_with_attribution(
                     backend_name,
                     command_name,
                     duration_ms,
                     -1,
-                    None,
+                    session_id.clone(),
                     Some(e.to_string()),
+                    attribution.clone(),
                 )
                 .await;
             }
             Err(e) => {
-                report_exec_audit(
+                report_exec_audit_with_attribution(
                     backend_name,
                     command_name,
                     duration_ms,
                     -1,
-                    None,
+                    session_id.clone(),
                     Some(format!("task join error: {e}")),
+                    attribution,
                 )
                 .await;
             }
@@ -463,16 +487,21 @@ async fn run_sandbox_exec(arguments: Value) -> Result<Value> {
 
     #[cfg(not(feature = "sandbox-wasmtime"))]
     {
-        use crate::sidecar::gateway::report_exec_audit;
+        use crate::sidecar::gateway::{report_exec_audit_with_attribution, ExecAuditAttribution};
 
         // Feature off: report a zero-duration stub event and return unavailable.
-        report_exec_audit(
+        report_exec_audit_with_attribution(
             backend_name,
             command_name,
             0,
             0,
-            None,
+            session_id,
             Some("sandbox-wasmtime feature not compiled in".to_owned()),
+            ExecAuditAttribution {
+                agent_id: agent_id.map(str::to_owned),
+                feature: Some("agent".to_owned()),
+                ..Default::default()
+            },
         )
         .await;
 
@@ -543,10 +572,23 @@ fn parse_capabilities(arguments: &Value) -> SandboxCapabilities {
 /// A malformed call (missing `command`) is a hard `Err`; an environment that
 /// is simply not ready (backend not installed/reachable) returns a graceful
 /// `unavailable` so the agent gets a clean signal instead of a tool error.
-async fn run_process_exec(backend: SandboxBackend, arguments: Value) -> Result<Value> {
-    use crate::sidecar::gateway::{check_exec_budget, report_exec_audit, ExecBudgetOutcome};
+async fn run_process_exec(
+    backend: SandboxBackend,
+    arguments: Value,
+    agent_id: Option<&str>,
+    session_id: Option<String>,
+) -> Result<Value> {
+    use crate::sidecar::gateway::{
+        check_exec_budget, report_exec_audit_with_attribution, ExecAuditAttribution,
+        ExecBudgetOutcome,
+    };
 
     let backend_label = backend.as_str().to_owned();
+    let attribution = ExecAuditAttribution {
+        agent_id: agent_id.map(str::to_owned),
+        feature: Some("agent".to_owned()),
+        ..Default::default()
+    };
 
     let command = arguments
         .get("command")
@@ -600,8 +642,9 @@ async fn run_process_exec(backend: SandboxBackend, arguments: Value) -> Result<V
 
     // ── Metering (Daytona only): register the run for the heartbeat ticker ────
     // Only Daytona is the remote, billed backend; the local backends (docker /
-    // microsandbox / opensandbox) are free, so they never register. Fully
-    // fail-open — a metering hiccup must never fail the user's exec.
+    // microsandbox / opensandbox) are free, so they never register. An org-bound
+    // Daytona execution must not report success when its final debit cannot be
+    // confirmed.
     let daytona_run = register_daytona_metering(&backend_label).await;
 
     // ── Step 2: run the backend ──────────────────────────────────────────────
@@ -611,33 +654,41 @@ async fn run_process_exec(backend: SandboxBackend, arguments: Value) -> Result<V
 
     // ── Metering (Daytona only): deregister + final residual debit ────────────
     // One-shot runs usually finish inside a single tick, so the periodic ticker
-    // may have billed nothing; charge the un-ticked tail here (fail-open).
-    finalize_daytona_metering(daytona_run, duration_ms).await;
+    // may have billed nothing; charge the un-ticked tail here.
+    let metering_result = finalize_daytona_metering(daytona_run, duration_ms).await;
 
     // ── Step 3: post-run audit report (best-effort) ──────────────────────────
     match &result {
         Ok(output) => {
-            report_exec_audit(
+            report_exec_audit_with_attribution(
                 &backend_label,
                 &command,
                 duration_ms,
                 output.exit_code,
+                session_id.clone(),
                 None,
-                None,
+                attribution.clone(),
             )
             .await;
         }
         Err(e) => {
-            report_exec_audit(
+            report_exec_audit_with_attribution(
                 &backend_label,
                 &command,
                 duration_ms,
                 -1,
-                None,
+                session_id,
                 Some(e.to_string()),
+                attribution,
             )
             .await;
         }
+    }
+
+    if let Err(error) = metering_result {
+        return Err(anyhow::anyhow!(
+            "billable sandbox execution completed but final billing could not be confirmed: {error}"
+        ));
     }
 
     match result {
@@ -715,11 +766,14 @@ async fn register_daytona_metering(backend_label: &str) -> Option<DaytonaMeterin
 }
 
 /// Deregister a Daytona run and debit its un-ticked tail. A no-op when `metering`
-/// is `None` (non-Daytona backend). Fully fail-open — every failure is swallowed
-/// inside [`heartbeat::debit_final`], so it can never fail the user's exec.
-async fn finalize_daytona_metering(metering: Option<DaytonaMetering>, duration_ms: u64) {
+/// is `None` (non-Daytona backend). Billable failures are returned to the caller
+/// after the remote workspace has been removed.
+async fn finalize_daytona_metering(
+    metering: Option<DaytonaMetering>,
+    duration_ms: u64,
+) -> Result<(), String> {
     let Some(m) = metering else {
-        return;
+        return Ok(());
     };
     use crate::sidecar::sandbox::heartbeat;
 
@@ -727,7 +781,7 @@ async fn finalize_daytona_metering(metering: Option<DaytonaMetering>, duration_m
     // the ticker. `None` ⇒ the run was already removed (e.g. a budget-kill
     // verdict already charged it) — nothing left to debit.
     let Some(residual) = heartbeat::deregister_for_final_debit(&m.run_id) else {
-        return;
+        return Ok(());
     };
 
     // No owning org ⇒ registered for visibility only; never bill a wrong org.
@@ -736,7 +790,7 @@ async fn finalize_daytona_metering(metering: Option<DaytonaMetering>, duration_m
             run_id = %m.run_id,
             "daytona sandbox metering: no owning org, skipping final debit (visibility only)"
         );
-        return;
+        return Ok(());
     }
 
     // Charge the measured duration (rounded up, min 1s) minus whatever the
@@ -751,7 +805,7 @@ async fn finalize_daytona_metering(metering: Option<DaytonaMetering>, duration_m
         m.budget_micro_usd,
         residual.next_tick_index,
     )
-    .await;
+    .await
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────

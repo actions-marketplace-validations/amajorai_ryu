@@ -43,6 +43,7 @@ import {
 import {
 	DropdownMenu,
 	DropdownMenuContent,
+	DropdownMenuGroup,
 	DropdownMenuItem,
 	DropdownMenuLabel,
 	DropdownMenuSeparator,
@@ -59,7 +60,6 @@ import {
 } from "@ryu/ui/components/tooltip.tsx";
 import { formatCount } from "@ryu/ui/lib/number-format.ts";
 import { cn } from "@ryu/ui/lib/utils.ts";
-import { invoke } from "@tauri-apps/api/core";
 import type { ReactNode } from "react";
 import { useCallback, useMemo, useState } from "react";
 import {
@@ -73,6 +73,7 @@ import {
 	useWorktreeDiff,
 	useWorktreeStatus,
 } from "@/src/hooks/useGitStatus.ts";
+import { useTerminalPanelLocation } from "@/src/hooks/useTerminalPanelLocation.ts";
 import type { ApiTarget } from "@/src/lib/api/client.ts";
 import {
 	checkoutBranch,
@@ -84,6 +85,7 @@ import {
 	findWorkspaceProject,
 	workspaceProjectName,
 } from "@/src/lib/workspace-projects.ts";
+import { useDockPanelRequestStore } from "@/src/store/useDockPanelRequestStore.ts";
 import type {
 	ProjectEnvironment,
 	ProjectEnvironmentScripts,
@@ -136,12 +138,12 @@ export function DiffStat({ stat }: { stat: LineStat }) {
 	return (
 		<span className="flex shrink-0 items-center gap-1 font-medium font-mono text-[11px] tabular-nums">
 			{stat.insertions > 0 && (
-				<span className="text-emerald-600 dark:text-emerald-400/90">
+				<span className="text-status-success dark:text-status-success/90">
 					+{formatCount(stat.insertions)}
 				</span>
 			)}
 			{stat.deletions > 0 && (
-				<span className="text-red-600/90 dark:text-red-400/90">
+				<span className="text-status-destructive/90 dark:text-status-destructive/90">
 					−{formatCount(stat.deletions)}
 				</span>
 			)}
@@ -199,11 +201,11 @@ export function WorkspacePicker({
 		(s) => s.selectProjectEnvironment
 	);
 	const terminalShell = useWorkspaceStore((s) => s.terminalShell);
+	const [terminalPanelLocation] = useTerminalPanelLocation();
 	const activeEnvironment = projectEnvironments.find(
 		(environment) => environment.id === activeEnvironmentId
 	);
 	const worktreeMode = worktreeModeOverride ?? globalWorktreeMode;
-	const [runningActionId, setRunningActionId] = useState<string | null>(null);
 
 	// Both layouts use one direct menu per control. Tracking the active control
 	// keeps sibling menus mutually exclusive without nesting any of them.
@@ -428,7 +430,7 @@ export function WorkspacePicker({
 	) : null;
 
 	const runEnvironmentAction = useCallback(
-		async (environment: ProjectEnvironment, actionId: string) => {
+		(environment: ProjectEnvironment, actionId: string) => {
 			const action = environment.actions.find((item) => item.id === actionId);
 			const actionCwd = worktreeStatus.path ?? folder;
 			if (!(action && actionCwd)) {
@@ -439,42 +441,30 @@ export function WorkspacePicker({
 				toast.error(`${action.name} has no command for this platform`);
 				return;
 			}
-			setRunningActionId(action.id);
-			try {
-				const env = Object.fromEntries(
-					environment.variables
-						.filter((variable) => variable.key.trim())
-						.map((variable) => [variable.key.trim(), variable.value])
-				);
-				env.RYU_PROJECT_PATH = folder ?? actionCwd;
-				env.RYU_WORKTREE_PATH = actionCwd;
-				const result = await invoke<{
-					code: number;
-					stderr: string;
-					stdout: string;
-				}>("shell_execute", {
+			const env = Object.fromEntries(
+				environment.variables
+					.filter((variable) => variable.key.trim())
+					.map((variable) => [variable.key.trim(), variable.value])
+			);
+			env.RYU_PROJECT_PATH = folder ?? actionCwd;
+			env.RYU_WORKTREE_PATH = actionCwd;
+			useDockPanelRequestStore
+				.getState()
+				.open("terminal", "Terminal", terminalPanelLocation, {
 					command,
 					cwd: actionCwd,
 					env,
 					shell: terminalShell === "auto" ? null : terminalShell,
 				});
-				if (result.code === 0) {
-					toast.success(`${action.name} finished`, {
-						description: result.stdout.trim().slice(-240) || undefined,
-					});
-				} else {
-					toast.error(`${action.name} failed`, {
-						description:
-							result.stderr.trim().slice(-240) || `Exited with ${result.code}`,
-					});
-				}
-			} catch (error) {
-				toast.error(`${action.name} failed`, { description: String(error) });
-			} finally {
-				setRunningActionId(null);
-			}
+			closeMenus();
 		},
-		[folder, terminalShell, worktreeStatus.path]
+		[
+			closeMenus,
+			folder,
+			terminalPanelLocation,
+			terminalShell,
+			worktreeStatus.path,
+		]
 	);
 
 	if (stacked) {
@@ -647,13 +637,9 @@ export function WorkspacePicker({
 					? activeEnvironment?.actions.map((action) => (
 							<Button
 								className={WORKSPACE_SELECT_TRIGGER}
-								disabled={runningActionId !== null}
 								key={action.id}
-								loading={runningActionId === action.id}
 								onClick={() => {
-									runEnvironmentAction(activeEnvironment, action.id).catch(
-										() => undefined
-									);
+									runEnvironmentAction(activeEnvironment, action.id);
 								}}
 								size="sm"
 								title={`Run ${action.name} in ${worktreeStatus.path ? "the worktree" : "the project"}`}
@@ -727,7 +713,7 @@ function EnvironmentList({
 	onSelect: (environmentId: string) => void;
 }) {
 	return (
-		<>
+		<DropdownMenuGroup>
 			<DropdownMenuLabel className="px-2 pt-1 pb-1 text-sm">
 				Local environment
 			</DropdownMenuLabel>
@@ -754,7 +740,7 @@ function EnvironmentList({
 					worktree is created.
 				</p>
 			) : null}
-		</>
+		</DropdownMenuGroup>
 	);
 }
 
@@ -890,7 +876,7 @@ function BranchList({
 	);
 
 	return (
-		<>
+		<DropdownMenuGroup>
 			{branches.length > 1 && (
 				<div className="sticky top-0 z-10 mb-1">
 					<div className="relative">
@@ -971,7 +957,9 @@ function BranchList({
 				</DropdownMenuItem>
 			)}
 			{error && (
-				<p className="mt-1 px-2 py-1.5 text-[12px] text-destructive">{error}</p>
+				<p className="mt-1 px-2 py-1.5 text-[12px] text-status-destructive">
+					{error}
+				</p>
 			)}
 			<DropdownMenuSeparator />
 
@@ -985,7 +973,7 @@ function BranchList({
 			) : (
 				createRow
 			)}
-		</>
+		</DropdownMenuGroup>
 	);
 }
 
@@ -1049,7 +1037,9 @@ function CreateBranchDialog({
 					spellCheck={false}
 					value={name}
 				/>
-				{error && <p className="text-[12px] text-destructive">{error}</p>}
+				{error && (
+					<p className="text-[12px] text-status-destructive">{error}</p>
+				)}
 				<DialogFooter>
 					<DialogClose render={<Button variant="ghost" />}>Cancel</DialogClose>
 					<Button
@@ -1100,7 +1090,7 @@ function RunModeContent({
 		);
 	}
 	return (
-		<>
+		<DropdownMenuGroup>
 			<DropdownMenuLabel className="px-2 pt-1 pb-1 text-sm">
 				Work in
 			</DropdownMenuLabel>
@@ -1142,7 +1132,7 @@ function RunModeContent({
 					</div>
 				</div>
 			)}
-		</>
+		</DropdownMenuGroup>
 	);
 }
 

@@ -571,7 +571,7 @@ function ProviderCardContent({
 			<Collapsible onOpenChange={setOpen} open={open}>
 				{/* Header row (always visible): label + status hint + chevron. Base UI
 				    manages aria-expanded + keyboard on the trigger button. */}
-				<CollapsibleTrigger className="flex w-full items-center justify-between gap-3 rounded-[10px] p-3.5 text-left hover:bg-muted/40">
+				<CollapsibleTrigger className="flex w-full items-center justify-between gap-3 rounded-lg p-3.5 text-left hover:bg-muted/40">
 					<div className="flex min-w-0 items-center gap-2.5">
 						{/* Resolve the brand mark on id+label ONLY — never `provider.api`.
 						    The Pi `api` type is a transport ("openai-completions",
@@ -743,8 +743,8 @@ function ProviderCardContent({
 								<span
 									className={
 										checkResult.ok
-											? "text-emerald-600 text-xs dark:text-emerald-400"
-											: "text-destructive text-xs"
+											? "text-status-success text-xs"
+											: "text-status-destructive text-xs"
 									}
 								>
 									{checkResult.ok
@@ -994,7 +994,7 @@ export function LlmProvidersSettings({
 
 	if (error) {
 		return (
-			<div className="rounded-lg border border-destructive/40 bg-destructive/5 p-4 text-destructive text-sm">
+			<div className="rounded-lg border border-destructive/40 bg-destructive/5 p-4 text-sm text-status-destructive">
 				Failed to load providers: {error}
 			</div>
 		);

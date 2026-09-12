@@ -120,7 +120,9 @@ describe("multiplexed event hook lifecycle", () => {
 
 		for (const { signals, stream } of streams) {
 			expect(stream).toHaveBeenCalledTimes(1);
-			expect(stream.mock.calls[0]?.[0]).toEqual(node);
+			expect(stream.mock.calls[0]?.[0]).toEqual(
+				stream === downloads.stream ? node : { ...node, userJwt: null }
+			);
 			expect(signals).toHaveLength(1);
 			expect(signals[0]?.aborted).toBe(false);
 		}

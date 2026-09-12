@@ -13,7 +13,8 @@ test("prints a reusable top-up receipt without exposing the provider checkout id
 
 	expect(html).toContain('data-testid="payment-success-receipt"');
 	expect(html).toContain("Top-up complete");
-	expect(html).toContain("Being added");
+	expect(html).toContain("Syncing");
+	expect(html).toContain("wallet update clears");
 	expect(html).toContain("RYU-");
 	expect(html).not.toContain(checkoutId);
 });

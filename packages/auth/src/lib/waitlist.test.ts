@@ -3,6 +3,7 @@ import {
 	adminEmails,
 	generateReferralCode,
 	invitesPerWeek,
+	isAdmin,
 	isAdminEmail,
 	isWaitlistBypassed,
 	isWaitlisted,
@@ -61,6 +62,25 @@ describe("adminEmails / isAdminEmail", () => {
 		expect(isAdminEmail(null)).toBe(false);
 		expect(isAdminEmail(undefined)).toBe(false);
 		expect(isAdminEmail("")).toBe(false);
+	});
+});
+
+describe("isAdmin", () => {
+	it("recognizes a Better Auth admin role without an email allowlist", () => {
+		expect(isAdmin({ email: "role-only@example.com", role: "admin" })).toBe(
+			true
+		);
+	});
+
+	it("rejects a normal Better Auth user without an email allowlist", () => {
+		expect(isAdmin({ email: "user@example.com", role: "user" })).toBe(false);
+	});
+
+	it("keeps the configured admin email as the bootstrap authority", () => {
+		process.env.ADMIN_EMAILS = "bootstrap@example.com";
+		expect(isAdmin({ email: "bootstrap@example.com", role: "user" })).toBe(
+			true
+		);
 	});
 });
 
@@ -139,6 +159,10 @@ describe("isWaitlisted", () => {
 
 	it("is false when the waitlist is bypassed (no admins configured)", () => {
 		expect(isWaitlisted({ role: "waitlist", email: "user@x.io" })).toBe(false);
+	});
+
+	it("keeps an anonymous session gated while guest mode is disabled", () => {
+		expect(isWaitlisted({ isAnonymous: true })).toBe(true);
 	});
 });
 

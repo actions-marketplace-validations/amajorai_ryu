@@ -51,6 +51,7 @@ const toolkits: ComposioToolkit[] = [
 
 const initialConnections: ComposioConnection[] = [
 	{
+		accessLevel: "risk_based",
 		active: true,
 		id: "gmail-1",
 		status: "ACTIVE",
@@ -113,6 +114,7 @@ function BlockedState() {
 function ProofApp() {
 	const params = new URLSearchParams(window.location.search);
 	const paid = params.get("paid") === "true";
+	const organizationPlan = params.get("organization") === "true";
 	const owner = params.get("role") !== "member";
 	const [stage, setStage] = useState<Stage>(paid ? "offer" : "source");
 	const [checkoutOpened, setCheckoutOpened] = useState(false);
@@ -122,6 +124,7 @@ function ProofApp() {
 			? [
 					...initialConnections,
 					{
+						accessLevel: "risk_based",
 						active: true,
 						id: "notion-1",
 						status: "ACTIVE",
@@ -169,13 +172,14 @@ function ProofApp() {
 				{stage === "apps" ? (
 					<ActivationRecommendationsStep
 						busySlug={null}
-						onConnect={(recommendation: ActivationRecommendation) => {
+						onConnect={async (recommendation: ActivationRecommendation) => {
 							if (!recommendation.appSlug) {
 								return;
 							}
 							setConnections((previous) => [
 								...previous,
 								{
+									accessLevel: "risk_based",
 									active: true,
 									id: `${recommendation.appSlug}-1`,
 									status: "ACTIVE",
@@ -203,6 +207,7 @@ function ProofApp() {
 						onContinue={() => setStage("task")}
 						onSkip={() => setStage("task")}
 						onStartCheckout={() => setCheckoutOpened(true)}
+						organizationPlan={organizationPlan}
 						subscribed={subscribed}
 					/>
 				) : null}

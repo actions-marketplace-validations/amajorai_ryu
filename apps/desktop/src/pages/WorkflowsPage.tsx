@@ -29,7 +29,7 @@ import {
 } from "@ryu/ui/components/empty";
 import { Spinner } from "@ryu/ui/components/spinner";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { useTabsContext } from "@/src/contexts/TabsContext.tsx";
+import { useTabSelector } from "@/src/contexts/TabsContext.tsx";
 import { useTitleBar } from "@/src/contexts/TitleBarContext.tsx";
 import { useActiveNode } from "@/src/hooks/useActiveNode.ts";
 import { useAssistantBuilder } from "@/src/hooks/useAssistantBuilder.ts";
@@ -64,7 +64,7 @@ export default function WorkflowsPage({
 	initialWorkflowId = null,
 }: WorkflowsPageProps) {
 	const { workflows, loading, error, create, reload } = useWorkflows();
-	const { openTab } = useTabsContext();
+	const openTab = useTabSelector((state) => state.openTab);
 	const activeNode = useActiveNode();
 	const target = useMemo(
 		() => ({
@@ -162,7 +162,7 @@ export default function WorkflowsPage({
 					className="size-4 shrink-0 opacity-70"
 					icon={WorkflowCircle06Icon}
 				/>
-				<span className="truncate font-semibold">
+				<span className="truncate font-medium">
 					{selected?.name?.trim() || "Build a workflow"}
 				</span>
 			</span>
@@ -210,7 +210,7 @@ export default function WorkflowsPage({
 						className="size-4 opacity-70"
 						icon={WorkflowCircle06Icon}
 					/>
-					<span className="font-semibold text-sm">Build with AI</span>
+					<span className="font-medium text-sm">Build with AI</span>
 				</div>
 				<div className="p-2">
 					<Button
@@ -261,7 +261,7 @@ export default function WorkflowsPage({
 				<div className="mx-auto flex w-full max-w-2xl flex-col gap-4">
 					<div className="flex items-start justify-between gap-3">
 						<div className="min-w-0">
-							<h1 className="truncate font-semibold text-lg">
+							<h1 className="truncate font-medium text-lg">
 								{selected?.name?.trim() || "Build a workflow"}
 							</h1>
 							<p className="text-muted-foreground text-sm">

@@ -63,7 +63,7 @@ export function TeamCardView({
 				{canManage && headerActions}
 			</CardHeader>
 			<CardContent className="space-y-4">
-				{error && <p className="text-destructive text-sm">{error}</p>}
+				{error && <p className="text-sm text-status-destructive">{error}</p>}
 
 				{loadingMembers ? (
 					<Skeleton className="h-10 w-full" />
@@ -103,6 +103,8 @@ export function TeamCardView({
 }
 
 export interface TeamsLayoutProps {
+	/** Active-team selector; the live app injects the Better Auth control. */
+	activeTeamSlot?: ReactNode;
 	canManage?: boolean;
 	children?: ReactNode;
 	/** Create-team control; the live page injects its create dialog. */
@@ -120,6 +122,7 @@ export interface TeamsLayoutProps {
  * create-team dialog, and the rendered team cards as children.
  */
 export function TeamsLayout({
+	activeTeamSlot,
 	organizationName,
 	canManage = false,
 	loading = false,
@@ -149,7 +152,7 @@ export function TeamsLayout({
 		<div className="mx-auto flex w-full max-w-4xl flex-col gap-8">
 			<div className="flex flex-wrap items-center justify-between gap-4">
 				<div>
-					<h1 className="font-bold text-2xl">Teams</h1>
+					<h1 className="font-medium text-2xl">Teams</h1>
 					<p className="text-muted-foreground text-sm">
 						Group members of {organizationName ?? "your organization"} into
 						teams.
@@ -158,7 +161,13 @@ export function TeamsLayout({
 				{canManage && createTeamSlot}
 			</div>
 
-			{error && <p className="text-destructive text-sm">{error}</p>}
+			{activeTeamSlot ? (
+				<div className="rounded-2xl border border-border/70 bg-card p-4">
+					{activeTeamSlot}
+				</div>
+			) : null}
+
+			{error && <p className="text-sm text-status-destructive">{error}</p>}
 
 			{loading && (
 				<div className="grid gap-3">

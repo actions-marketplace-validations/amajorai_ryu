@@ -17,6 +17,10 @@ import { Badge } from "@ryu/ui/components/badge";
 import { BeforeAfterSummary } from "@ryu/ui/components/before-after-summary.tsx";
 import { Button } from "@ryu/ui/components/button";
 import {
+	type CreditAllocationView,
+	CreditBalanceBreakdown,
+} from "@ryu/ui/components/credit-balance-breakdown.tsx";
+import {
 	Dialog,
 	DialogClose,
 	DialogContent,
@@ -47,8 +51,13 @@ export function formatMicroUsd(microUsd: number, currency = "usd"): string {
 }
 
 export interface CreditWalletView {
+	balanceBreakdownAvailable?: boolean;
 	balanceMicroUsd: number;
 	currency: string;
+	providerAllocations?: CreditGrantPoolView[];
+	source?: "local" | "polar";
+	subscriptionBalanceMicroUsd: number | null;
+	topupBalanceMicroUsd: number | null;
 }
 
 export interface CreditEntitlementView {
@@ -77,6 +86,7 @@ export interface CreditGrantPoolView {
 	/** Pre-formatted expiry ("Expires 12 Aug 2026"), or null when it never lapses. */
 	expiresAtLabel?: string | null;
 	id: string;
+	isFreeProvider: boolean;
 	label: string;
 	remainingMicroUsd: number;
 	spendableOn?: string;
@@ -121,6 +131,8 @@ export interface CreditsViewProps {
 	 * EXACTLY the pre-grant page — no header, no placeholder, no empty state.
 	 */
 	grantPools?: CreditGrantPoolView[];
+	/** True while the optional provider-allocation read is in flight. */
+	grantPoolsLoading?: boolean;
 	ledger?: CreditLedgerRow[];
 	ledgerPage?: number;
 	loading?: boolean;
@@ -154,7 +166,7 @@ function LedgerAmount({
 	return (
 		<span
 			className={`font-heading font-medium text-sm tabular-nums ${
-				row.isCredit ? "text-green-600 dark:text-green-400" : "text-foreground"
+				row.isCredit ? "text-status-success" : "text-foreground"
 			}`}
 		>
 			{row.isCredit ? "+" : "−"}
@@ -173,6 +185,7 @@ export function CreditsView({
 	walletEmpty,
 	entitlement,
 	grantPools = [],
+	grantPoolsLoading = false,
 	ledger = [],
 	packs = [10, 25, 100],
 	minTopupDollars = 5,
@@ -274,7 +287,7 @@ export function CreditsView({
 	return (
 		<div className="mx-auto max-w-2xl px-6 py-8">
 			<div className="mb-8 flex items-center justify-between">
-				<h1 className="font-semibold text-xl">Credits</h1>
+				<h1 className="font-medium text-xl">Credits</h1>
 				<Button
 					aria-label="Refresh balance"
 					onClick={onRefresh}
@@ -287,9 +300,9 @@ export function CreditsView({
 			</div>
 
 			{walletEmpty ? (
-				<div className="mb-6 flex items-start gap-3 rounded-lg border border-amber-500/40 bg-amber-500/5 p-4">
+				<div className="mb-6 flex items-start gap-3 rounded-lg border border-warning/40 bg-warning/5 p-4">
 					<HugeiconsIcon
-						className="mt-0.5 size-5 shrink-0 text-amber-500"
+						className="mt-0.5 size-5 shrink-0 text-status-warning"
 						icon={Alert02Icon}
 					/>
 					<div className="min-w-0 flex-1">
@@ -313,106 +326,37 @@ export function CreditsView({
 				</div>
 			) : null}
 
-			{entitlement?.managedInference && entitlement.plan ? (
-				<section className="mb-8">
-					<h2 className="mb-3 font-medium text-muted-foreground text-sm uppercase tracking-wide">
-						Plan
-					</h2>
-					<div className="rounded-lg border bg-card p-5">
-						<div className="flex items-center justify-between gap-3">
-							<div className="min-w-0">
-								<p className="font-medium text-sm">
-									{entitlement.planLabel ?? entitlement.plan}
-								</p>
-								<p className="mt-0.5 text-muted-foreground text-xs">
-									Includes{" "}
-									<span className="font-heading font-medium text-foreground tabular-nums">
-										{formatMicroUsd(
-											entitlement.monthlyCreditPoolMicroUsd,
-											currency
-										)}
-									</span>{" "}
-									of credits per month
-									{entitlement.seats > 1
-										? ` across ${entitlement.seats} seats`
-										: ""}
-									. Added to your balance each billing period.
-								</p>
-							</div>
-							<Badge className="shrink-0" variant="secondary">
-								Managed inference
-							</Badge>
-						</div>
-					</div>
-				</section>
-			) : null}
-
 			<section className="mb-8">
 				<h2 className="mb-3 font-medium text-muted-foreground text-sm uppercase tracking-wide">
-					Balance
+					Credit balances
 				</h2>
-				<div className="rounded-lg border bg-card p-5">
-					{loading && !wallet ? (
-						<Spinner className="size-5" />
-					) : (
-						<div className="flex items-baseline gap-2">
-							<HugeiconsIcon
-								className="size-6 text-muted-foreground"
-								icon={DollarCircleIcon}
-							/>
-							<span className="font-heading font-semibold text-3xl tabular-nums">
-								{wallet
-									? formatMicroUsd(wallet.balanceMicroUsd, currency)
-									: "—"}
-							</span>
-							<span className="text-muted-foreground text-sm uppercase">
-								{currency}
-							</span>
-						</div>
-					)}
-					{!(loading || wallet) && errorMessage ? (
-						<p className="mt-2 text-destructive text-xs">
-							Could not load your balance: {errorMessage}
-						</p>
-					) : null}
-					<p className="mt-2 text-muted-foreground text-xs">
-						Credits pay for AI usage as you go. They are non-refundable.
+				{!(loading || wallet) && errorMessage ? (
+					<p className="mb-3 text-status-destructive text-xs">
+						Could not load your balance: {errorMessage}
 					</p>
-
-					{/* The restricted breakdown lives INSIDE the balance card, under the
-					    total, because that is what it is: a slice of the number above,
-					    not a second wallet. Rendered only when the account actually
-					    holds granted credit — an account with none sees the card
-					    exactly as it was before pools existed. */}
-					{grantPools.length > 0 ? (
-						<div className="mt-4 space-y-2 border-t pt-3">
-							<p className="text-muted-foreground text-xs">
-								Part of this balance is granted credit, which can only be spent
-								on the models it was granted for:
-							</p>
-							{grantPools.map((pool) => (
-								<div
-									className="flex items-baseline justify-between gap-3"
-									key={pool.id}
-								>
-									<div className="min-w-0">
-										<p className="truncate font-medium text-sm">{pool.label}</p>
-										{pool.spendableOn || pool.expiresAtLabel ? (
-											<p className="text-muted-foreground text-xs">
-												{[pool.spendableOn, pool.expiresAtLabel]
-													.filter(Boolean)
-													.join(" · ")}
-											</p>
-										) : null}
-									</div>
-									<span className="shrink-0 font-heading font-medium text-sm tabular-nums">
-										{formatMicroUsd(pool.remainingMicroUsd, currency)}
-									</span>
-								</div>
-							))}
-						</div>
-					) : null}
-				</div>
+				) : null}
+				<CreditBalanceBreakdown
+					balanceBreakdownAvailable={wallet?.balanceBreakdownAvailable}
+					currency={currency}
+					onDemandCreditsMicroUsd={wallet?.topupBalanceMicroUsd ?? null}
+					planAllowanceMicroUsd={entitlement?.monthlyCreditPoolMicroUsd ?? null}
+					planCreditsMicroUsd={wallet?.subscriptionBalanceMicroUsd ?? null}
+					providerAllocations={
+						wallet?.balanceBreakdownAvailable === false
+							? (wallet.providerAllocations ?? null)
+							: wallet && !grantPoolsLoading
+								? grantPools.map<CreditAllocationView>((pool) => ({
+										expiresAtLabel: pool.expiresAtLabel,
+										id: pool.id,
+										isFreeProvider: pool.isFreeProvider,
+										label: pool.label,
+										remainingMicroUsd: pool.remainingMicroUsd,
+										spendableOn: pool.spendableOn,
+									}))
+								: null
+					}
+					totalMicroUsd={wallet?.balanceMicroUsd ?? null}
+				/>
 			</section>
 
 			<section className="mb-8">
@@ -469,9 +413,10 @@ export function CreditsView({
 								</Button>
 							</div>
 							<p className="text-muted-foreground text-xs">
-								You'll complete payment in your browser via Polar. A 6% + $1.00
-								deposit fee is added at checkout; your wallet is credited the
-								face value. Your balance updates here once it clears.
+								You'll complete payment in your browser via Polar. The exact
+								plan percentage or $2.75 minimum deposit fee is shown before
+								payment; your wallet is credited the face value. Your balance
+								updates here once it clears.
 							</p>
 						</div>
 					</div>

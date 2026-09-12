@@ -19,7 +19,7 @@ name: nightly
 
 on:
   schedule:
-    - cron: "0 7 * * *" # 07:00 UTC daily
+    - cron: "0 */3 * * *" # every 3 hours at minute 0 UTC
   workflow_dispatch:
 
 permissions:
@@ -30,9 +30,8 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  # Skip the whole run when main has not moved since yesterday, so a quiet repo does not
-  # republish identical binaries. Manual dispatch always builds. The 25h window is wider
-  # than the 24h cron so a delayed scheduled run never drops a day of real commits.
+  # Skip the whole run when main has not moved in the last three hours, so a quiet repo does
+  # not republish identical binaries. Manual dispatch always builds.
   gate:
     runs-on: ubuntu-latest
     outputs:
@@ -49,15 +48,15 @@ jobs:
             echo "build=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          if [ -n "$(git log --since='25 hours ago' --oneline)" ]; then
+          if [ -n "$(git log --since='3 hours ago' --oneline)" ]; then
             echo "New commits on main — building."
             echo "build=true" >> "$GITHUB_OUTPUT"
           else
-            echo "No commits in the last 25h — skipping nightly."
+            echo "No commits in the last 3h — skipping nightly."
             echo "build=false" >> "$GITHUB_OUTPUT"
           fi
 
-  # Create TODAY's prerelease BEFORE the matrix uploads, so the parallel build jobs
+  # Create this run's prerelease BEFORE the matrix uploads, so the parallel build jobs
   # upload into an existing release instead of racing to create it.
   #
   # HISTORY IS KEPT (changed 2026-08-04) — see the matching block in canary.yml for
@@ -95,16 +94,17 @@ jobs:
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "tag=v$VERSION" >> "$GITHUB_OUTPUT"
           echo "Nightly version: $VERSION (tag v$VERSION)"
-      - name: Create tonight's prerelease, then prune old ones
+      - name: Create this run's prerelease, then prune old ones
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           VERSION: ${{ steps.version.outputs.version }}
           TAG: ${{ steps.version.outputs.tag }}
-          # Nightlies land once a day, so 14 is about two weeks of history.
+          # Nightlies land every three hours, so 14 is roughly 42 hours of history.
           RETAIN: "14"
           # Optional. Unset = the changelog is the raw mirror-commit bullets,
           # which is already real content; set, they are merged into highlights.
           OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
+          OPENCODE_SESSION_ID: "ryu-${{ github.repository }}-${{ github.run_id }}"
         run: |
           set -e
           # Notes must be GENERATED before the release references them — the
@@ -221,7 +221,8 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-          NODE_OPTIONS: --max-old-space-size=8192
+          # Windows needs the larger heap for the full desktop renderer bundle.
+          NODE_OPTIONS: ${{ matrix.platform == 'windows-latest' && '--max-old-space-size=16384' || '--max-old-space-size=8192' }}
           # Vite INLINES these; apps/desktop/.env is gitignored, so without them a
           # released build bakes the localhost fallbacks and cannot sign in.
           VITE_APP_BACKEND_URL: ${{ vars.VITE_APP_BACKEND_URL || 'https://api.ryuhq.com' }}
@@ -327,6 +328,8 @@ jobs:
         working-directory: apps/island
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # The full renderer bundle peaks above Node's default heap on macOS.
+          NODE_OPTIONS: --max-old-space-size=8192
           # node-gyp cannot locate Visual Studio on windows-latest without this.
           GYP_MSVS_VERSION: "2022"
           npm_config_msvs_version: "2022"

@@ -1,12 +1,13 @@
 {
   "name": "@ryu/browser-local-ai",
-  "version": "0.2.2",
+  "version": "0.3.1",
   "private": true,
   "type": "module",
   "exports": {
     ".": "./src/index.ts",
     "./catalog": "./src/catalog.ts",
-    "./runtime": "./src/runtime.ts"
+    "./runtime": "./src/runtime.ts",
+    "./data": "./src/data.ts"
   },
   "scripts": {
     "check-types": "tsc --noEmit",

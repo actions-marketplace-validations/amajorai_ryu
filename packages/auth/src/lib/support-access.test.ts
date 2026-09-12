@@ -1,8 +1,10 @@
 import { describe, expect, it } from "bun:test";
 import {
 	isGrantUsable,
+	isSupportAccessRequestAllowed,
 	normalizeScopes,
 	resolveGrantExpiry,
+	supportAccessScopeForRequest,
 } from "./support-access.ts";
 
 describe("support access policy helpers", () => {
@@ -45,5 +47,38 @@ describe("support access policy helpers", () => {
 				now
 			)
 		).toBe(false);
+	});
+
+	it("allows only exact read routes for the matching diagnostic scope", () => {
+		expect(
+			supportAccessScopeForRequest("/api/support-access/diagnostics/billing")
+		).toBe("billing");
+		expect(
+			isSupportAccessRequestAllowed(
+				"/api/support-access/diagnostics/billing",
+				"GET",
+				["billing"]
+			)
+		).toBe(true);
+		expect(
+			isSupportAccessRequestAllowed(
+				"/api/support-access/diagnostics/billing",
+				"POST",
+				["billing"]
+			)
+		).toBe(false);
+		expect(
+			isSupportAccessRequestAllowed("/api/channels/customer-config", "GET", [
+				"channels",
+			])
+		).toBe(false);
+		expect(
+			isSupportAccessRequestAllowed("/api/marketplace/marketplaces", "GET", [
+				"marketplace",
+			])
+		).toBe(false);
+		expect(
+			supportAccessScopeForRequest("/api/marketplace/catalog/detail", "GET")
+		).toBeNull();
 	});
 });

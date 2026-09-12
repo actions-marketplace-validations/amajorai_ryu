@@ -63,7 +63,7 @@ export function MicPermissionPrompt({
 	if (status === "blocked") {
 		return (
 			<div className={`space-y-2 ${className ?? ""}`}>
-				<p className="text-destructive text-sm">
+				<p className="text-sm text-status-destructive">
 					Microphone access is blocked. Turn it on in your system settings, then
 					try again.
 				</p>

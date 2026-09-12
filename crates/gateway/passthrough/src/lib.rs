@@ -57,6 +57,19 @@ pub fn is_responses_path(path: &str) -> bool {
     p == "responses" || p.ends_with("/responses")
 }
 
+/// Accept only unambiguous relative paths before endpoint classification.
+/// Axum has already decoded the route parameter; another decode or URL parser
+/// normalization must not change the destination after the DLP decision.
+pub fn is_safe_upstream_path(path: &str) -> bool {
+    !path.is_empty()
+        && !path
+            .chars()
+            .any(|c| c.is_control() || matches!(c, '%' | '\\' | '?' | '#'))
+        && path
+            .split('/')
+            .all(|segment| segment != "." && segment != "..")
+}
+
 pub fn build_upstream_url(base: &str, path: &str, query: Option<&str>) -> String {
     let base = base.trim_end_matches('/');
     let path = path.trim_start_matches('/');
@@ -266,6 +279,30 @@ mod tests {
         }
         fn redact_outbound(&self, text: &str) -> (String, Vec<&'static str>) {
             (text.to_string(), Vec::new())
+        }
+    }
+
+    #[test]
+    fn rejects_paths_that_change_after_url_parsing() {
+        for path in [
+            "responses/.",
+            "v1/messages/..",
+            "../responses",
+            "responses?x",
+            "responses#x",
+            "v1%2fmessages",
+            "v1\\messages",
+            "responses\n",
+        ] {
+            assert!(!is_safe_upstream_path(path), "accepted {path:?}");
+        }
+        for path in [
+            "v1/messages",
+            "responses",
+            "responses/",
+            "v1/messages/count_tokens",
+        ] {
+            assert!(is_safe_upstream_path(path));
         }
     }
 

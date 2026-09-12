@@ -162,7 +162,9 @@ function ConcernRow({
 					</p>
 				) : null}
 				{error ? (
-					<p className="text-destructive text-xs leading-snug">{error}</p>
+					<p className="text-status-destructive text-xs leading-snug">
+						{error}
+					</p>
 				) : null}
 			</div>
 			<div className="flex shrink-0 items-center gap-2">
@@ -374,7 +376,7 @@ function ToolsPlanPreview({
 				</p>
 			) : null}
 			{error ? (
-				<p className="text-destructive text-xs leading-snug">{error}</p>
+				<p className="text-status-destructive text-xs leading-snug">{error}</p>
 			) : null}
 			<div className="flex items-center gap-2">
 				<Button

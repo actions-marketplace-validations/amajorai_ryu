@@ -37,7 +37,15 @@ function entryToVideo(entry: unknown): GeneratedVideo | null {
 	}
 	const obj = entry as Record<string, unknown>;
 	if (typeof obj.url === "string") {
-		return { url: obj.url, mediaType: "video/mp4" };
+		return {
+			url: obj.url,
+			mediaType:
+				typeof obj.mediaType === "string"
+					? obj.mediaType
+					: typeof obj.mime_type === "string"
+						? obj.mime_type
+						: "video/mp4",
+		};
 	}
 	// sd-server may reuse the image field name for the encoded clip.
 	const b64 =
@@ -86,6 +94,8 @@ export interface GenerateVideoOptions {
 	/** Cloud provider to route through the Gateway: `"replicate"` or `"fal"`.
 	 * Omit (or use a local id) to render on the local sd-server engine. */
 	provider?: string;
+	/** Correlates this generation with an app-owned Gateway audit request. */
+	requestId?: string;
 	/** Give up after this many ms for a cloud job. Default: 600000 (10 min). */
 	timeoutMs?: number;
 }
@@ -103,9 +113,13 @@ export async function pollVideoJob(
 	target: ApiTarget,
 	id: string
 ): Promise<VideoJobEnvelope> {
-	const resp = await authenticatedFetch(target, `/api/video/jobs/${id}`, {
-		method: "GET",
-	});
+	const resp = await authenticatedFetch(
+		target,
+		`/api/video/jobs/${encodeURIComponent(id)}`,
+		{
+			method: "GET",
+		}
+	);
 	if (!resp.ok) {
 		throw new Error(`video job poll failed: ${resp.status}`);
 	}
@@ -131,7 +145,10 @@ export async function generateVideo(
 	prompt: string,
 	options: GenerateVideoOptions = {}
 ): Promise<GeneratedVideo[]> {
-	const body: Record<string, unknown> = { prompt };
+	const body: Record<string, unknown> = {
+		prompt,
+		request_id: options.requestId,
+	};
 	if (options.provider) {
 		body.provider = options.provider;
 	}
@@ -168,14 +185,25 @@ export async function generateVideo(
 	const interval = options.pollIntervalMs ?? 3000;
 	const deadline = Date.now() + (options.timeoutMs ?? 600_000);
 	let job: VideoJobEnvelope = first;
-	while (job.status !== "succeeded" && job.status !== "failed") {
+	while (
+		![
+			"succeeded",
+			"completed",
+			"failed",
+			"canceled",
+			"cancelled",
+			"expired",
+		].includes(job.status ?? "")
+	) {
 		if (Date.now() >= deadline) {
 			throw new Error("video generation timed out");
 		}
 		await sleep(interval);
 		job = await pollVideoJob(target, first.id);
 	}
-	if (job.status === "failed") {
+	if (
+		["failed", "canceled", "cancelled", "expired"].includes(job.status ?? "")
+	) {
 		throw new Error(job.error ?? "video generation failed");
 	}
 	return clipsFromBody(job);

@@ -1,3 +1,4 @@
+import { GUEST_MODE_ENABLED } from "@ryu/auth/lib/guest-mode";
 import { ditherAvatarSeed } from "@ryu/ui/components/dither-kit/avatar.tsx";
 import { Logo as OrbLogo } from "@ryu/ui/components/logo.tsx";
 import { Toaster, toast } from "@ryu/ui/components/sileo.tsx";
@@ -29,6 +30,7 @@ import {
 } from "@/src/contexts/app-surface-context.tsx";
 import { EntitlementProvider } from "@/src/contexts/entitlement-context.tsx";
 import { initAnalytics } from "@/src/lib/analytics.ts";
+import { fetchNodeOnboardingState } from "@/src/lib/api/onboarding-profile.ts";
 import { fetchWaitlistMe } from "@/src/lib/api/waitlist.ts";
 import { initCrashReporting } from "@/src/lib/crash.ts";
 import { applyDecorumChrome } from "@/src/lib/decorumTitlebar.ts";
@@ -58,6 +60,10 @@ import { initPointerCursor } from "./hooks/usePointerCursor.ts";
 import { initTheme, useThemePreset } from "./hooks/useThemePreset.ts";
 import { useBuildProfile } from "./lib/build-profile.ts";
 import {
+	isDesktopOnboardingComplete,
+	shouldStartOnboarding,
+} from "./lib/desktop-onboarding-state.ts";
+import {
 	type InstallerProgress,
 	installerComponentLabel,
 } from "./lib/installer-progress.ts";
@@ -79,18 +85,14 @@ import {
 	readStartupSelectionPreferences,
 	startupSelectionSteps,
 } from "./lib/startup-selection.ts";
+import { resolveDesktopWindowTitle } from "./lib/window-title.ts";
 import CompanionPage from "./pages/CompanionPage.tsx";
 import LoginPage from "./pages/LoginPage.tsx";
 import OnboardingPage from "./pages/OnboardingPage.tsx";
-import { PreflightPage } from "./pages/PreflightPage.tsx";
 import StandaloneAppEntry from "./pages/StandaloneAppEntry.tsx";
 import WaitlistPage from "./pages/WaitlistPage.tsx";
 import { useAppStore } from "./store/useAppStore.ts";
-import {
-	isLocalNode,
-	LOCAL_FALLBACK,
-	useNodeStore,
-} from "./store/useNodeStore.ts";
+import { useNodeStore } from "./store/useNodeStore.ts";
 
 // Detect the Tauri window label synchronously via the internals object that
 // Tauri injects before any JS runs. Falls back to "main" in a plain browser.
@@ -255,49 +257,43 @@ function ProductModeAccessSync({ children }: { children: ReactNode }) {
 	return children;
 }
 
-/** Syncs the macOS dock / Windows taskbar label with the release channel. */
+/** Syncs the native window/taskbar label with the active product and release channel. */
 function WindowTitleManager() {
 	const { dev } = useBuildProfile();
 	const [channel] = useReleaseChannel();
 	const productMode = useProductMode();
-	const botProduct = productMode === "bot";
-	const osProduct = productMode === "os";
 	const standaloneApp = isRyuStandaloneApp();
+	const title = resolveDesktopWindowTitle({
+		channel,
+		dev,
+		mode: productMode,
+		standaloneApp,
+		standaloneAppName: STANDALONE_APP_NAME,
+	});
+	const latestTitle = useRef(title);
+	const titleRequest = useRef(0);
+	latestTitle.current = title;
 
 	useEffect(() => {
-		const suffix = dev
-			? "Dev"
-			: channel === "canary"
-				? "Canary"
-				: channel === "nightly"
-					? "Nightly"
-					: channel === "beta"
-						? "Beta"
-						: null;
+		const request = ++titleRequest.current;
 
-		const productTitle = botProduct
-			? "Ryu Bot"
-			: osProduct
-				? "Ryu OS"
-				: "Ryu Console";
-		const title = standaloneApp
-			? STANDALONE_APP_NAME || "Ryu App"
-			: botProduct || osProduct
-				? `${productTitle}${suffix ? ` ${suffix}` : ""}`
-				: suffix
-					? `${productTitle} (Research Preview ${suffix})`
-					: productTitle;
-
-		// `getCurrentWindow()` reads the bridge's metadata, so this effect fires
-		// inside the same cold-start race. Through the gate it retries once the
-		// bridge lands and resolves null (rather than throwing) when there is none.
+		// A slow cold-start title write must not overwrite a newer Bot/Console
+		// selection. If an older native write completes after a newer one, correct
+		// it immediately with the latest title.
 		withTauri(async () => {
+			if (request !== titleRequest.current) {
+				return;
+			}
 			const { getCurrentWindow } = await import("@tauri-apps/api/window");
-			await getCurrentWindow().setTitle(title);
+			const currentWindow = getCurrentWindow();
+			await currentWindow.setTitle(title);
+			if (request !== titleRequest.current) {
+				await currentWindow.setTitle(latestTitle.current);
+			}
 		}).catch(() => {
 			// Setting the window title is cosmetic — never worth surfacing.
 		});
-	}, [botProduct, channel, dev, osProduct, standaloneApp]);
+	}, [title]);
 
 	return null;
 }
@@ -308,15 +304,23 @@ function MainApp({ hostSurface }: { hostSurface: AppSurface }) {
 	const standaloneApp = isRyuStandaloneApp();
 	useAcpKeepAwake();
 	const setCoreStatus = useAppStore((state) => state.setCoreStatus);
-	const coreStatus = useAppStore((state) => state.coreStatus);
 	const initNodes = useNodeStore((s) => s.init);
 	const startupNodes = useNodeStore((s) => s.nodes);
+	const activeNodeForOnboarding = useNodeStore((s) => s.getActiveNode());
 	const { data: session, isPending } = useSession();
 	const [vaultReady, setVaultReady] = useState(false);
 	const [nodesReady, setNodesReady] = useState(false);
 	const [startupSelectionStatus, setStartupSelectionStatus] = useState<
 		"loading" | "show" | "ready"
 	>("loading");
+	const [nodeOnboardingState, setNodeOnboardingState] = useState<Awaited<
+		ReturnType<typeof fetchNodeOnboardingState>
+	> | null>(null);
+	const [nodeOnboardingStateStatus, setNodeOnboardingStateStatus] = useState<
+		"loading" | "ready"
+	>("loading");
+	const [nodeOnboardingStateAvailable, setNodeOnboardingStateAvailable] =
+		useState(false);
 	const pendingAuthToken = useAppStore((s) => s.pendingAuthToken);
 	const setPendingAuthToken = useAppStore((s) => s.setPendingAuthToken);
 	const isAuthenticated = useAppStore((s) => s.isAuthenticated);
@@ -670,6 +674,57 @@ function MainApp({ hostSurface }: { hostSurface: AppSurface }) {
 	const reportedQuestEventKeys = useRef(new Set<string>());
 	const questSurface = hostSurface === "web" ? null : hostSurface;
 
+	// Node setup is a server-owned gate. Read it only after the active node and
+	// startup chooser have settled, so a new desktop can discover an incomplete
+	// node even when its own localStorage says desktop onboarding is finished.
+	// Older nodes that do not expose the endpoint remain compatible: a failed read
+	// does not invent state and falls back to the existing desktop-only marker.
+	useEffect(() => {
+		if (!authed || botProduct || !(vaultReady && nodesReady)) {
+			setNodeOnboardingStateStatus("ready");
+			return;
+		}
+		if (startupSelectionStatus !== "ready") {
+			setNodeOnboardingStateStatus("loading");
+			return;
+		}
+		let cancelled = false;
+		setNodeOnboardingStateStatus("loading");
+		const node = activeNodeForOnboarding;
+		fetchNodeOnboardingState({
+			token: node.token ?? null,
+			url: node.url,
+			userJwt: node.userJwt ?? null,
+		})
+			.then((next) => {
+				if (!cancelled) {
+					setNodeOnboardingState(next);
+					setNodeOnboardingStateAvailable(true);
+				}
+			})
+			.catch(() => {
+				if (!cancelled) {
+					setNodeOnboardingState(null);
+					setNodeOnboardingStateAvailable(false);
+				}
+			})
+			.finally(() => {
+				if (!cancelled) {
+					setNodeOnboardingStateStatus("ready");
+				}
+			});
+		return () => {
+			cancelled = true;
+		};
+	}, [
+		activeNodeForOnboarding,
+		authed,
+		botProduct,
+		nodesReady,
+		startupSelectionStatus,
+		vaultReady,
+	]);
+
 	useEffect(() => {
 		if (!(authed && vaultReady && questSurface)) {
 			return;
@@ -735,6 +790,7 @@ function MainApp({ hostSurface }: { hostSurface: AppSurface }) {
 	const [waitlistGate, setWaitlistGate] = useState<
 		"loading" | "approved" | "pending"
 	>("loading");
+	const disabledGuestCleanupStarted = useRef(false);
 
 	useEffect(() => {
 		if (!authed) {
@@ -749,8 +805,28 @@ function MainApp({ hostSurface }: { hostSurface: AppSurface }) {
 				timer = null;
 			}
 		};
+		const removeDisabledGuestSession = async () => {
+			if (disabledGuestCleanupStarted.current) {
+				return;
+			}
+			disabledGuestCleanupStarted.current = true;
+			// Remove both the anonymous account and any browser credential. The reload
+			// below also clears the cached client session used by the webapp shell.
+			await authClient.deleteAnonymousUser().catch(() => undefined);
+			await authClient.signOut().catch(() => undefined);
+			await clearSessionToken();
+			if (active) {
+				setIsAuthenticated(false);
+				window.location.reload();
+			}
+		};
 		const check = async () => {
 			if (session?.user?.isAnonymous) {
+				if (!GUEST_MODE_ENABLED) {
+					setWaitlistGate("loading");
+					await removeDisabledGuestSession();
+					return;
+				}
 				setWaitlistGate("approved");
 				stop();
 				return;
@@ -797,6 +873,11 @@ function MainApp({ hostSurface }: { hostSurface: AppSurface }) {
 						user?: { isAnonymous?: boolean };
 					} | null;
 					if (data?.user?.isAnonymous) {
+						if (!GUEST_MODE_ENABLED) {
+							setWaitlistGate("loading");
+							await removeDisabledGuestSession();
+							return;
+						}
 						setWaitlistGate("approved");
 						stop();
 						return;
@@ -839,6 +920,12 @@ function MainApp({ hostSurface }: { hostSurface: AppSurface }) {
 	}, []);
 
 	useEffect(() => {
+		// macOS keeps the native traffic lights restored by the native titlebar
+		// plugin. Decorum's injected overlay is a Windows/Linux concern; observing
+		// every DOM mutation here on macOS only reintroduces a second shell layer.
+		if (navigator.userAgent.includes("Mac")) {
+			return;
+		}
 		// tauri-plugin-decorum re-asserts its native titlebar (full width, with its
 		// own drag region) on window events — focus, maximize/restore, resize. The
 		// old fix only ran on a 5s interval, so any revert AFTER that window left a
@@ -881,29 +968,6 @@ function MainApp({ hostSurface }: { hostSurface: AppSurface }) {
 		};
 	}, []);
 
-	// Preflight ("Ryu Core isn't running") used to gate the ENTIRE tree, ahead of
-	// even the login screen — so a machine with no local Core could never reach
-	// sign-in, let alone the screen that offers running in the cloud or on an
-	// existing node. Core is optional now, so this is scoped to the only users for
-	// whom a dead local Core is actually a fault:
-	//
-	//   * onboarding must already be finished — before that, the choose step is
-	//     exactly where a user without Core is supposed to land; and
-	//   * the active node must be the local one. A user pointed at their team's
-	//     server or a cloud node has no local Core by design, and the node
-	//     selector's unreachable banner is the right (non-blocking) signal there.
-	const defaultNodeName = useNodeStore((s) => s.defaultNode);
-	const nodes = useNodeStore((s) => s.nodes);
-	const activeNodeIsLocal = isLocalNode(
-		nodes.find((n) => n.name === defaultNodeName) ?? LOCAL_FALLBACK
-	);
-	const showPreflight =
-		!(botProduct || standaloneApp) &&
-		hostSurface === "desktop" &&
-		coreStatus === "stopped" &&
-		activeNodeIsLocal &&
-		localStorage.getItem("ryu_onboarding_complete") === "true";
-
 	const showApp = standaloneApp || authed;
 	// Hold the app behind the waitlist check while it resolves, so we never flash
 	// the app and then bounce a pending user to the queue screen.
@@ -916,6 +980,13 @@ function MainApp({ hostSurface }: { hostSurface: AppSurface }) {
 		!(botProduct || standaloneApp) &&
 		authed &&
 		startupSelectionStatus === "show";
+	const desktopOnboardingComplete = isDesktopOnboardingComplete();
+	const shouldMountOnboarding = shouldStartOnboarding({
+		desktopComplete: desktopOnboardingComplete,
+		nodeCanConfigure: nodeOnboardingState?.canConfigure,
+		nodeComplete: nodeOnboardingState?.completed,
+		nodeStateAvailable: nodeOnboardingStateAvailable,
+	});
 
 	return (
 		<ThemeProvider
@@ -942,10 +1013,6 @@ function MainApp({ hostSurface }: { hostSurface: AppSurface }) {
 					) : startupChooserVisible ? (
 						<PageWrapper>
 							<DesktopStartupChooser />
-						</PageWrapper>
-					) : showPreflight ? (
-						<PageWrapper>
-							<PreflightPage />
 						</PageWrapper>
 					) : (!standaloneApp && isPending && !sessionSettledOnce) ||
 						waitlistResolving ? (
@@ -979,18 +1046,30 @@ function MainApp({ hostSurface }: { hostSurface: AppSurface }) {
 											<StandaloneAppEntry appId={STANDALONE_APP_ID} />
 										) : botProduct ? (
 											<BotManagedEntry />
+										) : nodeOnboardingStateStatus === "loading" &&
+											!nodeOnboardingStateAvailable ? (
+											<div
+												className="flex size-full items-center justify-center"
+												data-tauri-drag-region
+											>
+												<OrbLogo size="56px" variant="shimmer" />
+											</div>
 										) : (
 											<MemoryRouter
 												initialEntries={[
-													localStorage.getItem("ryu_onboarding_complete") ===
-													"true"
-														? "/chat"
-														: "/onboarding",
+													shouldMountOnboarding ? "/onboarding" : "/chat",
 												]}
 											>
 												<Routes>
 													<Route
-														element={<OnboardingPage />}
+														element={
+															<OnboardingPage
+																nodeOnboardingState={nodeOnboardingState}
+																nodeOnboardingStateAvailable={
+																	nodeOnboardingStateAvailable
+																}
+															/>
+														}
 														path="/onboarding"
 													/>
 													<Route element={<Layout />} path="/*" />

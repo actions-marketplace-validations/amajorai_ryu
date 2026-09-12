@@ -26,6 +26,7 @@ import {
 import {
 	DropdownMenu,
 	DropdownMenuContent,
+	DropdownMenuGroup,
 	DropdownMenuItem,
 	DropdownMenuLabel,
 	DropdownMenuSeparator,
@@ -33,8 +34,8 @@ import {
 } from "@ryu/ui/components/dropdown-menu.tsx";
 import { Input } from "@ryu/ui/components/input.tsx";
 import { RadioGroup, RadioGroupItem } from "@ryu/ui/components/radio-group.tsx";
+import { Textarea } from "@ryu/ui/components/textarea.tsx";
 import { formatCount } from "@ryu/ui/lib/number-format.ts";
-import { cn } from "@ryu/ui/lib/utils.ts";
 import { useState } from "react";
 import type { GitCommitAction } from "@/src/lib/api/git.ts";
 import type { GitHubRepositoryVisibility } from "@/src/lib/api/pull-requests.ts";
@@ -93,15 +94,16 @@ export function GitProgressStatus({ onStop, phase }: GitProgressStatusProps) {
 				{gitProgressLabel(phase)}
 			</span>
 			{onStop && (
-				<button
+				<Button
 					aria-label="Stop git action"
-					className="grid size-7 shrink-0 place-items-center rounded-md text-muted-foreground transition-colors hover:bg-destructive/10 hover:text-destructive focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
 					onClick={onStop}
+					size="icon-sm"
 					title="Stop git action"
 					type="button"
+					variant="ghost"
 				>
 					<HugeiconsIcon aria-hidden className="size-4" icon={StopIcon} />
-				</button>
+				</Button>
 			)}
 		</div>
 	);
@@ -116,12 +118,13 @@ export function GitRemoteActions({
 }) {
 	return (
 		<div className="grid grid-cols-2 gap-1.5">
-			<button
+			<Button
 				aria-label="Pull latest changes"
-				className="flex min-w-0 items-center justify-center gap-1 rounded-md border border-border/70 px-2 py-1.5 font-medium text-muted-foreground text-xs transition hover:bg-muted/60 hover:text-foreground"
 				onClick={onPull}
+				size="sm"
 				title="Pull latest changes"
 				type="button"
+				variant="outline"
 			>
 				<HugeiconsIcon
 					aria-hidden
@@ -129,13 +132,14 @@ export function GitRemoteActions({
 					icon={ArrowDown01Icon}
 				/>
 				<span>Pull</span>
-			</button>
-			<button
+			</Button>
+			<Button
 				aria-label="Sync with remote"
-				className="flex min-w-0 items-center justify-center gap-1 rounded-md border border-border/70 px-2 py-1.5 font-medium text-muted-foreground text-xs transition hover:bg-muted/60 hover:text-foreground"
 				onClick={onSync}
+				size="sm"
 				title="Sync with remote"
 				type="button"
+				variant="outline"
 			>
 				<HugeiconsIcon
 					aria-hidden
@@ -143,7 +147,7 @@ export function GitRemoteActions({
 					icon={RefreshIcon}
 				/>
 				<span>Sync</span>
-			</button>
+			</Button>
 		</div>
 	);
 }
@@ -177,9 +181,8 @@ export function CreateGitHubRepositoryDialog({
 	return (
 		<Dialog onOpenChange={onOpenChange} open={open}>
 			<DialogContent
-				className="gap-0 rounded-[28px] border-border/80 bg-background/95 p-5 shadow-2xl backdrop-blur-xl sm:max-w-[520px]"
+				className="max-h-[calc(100dvh-2rem)] overflow-y-auto sm:max-w-lg"
 				data-testid="create-github-repository-dialog"
-				showCloseButton={false}
 			>
 				<DialogHeader>
 					<DialogTitle>Create GitHub repository</DialogTitle>
@@ -188,7 +191,7 @@ export function CreateGitHubRepositoryDialog({
 						commit.
 					</DialogDescription>
 				</DialogHeader>
-				<div className="mt-5 grid gap-2">
+				<div className="grid gap-2">
 					<label
 						className="font-medium text-sm"
 						htmlFor="github-repository-name"
@@ -204,7 +207,7 @@ export function CreateGitHubRepositoryDialog({
 						value={name}
 					/>
 				</div>
-				<fieldset className="mt-5 grid gap-2">
+				<fieldset className="grid gap-2">
 					<legend className="font-medium text-sm">Visibility</legend>
 					<RadioGroup
 						aria-label="Repository visibility"
@@ -261,16 +264,16 @@ export function CreateGitHubRepositoryDialog({
 						</label>
 					</RadioGroup>
 				</fieldset>
-				<p className="mt-4 text-muted-foreground text-xs leading-5">
+				<p className="text-muted-foreground text-xs leading-5">
 					Ryu commits the local folder, creates the GitHub remote, and pushes
 					the current branch. GitHub CLI handles your existing sign-in.
 				</p>
 				{error && (
-					<p className="mt-3 rounded-2xl bg-destructive/10 px-3 py-2 text-destructive text-sm">
+					<p className="mt-3 rounded-2xl bg-destructive/10 px-3 py-2 text-sm text-status-destructive">
 						{error}
 					</p>
 				)}
-				<div className="mt-5 flex justify-end gap-2">
+				<div className="flex justify-end gap-2">
 					<Button
 						disabled={busy}
 						onClick={() => onOpenChange(false)}
@@ -303,12 +306,14 @@ function DialogDiffStats({
 		return null;
 	}
 	return (
-		<span className="flex shrink-0 items-center gap-2 font-medium font-mono text-2xl tabular-nums sm:text-[30px]">
+		<span className="col-start-2 flex shrink-0 items-center gap-2 font-mono text-xs tabular-nums sm:col-start-auto">
 			{insertions > 0 && (
-				<span className="text-emerald-500">+{formatCount(insertions)}</span>
+				<span className="text-status-success">+{formatCount(insertions)}</span>
 			)}
 			{deletions > 0 && (
-				<span className="text-red-500">−{formatCount(deletions)}</span>
+				<span className="text-status-destructive">
+					−{formatCount(deletions)}
+				</span>
 			)}
 		</span>
 	);
@@ -363,16 +368,16 @@ function BranchTargetPicker({
 					render={
 						<Button
 							aria-label={`Commit to ${branch}`}
-							className="h-14 w-full justify-start gap-3 rounded-[22px] bg-muted/75 px-5 text-lg hover:bg-muted"
+							className="w-full justify-start"
 							disabled={disabled}
 							type="button"
-							variant="ghost"
+							variant="secondary"
 						/>
 					}
 				>
 					<HugeiconsIcon
 						aria-hidden
-						className="size-6 shrink-0"
+						className="size-4 shrink-0"
 						icon={GitBranchIcon}
 					/>
 					<ButtonLabel className="min-w-0 flex-1 truncate text-left font-normal">
@@ -380,60 +385,58 @@ function BranchTargetPicker({
 					</ButtonLabel>
 					<HugeiconsIcon
 						aria-hidden
-						className="size-5 shrink-0"
+						className="size-4 shrink-0"
 						icon={ArrowDown01Icon}
 					/>
 				</DropdownMenuTrigger>
 				<DropdownMenuContent
 					align="start"
-					className="w-[320px] rounded-3xl border-border/80 bg-popover p-2 shadow-2xl"
+					className="w-72 max-w-[calc(100vw-2rem)]"
 					sideOffset={8}
 				>
-					<DropdownMenuLabel className="px-3 pt-2 pb-2 text-base text-muted-foreground">
-						Commit to
-					</DropdownMenuLabel>
-					{loading ? (
-						<div className="flex items-center gap-2 px-3 py-3 text-muted-foreground text-sm">
-							<HugeiconsIcon
-								aria-hidden
-								className="size-4 animate-spin"
-								icon={Loading01Icon}
-							/>
-							Loading branches…
-						</div>
-					) : (
-						branchOptions.map((candidate) => (
-							<DropdownMenuItem
-								className="min-h-11 gap-3 rounded-2xl px-3 text-base"
-								disabled={disabled}
-								key={candidate}
-								onClick={() => onSelectBranch(candidate)}
-							>
+					<DropdownMenuGroup>
+						<DropdownMenuLabel>Commit to</DropdownMenuLabel>
+						{loading ? (
+							<div className="flex items-center gap-2 px-3 py-3 text-muted-foreground text-sm">
 								<HugeiconsIcon
 									aria-hidden
-									className="size-5 shrink-0 text-muted-foreground"
-									icon={GitBranchIcon}
+									className="size-4 animate-spin"
+									icon={Loading01Icon}
 								/>
-								<span className="min-w-0 flex-1 truncate">{candidate}</span>
-								{candidate === branch && (
+								Loading branches…
+							</div>
+						) : (
+							branchOptions.map((candidate) => (
+								<DropdownMenuItem
+									disabled={disabled}
+									key={candidate}
+									onClick={() => onSelectBranch(candidate)}
+								>
 									<HugeiconsIcon
 										aria-hidden
-										className="size-5 shrink-0"
-										icon={Tick02Icon}
+										className="size-4 shrink-0 text-muted-foreground"
+										icon={GitBranchIcon}
 									/>
-								)}
-							</DropdownMenuItem>
-						))
-					)}
-					<DropdownMenuSeparator className="my-2" />
+									<span className="min-w-0 flex-1 truncate">{candidate}</span>
+									{candidate === branch && (
+										<HugeiconsIcon
+											aria-hidden
+											className="size-4 shrink-0"
+											icon={Tick02Icon}
+										/>
+									)}
+								</DropdownMenuItem>
+							))
+						)}
+					</DropdownMenuGroup>
+					<DropdownMenuSeparator />
 					<DropdownMenuItem
-						className="min-h-11 gap-3 rounded-2xl px-3 text-base"
 						disabled={disabled || !onCreateBranch}
 						onClick={() => setNewBranchOpen(true)}
 					>
 						<HugeiconsIcon
 							aria-hidden
-							className="size-5 shrink-0 text-muted-foreground"
+							className="size-4 shrink-0 text-muted-foreground"
 							icon={Add01Icon}
 						/>
 						New branch
@@ -474,7 +477,7 @@ function BranchTargetPicker({
 						value={newBranchName}
 					/>
 					{newBranchError && (
-						<p className="text-destructive text-xs">{newBranchError}</p>
+						<p className="text-status-destructive text-xs">{newBranchError}</p>
 					)}
 					<div className="flex justify-end gap-2">
 						<Button
@@ -551,11 +554,8 @@ export function GitActionDialog({
 
 	return (
 		<Dialog onOpenChange={onOpenChange} open={open}>
-			<DialogContent
-				className="max-h-[calc(100vh-2rem)] gap-0 overflow-visible rounded-[28px] border-border/80 bg-background/95 p-3 shadow-2xl backdrop-blur-xl sm:max-w-[760px]"
-				showCloseButton={false}
-			>
-				<DialogHeader className="sr-only">
+			<DialogContent className="max-h-[calc(100dvh-2rem)] overflow-y-auto sm:max-w-lg">
+				<DialogHeader>
 					<DialogTitle>Commit or push changes</DialogTitle>
 					<DialogDescription>
 						Choose a branch and an action for the current changes.
@@ -570,18 +570,17 @@ export function GitActionDialog({
 					onCreateBranch={onCreateBranch}
 					onSelectBranch={onSelectBranch}
 				/>
-				<textarea
+				<Textarea
 					aria-label="Commit message"
-					className="min-h-52 w-full resize-none border-0 bg-transparent px-4 py-5 text-2xl leading-tight outline-none placeholder:text-muted-foreground/80 focus:ring-0 sm:min-h-60 sm:text-3xl"
+					className="max-h-60 min-h-28"
 					disabled={busy}
 					onChange={(event) => onCommitMessageChange(event.target.value)}
 					placeholder="Commit message (leave blank to generate)…"
 					value={commitMessage}
 				/>
-				<label className="flex min-h-16 cursor-pointer items-center gap-4 px-4 py-3 text-lg">
+				<label className="grid cursor-pointer grid-cols-[auto_minmax(0,1fr)] items-center gap-3 text-sm sm:grid-cols-[auto_minmax(0,1fr)_auto]">
 					<Checkbox
 						checked={includeUnstaged}
-						className="size-5 rounded-lg"
 						disabled={busy}
 						onCheckedChange={(checked) =>
 							onIncludeUnstagedChange(checked === true)
@@ -591,35 +590,29 @@ export function GitActionDialog({
 					<DialogDiffStats deletions={deletions} insertions={insertions} />
 				</label>
 				{error && (
-					<p className="mx-4 mb-3 rounded-2xl bg-destructive/10 px-3 py-2 text-destructive text-sm">
+					<p className="rounded-lg bg-destructive/10 px-3 py-2 text-sm text-status-destructive">
 						{error}
 					</p>
 				)}
-				<div className="border-border/70 border-t pt-2">
+				<div className="grid gap-2 border-border border-t pt-4">
 					{COMMIT_ACTIONS.map((item, index) => (
-						<button
-							className={cn(
-								"flex min-h-14 w-full items-center gap-4 rounded-3xl px-4 text-left text-xl transition-colors hover:bg-muted/80 focus-visible:bg-muted/80 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
-								index === 0 && "bg-muted/80",
-								busy && "cursor-wait opacity-60"
-							)}
+						<Button
+							className="w-full justify-start"
 							disabled={busy}
 							key={item.action}
 							onClick={() => onSubmit(item.action)}
 							type="button"
+							variant={index === 0 ? "secondary" : "ghost"}
 						>
 							<HugeiconsIcon
 								aria-hidden
-								className="size-6 shrink-0 text-muted-foreground"
+								className="size-4 shrink-0 text-muted-foreground"
 								icon={item.icon}
 							/>
-							<span className="min-w-0 flex-1">{item.label}</span>
-							{item.action === "commit" && (
-								<kbd className="rounded-full bg-background/40 px-3 py-1 font-mono text-base text-muted-foreground">
-									⌘↵
-								</kbd>
-							)}
-						</button>
+							<ButtonLabel className="min-w-0 flex-1 text-left">
+								{item.label}
+							</ButtonLabel>
+						</Button>
 					))}
 				</div>
 			</DialogContent>
@@ -676,38 +669,31 @@ export function PullRequestDialog({
 
 	return (
 		<Dialog onOpenChange={onOpenChange} open={open}>
-			<DialogContent
-				className="max-h-[calc(100vh-2rem)] gap-0 overflow-hidden rounded-[28px] border-border/80 bg-background/95 p-3 shadow-2xl backdrop-blur-xl sm:max-w-[760px]"
-				showCloseButton={false}
-			>
-				<DialogHeader className="px-4 pt-3">
-					<DialogTitle className="font-normal text-2xl text-muted-foreground sm:text-3xl">
+			<DialogContent className="max-h-[calc(100dvh-2rem)] overflow-y-auto sm:max-w-lg">
+				<DialogHeader>
+					<DialogTitle>Create pull request</DialogTitle>
+					<DialogDescription className="break-all">
 						{branch} → {baseBranch}
-					</DialogTitle>
-					<DialogDescription className="sr-only">
-						Create a pull request from this branch.
 					</DialogDescription>
 				</DialogHeader>
-				<input
+				<Input
 					aria-label="Pull request title"
-					className="w-full border-0 bg-transparent px-4 pt-10 pb-3 font-medium text-2xl outline-none placeholder:text-muted-foreground/80 focus:ring-0 sm:text-3xl"
 					disabled={busy}
 					onChange={(event) => onTitleChange(event.target.value)}
 					placeholder="Title"
 					value={title}
 				/>
-				<textarea
+				<Textarea
 					aria-label="Pull request description"
-					className="min-h-52 w-full resize-none border-0 bg-transparent px-4 py-3 text-2xl leading-tight outline-none placeholder:text-muted-foreground/80 focus:ring-0 sm:min-h-60 sm:text-3xl"
+					className="max-h-60 min-h-28"
 					disabled={busy}
 					onChange={(event) => onDescriptionChange(event.target.value)}
 					placeholder="Description (leave empty to generate)"
 					value={description}
 				/>
-				<label className="flex min-h-16 cursor-pointer items-center gap-4 px-4 py-3 text-lg">
+				<label className="grid cursor-pointer grid-cols-[auto_minmax(0,1fr)] items-center gap-3 text-sm sm:grid-cols-[auto_minmax(0,1fr)_auto]">
 					<Checkbox
 						checked={includeUnstaged}
-						className="size-5 rounded-lg"
 						disabled={busy}
 						onCheckedChange={(checked) =>
 							onIncludeUnstagedChange(checked === true)
@@ -717,35 +703,29 @@ export function PullRequestDialog({
 					<DialogDiffStats deletions={deletions} insertions={insertions} />
 				</label>
 				{error && (
-					<p className="mx-4 mb-3 rounded-2xl bg-destructive/10 px-3 py-2 text-destructive text-sm">
+					<p className="rounded-lg bg-destructive/10 px-3 py-2 text-sm text-status-destructive">
 						{error}
 					</p>
 				)}
-				<div className="border-border/70 border-t pt-2">
+				<div className="grid gap-2 border-border border-t pt-4">
 					{PULL_REQUEST_ACTIONS.map((item, index) => (
-						<button
-							className={cn(
-								"flex min-h-14 w-full items-center gap-4 rounded-3xl px-4 text-left text-xl transition-colors hover:bg-muted/80 focus-visible:bg-muted/80 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
-								index === 1 && "bg-muted/80",
-								busy && "cursor-wait opacity-60"
-							)}
+						<Button
+							className="w-full justify-start"
 							disabled={busy}
 							key={item.action}
 							onClick={() => onSubmit(item.action)}
 							type="button"
+							variant={index === 1 ? "secondary" : "ghost"}
 						>
 							<HugeiconsIcon
 								aria-hidden
-								className="size-6 shrink-0 text-muted-foreground"
+								className="size-4 shrink-0 text-muted-foreground"
 								icon={item.icon}
 							/>
-							<span className="min-w-0 flex-1">{item.label}</span>
-							{item.action === "create" && (
-								<kbd className="rounded-full bg-background/40 px-3 py-1 font-mono text-base text-muted-foreground">
-									⌘↵
-								</kbd>
-							)}
-						</button>
+							<ButtonLabel className="min-w-0 flex-1 text-left">
+								{item.label}
+							</ButtonLabel>
+						</Button>
 					))}
 				</div>
 			</DialogContent>

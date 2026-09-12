@@ -467,7 +467,7 @@ export function SpaceImportsPanel({
 	return (
 		<div className="flex flex-col gap-8 p-4">
 			<header>
-				<h2 className="font-semibold text-lg">Import</h2>
+				<h2 className="font-medium text-lg">Import</h2>
 				<p className="mt-1 text-muted-foreground text-sm">
 					Turn files and connected-app data into editable pages and databases in
 					this space.
@@ -516,7 +516,7 @@ export function SpaceImportsPanel({
 					</p>
 				) : null}
 				{uploadError ? (
-					<p className="text-destructive text-sm">{uploadError}</p>
+					<p className="text-sm text-status-destructive">{uploadError}</p>
 				) : null}
 			</section>
 
@@ -677,7 +677,9 @@ export function SpaceImportsPanel({
 										</div>
 									</div>
 									{composioError ? (
-										<p className="text-destructive text-sm">{composioError}</p>
+										<p className="text-sm text-status-destructive">
+											{composioError}
+										</p>
 									) : null}
 									<Button
 										disabled={!selectedAction}
@@ -732,7 +734,7 @@ export function SpaceImportsPanel({
 					</Button>
 				</div>
 				{historyError ? (
-					<p className="text-destructive text-sm">{historyError}</p>
+					<p className="text-sm text-status-destructive">{historyError}</p>
 				) : null}
 				{imports.length === 0 && !historyError ? (
 					<div className="rounded-lg border border-dashed p-6 text-center text-muted-foreground text-sm">
@@ -777,7 +779,7 @@ export function SpaceImportsPanel({
 											<p
 												className={
 													item.status === "failed"
-														? "mt-2 text-destructive text-xs"
+														? "mt-2 text-status-destructive text-xs"
 														: "mt-2 text-muted-foreground text-xs"
 												}
 											>

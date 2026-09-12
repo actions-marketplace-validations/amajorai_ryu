@@ -55,12 +55,12 @@ const STATUS_META: Record<
 	{ className: string; icon: typeof CheckmarkCircle02Icon; label: string }
 > = {
 	ok: {
-		className: "text-emerald-500",
+		className: "text-status-success",
 		icon: CheckmarkCircle02Icon,
 		label: "Completed",
 	},
 	failed: {
-		className: "text-destructive",
+		className: "text-status-destructive",
 		icon: Alert02Icon,
 		label: "Hit an error",
 	},
@@ -76,10 +76,10 @@ const TOUCH_META: Record<
 	{ className: string; label: string }
 > = {
 	create: {
-		className: "text-emerald-600 dark:text-emerald-400",
+		className: "text-status-success",
 		label: "new",
 	},
-	edit: { className: "text-amber-600 dark:text-amber-400", label: "edit" },
+	edit: { className: "text-status-warning", label: "edit" },
 	read: { className: "text-muted-foreground", label: "read" },
 };
 
@@ -171,7 +171,7 @@ function CommandRow({ command }: { command: MissionCommand }) {
 			<HugeiconsIcon
 				className={cn(
 					"mt-0.5 size-3.5 shrink-0",
-					command.failed ? "text-destructive" : "text-muted-foreground"
+					command.failed ? "text-status-destructive" : "text-muted-foreground"
 				)}
 				icon={CodeIcon}
 			/>

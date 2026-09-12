@@ -88,12 +88,12 @@ export interface FleetViewProps {
 
 function latencyColor(ms: number): string {
 	if (ms < 100) {
-		return "text-green-600";
+		return "text-status-success";
 	}
 	if (ms < 500) {
-		return "text-yellow-600";
+		return "text-status-warning";
 	}
-	return "text-red-600";
+	return "text-status-destructive";
 }
 
 function NodeStatusCell({
@@ -159,7 +159,7 @@ function StatusDot({
 	if (running) {
 		return (
 			<HugeiconsIcon
-				className="h-3 w-3 fill-green-500 text-green-500"
+				className="h-3 w-3 fill-success text-status-success"
 				icon={CircleIcon}
 			/>
 		);
@@ -208,7 +208,7 @@ function SidecarActions({
 	if (isFailed) {
 		return (
 			<Button
-				className="h-7 px-2 text-amber-500 hover:text-amber-600"
+				className="h-7 px-2 text-status-warning hover:text-status-warning"
 				disabled={pending !== null}
 				onClick={onInstall}
 				size="sm"
@@ -240,7 +240,7 @@ function SidecarActions({
 		<>
 			{hasUpdate ? (
 				<Button
-					className="h-7 px-2 text-blue-500 hover:text-blue-600"
+					className="h-7 px-2 text-status-info hover:text-status-info"
 					disabled={pending !== null}
 					onClick={onInstall}
 					size="sm"
@@ -330,7 +330,7 @@ function FleetSidecarRow({
 						{entry.displayName}
 					</span>
 					{entry.deprecated ? (
-						<span className="flex items-center gap-1 font-medium text-amber-500 text-xs">
+						<span className="flex items-center gap-1 font-medium text-status-warning text-xs">
 							<HugeiconsIcon className="h-3 w-3" icon={Alert01Icon} />
 							Deprecated
 						</span>
@@ -366,7 +366,7 @@ function ServiceSection({
 	return (
 		<div className="border-t first:border-t-0">
 			<div className="px-4 py-1.5">
-				<span className="font-semibold text-muted-foreground text-xs uppercase tracking-wider">
+				<span className="font-medium text-muted-foreground text-xs uppercase tracking-wider">
 					{title}
 				</span>
 			</div>
@@ -410,7 +410,7 @@ function NodeSidecarPanel({
 	}
 	if (services.error) {
 		return (
-			<div className="flex items-center gap-2 px-4 py-4 text-destructive text-sm">
+			<div className="flex items-center gap-2 px-4 py-4 text-sm text-status-destructive">
 				<HugeiconsIcon className="size-4 shrink-0" icon={AlertCircleIcon} />
 				{services.error}
 			</div>

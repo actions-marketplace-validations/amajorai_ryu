@@ -79,6 +79,7 @@ pub fn installer_pin(name: &str) -> Option<&'static str> {
     match name {
         "llamacpp" => Some(crate::sidecar::providers::llamacpp::downloader::TARGET_VERSION),
         "whispercpp" => Some(crate::sidecar::providers::whispercpp::downloader::TARGET_VERSION),
+        "audiocpp" => Some(crate::sidecar::providers::audiocpp::TARGET_VERSION),
         "sdcpp" => Some(crate::sidecar::providers::sdcpp::downloader::TARGET_VERSION),
         _ => None,
     }
@@ -112,10 +113,11 @@ pub fn is_comparable_version(version: &str) -> bool {
 /// accounts for CPU architecture.
 pub fn required_platforms(name: &str) -> &'static [&'static str] {
     match name {
+        "freetoken" => &["linux", "windows"],
         // MLX is Apple's array framework — Apple Silicon macOS only. The vision
-        // (mlx-vlm) and oMLX engines build on the same framework, so they share
-        // the gate.
-        "mlx" | "mlx-vlm" | "omlx" | "apfel" => &["macos"],
+        // (mlx-vlm), native mlx-serve, and oMLX engines build on the same
+        // framework, so they share the platform label.
+        "mlx" | "mlx-vlm" | "mlx-serve" | "omlx" | "apfel" => &["macos"],
         // Tailscale mesh daemon (#478) is deliberately UNCONSTRAINED. It used to
         // carry a `["linux"]` label meant to reserve a future Linux-only
         // downloader, described as "display + install-gate only" — but this list
@@ -135,17 +137,28 @@ pub fn required_platforms(name: &str) -> &'static [&'static str] {
     }
 }
 
+fn freetoken_platform_supported(os: &str, arch: &str) -> bool {
+    arch == "x86_64" && matches!(os, "linux" | "windows")
+}
+
 /// Whether THIS Core node can actually install/run `name`, given its own OS and
 /// CPU architecture. The NODE is authoritative — not the client driving it — so
 /// a remote desktop on Windows correctly sees a macOS-only engine as unsupported
 /// when (and only when) the Core node it targets isn't an Apple Silicon Mac.
 ///
-/// Most entries are unconstrained. MLX is the one platform-locked entry today and
-/// needs arm64 macOS specifically: `std::env::consts::OS == "macos"` is also true
-/// on Intel Macs, where `pip install mlx-lm` fails, so the arch is part of the gate.
+/// Most entries are unconstrained. MLX engines need arm64 macOS specifically:
+/// `std::env::consts::OS == "macos"` is also true on Intel Macs, where the
+/// Apple MLX runtimes cannot run, so the arch is part of the gate.
 pub fn supported_on_node(name: &str) -> bool {
     match name {
+        "freetoken" => freetoken_platform_supported(std::env::consts::OS, std::env::consts::ARCH),
         "mlx" | "mlx-vlm" | "omlx" => cfg!(target_os = "macos") && cfg!(target_arch = "aarch64"),
+        // The native mlx-serve release currently requires macOS 26.2+ in
+        // addition to Apple Silicon. Keep this gate server-side because the
+        // desktop may be driving a remote Core node.
+        "mlx-serve" => {
+            cfg!(target_os = "macos") && cfg!(target_arch = "aarch64") && macos_at_least_26_2()
+        }
         // Apple Foundation Models (via apfel) need Apple Silicon AND macOS 26+.
         // Unlike the MLX engines this has a RUNTIME component: the OS version is
         // not knowable at compile time. `apfel`'s `/health` verifies the deeper
@@ -153,6 +166,20 @@ pub fn supported_on_node(name: &str) -> bool {
         // this gate answers only "is this Mac new enough to possibly run it".
         "apfel" => {
             cfg!(target_os = "macos") && cfg!(target_arch = "aarch64") && macos_at_least_26()
+        }
+        // audio.cpp publishes native server archives for macOS and Windows on
+        // x64/arm64 where listed, plus Linux x86_64. Keep this gate aligned
+        // with the pinned downloader assets rather than claiming every Rust
+        // target can run the runtime.
+        "audiocpp" => {
+            cfg!(any(
+                all(
+                    target_os = "macos",
+                    any(target_arch = "aarch64", target_arch = "x86_64")
+                ),
+                all(target_os = "linux", target_arch = "x86_64"),
+                all(target_os = "windows", target_arch = "x86_64"),
+            ))
         }
         other => {
             let platforms = required_platforms(other);
@@ -189,6 +216,37 @@ fn macos_at_least_26() -> bool {
             .map(|major| major >= 26)
             .unwrap_or(false)
     })
+}
+
+/// Whether this node runs macOS 26.2 (Tahoe) or newer — the current floor for
+/// the native mlx-serve release. Cached because catalog and engine-selection
+/// paths call [`supported_on_node`] synchronously.
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+fn macos_at_least_26_2() -> bool {
+    use crate::win_process::NoWindow;
+    use std::sync::OnceLock;
+    static CACHED: OnceLock<bool> = OnceLock::new();
+    *CACHED.get_or_init(|| {
+        std::process::Command::new("sw_vers")
+            .arg("-productVersion")
+            .no_window()
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .and_then(|o| {
+                let text = String::from_utf8_lossy(&o.stdout);
+                let mut parts = text.trim().split('.');
+                let major = parts.next()?.parse::<u32>().ok()?;
+                let minor = parts.next().unwrap_or("0").parse::<u32>().ok()?;
+                Some((major, minor))
+            })
+            .is_some_and(|(major, minor)| major > 26 || (major == 26 && minor >= 2))
+    })
+}
+
+#[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+fn macos_at_least_26_2() -> bool {
+    false
 }
 
 #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
@@ -332,6 +390,20 @@ pub fn static_registry() -> Vec<CatalogEntry> {
             deprecated: false,
             recommended: true,
         },
+        // mlx-serve — native Zig model-directory server. It is opt-in because
+        // the upstream binary owns its model cache and currently requires
+        // macOS 26.2+; Ryu does not make it the format-derived default.
+        CatalogEntry {
+            name: "mlx-serve",
+            display_name: "MLX Serve",
+            description: "Native Apple Silicon inference · mlx-serve (Zig) · MLX + GGUF · OpenAI/Anthropic/Ollama APIs · macOS (arm64) 26.2+ · Homebrew/binary install",
+            category: SidecarCategory::Provider,
+            source: SidecarSource::Github {
+                repo: "ddalcu/mlx-serve",
+            },
+            deprecated: false,
+            recommended: false,
+        },
         // oMLX — high-performance Apple-Silicon server (continuous batching +
         // RAM/SSD KV cache). Not on PyPI: PATH-adopted with a best-effort install
         // (Homebrew / pip-from-git), so it is opt-in and not recommended-by-default.
@@ -342,6 +414,39 @@ pub fn static_registry() -> Vec<CatalogEntry> {
             category: SidecarCategory::Provider,
             source: SidecarSource::Github {
                 repo: "jundot/omlx",
+            },
+            deprecated: false,
+            recommended: false,
+        },
+        CatalogEntry {
+            name: "lemonade",
+            display_name: "Lemonade Server",
+            description: "Connect to Lemonade Server · OpenAI-compatible chat · install Lemonade and download models first at lemonade-server.ai",
+            category: SidecarCategory::Provider,
+            source: SidecarSource::Github {
+                repo: "lemonade-sdk/lemonade",
+            },
+            deprecated: false,
+            recommended: false,
+        },
+        CatalogEntry {
+            name: "llama-swap",
+            display_name: "llama-swap",
+            description: "On-demand model switching · connect to your configured llama-swap server · OpenAI-compatible · backend processes and models managed by llama-swap",
+            category: SidecarCategory::Provider,
+            source: SidecarSource::Github {
+                repo: "mostlygeek/llama-swap",
+            },
+            deprecated: false,
+            recommended: false,
+        },
+        CatalogEntry {
+            name: "freetoken",
+            display_name: "FreeToken",
+            description: "MoE inference on NVIDIA GPUs · connect to an installed FreeToken server · Windows/Linux x86_64 · no native macOS runtime",
+            category: SidecarCategory::Provider,
+            source: SidecarSource::Github {
+                repo: "FlashML-org/FreeToken",
             },
             deprecated: false,
             recommended: false,
@@ -403,6 +508,17 @@ pub fn static_registry() -> Vec<CatalogEntry> {
             category: SidecarCategory::Voice,
             source: SidecarSource::Github {
                 repo: "ggml-org/whisper.cpp",
+            },
+            deprecated: false,
+            recommended: false,
+        },
+        CatalogEntry {
+            name: "audiocpp",
+            display_name: "audio.cpp",
+            description: "Native local audio runtime · PocketTTS speech and Parakeet-TDT recognition · CPU/Metal-capable GGUF packages",
+            category: SidecarCategory::Voice,
+            source: SidecarSource::Github {
+                repo: "0xShug0/audio.cpp",
             },
             deprecated: false,
             recommended: false,
@@ -524,14 +640,30 @@ mod tests {
     use super::*;
 
     #[test]
+    fn freetoken_platform_matrix_enforces_supported_operating_systems_and_architecture() {
+        for (os, arch, expected) in [
+            ("linux", "x86_64", true), ("windows", "x86_64", true),
+            ("macos", "aarch64", false), ("macos", "x86_64", false),
+            ("linux", "aarch64", false), ("windows", "aarch64", false),
+            ("freebsd", "x86_64", false),
+        ] {
+            assert_eq!(freetoken_platform_supported(os, arch), expected, "{os}/{arch}");
+        }
+    }
+
+    #[test]
     fn registry_has_correct_count() {
         let r = static_registry();
-        // 21 non-sandbox entries + 4 sandbox backends (wasmtime, docker,
-        // microsandbox, opensandbox). Unsloth is intentionally included as the
-        // opt-in fine-tuning Tool entry; `spider` is intentionally excluded after
-        // becoming a BYO declarative `command` plugin. Keep this count aligned
-        // with the canonical entries above.
-        assert_eq!(r.len(), 25);
+        // 23 base entries + 4 sandbox backends (wasmtime, docker, microsandbox,
+        // opensandbox). The nano/pico/nemo/iron-claw + temporal + qmd rows were
+        // dropped and unsloth/docker-model-runner/apfel/mesh-llm added since the old count
+        // of 30; `spider` then left the managed-sidecar catalog when it became a
+        // BYO declarative `command` plugin, leaving the base count at 23 (its
+        // sibling assertions in `registry_recommended_entries` and the tool count
+        // moved with it — this one did not, hence the rebase). NOTE: this is a
+        // global count over a shared tree — if a concurrent feature adds a catalog
+        // row, rebase this number with it.
+        assert_eq!(r.len(), 30);
     }
 
     #[test]
@@ -582,6 +714,20 @@ mod tests {
     }
 
     #[test]
+    fn mlx_serve_is_gated_to_supported_apple_silicon_macos() {
+        let entry = static_registry()
+            .into_iter()
+            .find(|entry| entry.name == "mlx-serve")
+            .expect("mlx-serve registry entry");
+        assert_eq!(entry.name, "mlx-serve");
+        assert_eq!(required_platforms("mlx-serve"), &["macos"]);
+
+        let expected =
+            cfg!(target_os = "macos") && cfg!(target_arch = "aarch64") && macos_at_least_26_2();
+        assert_eq!(supported_on_node("mlx-serve"), expected);
+    }
+
+    #[test]
     fn categories_are_correct() {
         let r = static_registry();
         let agents: Vec<_> = r
@@ -617,13 +763,13 @@ mod tests {
         // agentbrowser, llmfit, shadow, ghost, unsloth. (spider left the catalog
         // when it became a BYO declarative command plugin.)
         assert_eq!(tools.len(), 5);
-        // llamacpp, ollama, vllm, sglang, mlx, mlx-vlm, omlx (Apple Silicon only),
+        // llamacpp, ollama, vllm, sglang, mlx, mlx-vlm, mlx-serve, omlx (Apple Silicon only),
         // docker-model-runner (adopt-only), apfel (Apple FM, Apple Silicon macOS 26+),
-        // mesh-llm (adopt-or-start, OpenAI-compatible distributed runtime).
-        assert_eq!(providers.len(), 10);
-        // whisper.cpp + OuteTTS + Ryu TTS multi-engine sidecar (parakeet is a
-        // model, not a Store engine entry).
-        assert_eq!(voice.len(), 3);
+        // mesh-llm (adopt-or-start), lemonade and llama-swap (externally managed).
+        assert_eq!(providers.len(), 14);
+        // whisper.cpp + audio.cpp + OuteTTS + Ryu TTS multi-engine sidecar
+        // (parakeet is also a model, not a Store engine entry).
+        assert_eq!(voice.len(), 4);
         assert_eq!(media.len(), 1);
         // No embedding *engine* is a Store entry — the embeddings server is
         // backing infra (auto-started), not user-pickable.

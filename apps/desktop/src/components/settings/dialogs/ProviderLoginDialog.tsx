@@ -308,14 +308,16 @@ export function ProviderLoginDialog({
 				<div className="flex flex-col gap-4">
 					{done ? (
 						<div className="flex items-center gap-3">
-							<SuccessCheck className="size-8 shrink-0 text-success" />
+							<SuccessCheck className="size-8 shrink-0 text-status-success" />
 							<p className="text-sm">
 								Connected. {providerLabel} is ready to use.
 							</p>
 						</div>
 					) : null}
 
-					{error ? <p className="text-destructive text-sm">{error}</p> : null}
+					{error ? (
+						<p className="text-sm text-status-destructive">{error}</p>
+					) : null}
 
 					{authUrl && !done ? (
 						<div className="flex flex-col gap-2">

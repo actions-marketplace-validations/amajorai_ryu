@@ -3,13 +3,17 @@ import type { GlyphValue } from "@ryu/ui/components/glyph.ts";
 import type { ReactNode } from "react";
 import {
 	createContext,
+	use,
 	useCallback,
 	useContext,
 	useEffect,
+	useLayoutEffect,
 	useMemo,
 	useRef,
 	useState,
+	useSyncExternalStore,
 } from "react";
+import { createStore, type StoreApi } from "zustand/vanilla";
 import type { AttachedImage } from "@/components/agent-elements/input-bar.tsx";
 import { useEntitlementContext } from "@/src/contexts/entitlement-context.tsx";
 import {
@@ -53,6 +57,14 @@ import {
 	swapLeaves,
 } from "@/src/lib/splitTree.ts";
 import {
+	DEFAULT_TAB_UNLOAD_MINUTES,
+	inactiveTabIds,
+	initialTabActivity,
+	TAB_UNLOAD_INTERVAL_MS,
+	TAB_UNLOAD_MINUTES_KEY,
+} from "@/src/lib/tab-memory-policy.ts";
+import type { TabTransfer } from "@/src/lib/tab-transfer.ts";
+import {
 	listenForEntityActivation,
 	registerWindowTabs,
 	tabEntityKey,
@@ -71,6 +83,10 @@ export type {
 	SplitNode,
 	SplitOrientation,
 } from "@/src/lib/splitTree.ts";
+
+// Keep the historical import path available to desktop consumers while the
+// preference's canonical owner lives with the pure tab-memory policy.
+export { TAB_UNLOAD_MINUTES_KEY } from "@/src/lib/tab-memory-policy.ts";
 
 export interface Tab {
 	/** Live run in progress for this tab (streaming chat, etc.). Runtime-only —
@@ -99,6 +115,8 @@ export interface Tab {
 	initialImages?: AttachedImage[];
 	/** One-shot model selection to carry into a newly opened focused reply thread. */
 	initialModel?: string;
+	/** One-shot composer flags carried from the new-chat launchpad. Runtime-only. */
+	initialPluginFlags?: Record<string, boolean>;
 	/** One-shot Core assistant opening. Unlike `initialSubmit`, this never adds
 	    a synthetic user row and waits for model readiness. Runtime-only. */
 	initialProactiveOpening?: boolean;
@@ -119,6 +137,8 @@ export interface Tab {
 	    `ryu://chat/new` deep link and Inbox suggestions leave this unset so their
 	    attacker-/system-controllable text stays pre-fill-only. Runtime-only. */
 	initialSubmit?: boolean;
+	/** One-shot team target carried from the new-chat launchpad. Runtime-only. */
+	initialTeamId?: string;
 	/** Context from an app-owned sidebar row, forwarded to that app's Companion. */
 	mountContext?: Record<string, unknown> | null;
 	/** Bumped each time this tab is navigated in place ("open in current tab").
@@ -197,11 +217,6 @@ export function findSplit(
 	return splits.find((s) => s.id === splitId);
 }
 
-/** Members of a split, in strip (tab) order. */
-export function splitMembers(tabs: Tab[], splitId: string): Tab[] {
-	return tabs.filter((t) => t.splitId === splitId);
-}
-
 /** Members of a split in PANE order (the tree's depth-first leaf order) —
     the order the content area tiles them. */
 export function splitPaneTabs(tabs: Tab[], split: Split): Tab[] {
@@ -254,11 +269,6 @@ export const TAB_GROUP_COLORS = [
 ] as const;
 export type TabGroupColor = (typeof TAB_GROUP_COLORS)[number];
 
-/** Shared localStorage key for the "unload inactive tabs after N minutes"
-    preference. 0 disables auto-unload. Read by the timer here and written by the
-    settings dialog so both sides agree without prop-drilling. */
-export const TAB_UNLOAD_MINUTES_KEY = "ryu_tab_unload_minutes";
-
 interface ClosedTab {
 	index: number;
 	tab: Tab;
@@ -297,7 +307,7 @@ interface TabsContextValue {
 	/** Clear a tab's pending scroll-to-message after ChatPage consumes it. */
 	clearScrollToMessage: (tabId: string) => void;
 	closeGroup: (groupId: string) => void;
-	closeTab: (id: string) => void;
+	closeTab: (id: string, options?: { transferred?: boolean }) => void;
 	// Grouping
 	createGroup: (tabId: string) => string;
 	/** Reset every branch of a split to equal fractions, at every depth. Sizes
@@ -325,7 +335,9 @@ interface TabsContextValue {
 			initialSubmit?: boolean;
 			initialImages?: AttachedImage[];
 			initialAgent?: string;
+			initialTeamId?: string;
 			initialGhost?: boolean;
+			initialPluginFlags?: Record<string, boolean>;
 			initialProject?: string;
 			initialStoreQuery?: string;
 			initialStoreItem?: { id: string; kind: string };
@@ -421,6 +433,51 @@ interface TabsContextValue {
  *  test; app code must go through {@link useTabsContext}, which fails loudly
  *  outside a real {@link TabsProvider}. */
 export const TabsContext = createContext<TabsContextValue | null>(null);
+
+const TabsSelectionContext = createContext<StoreApi<TabsContextValue> | null>(
+	null
+);
+
+/** Keep action-only and per-tab subscribers off unrelated navigation updates. */
+function TabsStateProvider({
+	value,
+	children,
+}: {
+	value: TabsContextValue;
+	children: ReactNode;
+}) {
+	const [store] = useState(() => createStore<TabsContextValue>(() => value));
+	useLayoutEffect(() => {
+		store.setState(value, true);
+	}, [store, value]);
+	return (
+		<TabsSelectionContext.Provider value={store}>
+			<TabsContext.Provider value={value}>{children}</TabsContext.Provider>
+		</TabsSelectionContext.Provider>
+	);
+}
+
+const subscribeWithoutProvider = () => () => undefined;
+
+/** Select an existing object, action, or primitive; do not allocate a snapshot. */
+export function useTabSelector<T>(selector: (state: TabsContextValue) => T): T {
+	const store = useContext(TabsSelectionContext);
+	// Direct context providers remain supported by embedded hosts and stories.
+	const fallback = store ? null : use(TabsContext);
+	const getSnapshot = () => {
+		const state = store?.getState() ?? fallback;
+		if (!state) {
+			throw new Error("useTabSelector must be inside TabsProvider");
+		}
+		return selector(state);
+	};
+	return useSyncExternalStore(
+		store?.subscribe ?? subscribeWithoutProvider,
+		getSnapshot,
+		getSnapshot
+	);
+}
+
 const IsActiveTabContext = createContext<boolean>(true);
 
 // The id of the tab a subtree is rendered under. Undefined when rendered
@@ -480,8 +537,10 @@ export function useTabsContext(): TabsContextValue {
 const PATH_TITLES: Record<string, string> = {
 	[DASHBOARD_DEFAULT_PATH]: "Home",
 	"/chat": "New chat",
+	"/compute": "Compute",
 	[PANE_CHOOSER_PATH]: "Empty pane",
 	"/identities/new": "New identity",
+	"/vault": "Vault",
 	"/workflows/build": "Build a workflow",
 	"/calendar": "Calendar",
 	"/meetings": "Meetings",
@@ -493,6 +552,7 @@ const PATH_TITLES: Record<string, string> = {
 	"/inbox": "Inbox",
 	"/downloads": "Downloads",
 	"/settings": "Settings",
+	"/share": "Share",
 };
 
 /** The two multi-section shells in the app: LibraryPage and StorePage. */
@@ -755,6 +815,7 @@ export interface InitialTab {
 	node?: string;
 	path: string;
 	title?: string;
+	transfer?: TabTransfer;
 }
 
 /** localStorage key holding the previous session's open tabs, so the "restore
@@ -1107,7 +1168,13 @@ export function TabsProvider({
 	// (spawned with an `initialTab`) always seeds from that one conversation.
 	const [initialState] = useState<StartupState>(() => {
 		if (initialTab) {
-			const id = makeTabId();
+			const id = initialTab.transfer?.tab.id ?? makeTabId();
+			if (initialTab.transfer?.artifact) {
+				useArtifactStore.getState().put(initialTab.transfer.artifact);
+			}
+			if (initialTab.node) {
+				useNodeStore.getState().setTabOverride(id, initialTab.node);
+			}
 			return {
 				tabs: [
 					{
@@ -1120,6 +1187,7 @@ export function TabsProvider({
 						initialPrompt: initialTab.initialPrompt,
 						initialSubmit: initialTab.initialSubmit,
 						initialProactiveOpening: initialTab.initialProactiveOpening,
+						...initialTab.transfer?.tab,
 					},
 				],
 				activeId: id,
@@ -1160,7 +1228,9 @@ export function TabsProvider({
 	// Last time each tab was the active view, keyed by tab id. Held in a ref (not
 	// tab state) so stamping it on every activation doesn't churn renders; the
 	// auto-unload timer reads it directly.
-	const lastActiveAtRef = useRef<Record<string, number>>({});
+	const lastActiveAtRef = useRef<Record<string, number>>(
+		initialTabActivity(initialState.tabs, Date.now())
+	);
 	const activeTabIdRef = useRef<string>(activeTabId);
 	activeTabIdRef.current = activeTabId;
 
@@ -1285,7 +1355,9 @@ export function TabsProvider({
 				initialSubmit?: boolean;
 				initialImages?: AttachedImage[];
 				initialAgent?: string;
+				initialTeamId?: string;
 				initialGhost?: boolean;
+				initialPluginFlags?: Record<string, boolean>;
 				initialProject?: string;
 				initialStoreQuery?: string;
 				initialStoreItem?: { id: string; kind: string };
@@ -1471,7 +1543,9 @@ export function TabsProvider({
 					initialSubmit: opts?.initialSubmit,
 					initialImages: opts?.initialImages,
 					initialAgent: opts?.initialAgent,
+					initialTeamId: opts?.initialTeamId,
 					initialGhost: opts?.initialGhost,
+					initialPluginFlags: opts?.initialPluginFlags,
 					initialProject: opts?.initialProject,
 					initialStoreQuery: opts?.initialStoreQuery,
 					initialStoreItem: opts?.initialStoreItem,
@@ -1517,7 +1591,9 @@ export function TabsProvider({
 				initialSubmit: opts?.initialSubmit,
 				initialImages: opts?.initialImages,
 				initialAgent: opts?.initialAgent,
+				initialTeamId: opts?.initialTeamId,
 				initialGhost: opts?.initialGhost,
+				initialPluginFlags: opts?.initialPluginFlags,
 				initialProject: opts?.initialProject,
 				initialStoreQuery: opts?.initialStoreQuery,
 				initialStoreItem: opts?.initialStoreItem,
@@ -1537,7 +1613,7 @@ export function TabsProvider({
 	);
 
 	const closeTab = useCallback(
-		(id: string) => {
+		(id: string, options?: { transferred?: boolean }) => {
 			// Drop any per-tab node override so the in-memory map doesn't keep stale
 			// entries for tabs that no longer exist.
 			useNodeStore.getState().clearTabOverride(id);
@@ -1565,7 +1641,9 @@ export function TabsProvider({
 			if (idx === -1) {
 				return;
 			}
-			setClosedTabs((stack) => [...stack, { tab: prev[idx], index: idx }]);
+			if (!options?.transferred) {
+				setClosedTabs((stack) => [...stack, { tab: prev[idx], index: idx }]);
+			}
 			// If the tab is part of a split, its surviving siblings stay together.
 			// Prefer focusing one of them so the split remains visible after the
 			// close, rather than jumping to an unrelated neighbor tab.
@@ -1705,7 +1783,13 @@ export function TabsProvider({
 	}, [markActive, syncNav]);
 
 	const updateTabTitle = useCallback((id: string, title: string) => {
-		setTabs((prev) => prev.map((t) => (t.id === id ? { ...t, title } : t)));
+		setTabs((prev) => {
+			const tab = prev.find((item) => item.id === id);
+			if (!tab || tab.title === title) {
+				return prev;
+			}
+			return prev.map((item) => (item.id === id ? { ...item, title } : item));
+		});
 	}, []);
 
 	const updateTabWorkspaceSession = useCallback(
@@ -1920,6 +2004,11 @@ export function TabsProvider({
 	const unloadTab = useCallback((id: string) => {
 		// Never unload the tab the user is currently looking at.
 		if (id === activeTabIdRef.current) {
+			return;
+		}
+		// A running route may own the live stream that is driving the tab. Keep it
+		// mounted until the run ends so memory cleanup never becomes cancellation.
+		if (tabsRef.current.find((tab) => tab.id === id)?.busy) {
 			return;
 		}
 		// Never unload a pane that is currently visible as part of the active
@@ -2479,6 +2568,8 @@ export function TabsProvider({
 				initialSubmit: undefined,
 				initialImages: undefined,
 				initialGhost: undefined,
+				initialTeamId: undefined,
+				initialPluginFlags: undefined,
 				scrollToMessageId: undefined,
 				worktreeMode: undefined,
 				workspaceSession: undefined,
@@ -2646,40 +2737,31 @@ export function TabsProvider({
 	// when the threshold is 0 ("Never").
 	useEffect(() => {
 		const tick = () => {
-			const minutes = readPersistedNumber(TAB_UNLOAD_MINUTES_KEY, 0);
-			if (minutes <= 0) {
-				return;
-			}
-			const cutoff = Date.now() - minutes * 60_000;
-			// Every pane of the currently-visible split is exempt — unloading one
-			// would blank a side-by-side view in active use.
-			const activeSplitId = tabsRef.current.find(
-				(t) => t.id === activeTabIdRef.current
-			)?.splitId;
-			const protectedIds = new Set(
-				activeSplitId
-					? tabsRef.current
-							.filter((t) => t.splitId === activeSplitId)
-							.map((t) => t.id)
-					: []
+			const minutes = readPersistedNumber(
+				TAB_UNLOAD_MINUTES_KEY,
+				DEFAULT_TAB_UNLOAD_MINUTES
 			);
+			const now = Date.now();
 			setTabs((prev) => {
+				const unloadIds = new Set(
+					inactiveTabIds(
+						prev,
+						activeTabIdRef.current,
+						lastActiveAtRef.current,
+						now,
+						minutes
+					)
+				);
+				if (unloadIds.size === 0) {
+					return prev;
+				}
 				let changed = false;
 				const next = prev.map((t) => {
-					if (
-						t.id === activeTabIdRef.current ||
-						t.pinned ||
-						t.unloaded ||
-						protectedIds.has(t.id)
-					) {
+					if (!unloadIds.has(t.id)) {
 						return t;
 					}
-					const lastActive = lastActiveAtRef.current[t.id];
-					if (lastActive !== undefined && lastActive < cutoff) {
-						changed = true;
-						return { ...t, unloaded: true };
-					}
-					return t;
+					changed = true;
+					return { ...t, unloaded: true };
 				});
 				if (!changed) {
 					return prev;
@@ -2688,7 +2770,7 @@ export function TabsProvider({
 				return next;
 			});
 		};
-		const interval = setInterval(tick, 30_000);
+		const interval = setInterval(tick, TAB_UNLOAD_INTERVAL_MS);
 		return () => clearInterval(interval);
 	}, []);
 
@@ -2779,15 +2861,38 @@ export function TabsProvider({
 	// previous tabs" startup behavior can reopen them next launch. Tear-off
 	// windows (which carry an `initialTab`) never own the session snapshot — they
 	// share localStorage, so letting them write would clobber the main window's.
+	const pendingSession = useRef<(() => void) | null>(null);
+	const flushSession = useCallback(() => {
+		pendingSession.current?.();
+		pendingSession.current = null;
+	}, []);
 	useEffect(() => {
 		if (initialTab) {
 			return;
 		}
-		persistSession(tabs, activeTabId, splits);
-	}, [tabs, activeTabId, splits, initialTab]);
+		// Coalesce rapid navigation and let the selected page paint before
+		// serializing the whole session into synchronous browser storage.
+		pendingSession.current = () => persistSession(tabs, activeTabId, splits);
+		const timer = window.setTimeout(flushSession, 150);
+		return () => window.clearTimeout(timer);
+	}, [tabs, activeTabId, splits, initialTab, flushSession]);
+	useEffect(() => {
+		const onVisibilityChange = () => {
+			if (document.visibilityState === "hidden") {
+				flushSession();
+			}
+		};
+		window.addEventListener("pagehide", flushSession);
+		document.addEventListener("visibilitychange", onVisibilityChange);
+		return () => {
+			window.removeEventListener("pagehide", flushSession);
+			document.removeEventListener("visibilitychange", onVisibilityChange);
+			flushSession();
+		};
+	}, [flushSession]);
 
 	return (
-		<TabsContext.Provider
+		<TabsStateProvider
 			value={{
 				tabs,
 				groups,
@@ -2842,6 +2947,6 @@ export function TabsProvider({
 			}}
 		>
 			{children}
-		</TabsContext.Provider>
+		</TabsStateProvider>
 	);
 }

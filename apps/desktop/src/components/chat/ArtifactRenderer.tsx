@@ -116,7 +116,7 @@ function ArtifactFrame({ doc, title }: { doc: string; title: string }) {
 function ArtifactError({ message }: { message: string }) {
 	return (
 		<div className="flex h-full items-center justify-center p-6">
-			<div className="flex max-w-sm items-start gap-2 text-destructive text-xs">
+			<div className="flex max-w-sm items-start gap-2 text-status-destructive text-xs">
 				<HugeiconsIcon
 					aria-hidden
 					className="mt-0.5 size-4 shrink-0"

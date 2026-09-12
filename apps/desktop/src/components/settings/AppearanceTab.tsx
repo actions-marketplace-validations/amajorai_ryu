@@ -25,12 +25,8 @@ import {
 } from "@ryu/ui/components/collapsible";
 import {
 	ColorPicker,
-	ColorPickerArea,
 	ColorPickerContent,
-	ColorPickerEyeDropper,
-	ColorPickerFormatSelect,
-	ColorPickerHueSlider,
-	ColorPickerInput,
+	ColorPickerPanel,
 	ColorPickerTrigger,
 } from "@ryu/ui/components/color-picker";
 import { Input } from "@ryu/ui/components/input";
@@ -193,6 +189,7 @@ import {
 	toolDetailStepIndex,
 } from "@/src/lib/tool-detail-ladder.ts";
 import { BackgroundCustomizationSettings } from "./BackgroundCustomizationSettings.tsx";
+import { LanguageSettings } from "./LanguageSettings.tsx";
 import {
 	SettingsCard,
 	SettingsGroup,
@@ -475,9 +472,9 @@ function ColorField({
 	value: string;
 	onChange: (key: keyof CustomTokens, val: string) => void;
 }) {
-	// `value` may be a raw preset string (oklch/rgba, possibly translucent). The
-	// swatch + picker only speak 6-digit hex, so derive a display hex here — the
-	// picker emitting an opaque hex on edit is the user's explicit choice.
+	// `value` may be a raw preset string (oklch/rgba, possibly translucent). Keep
+	// that lossless token in theme state while the trigger uses a compact hex
+	// display value for the shared picker.
 	const hexVal = colorToHex(value);
 	const textColor = getContrastColor(hexVal);
 
@@ -503,11 +500,7 @@ function ColorField({
 						{hexVal}
 					</ColorPickerTrigger>
 					<ColorPickerContent className="z-50">
-						<ColorPickerArea />
-						<ColorPickerHueSlider />
-						<ColorPickerEyeDropper />
-						<ColorPickerFormatSelect />
-						<ColorPickerInput />
+						<ColorPickerPanel />
 					</ColorPickerContent>
 				</ColorPicker>
 			</div>
@@ -525,7 +518,8 @@ function PrimaryColorField({
 	onChange: (key: keyof CustomTokens, val: string) => void;
 }) {
 	// `value` may be a raw preset string (oklch). Derive a display hex so the
-	// swatch renders and preset-matching works; the picker still emits hex.
+	// trigger renders and preset-matching works; the picker still emits hex for
+	// this explicitly hex-formatted field.
 	const hexVal = colorToHex(value);
 	const matchesPreset = PRIMARY_PRESETS.some(
 		(p) => (mode === "light" ? p.light : p.dark).toLowerCase() === hexVal
@@ -576,11 +570,7 @@ function PrimaryColorField({
 						title="Custom color"
 					/>
 					<ColorPickerContent className="z-50">
-						<ColorPickerArea />
-						<ColorPickerHueSlider />
-						<ColorPickerEyeDropper />
-						<ColorPickerFormatSelect />
-						<ColorPickerInput />
+						<ColorPickerPanel />
 					</ColorPickerContent>
 				</ColorPicker>
 			</div>
@@ -2044,7 +2034,7 @@ export function AppearanceTab() {
 								}
 							/>
 						}
-						description="Use the built-in Agents view: one toggle — Sessions ⇄ Agents — opening on the Agents tab, with messaging-style rows on. Ryu Work selects it automatically; turn it off to return to the full section list."
+						description="Use the built-in Agents view: direct threads appear under each bot, with other chats below the roster and messaging-style rows on. Ryu Work selects it automatically; turn it off to return to the full section list."
 						title="Agents view"
 					/>
 					{/* App-registered modes (`contributes.sidebar_modes`). Rendered from the
@@ -2256,7 +2246,7 @@ export function AppearanceTab() {
 					onOpenChange={setToolDetailAdvancedOpen}
 					open={toolDetailAdvancedOpen}
 				>
-					<CollapsibleTrigger className="flex w-full items-center justify-between gap-3 rounded-[10px] px-3.5 py-2 text-left text-muted-foreground text-xs hover:bg-muted/40">
+					<CollapsibleTrigger className="flex w-full items-center justify-between gap-3 rounded-lg px-3.5 py-2 text-left text-muted-foreground text-xs hover:bg-muted/40">
 						<span>Advanced detail</span>
 						<HugeiconsIcon
 							className={cn(
@@ -3024,6 +3014,14 @@ export function AppearanceTab() {
 			intro={themeIntro}
 			label="Customize"
 			pages={[
+				{
+					id: "language",
+					title: "Language & vibe",
+					hint: "Choose an official locale or a community-created voice pack.",
+					icon: TextFontIcon,
+					tint: "purple",
+					content: <LanguageSettings />,
+				},
 				{
 					id: "layout",
 					title: "Layout & text",

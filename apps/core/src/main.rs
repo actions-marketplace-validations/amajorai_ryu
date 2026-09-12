@@ -1,10 +1,11 @@
+mod a2a;
 mod acl;
 mod acp_runtime;
 mod activity;
-mod a2a;
 mod agent_control;
 mod agent_execution;
 mod agent_routing;
+mod agent_sandbox;
 mod agent_selection;
 mod agents;
 mod approvals;
@@ -18,6 +19,7 @@ mod claude_config;
 mod codex_config;
 mod collab_host;
 mod composio_host;
+mod connection_policy;
 // Composio integration orchestration lives in the extracted `ryu-composio`
 // crate; these aliases keep the in-tree `crate::composio_*` call sites unchanged.
 // The workflow/agent-engine fan-out (`run_workflow_for_trigger`/`run_agent`)
@@ -26,12 +28,13 @@ pub(crate) use ryu_composio::auth as composio_auth;
 pub(crate) use ryu_composio::catalog as composio_catalog;
 pub(crate) use ryu_composio::connect as composio_connect;
 pub(crate) use ryu_composio::triggers as composio_triggers;
-mod connections;
 mod config_file;
+mod connections;
 mod crash;
 mod crypto_host;
 mod dashboards_client;
 mod data_path;
+mod backups;
 /// The `document.parse` extraction facade. Shipped in `9bf1e2023` **without a
 /// `mod` line**, so it was never in the module tree and never compiled — the
 /// deepest form of the gap it was written to close. Declared here so
@@ -98,6 +101,7 @@ mod model_catalog_host;
 pub use ryu_model_format as model_format;
 mod monitors_client;
 mod native_history;
+mod needle2;
 mod node_token;
 mod notify;
 /// Re-export shim: the Open Knowledge Format (OKF) primitive now lives in the
@@ -118,11 +122,11 @@ mod plugin_storage;
 mod plugins;
 mod policy_alerts;
 mod portable_packages;
-mod prompt_evals;
 mod predict;
 mod predict_host;
 mod privacy;
 mod profile;
+mod prompt_evals;
 mod quests_client;
 mod rag_host;
 mod recipes_client;
@@ -133,8 +137,8 @@ mod routing_policy;
 mod rtk_config;
 mod runnable;
 mod ryu_analytics;
-mod safe_actions;
 mod ryu_platform;
+mod safe_actions;
 /// The OS-style "boot with the extension layer off" switch (apps, plugins,
 /// skills, user MCP servers, the scheduler). Resolved once, below, BEFORE
 /// anything it suppresses has a chance to spawn.
@@ -177,14 +181,15 @@ use sidecar::{
     install_state::InstallStatusStore,
     onboarding::SetupManager,
     providers::{
-        apfel::ApfelManager, llamacpp::LlamaCppClassifyManager, llamacpp::LlamaCppEmbedManager,
-        llamacpp::LlamaCppManager, llamacpp::LlamaCppRerankManager,
-        llamacpp::LlamaCppSpeechManager, mlx::MlxManager,
-        mlx_vlm::MlxVlmManager, mesh_llm::MeshLlmManager, ollama::OllamaManager, omlx::OmlxManager, outetts::OuteTtsManager,
-        parakeet::ParakeetManager, ryutts::RyuTtsManager, sdcpp::StableDiffusionManager,
-        sglang::SglangManager, vllm::VllmManager, whispercpp::WhisperCppManager,
-        DockerModelRunnerManager,
+        apfel::ApfelManager, audiocpp::AudioCppManager, llamacpp::LlamaCppClassifyManager,
+        llamacpp::LlamaCppEmbedManager, llamacpp::LlamaCppManager, llamacpp::LlamaCppRerankManager,
+        llamacpp::LlamaCppSpeechManager, mesh_llm::MeshLlmManager, mlx::MlxManager,
+        mlx_serve::MlxServeManager, mlx_vlm::MlxVlmManager, ollama::OllamaManager,
+        omlx::OmlxManager, outetts::OuteTtsManager, parakeet::ParakeetManager,
+        ryutts::RyuTtsManager, sdcpp::StableDiffusionManager, sglang::SglangManager,
+        vllm::VllmManager, whispercpp::WhisperCppManager, DockerModelRunnerManager,
     },
+    tailcat::TailcatManager,
     tailscale::TailscaleManager,
     tools::{
         ghost::GhostManager, llmfit::LlmFit, research::ResearchManager, shadow::ShadowManager,
@@ -251,6 +256,16 @@ fn seed_ghost_sidecar_env() {
 
 #[tokio::main]
 async fn main() {
+    // The Ryu-managed Codex PreToolUse hook must be able to run without
+    // starting the Core server or opening any durable state. Keep this before
+    // every normal boot path so the hook is a pure JSON-in/JSON-out guard.
+    if crate::codex_config::run_safe_delete_hook_if_requested() {
+        return;
+    }
+    if crate::agent_sandbox::run_if_requested() {
+        return;
+    }
+
     // Emit the OpenAPI spec and exit — keeps stdout clean (before tracing init)
     // so `ryu-core --dump-openapi > core-openapi.json` is well-formed. The spec
     // is static (derived from handler annotations), so no server state is needed.
@@ -298,8 +313,8 @@ async fn main() {
     // Prompt Studio suites/runs/reviews are Core-owned durable resources. Install
     // the store after profile defaults so the database follows the active node
     // data directory, before any HTTP router can serve the prompt-eval surface.
-    let prompt_eval_store = crate::prompt_evals::PromptEvalStore::open()
-        .expect("open prompt eval store");
+    let prompt_eval_store =
+        crate::prompt_evals::PromptEvalStore::open().expect("open prompt eval store");
     crate::prompt_evals::PromptEvalStore::install_global(prompt_eval_store)
         .expect("install prompt eval store");
 
@@ -329,13 +344,9 @@ async fn main() {
             source = ?resolved.source,
             "node auth token resolved; protected routes require a bearer"
         ),
-        // Not fatal on loopback (Core behaves exactly as it did before this
-        // existed). `enforce_remote_auth` below still REFUSES to expose a tokenless
-        // node beyond loopback, so an unwritable home cannot yield an open node on
-        // a public IP.
-        None => {
-            tracing::warn!("no node auth token could be established; local API is UNAUTHENTICATED")
-        }
+        // A credential initialization failure must never weaken API admission,
+        // including on loopback. No listener or child service is started.
+        None => boot_fail!("node credentials could not be initialized; refusing unauthenticated startup"),
     }
 
     // Ghost sidecar env: the Ghost MCP server moved from a hardcoded built-in to
@@ -565,6 +576,7 @@ async fn main() {
     // + reconcile orphan `.part` files (auto-resume when RYU_DOWNLOADS_AUTORESUME=1).
     let download_center = crate::downloads::DownloadCenter::with_default_client();
     download_center.load().await;
+    crate::needle2::install_downloads(download_center.clone());
 
     // Island is a desktop-owned companion, not a Core sidecar: Core never starts
     // it and it stays out of the node selector while the feature is disabled. Its
@@ -577,12 +589,9 @@ async fn main() {
         let island_downloads = download_center.clone();
         tokio::spawn(async move {
             let version = env!("CARGO_PKG_VERSION");
-            if let Err(error) = crate::sidecar::tools::island::ensure_installed(
-                &island_downloads,
-                version,
-                false,
-            )
-            .await
+            if let Err(error) =
+                crate::sidecar::tools::island::ensure_installed(&island_downloads, version, false)
+                    .await
             {
                 tracing::warn!(error = %error, "Island preinstall/update failed");
             }
@@ -623,11 +632,17 @@ async fn main() {
         // MLX-VLM — vision/omni MLX engine (recommended default MLX on Apple
         // Silicon). Same node-gate as mlx-lm.
         Arc::new(MlxVlmManager::new()),
+        // mlx-serve — native Zig, model-directory MLX + GGUF server. It is
+        // opt-in and uses the same active-engine swap as the Python MLX lanes.
+        Arc::new(MlxServeManager::new()),
         // oMLX — high-performance Apple-Silicon server (PATH-adopted, opt-in).
         Arc::new(OmlxManager::new()),
         // Docker Model Runner — adopt-only: Ryu downloads/spawns nothing, it just
         // routes to Docker's built-in OpenAI-compatible model server on :12434.
         Arc::new(DockerModelRunnerManager::new()),
+        Arc::new(sidecar::providers::LemonadeManager::new()),
+        Arc::new(sidecar::providers::LlamaSwapManager::new()),
+        Arc::new(sidecar::providers::FreeTokenManager::new()),
         // apfel — Apple Foundation Models (Apple Silicon macOS 26+). Adopt-a-binary
         // (PATH/`brew`), serves Apple Intelligence as an OpenAI-compat local engine.
         // Registered on every platform so the catalog shows it (disabled) off a
@@ -640,6 +655,7 @@ async fn main() {
         // Voice engines (STT/TTS) — opt-in, run alongside the resident chat engine.
         Arc::new(WhisperCppManager::new().with_downloads(download_center.clone())),
         Arc::new(ParakeetManager::new().with_downloads(download_center.clone())),
+        Arc::new(AudioCppManager::new()),
         Arc::new(OuteTtsManager::new().with_downloads(download_center.clone())),
         // Ryu TTS sidecar — universal multi-engine text-to-speech (Python runtime
         // fronting KittenTTS, Pocket TTS, …). Opt-in; NOT in startup_order — it
@@ -673,10 +689,11 @@ async fn main() {
         Arc::new(ZeroClawManager::new().with_downloads(download_center.clone())),
         Arc::new(OpenClawManager::new()),
         Arc::new(HermesManager::new()),
-        // Mesh daemon (Tailscale/Headscale, #478). Opt-in via RYU_MESH_ENABLED;
-        // registered here so the catalog/install routes can reach it, but
-        // deliberately NOT in `startup_order` — it never auto-starts.
+        // Network backends (Tailscale/Headscale + Tailcat, #478). Opt-in via
+        // RYU_MESH_ENABLED; registered here so the config/start routes can reach
+        // them. Only the selected backend is marked installed at boot.
         Arc::new(TailscaleManager::new().with_downloads(download_center.clone())),
+        Arc::new(TailcatManager::new()),
     ];
 
     let startup_order = vec![
@@ -709,16 +726,24 @@ async fn main() {
         // installed, and a lean build (no `voice-parakeet`) refuses in `start()` and
         // reports the missing feature — neither reports a false "Running".
         "parakeet".into(),
+        // audio.cpp is a selectable native STT/TTS runtime. It is only started
+        // when its version marker is present, so the optional alternate costs
+        // nothing on nodes that have not installed it.
+        "audiocpp".into(),
         "ollama".into(),
         "vllm".into(),
         "sglang".into(),
         "mlx".into(),
+        "mlx-serve".into(),
         // Docker Model Runner is adopt-only (never spawned/downloaded), but it
         // MUST be in startup_order: `seed_names = startup_order.clone()` drives
         // `seed_installed_from_disk`, so without it a persisted install would not
         // re-seed the installed set on restart. `start_all` skips non-resident
         // local engines, so listing it here has no spawn cost.
         "docker-model-runner".into(),
+        "lemonade".into(),
+        "llama-swap".into(),
+        "freetoken".into(),
         // apfel (Apple Foundation Models). Like docker-model-runner it never
         // auto-spawns (`start_all` skips non-resident local engines), but it MUST
         // be in startup_order so `seed_installed_from_disk` re-seeds a persisted
@@ -738,24 +763,20 @@ async fn main() {
         "nemoclaw".into(),
         "ironclaw".into(),
         "hermes".into(),
-        // Mesh daemon (Tailscale/Headscale, #478). Listed in startup_order so a
-        // mesh-enabled node auto-starts the daemon on boot. `start_all` skips it
+        // Network backends (Tailscale/Headscale + Tailcat, #478). Listed in
+        // startup_order so an enabled node auto-starts its selected backend on boot.
+        // `start_all` skips them
         // unless it was explicitly marked installed, which `main()` does just
         // below only when `ryu_mesh::is_enabled()`. A mesh-off install is never
         // marked and so never runs (nor logs) anything.
         //
-        // It USED to be PATH-adopted only, and therefore never in `versions.json`.
-        // It can be there now — `sidecar/tailscale/downloader.rs` installs a
-        // managed pair when no client is on PATH — which would otherwise make
-        // `seed_installed_from_disk` mark it installed on every boot and produce a
-        // failed-start log for users who never enabled the mesh. That function
-        // skips this one name for exactly that reason; the mesh pref stays the
-        // single source of installed-ness here. That skip is now load-bearing for
-        // the DEFAULT node, not just an unusual one: first run pre-installs the
-        // client (see `MESH_PREINSTALL_PREF_KEY`), so a mesh-OFF machine has a
-        // `versions.json` tailscale row from boot 2 onward. Seeding from it would
-        // start a tailnet daemon nobody asked for.
+        // These used to be PATH-adopted only, and therefore never in
+        // `versions.json`. They can be there now because Ryu manages both client
+        // binaries; seeding from them would otherwise start a network listener
+        // for users who never enabled the mesh. The mesh pref stays the single
+        // source of installed-ness for these sidecars.
         "tailscale".into(),
+        "tailcat".into(),
     ];
 
     // Keep the names so we can seed the installed set from disk before
@@ -845,9 +866,9 @@ async fn main() {
     }
     // Persisted agent teams (collections of agents + a coordination strategy) now
     // live OUT-OF-PROCESS in the `ryu-teams` sidecar (single owner of `teams.db`).
-    // Core reaches them over loopback via `TeamsClient`, constructed below once the
-    // manifests are loaded (so the sidecar port resolves from the manifest, not a
-    // hardcoded constant).
+    // Core reaches them over loopback via `TeamsClient`. The client is constructed
+    // before app-sidecar reconciliation and resolves a manager-owned target per call;
+    // no manifest port becomes a dial target here.
     let conversations = match server::conversations::ConversationStore::open_default() {
         Ok(store) => store,
         Err(e) => boot_fail!("failed to open conversation store: {e:#}"),
@@ -1179,9 +1200,9 @@ async fn main() {
     rtk_config::seed_and_apply(&preferences).await;
     // Command-approval gate: seed `RYU_EXEC_APPROVAL_MODE` from the pref so every
     // ACP agent's native tool calls (Claude/Codex `Bash`/`Write`/`Edit`) are
-    // scanned at the `request_permission` seam. Off by default; seeded once here
-    // (before request threads) so there is no concurrent env race — restart to
-    // apply, like the crash/OTLP prefs.
+    // scanned at the `request_permission` seam. The pattern scanner is armed by
+    // default; the permanent-deletion guard is stronger and remains active even
+    // when this pattern mode is explicitly turned off.
     if let Ok(Some(value)) = preferences
         .get(exec_approval::EXEC_APPROVAL_MODE_PREF_KEY)
         .await
@@ -1286,10 +1307,8 @@ async fn main() {
         loaded.compatible = runtime;
         loaded
     };
-    // Loopback clients need their manifest-declared ports before the default
-    // marketplace packages are materialized below. Keep this bootstrap snapshot
-    // separate from the runtime set: absent packages must not be activated merely
-    // to make startup port resolution work.
+    // Keep bootstrap packages separate from the runtime set until the default
+    // marketplace packages are materialized below.
     let bootstrap_manifests = crate::plugin_manifest::PluginManifestLoader::load_bootstrap();
     if !loaded_manifests.incompatible.is_empty() {
         tracing::info!(
@@ -1300,56 +1319,41 @@ async fn main() {
     let incompatible_manifests = Arc::new(tokio::sync::RwLock::new(loaded_manifests.incompatible));
     let app_manifests = Arc::new(tokio::sync::RwLock::new(loaded_manifests.compatible));
     // Loopback client for the out-of-process `ryu-teams` sidecar (single owner of
-    // `teams.db`). Port resolved from the just-loaded manifests, profile-shifted.
-    let teams = crate::teams_client::TeamsClient::new(crate::teams_client::sidecar_port(
-        &bootstrap_manifests,
-    ));
+    // `teams.db`). Targets resolve through the live sidecar manager per request.
+    let teams = crate::teams_client::TeamsClient::new(Arc::clone(&sidecars));
     // Loopback client for the out-of-process `ryu-finetune` sidecar (single owner of
-    // `finetune.db` + the Python `unsloth` worker). Port resolved from the just-loaded
-    // manifests, profile-shifted — same posture as `teams`.
-    let finetune = crate::finetune_client::FinetuneClient::new(
-        crate::finetune_client::sidecar_port(&bootstrap_manifests),
-    );
+    // `finetune.db` + the Python `unsloth` worker). Target resolves from the manager's
+    // live registration per request — same posture as `teams`.
+    let finetune = crate::finetune_client::FinetuneClient::new(Arc::clone(&sidecars));
     // Loopback client for the out-of-process `ryu-quests` sidecar (single owner of
-    // `quests.db` + the detection engine). Port resolved from the just-loaded
-    // manifests, profile-shifted — same posture as `finetune`/`teams`. Published as
-    // a process-global so the scheduler (`JobTarget::Quest`) can reach it without
+    // `quests.db` + the detection engine). Target resolves from the manager's live
+    // registration per request — same posture as `finetune`/`teams`. Published as a
+    // process-global so the scheduler (`JobTarget::Quest`) can reach it without
     // `ServerState`.
-    let quests = crate::quests_client::QuestsClient::new(crate::quests_client::sidecar_port(
-        &bootstrap_manifests,
-    ));
+    let quests = crate::quests_client::QuestsClient::new(Arc::clone(&sidecars));
     crate::quests_client::set_global_client(quests.clone());
     // Loopback client for the out-of-process `ryu-monitors` sidecar (single owner of
-    // `monitors.db` + the monitor engine). Port resolved from the just-loaded
-    // manifests, profile-shifted — same posture as `quests`. Published as a
-    // process-global so the scheduler (`JobTarget::Monitor`) can reach it without
-    // `ServerState`; the reconcile loop is spawned once `activity`/`ServerState` exist.
-    let monitors = crate::monitors_client::MonitorsClient::new(
-        crate::monitors_client::sidecar_port(&bootstrap_manifests),
-    );
+    // `monitors.db` + the monitor engine). Target resolves from the manager's live
+    // registration per request — same posture as `quests`. Published as a process-global
+    // so the scheduler (`JobTarget::Monitor`) can reach it without `ServerState`; the
+    // reconcile loop is spawned once `activity`/`ServerState` exist.
+    let monitors = crate::monitors_client::MonitorsClient::new(Arc::clone(&sidecars));
     crate::monitors_client::set_global_client(monitors.clone());
     // Loopback client for the out-of-process `ryu-dashboards` sidecar (single owner
-    // of `dashboards.db` + the refresh loop + the `/api/dashboards/*` surface). Port
-    // resolved from the just-loaded manifests, profile-shifted — same posture as
+    // of `dashboards.db` + the refresh loop + the `/api/dashboards/*` surface). Target
+    // resolves from the manager's live registration per request — same posture as
     // `monitors`. Published as a process-global so the state-free `dashboard_builder`
     // MCP runnable can reach it; also backs the kernel hardware device-dashboard
     // renderer + nudge loop through the `ryu_hardware::DashboardFeed` seam.
-    let dashboards = crate::dashboards_client::DashboardsClient::new(
-        crate::dashboards_client::sidecar_port(&bootstrap_manifests),
-    );
+    let dashboards = crate::dashboards_client::DashboardsClient::new(Arc::clone(&sidecars));
     crate::dashboards_client::set_global_client(dashboards.clone());
     // Loopback client for the out-of-process `ryu-meetings` sidecar (single owner of
-    // `meetings.db` + the engine/audio pipeline + the `/api/meetings/*` surface). Port
-    // resolved from the just-loaded manifests, profile-shifted — same posture as
+    // `meetings.db` + the engine/audio pipeline + the `/api/meetings/*` surface). Target
+    // resolves from the manager's live registration per request — same posture as
     // `dashboards`. Backs the kernel hardware ambient-audio path through the
     // `ryu_hardware::MeetingIngest` seam; the activity-feed fold is spawned once
     // `activity`/`ServerState` exist.
-    let meetings = crate::meetings_client::MeetingsClient::new(
-        crate::meetings_client::sidecar_port(&bootstrap_manifests),
-    );
-    // Resolve the `ryu-healing` sidecar port from the bootstrap snapshot; the
-    // healing client is built later, once `server_state` exists.
-    let healing_sidecar_port = crate::healing_client::sidecar_port(&bootstrap_manifests);
+    let meetings = crate::meetings_client::MeetingsClient::new(Arc::clone(&sidecars));
     let app_store = match crate::plugins::PluginStore::open() {
         Ok(store) => store,
         Err(e) => boot_fail!("failed to open app store: {e:#}"),
@@ -1796,8 +1800,8 @@ async fn main() {
     let sync_conversations = conversations.clone();
     let sync_spaces = spaces.clone();
     let sync_preferences = preferences.clone();
-    // Clone the preferences handle for the opt-in anonymous community-savings
-    // beacon (OFF by default) before `preferences` moves into ServerState below.
+    // Clone the preferences handle for the opt-out anonymous community-savings
+    // beacon (ON by default) before `preferences` moves into ServerState below.
     let stats_preferences = preferences.clone();
     // Clone the preferences handle for the managed Ryu analytics heartbeat. It
     // starts after durable-token adoption below so the relay sees the live node
@@ -1849,6 +1853,13 @@ async fn main() {
         Err(e) => boot_fail!("failed to open experience store: {e:#}"),
     };
 
+    let improvement_store = match ryu_improvement::ImprovementStore::open(
+        crate::paths::ryu_dir().join("improvements.db"),
+    ) {
+        Ok(store) => store,
+        Err(e) => boot_fail!("failed to open improvement store: {e}"),
+    };
+
     let agent_ui_templates = match server::agent_ui_templates::AgentUiTemplateStore::open_default()
     {
         Ok(store) => store,
@@ -1894,6 +1905,7 @@ async fn main() {
         catalog_client: Arc::new(crate::plugins::catalog::PluginCatalogClient::new()),
         skills: skill_registry,
         app_contrib: crate::plugins::app_contrib::AppContribRegistry::new(),
+        plugin_runtime: crate::plugins::runtime::PluginRuntime::new(),
         traces,
         preferences,
         support_audit,
@@ -1916,6 +1928,7 @@ async fn main() {
         collab,
         finetune,
         experience: experience_store,
+        improvements: improvement_store,
         agent_ui_templates,
         // Captured for the public `/api/realtime/ws` handler's in-handler node
         // token enforcement (the public router has no `auth_token` Extension).
@@ -1939,7 +1952,7 @@ async fn main() {
     // `ServerState`) and spawn the run-status bus loop, which reads a failed run's
     // context from the kernel conversation store and posts it to the sidecar,
     // applying the returned verdict (Core owns the approvals write + the re-run).
-    let healing = crate::healing_client::HealingClient::new(healing_sidecar_port);
+    let healing = crate::healing_client::HealingClient::new(Arc::clone(&sidecars));
     crate::healing_client::set_global_client(healing.clone());
     crate::healing_client::spawn(healing, server_state.clone());
     server::agent_sync::spawn_worker(server_state.clone());
@@ -1994,10 +2007,13 @@ async fn main() {
     // `onStartup` wakes here. Spawned (not awaited) so a slow registration never
     // delays the listener bind. onChat/onCommand are data-wiring follow-ons that
     // call the same `fire_activation_event` driver from the chat/palette paths.
+    // Sidecar reconciliation follows this activation pass in the same task so
+    // its generation binding cannot race the initial runnable registration.
     {
         let startup_state = server_state.clone();
         tokio::spawn(async move {
             crate::server::fire_activation_event(&startup_state, "onStartup").await;
+            crate::server::reconcile_plugin_sidecars(&startup_state).await;
         });
     }
 
@@ -2014,19 +2030,6 @@ async fn main() {
         Ok(0) => {}
         Ok(n) => tracing::info!("purged {n} stale sidecar provider entr(ies) from models.json"),
         Err(e) => tracing::warn!("purging stale sidecar provider entries failed: {e}"),
-    }
-
-    // Reconcile manifest-declared managed sidecars (the app ⇄ sidecar bridge):
-    // re-register + start every enabled plugin's declared sidecar. These are not in
-    // the SidecarManager's `startup_order`, so nothing else restarts them after a
-    // Core restart — without this an enabled plugin's process stays dead while the
-    // plugin still reads as enabled. Spawned (not awaited) so slow binary downloads
-    // never delay the listener bind; idempotent with the enable path.
-    {
-        let sidecar_state = server_state.clone();
-        tokio::spawn(async move {
-            crate::server::reconcile_plugin_sidecars(&sidecar_state).await;
-        });
     }
 
     // Reconcile the bundled system-skills catalog in the background: install
@@ -2180,10 +2183,10 @@ async fn main() {
     // this never alters default behaviour or blocks startup.
     server::sync::spawn_sync_loop(sync_conversations, sync_spaces, sync_preferences);
 
-    // Start the opt-in anonymous community-savings beacon. A no-op every tick
-    // until the user opts in (`community-stats-enabled` pref or
-    // `RYU_COMMUNITY_STATS_ENABLED`). OFF by default and fail-open, so this never
-    // alters default behaviour, sends identity data, or blocks startup.
+    // Start the opt-out anonymous community-savings beacon. It remains inactive
+    // whenever the user opts out (`community-stats-enabled=false` or
+    // `RYU_COMMUNITY_STATS_ENABLED=false`) and is fail-open, so it never sends
+    // identity data or blocks startup.
     stats_beacon::spawn_stats_beacon(stats_preferences);
 
     // F7 boot precedence: BEFORE any control-plane spawn reads the gateway env,
@@ -2274,9 +2277,7 @@ async fn main() {
             loop {
                 attempt += 1;
                 match sidecar::control_plane::register_managed_node(&cp_client).await {
-                    Ok(None)
-                        if fleet::enrollment_recovery_pending() && attempt < MAX_ATTEMPTS =>
-                    {
+                    Ok(None) if fleet::enrollment_recovery_pending() && attempt < MAX_ATTEMPTS => {
                         let backoff = std::time::Duration::from_secs(2u64.pow(attempt.min(5)));
                         tracing::info!(
                             "control-plane: waiting for saved organization enrollment recovery; retrying registration in {backoff:?}"
@@ -2403,60 +2404,78 @@ async fn main() {
     // Awaited (not spawned) so the seed is in place before `start_all` reads it.
     setup.seed_installed_from_disk(&seed_names).await;
 
-    // Mesh daemon: make `start_all` actually start it when the mesh is enabled.
-    // `seed_installed_from_disk` deliberately skips tailscale (a `versions.json`
-    // row now exists once the managed client is installed, and seeding from it
-    // would start the daemon for people who never enabled the mesh), so mark it
-    // installed from the SAME signal the rest of the mesh reads. A mesh-off
-    // install stays unmarked → `start_all` skips it
-    // entirely (no daemon, no warning). The desktop's runtime toggle marks it
-    // too via `POST /api/mesh/config`.
-    if ryu_mesh::is_enabled() {
-        setup.mark_installed("tailscale").await;
-        tracing::info!("mesh: enabled, Tailscale daemon will start with the other sidecars");
+    // Mesh daemon: make `start_all` actually start the selected backend when the
+    // mesh is enabled. `seed_installed_from_disk` deliberately skips both network
+    // sidecars: a managed binary may exist because Ryu preinstalled it while the
+    // mesh was off, and seeding from that binary would start a network listener
+    // nobody asked for. The enabled preference is the authority that marks the
+    // selected sidecar installed.
+    let selected_network_backend = crate::sidecar::tailscale::mesh_backend().await.0;
+    let selected_network_available = match selected_network_backend {
+        crate::sidecar::tailscale::MeshBackend::Tailcat => {
+            crate::sidecar::tailcat::resolve_binary().is_ok()
+        }
+        crate::sidecar::tailscale::MeshBackend::Headscale
+        | crate::sidecar::tailscale::MeshBackend::Tailscale => {
+            crate::sidecar::tailscale::ensure_mesh_binaries().is_ok()
+        }
+    };
+    if ryu_mesh::is_enabled() && selected_network_available {
+        setup
+            .mark_installed(selected_network_backend.sidecar_name())
+            .await;
+        tracing::info!(
+            backend = selected_network_backend.as_str(),
+            sidecar = selected_network_backend.sidecar_name(),
+            "network: selected backend will start with the other sidecars"
+        );
+    } else if ryu_mesh::is_enabled() {
+        tracing::info!(
+            backend = selected_network_backend.as_str(),
+            "network: selected backend is not installed yet; background installation will make it startable"
+        );
     }
 
-    // Mesh CLIENT install — a separate decision from the enable above, and the
-    // reason the two are no longer one block. Staging the binaries on a mesh-OFF
-    // node is what makes first run behave like llama.cpp + the default GGUF, which
-    // `install_local_stack` fetches unconditionally ~90 lines up: the client is
-    // there before the user wants it. Without this the ONLY trigger was the
-    // Tunnel toggle itself, so flipping it dropped the user into an up-to-10-minute
-    // `watchMeshInstall` wait; with the binaries staged that toggle takes the
-    // `ensure_mesh_binaries().is_ok()` branch and connects immediately.
+    // Mesh client install — a separate decision from enabling the mesh. Staging
+    // the selected backend on a mesh-OFF node is what makes first use behave like
+    // the default engines: the client is already present before the user turns
+    // the Tunnel on. If the user chose Tailcat, stage Tailcat; Headscale and
+    // Tailscale share the managed Tailscale client pair.
     //
-    // This does NOT turn the mesh on. `spawn_mesh_client_install` re-reads
-    // `ryu_mesh::is_enabled()` only AFTER the download and, when false, logs
-    // "installed, but the mesh was turned off meanwhile" without marking or
-    // starting anything — so no daemon runs, Core stays loopback-only, and the
-    // fail-closed token gate is untouched. `seed_installed_from_disk`'s tailscale
-    // skip is what keeps that true across the NEXT boot (a `versions.json` row now
-    // exists on mesh-off nodes), so it must stay.
-    //
-    // Both conditions after the want-check are the honest ones: nothing downloads
-    // when a complete `tailscale`/`tailscaled` pair already resolves (PATH adoption
-    // included), and `can_install()` is false on Windows (no userspace route) and
-    // on a Mac without Homebrew, so those nodes stay silent instead of failing.
-    // Re-entry is guarded by `MESH_INSTALL_IN_FLIGHT`, so this racing a user's
-    // toggle cannot double-download.
-    if (ryu_mesh::is_enabled() || mesh_preinstall_client)
-        && crate::sidecar::tailscale::ensure_mesh_binaries().is_err()
-        && crate::sidecar::tailscale::downloader::can_install()
-    {
+    // This does NOT turn the mesh on. `spawn_mesh_backend_install` re-reads
+    // `ryu_mesh::is_enabled()` only AFTER the download and, when false, leaves
+    // the sidecar unmarked and stopped. The fail-closed token gate therefore
+    // remains untouched while a mesh-OFF node is being prepared.
+    let should_preinstall_network = ryu_mesh::is_enabled() || mesh_preinstall_client;
+    let can_install_selected_backend = match selected_network_backend {
+        crate::sidecar::tailscale::MeshBackend::Tailcat => {
+            crate::sidecar::tailcat_downloader::can_install()
+        }
+        crate::sidecar::tailscale::MeshBackend::Headscale
+        | crate::sidecar::tailscale::MeshBackend::Tailscale => {
+            crate::sidecar::tailscale::downloader::can_install()
+        }
+    };
+    if should_preinstall_network && !selected_network_available && can_install_selected_backend {
         if ryu_mesh::is_enabled() {
-            tracing::info!("mesh: enabled but no Tailscale client — installing one now");
+            tracing::info!(
+                backend = selected_network_backend.as_str(),
+                "mesh: selected network client is missing — installing one now"
+            );
         } else {
             tracing::info!(
-                "mesh: pre-installing the Tailscale client (mesh stays off; set \
+                backend = selected_network_backend.as_str(),
+                "mesh: pre-installing the selected network client (mesh stays off; set \
                  {}=0 or the `{}` pref to skip)",
                 crate::mesh_host::MESH_PREINSTALL_ENV,
                 crate::mesh_host::MESH_PREINSTALL_PREF_KEY,
             );
         }
-        crate::server::spawn_mesh_client_install(
+        crate::server::spawn_mesh_backend_install(
             download_center.clone(),
             Arc::clone(&sidecars),
             Arc::clone(&install_status),
+            selected_network_backend,
         );
     }
 
@@ -2557,6 +2576,8 @@ fn ensure_identity_health_job() -> Result<(), String> {
         require_approval: false,
         // Core-owned (reconciled by Core itself), not an App-created job.
         owner_app: None,
+        owner_user_id: None,
+        org_id: None,
         created_at: existing
             .as_ref()
             .map(|j| j.created_at.clone())
@@ -2592,6 +2613,8 @@ fn ensure_learning_cycle_job() -> Result<(), String> {
         require_approval: false,
         // Core-owned (reconciled by Core itself), not an App-created job.
         owner_app: None,
+        owner_user_id: None,
+        org_id: None,
         created_at: existing
             .as_ref()
             .map(|j| j.created_at.clone())

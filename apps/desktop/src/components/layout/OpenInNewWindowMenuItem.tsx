@@ -6,11 +6,13 @@ import { useAppSurface } from "@/src/contexts/app-surface-context.tsx";
 
 interface OpenInNewWindowMenuItemProps {
 	iconClassName?: string;
+	label?: string;
 	onClick: () => void;
 }
 
 export function OpenInNewWindowContextMenuItem({
 	iconClassName = "mr-2 size-4",
+	label = "Open in new window",
 	onClick,
 }: OpenInNewWindowMenuItemProps) {
 	if (!useAppSurface().canOpenNativeWindows) {
@@ -20,7 +22,7 @@ export function OpenInNewWindowContextMenuItem({
 	return (
 		<ContextMenuItem onClick={onClick}>
 			<HugeiconsIcon className={iconClassName} icon={LinkSquare02Icon} />
-			Open in new window
+			{label}
 		</ContextMenuItem>
 	);
 }

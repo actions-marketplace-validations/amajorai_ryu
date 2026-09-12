@@ -53,7 +53,7 @@ function slugify(label: string): string {
 export function themeToPluginManifest(
 	variant: ThemeVariant,
 	options: { scope?: string } = {}
-): Record<string, unknown> {
+) {
 	const slug = slugify(variant.label);
 	const scope = options.scope?.trim() || "@you";
 	const pluginId = `${scope}/${slug}-theme`;

@@ -23,7 +23,7 @@
 //!   subscribe-loop, now dep-free JSON).
 //!
 //! Security mirrors the ext-proxy hop exactly: loopback target on the sidecar's
-//! declared port ([`crate::profile::port`]-shifted for dev profiles), with the
+//! live manager-owned port, with the
 //! per-plugin minted bearer ([`crate::sidecar::ext_proxy::ext_token`]) the sidecar
 //! was spawned with — nothing hardcoded.
 
@@ -59,18 +59,6 @@ fn job_id_for(quest_id: &str) -> String {
     format!("quest-{quest_id}")
 }
 
-/// Resolve the `ryu-quests` sidecar's loopback port from the loaded manifests,
-/// profile-shifted the same way the ext-proxy forwards ([`crate::profile::port`]). The
-/// port comes from the manifest and ONLY the manifest — see
-/// [`crate::sidecar::ext_proxy::sidecar_port`] for why a built-in absence is a
-/// build-time invariant rather than a runtime fallback.
-pub fn sidecar_port(manifests: &[crate::plugin_manifest::PluginManifest]) -> u16 {
-    crate::sidecar::ext_proxy::sidecar_port(manifests, QUESTS_PLUGIN_ID, QUESTS_SIDECAR).expect(
-        "built-in quests.manifest.json must declare the ryu-quests sidecar (see \
-         plugin_manifest::BUILTIN_MANIFESTS)",
-    )
-}
-
 /// Process-global quests client, so the scheduler (`JobTarget::Quest`) — which
 /// does not carry `ServerState` — can reach the
 /// sidecar. Set once from `main.rs`, mirroring the `ryu_*::global_engine` pattern
@@ -88,21 +76,24 @@ pub fn global_client() -> Option<&'static QuestsClient> {
 }
 
 /// Typed loopback client for the `ryu-quests` sidecar. Cheap to clone (holds only
-/// the resolved port); the bearer is minted per call so it always tracks the
+/// the manager); the bearer is minted per call so it always tracks the
 /// current node token.
 #[derive(Clone)]
 pub struct QuestsClient {
-    port: u16,
+    manager: std::sync::Arc<crate::sidecar::SidecarManager>,
 }
 
 impl QuestsClient {
-    /// Build a client bound to the sidecar's resolved loopback port.
-    pub fn new(port: u16) -> Self {
-        Self { port }
+    /// Build a client that resolves the manager's live target before each request.
+    pub fn new(manager: std::sync::Arc<crate::sidecar::SidecarManager>) -> Self {
+        Self { manager }
     }
 
-    fn base_url(&self) -> String {
-        format!("http://127.0.0.1:{}/api/quests", self.port)
+    fn base_url(&self) -> std::result::Result<String, String> {
+        self.manager
+            .sidecar_base_url(QUESTS_PLUGIN_ID, QUESTS_SIDECAR)
+            .map(|url| format!("{url}/api/quests"))
+            .map_err(|denied| denied.reason())
     }
 
     /// The per-plugin minted bearer the sidecar was spawned with — the same value
@@ -122,7 +113,7 @@ impl QuestsClient {
             None => json!({}),
         };
         let resp = reqwest::Client::new()
-            .post(format!("{}/{quest_id}/judge", self.base_url()))
+            .post(format!("{}/{quest_id}/judge", self.base_url()?))
             .bearer_auth(self.bearer())
             .json(&body)
             .send()
@@ -151,7 +142,7 @@ impl QuestsClient {
     /// sidecar answered and authoritatively holds no quests.
     pub async fn list_quests(&self) -> Result<Vec<Value>, String> {
         let resp = reqwest::Client::new()
-            .get(self.base_url())
+            .get(self.base_url()?)
             .bearer_auth(self.bearer())
             .send()
             .await
@@ -173,7 +164,7 @@ impl QuestsClient {
     /// create/complete/dismiss/reopen operations.
     pub async fn post(&self, path: &str, body: Value) -> Result<Value, String> {
         let resp = reqwest::Client::new()
-            .post(format!("{}{path}", self.base_url()))
+            .post(format!("{}{path}", self.base_url()?))
             .bearer_auth(self.bearer())
             .json(&body)
             .send()
@@ -195,8 +186,11 @@ impl QuestsClient {
     /// Resolve the detection interval the sidecar reports
     /// (`GET /api/quests/detection-config`), falling back to [`DEFAULT_INTERVAL`].
     async fn detection_interval(&self) -> String {
+        let Ok(base_url) = self.base_url() else {
+            return DEFAULT_INTERVAL.to_string();
+        };
         let Ok(resp) = reqwest::Client::new()
-            .get(format!("{}/detection-config", self.base_url()))
+            .get(format!("{base_url}/detection-config"))
             .bearer_auth(self.bearer())
             .send()
             .await
@@ -389,6 +383,8 @@ fn sync_backing_job(quest_id: &str, title: &str, interval: &str, open: bool) {
         require_approval: false,
         // Core-owned (reconciled by Core itself), not an App-created job.
         owner_app: None,
+        owner_user_id: None,
+        org_id: None,
         created_at: existing
             .as_ref()
             .map(|j| j.created_at.clone())
@@ -479,7 +475,7 @@ pub fn spawn(client: QuestsClient, activity: ActivityStore) {
 /// activity store until the stream closes or errors (then [`spawn`] reconnects).
 async fn stream_activity(client: &QuestsClient, activity: &ActivityStore) -> Result<(), String> {
     let resp = reqwest::Client::new()
-        .get(format!("{}/events", client.base_url()))
+        .get(format!("{}/events", client.base_url()?))
         .bearer_auth(client.bearer())
         .send()
         .await
@@ -536,6 +532,8 @@ mod tests {
             enabled: true,
             require_approval: false,
             owner_app: None,
+            owner_user_id: None,
+            org_id: None,
             created_at: "t".into(),
             updated_at: "t".into(),
             last_run_at: None,

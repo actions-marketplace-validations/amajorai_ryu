@@ -38,6 +38,11 @@ import {
 import { useActiveNode } from "@/src/hooks/useActiveNode.ts";
 import type { ApiTarget } from "@/src/lib/api/client.ts";
 import {
+	createMemory,
+	getMemorySettings,
+	setMemorySettings,
+} from "@/src/lib/api/memory.ts";
+import {
 	AUTO_RECALL_MAX_TOP_K,
 	AUTO_RECALL_MIN_TOP_K,
 	CONTEXT_MAX_OUTPUT_RESERVE,
@@ -65,7 +70,6 @@ import {
 	type ToolRankerId,
 } from "@/src/lib/api/preferences.ts";
 import {
-	indexChunk,
 	listSpaceSummaries,
 	type ScoredChunk,
 	type SpaceSummary,
@@ -141,6 +145,7 @@ const BUDGET_ITEMS = [
 ];
 
 const RANKER_ITEMS: { value: ToolRankerId; label: string }[] = [
+	{ value: "needle2", label: "Needle 2 (on-device selector)" },
 	{ value: "bm25", label: "Keyword (BM25)" },
 	{ value: "semantic", label: "Meaning (embeddings)" },
 ];
@@ -429,7 +434,7 @@ function ContextWindowSection({ target }: { target: ApiTarget }) {
 // and this is the tab that already owns how skills reach the model.
 
 function ToolRankerSection({ target }: { target: ApiTarget }) {
-	const [ranker, setRanker] = useState<ToolRankerId>("bm25");
+	const [ranker, setRanker] = useState<ToolRankerId>("needle2");
 
 	useEffect(() => {
 		let cancelled = false;
@@ -440,7 +445,7 @@ function ToolRankerSection({ target }: { target: ApiTarget }) {
 				}
 			})
 			.catch(() => {
-				// Leaves the BM25 default showing, which is what Core uses when the
+				// Leaves the Needle 2 default showing, which is what Core uses when the
 				// pref is unreadable.
 			});
 		return () => {
@@ -450,10 +455,14 @@ function ToolRankerSection({ target }: { target: ApiTarget }) {
 
 	const handleChange = useCallback(
 		(value: string) => {
-			// Mirrors Core's `ToolRanker::from_pref`: only the exact "semantic"
-			// selects semantic ranking, so a cleared selection means BM25 — the
-			// same thing an unset preference means.
-			const next: ToolRankerId = value === "semantic" ? "semantic" : "bm25";
+			// Mirrors Core's `ToolRanker::from_pref`: explicit BM25 and Semantic
+			// values opt out of the Needle 2 default; unknown values use Needle 2.
+			const next: ToolRankerId =
+				value === "bm25"
+					? "bm25"
+					: value === "semantic"
+						? "semantic"
+						: "needle2";
 			setRanker(next);
 			persist(setToolRanker(target, next), "the search ranking");
 		},
@@ -462,7 +471,7 @@ function ToolRankerSection({ target }: { target: ApiTarget }) {
 
 	return (
 		<SettingsSection
-			caption="How Ryu picks which tools and skills to offer the model for a given request. Keyword matching is the default and needs nothing installed. Meaning-based ranking compares your request to each tool or skill using the embedding model this node is configured with. Where no embedding model is reachable, it quietly falls back to keyword order rather than failing the search."
+			caption="How Ryu picks which tools and skills to offer the model for a given request. Needle 2 is the default on-device selector and falls back to keyword order when its runtime is unavailable. Keyword matching is the explicit no-model option. Meaning-based ranking compares your request to each tool or skill using this node's embedding model."
 			title="Tool and skill search"
 		>
 			<SettingsCard>
@@ -513,6 +522,40 @@ export function MemoryTab() {
 		setLongTermMemory(next);
 		localStorage.setItem(LONG_TERM_MEMORY_KEY, String(next));
 	}, []);
+
+	// Sensitive-topic consent is stored by Core per user/node, not in
+	// localStorage or the node-global preference table. Core defaults it off and
+	// applies it to capture, recall, search, and graph snapshots.
+	const [includeSensitiveTopics, setIncludeSensitiveTopics] = useState(false);
+	useEffect(() => {
+		let cancelled = false;
+		setIncludeSensitiveTopics(false);
+		getMemorySettings(target)
+			.then((settings) => {
+				if (!cancelled) {
+					setIncludeSensitiveTopics(settings.includeSensitiveTopics);
+				}
+			})
+			.catch(() => {
+				// Unavailable or unauthenticated nodes fail closed to off.
+			});
+		return () => {
+			cancelled = true;
+		};
+	}, [target]);
+	const handleSensitiveTopicsChange = useCallback(
+		(next: boolean) => {
+			setIncludeSensitiveTopics(next);
+			setMemorySettings(target, { includeSensitiveTopics: next }).catch(() => {
+				setIncludeSensitiveTopics(!next);
+				toast.error({
+					title: "Couldn't save sensitive-memory consent",
+					description: "Your change wasn't saved. Please try again.",
+				});
+			});
+		},
+		[target]
+	);
 
 	// Auto-recall (U17): before each chat turn Core retrieves relevant memory +
 	// past chat messages and injects them into the prompt. Default ON; persisted in
@@ -668,11 +711,7 @@ export function MemoryTab() {
 			setIndexStatus(null);
 			setIndexError(null);
 			try {
-				await indexChunk(target, {
-					id: `manual-${Date.now()}`,
-					content: trimmed,
-					source: "memory",
-				});
+				await createMemory(target, { content: trimmed });
 				setIndexStatus("Saved to memory.");
 				setIndexContent("");
 			} catch {
@@ -700,6 +739,17 @@ export function MemoryTab() {
 							/>
 						}
 						title="Remember facts across conversations"
+					/>
+					<SettingsItem
+						actions={
+							<Switch
+								checked={includeSensitiveTopics}
+								id="include-sensitive-topics"
+								onCheckedChange={handleSensitiveTopicsChange}
+							/>
+						}
+						description="Allows Ryu to capture and recall sensitive topics such as health conditions and religious beliefs. Off by default; existing sensitive memories stay hidden while it is off."
+						title="Include sensitive topics in memory"
 					/>
 				</SettingsGroup>
 			</SettingsSection>
@@ -786,7 +836,7 @@ export function MemoryTab() {
 					</form>
 
 					{searchError ? (
-						<p className="text-destructive text-sm">{searchError}</p>
+						<p className="text-sm text-status-destructive">{searchError}</p>
 					) : null}
 
 					{results !== null && results.length === 0 && !searchError ? (
@@ -855,7 +905,7 @@ export function MemoryTab() {
 							<p className="text-muted-foreground text-sm">{indexStatus}</p>
 						) : null}
 						{indexError ? (
-							<p className="text-destructive text-sm">{indexError}</p>
+							<p className="text-sm text-status-destructive">{indexError}</p>
 						) : null}
 						<div className="flex justify-end">
 							<Button

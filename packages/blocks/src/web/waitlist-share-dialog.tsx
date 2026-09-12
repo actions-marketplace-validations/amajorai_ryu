@@ -53,9 +53,12 @@ export function WaitlistShareDialog({
 			joined: formatPassDate(facts.joined),
 			name: facts.name,
 			position: facts.position ?? null,
+			referralUrl: facts.ref
+				? `https://${host.replace(/^https?:\/\//u, "")}/r/${encodeURIComponent(facts.ref)}`
+				: null,
 			username: facts.username ?? null,
 		}),
-		[facts.joined, facts.name, facts.position, facts.username]
+		[facts.joined, facts.name, facts.position, facts.ref, facts.username, host]
 	);
 
 	// What gets printed under the card. The member's OWN referral link, not the

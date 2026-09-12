@@ -20,7 +20,7 @@ export function TableElementStatic({
 		>
 			<div className="group/table relative w-fit">
 				<table
-					className="mr-0 ml-px table h-px table-fixed border-collapse"
+					className="ms-px me-0 table h-px table-fixed border-collapse"
 					style={{ borderCollapse: "collapse", width: "100%" }}
 				>
 					<tbody className="min-w-full">{children}</tbody>
@@ -62,7 +62,7 @@ export function TableCellElementStatic({
 			className={cn(
 				"h-full overflow-visible border-none bg-background p-0",
 				element.background ? "bg-(--cellBackground)" : "bg-background",
-				isHeader && "text-left font-normal *:m-0",
+				isHeader && "text-start font-normal *:m-0",
 				"before:size-full",
 				"before:absolute before:box-border before:select-none before:content-['']",
 				borders &&

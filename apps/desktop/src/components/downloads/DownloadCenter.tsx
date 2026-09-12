@@ -31,7 +31,7 @@ import {
 	TrayTextButton,
 	trayMeta,
 } from "@/src/components/shell/TrayPopover.tsx";
-import { useTabsContext } from "@/src/contexts/TabsContext.tsx";
+import { useTabSelector } from "@/src/contexts/TabsContext.tsx";
 import { useAvailableUpdates } from "@/src/hooks/useAvailableUpdates.ts";
 import { useDownloadBulkActions } from "@/src/hooks/useDownloadBulkActions.ts";
 import { useFriendlyMode } from "@/src/hooks/useFriendlyMode.ts";
@@ -63,7 +63,7 @@ export function DownloadCenter() {
 	// downloading — matching the "Updates" section in the panel body.
 	const { refresh, updates } = useAvailableUpdates();
 	const [friendly] = useFriendlyMode();
-	const { openTab } = useTabsContext();
+	const openTab = useTabSelector((state) => state.openTab);
 	const [open, setOpen] = useState(false);
 
 	const {

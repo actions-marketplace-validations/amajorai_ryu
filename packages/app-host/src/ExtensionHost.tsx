@@ -142,6 +142,12 @@ export interface ExtensionHostProps {
 	nonce: string;
 	/** Optional: notified when the bridge connects, for UI affordances. */
 	onConnected?: () => void;
+	/**
+	 * Optional host-owned messages emitted by the mounted frame. The callback is
+	 * invoked only for messages whose source is this iframe; RPC handshakes still
+	 * remain handled by the host below.
+	 */
+	onMessage?: (data: unknown) => void;
 	/** Optional (widget host, ADDITIVE): a ref the host fills with a push function
 	 *  once the port is live, so the caller can send `ryu-widget-set-globals` to the
 	 *  frame (spec §1.2 `HostPush`). Cleared to `null` on unmount. The plugin caller
@@ -165,6 +171,7 @@ export function ExtensionHost({
 	granted,
 	services,
 	onConnected,
+	onMessage,
 	pushRef,
 	themeTokens,
 	title,
@@ -172,7 +179,7 @@ export function ExtensionHost({
 	const iframeRef = useRef<HTMLIFrameElement>(null);
 
 	// Hold the callback-ish props in refs so the bridge effect depends ONLY on the
-	// memoized `granted`/`nonce` and runs exactly once per mount. Without this, an
+	// memoized grants, nonce, and source document. Without this, an
 	// inline `services`/`onConnected` (new identity each render, the common caller
 	// mistake) would re-run the effect, and its cleanup would close the live port
 	// right after a successful handshake; the iframe (srcDoc unchanged) would NOT
@@ -182,11 +189,14 @@ export function ExtensionHost({
 	servicesRef.current = services;
 	const onConnectedRef = useRef(onConnected);
 	onConnectedRef.current = onConnected;
+	const onMessageRef = useRef(onMessage);
+	onMessageRef.current = onMessage;
 	// Mirror the caller's pushRef (a stable ref object, but hold it via our own ref
 	// so the bridge effect stays keyed on [granted, nonce] only, like the others).
 	const pushRefRef = useRef(pushRef);
 	pushRefRef.current = pushRef;
 
+	// biome-ignore lint/correctness/useExhaustiveDependencies: a new srcdoc owns a new bridge even when a caller retains its nonce.
 	useHandshakeEffect(() => {
 		const iframe = iframeRef.current;
 		if (!iframe) {
@@ -198,6 +208,7 @@ export function ExtensionHost({
 		// `agent.cancel` can abort the matching in-flight stream and unmount can abort
 		// all of them.
 		const activeStreams = new Map<number, AbortController>();
+		const readLifetime = new AbortController();
 
 		// Post the terminal reply that ends a request (unary or streaming).
 		const postResult = (id: number, result?: unknown, error?: unknown) => {
@@ -285,6 +296,8 @@ export function ExtensionHost({
 					bindShellStream(servicesRef.current.shellRegisterTabIcon);
 				} else if (req.method === "shell.eventsSubscribe") {
 					bindShellStream(servicesRef.current.shellEventsSubscribe);
+				} else if (req.method === "i18n.subscribe") {
+					bindShellStream(servicesRef.current.i18nSubscribe);
 				} else if (req.method === "finetune.stream") {
 					const arg = asFinetuneIdArg(req.args[0]);
 					const svc = servicesRef.current.finetuneStream;
@@ -372,7 +385,13 @@ export function ExtensionHost({
 				return;
 			}
 
-			dispatchRpc(req.method, req.args, granted, servicesRef.current)
+			dispatchRpc(
+				req.method,
+				req.args,
+				granted,
+				servicesRef.current,
+				readLifetime.signal
+			)
 				.then((result) => {
 					const reply: RpcResponse = {
 						kind: "ryu-plugin-rpc-result",
@@ -398,6 +417,9 @@ export function ExtensionHost({
 		const onWindowMessage = (event: MessageEvent) => {
 			if (disposed) {
 				return;
+			}
+			if (event.source === iframe.contentWindow) {
+				onMessageRef.current?.(event.data);
 			}
 			// The load-bearing decision, delegated to the pure predicate: correct
 			// nonce, from the window we created (`event.origin` is "null" here and
@@ -439,6 +461,7 @@ export function ExtensionHost({
 		window.addEventListener("message", onWindowMessage);
 		return () => {
 			disposed = true;
+			readLifetime.abort();
 			window.removeEventListener("message", onWindowMessage);
 			const pushTarget = pushRefRef.current;
 			if (pushTarget) {
@@ -455,7 +478,7 @@ export function ExtensionHost({
 				port = null;
 			}
 		};
-	}, [granted, nonce]);
+	}, [granted, nonce, srcdoc]);
 
 	useEffect(() => {
 		const iframe = iframeRef.current;

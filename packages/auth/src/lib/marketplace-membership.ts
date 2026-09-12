@@ -1,5 +1,8 @@
 import { PLANS, type PlanId } from "./plans.ts";
 
+const MAX_MARKETPLACE_MEMBERSHIP_PRICE_MINOR = 99_999_999;
+const MAX_MARKETPLACE_MEMBERSHIP_INVOICE_MINOR = 1_000_000_000;
+
 /** The offer shapes that can contribute an A Major Pass price tier. */
 export type MarketplaceMembershipPricingModel =
 	| "bounded_updates"
@@ -46,7 +49,12 @@ export const MARKETPLACE_PRICE_TIERS: readonly MarketplacePriceTier[] = [
 	{ maxAnnualizedUsd: null, multiplier: 100 },
 ];
 
-/** True only for a recurring plan that can fund the Marketplace publisher pool. */
+/**
+ * True only for a recurring plan whose contract funds the Marketplace publisher
+ * pool. Marketplace access and publisher funding are separate plan properties:
+ * Plus, Pro, Max, Teams, Teams Lite, and Business can access supported paid apps without making
+ * their managed-inference price carry an unrelated publisher liability.
+ */
 export function isRecurringMarketplacePlan(
 	plan: PlanId | null | undefined
 ): boolean {
@@ -55,7 +63,7 @@ export function isRecurringMarketplacePlan(
 	}
 	const definition = PLANS[plan];
 	return Boolean(
-		definition.marketplaceApps &&
+		definition.marketplacePublisherPool &&
 			(definition.bindings.monthly || definition.bindings.yearly)
 	);
 }
@@ -65,6 +73,9 @@ export interface MarketplaceMembershipListing {
 	marketplaceVisibility?: string | null;
 	origin?: string | null;
 	pricing?: {
+		amountMinor?: number | null;
+		currency?: string | null;
+		interval?: string | null;
 		membershipOptIn?: boolean | null;
 		model?: string | null;
 		sellerOrgId?: string | null;
@@ -91,14 +102,38 @@ export function isMarketplaceMembershipListingEligible(
 		model === "one_time" ||
 		model === "subscription" ||
 		model === "bounded_updates";
+	const amountMinor = listing.pricing?.amountMinor;
+	const currency =
+		typeof listing.pricing?.currency === "string"
+			? listing.pricing.currency.trim().toLowerCase()
+			: listing.pricing?.currency == null
+				? "usd"
+				: "";
+	const validPrice =
+		typeof amountMinor === "number" &&
+		Number.isSafeInteger(amountMinor) &&
+		amountMinor > 0 &&
+		amountMinor <= MAX_MARKETPLACE_MEMBERSHIP_PRICE_MINOR;
+	const validSubscriptionInterval =
+		model !== "subscription" ||
+		listing.pricing?.interval === undefined ||
+		listing.pricing.interval === "month" ||
+		listing.pricing.interval === "year";
+	const sellerOrgId =
+		typeof listing.pricing?.sellerOrgId === "string"
+			? listing.pricing.sellerOrgId.trim()
+			: "";
 	return Boolean(
 		listing.status === "live" &&
 			listing.kind === "app" &&
 			listing.marketplaceVisibility !== "organization" &&
 			listing.origin !== "community" &&
 			isPaid &&
+			validPrice &&
+			currency === "usd" &&
+			validSubscriptionInterval &&
 			listing.pricing?.membershipOptIn === true &&
-			listing.pricing.sellerOrgId?.trim() &&
+			sellerOrgId &&
 			publisher.payoutsEnabled
 	);
 }
@@ -108,7 +143,9 @@ export function annualizedMarketplacePriceMinor(
 	pricing: MarketplaceMembershipPricing
 ): number {
 	const amount =
-		Number.isInteger(pricing.amountMinor) && pricing.amountMinor > 0
+		Number.isSafeInteger(pricing.amountMinor) &&
+		pricing.amountMinor > 0 &&
+		pricing.amountMinor <= MAX_MARKETPLACE_MEMBERSHIP_PRICE_MINOR
 			? pricing.amountMinor
 			: 0;
 	if (pricing.model === "subscription" && pricing.interval === "month") {
@@ -159,16 +196,21 @@ export function allocateMarketplaceMembershipPool(
 	input: AllocateMarketplaceMembershipPoolInput
 ): MarketplaceMembershipAllocation[] {
 	const invoiceMinor =
-		Number.isInteger(input.invoiceMinor) && input.invoiceMinor > 0
+		Number.isSafeInteger(input.invoiceMinor) &&
+		input.invoiceMinor > 0 &&
+		input.invoiceMinor <= MAX_MARKETPLACE_MEMBERSHIP_INVOICE_MINOR
 			? input.invoiceMinor
 			: 0;
-	const publisherShareBps = Number.isInteger(input.publisherShareBps)
+	const publisherShareBps = Number.isSafeInteger(input.publisherShareBps)
 		? Math.min(Math.max(input.publisherShareBps, 0), 10_000)
 		: 0;
-	const publisherPoolMinor =
-		Number.isInteger(input.publisherPoolMinor) && input.publisherPoolMinor >= 0
+	const publisherPoolMinor = Math.min(
+		invoiceMinor,
+		Number.isSafeInteger(input.publisherPoolMinor) &&
+			input.publisherPoolMinor >= 0
 			? input.publisherPoolMinor
-			: Math.floor((invoiceMinor * publisherShareBps) / 10_000);
+			: Math.floor((invoiceMinor * publisherShareBps) / 10_000)
+	);
 	if (publisherPoolMinor === 0) {
 		return [];
 	}
@@ -187,7 +229,11 @@ export function allocateMarketplaceMembershipPool(
 			continue;
 		}
 		seen.add(appId);
-		uniqueApps.push({ appId, multiplier: app.multiplier, publisherOrgId });
+		uniqueApps.push({
+			appId,
+			multiplier: Math.min(app.multiplier, 100),
+			publisherOrgId,
+		});
 	}
 	if (uniqueApps.length === 0) {
 		return [];

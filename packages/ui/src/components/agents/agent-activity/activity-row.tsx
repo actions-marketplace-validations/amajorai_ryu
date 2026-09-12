@@ -200,12 +200,12 @@ function ToolRow({ item }: { item: AgentActivityTool }) {
 			typeof item.deletions === "number" ? (
 				<span className="flex shrink-0 items-center gap-2 font-mono tabular-nums">
 					{typeof item.additions === "number" ? (
-						<span className="text-emerald-500">
+						<span className="text-status-success">
 							+{formatCount(item.additions) ?? "—"}
 						</span>
 					) : null}
 					{typeof item.deletions === "number" ? (
-						<span className="text-rose-500">
+						<span className="text-status-destructive">
 							−{formatCount(item.deletions) ?? "—"}
 						</span>
 					) : null}

@@ -39,6 +39,8 @@ export const STEP_UP_SCOPES = [
 	"org.delete",
 	/** Membership and control: remove a member, change a role, hand over ownership. */
 	"org.members",
+	/** Organization-owned feature access controls. */
+	"org.features",
 	/** Long-lived secrets: gateway keys, API keys, the provider key vault. */
 	"org.credentials",
 	/** Cloud nodes: schedule removal, transfer, or destroy live infrastructure. */
@@ -96,6 +98,7 @@ const MINUTE_MS = 60 * 1000;
 const WINDOW_MS: Record<StepUpScope, number> = {
 	"org.delete": 5 * MINUTE_MS,
 	"org.members": 10 * MINUTE_MS,
+	"org.features": 10 * MINUTE_MS,
 	"org.credentials": 10 * MINUTE_MS,
 	"node.destroy": 5 * MINUTE_MS,
 	billing: 5 * MINUTE_MS,
@@ -123,8 +126,9 @@ export function stepUpWindowMs(scope: StepUpScope): number {
  * codes, and the emailed code as the fallback the sign-in flow already offers.
  * WITHOUT 2FA enrolled the only thing we can ask for is the emailed code —
  * weaker than a real second factor (it falls to whoever holds the mailbox), but
- * still a live challenge a stolen session cookie alone cannot answer, and the
- * alternative is leaving the action ungated for the majority of accounts.
+ * still useful for non-financial account actions. Card-funded actions are a
+ * deliberate exception: they require an enrolled authenticator and never fall
+ * back to mailbox possession.
  */
 export function stepUpMethods(user: {
 	twoFactorEnabled?: boolean | null;
@@ -148,15 +152,15 @@ export function stepUpMethodsForScope(
 }
 
 /**
- * Billing step-up is conditional by design. Accounts without 2FA keep the
- * existing checkout flow; accounts that enrolled 2FA must prove it before a
- * card-funded mutation proceeds.
+ * Billing step-up is mandatory. A card-funded mutation must never be authorized
+ * by a session cookie plus mailbox possession alone, so an account without an
+ * enrolled authenticator is refused before a challenge can be issued.
  */
 export function stepUpAppliesToUser(
-	scope: StepUpScope,
-	user: { twoFactorEnabled?: boolean | null }
+	_scope: StepUpScope,
+	_user: { twoFactorEnabled?: boolean | null }
 ): boolean {
-	return scope !== "billing" || Boolean(user.twoFactorEnabled);
+	return true;
 }
 
 /**
@@ -169,6 +173,7 @@ const SCOPE_LABELS: Record<StepUpScope, string> = {
 	"org.credentials": "change long-lived access keys",
 	"org.delete": "delete a workspace",
 	"org.members": "change who can access a workspace",
+	"org.features": "change organization feature access",
 	"node.destroy": "remove a cloud node",
 	billing: "complete this billing action",
 	"platform.admin": "use Ryu staff powers",
@@ -289,14 +294,14 @@ export async function verifyStepUpChallenge(input: {
  * Whether `scope` demands a REAL enrolled second factor rather than accepting
  * the emailed fallback.
  *
- * Only platform-admin does. A Ryu-staff session can reach every tenant's data,
- * so "whoever controls the staff mailbox" is not an acceptable answer to "who
- * is holding this session" — staff enrol 2FA or they do not act. Tenant-side
- * scopes stay on the fallback so the gate applies to everyone from day one
- * instead of only to the minority who have enrolled.
+ * Platform-admin and billing do. A Ryu-staff session can reach every tenant's
+ * data, and a billing session can move real money, so "whoever controls the
+ * mailbox" is not an acceptable answer to "who is holding this session" — the
+ * actor must enrol 2FA or they do not act. Other tenant-side scopes retain the
+ * emailed fallback so those controls apply to everyone from day one.
  */
 export function stepUpRequiresEnrolled2fa(scope: StepUpScope): boolean {
-	return scope === "platform.admin";
+	return scope === "platform.admin" || scope === "billing";
 }
 
 /** True when this session already holds a live grant for `scope`. */
@@ -425,14 +430,21 @@ export const STEP_UP_AUTH_PATHS: Record<string, StepUpScope> = {
 	"/organization/delete": "org.delete",
 	"/organization/remove-member": "org.members",
 	"/organization/update-member-role": "org.members",
-	// Legacy Better Auth Polar checkout callers still pass through this path.
-	// Keep the server-side gate even while newer callers use the billing router.
-	"/checkout": "billing",
-	// The Polar portal can change or cancel a subscription after handoff.
-	"/customer/portal": "billing",
 };
 
 /** The scope guarding a Better Auth path, or null when it is not gated. */
 export function stepUpScopeForAuthPath(path: string): StepUpScope | null {
 	return STEP_UP_AUTH_PATHS[path] ?? null;
+}
+
+/** Native key mutations need an ownership lookup before choosing a scope. */
+export function isStepUpApiKeyMutation(path: string): boolean {
+	return path === "/api-key/delete" || path === "/api-key/update";
+}
+
+/** Resolve the credential scope from Better Auth's stored key configuration. */
+export function stepUpScopeForApiKeyConfig(
+	configId: unknown
+): StepUpScope | null {
+	return configId === "organization" ? "org.credentials" : null;
 }

@@ -1,5 +1,6 @@
 import { mergeProps } from "@base-ui/react/merge-props";
 import { useRender } from "@base-ui/react/use-render";
+import { useLocalizedText } from "@ryu/i18n/react";
 import { Button } from "@ryu/ui/components/button.tsx";
 import { cn } from "@ryu/ui/lib/utils.ts";
 import { cva, type VariantProps } from "class-variance-authority";
@@ -48,7 +49,7 @@ function Attachment({
 }
 
 const attachmentMediaVariants = cva(
-	"relative flex aspect-square w-10 shrink-0 items-center justify-center overflow-hidden rounded-2xl bg-muted text-foreground group-data-[orientation=vertical]/attachment:w-full group-data-[size=sm]/attachment:w-8 group-data-[size=xs]/attachment:w-7 group-data-[size=xs]/attachment:rounded-xl group-data-[state=error]/attachment:bg-destructive/10 group-data-[state=error]/attachment:text-destructive group-data-[orientation=vertical]/attachment:*:data-[slot=spinner]:size-6! [&_svg:not([class*='size-'])]:size-4 group-data-[orientation=vertical]/attachment:[&_svg:not([class*='size-'])]:size-6 group-data-[size=xs]/attachment:[&_svg:not([class*='size-'])]:size-3.5 [&_svg]:pointer-events-none",
+	"relative flex aspect-square w-10 shrink-0 items-center justify-center overflow-hidden rounded-2xl bg-muted text-foreground group-data-[orientation=vertical]/attachment:w-full group-data-[size=sm]/attachment:w-8 group-data-[size=xs]/attachment:w-7 group-data-[size=xs]/attachment:rounded-xl group-data-[state=error]/attachment:bg-destructive/10 group-data-[state=error]/attachment:text-status-destructive group-data-[orientation=vertical]/attachment:*:data-[slot=spinner]:size-6! [&_svg:not([class*='size-'])]:size-4 group-data-[orientation=vertical]/attachment:[&_svg:not([class*='size-'])]:size-6 group-data-[size=xs]/attachment:[&_svg:not([class*='size-'])]:size-3.5 [&_svg]:pointer-events-none",
 	{
 		variants: {
 			variant: {
@@ -95,9 +96,11 @@ function AttachmentContent({
 }
 
 function AttachmentTitle({
+	children,
 	className,
 	...props
 }: React.ComponentProps<"span">) {
+	const localizedChildren = useLocalizedText(children, { literal: true });
 	return (
 		<span
 			className={cn(
@@ -106,24 +109,30 @@ function AttachmentTitle({
 			)}
 			data-slot="attachment-title"
 			{...props}
-		/>
+		>
+			{localizedChildren}
+		</span>
 	);
 }
 
 function AttachmentDescription({
+	children,
 	className,
 	...props
 }: React.ComponentProps<"span">) {
+	const localizedChildren = useLocalizedText(children, { literal: true });
 	return (
 		<span
 			className={cn(
-				"mt-0.5 block min-w-0 truncate text-muted-foreground text-xs group-data-[state=error]/attachment:text-destructive/80",
+				"mt-0.5 block min-w-0 truncate text-muted-foreground text-xs group-data-[state=error]/attachment:text-status-destructive/80",
 				"max-w-full",
 				className
 			)}
 			data-slot="attachment-description"
 			{...props}
-		/>
+		>
+			{localizedChildren}
+		</span>
 	);
 }
 

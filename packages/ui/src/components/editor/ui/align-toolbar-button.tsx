@@ -69,7 +69,7 @@ export function AlignToolbarButton(props: ComponentProps<typeof DropdownMenu>) {
 				>
 					{items.map(({ icon: Icon, value: itemValue }) => (
 						<DropdownMenuRadioItem
-							className="pl-2 data-checked:bg-accent *:first:[span]:hidden"
+							className="ps-2 data-checked:bg-accent *:first:[span]:hidden"
 							key={itemValue}
 							value={itemValue}
 						>

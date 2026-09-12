@@ -14,11 +14,26 @@
 // top by each app, not here.
 
 /** The subset of a node the api layer needs: base URL + scoped credentials. */
+export type RyuFetch = (
+	input: RequestInfo | URL,
+	init?: RequestInit
+) => Promise<Response>;
+
 export interface ApiTarget {
+	/**
+	 * HTTP implementation for this target. Expo apps can pass `expo/fetch` when
+	 * they need streaming response bodies; global fetch is used by default.
+	 */
+	fetch?: RyuFetch;
 	token: string | null;
 	url: string;
 	/** Verified end-user JWT for per-user/team tenancy on an org-bound Core. */
 	userJwt?: string | null;
+}
+
+/** Resolve the HTTP implementation for a target without adding a platform dependency. */
+export function fetchForTarget(target: Pick<ApiTarget, "fetch">): RyuFetch {
+	return target.fetch ?? globalThis.fetch;
 }
 
 export const USER_JWT_HEADER = "x-ryu-user-jwt";
@@ -99,6 +114,32 @@ export interface RequestOptions {
 	signal?: AbortSignal;
 }
 
+/** A structured non-2xx response from Core. The message intentionally keeps the
+ * historical status-only shape while typed callers inspect the status/body. */
+export class ApiError extends Error {
+	readonly status: number;
+	readonly serverMessage?: string;
+
+	constructor(path: string, status: number, serverMessage?: string) {
+		super(`${path} failed: ${status}`);
+		this.name = "ApiError";
+		this.status = status;
+		this.serverMessage = serverMessage;
+	}
+}
+
+function serverErrorFromBody(text: string): string | undefined {
+	if (!text) {
+		return undefined;
+	}
+	try {
+		const parsed = JSON.parse(text) as { error?: unknown };
+		return typeof parsed.error === "string" ? parsed.error : undefined;
+	} catch {
+		return undefined;
+	}
+}
+
 /**
  * The dedicated header carrying the user's CONTROL-PLANE (Better-Auth) session
  * bearer to Core on a marketplace install, so a PAID item's entitlement check
@@ -166,15 +207,16 @@ export function buyerTokenHeader(
 /**
  * Perform a JSON request against a node and parse the response.
  *
- * Throws an {@link Error} with the status code on a non-2xx response so callers
- * can degrade gracefully (the status spine relies on this to flag Core as down).
+ * Throws an {@link ApiError} with the status code and Core's structured error
+ * message, when present, while preserving the historical message string.
  */
 export async function request<T>(
 	target: ApiTarget,
 	path: string,
 	options: RequestOptions = {}
 ): Promise<T> {
-	const resp = await fetch(apiUrl(target, path), {
+	const fetchImpl = fetchForTarget(target);
+	const resp = await fetchImpl(apiUrl(target, path), {
 		method: options.method ?? "GET",
 		headers: {
 			...makeHeaders(target.token, target.userJwt),
@@ -183,10 +225,10 @@ export async function request<T>(
 		body: options.body === undefined ? undefined : JSON.stringify(options.body),
 		signal: options.signal,
 	});
+	const text = await resp.text();
 	if (!resp.ok) {
-		throw new Error(`${path} failed: ${resp.status}`);
+		throw new ApiError(path, resp.status, serverErrorFromBody(text));
 	}
 	// Some endpoints (DELETE, no-content) return an empty body.
-	const text = await resp.text();
 	return (text ? JSON.parse(text) : undefined) as T;
 }

@@ -117,6 +117,66 @@ export interface OrgListEntry {
 	slug: string;
 }
 
+export interface OrgTeamEntry {
+	id: string;
+	name: string;
+}
+
+export type OrganizationAuditActorType = "gateway" | "system" | "user";
+
+/** One bounded, redacted event returned by the organization audit projections. */
+export interface OrganizationAuditEntry {
+	action: string;
+	actor: {
+		email: string | null;
+		id: string | null;
+		name: string | null;
+		type: OrganizationAuditActorType;
+	};
+	agentId: string | null;
+	details: Record<string, unknown>;
+	error: string | null;
+	eventType: string;
+	feature: string | null;
+	id: string;
+	requestId: string | null;
+	scope: "gateway" | "org";
+	sessionId: string | null;
+	target: string;
+	targetId: string | null;
+	timestamp: string;
+}
+
+/** Gateway request/tool event shape used by the Agent passport. */
+export interface OrganizationGatewayActivityEntry {
+	actorId: string | null;
+	agentId: string | null;
+	apiKey: string | null;
+	backend: string | null;
+	command: string | null;
+	costMicroUsd: number | null;
+	durationMs: number | null;
+	error: string | null;
+	evalScore: number | null;
+	eventType: string;
+	feature: string | null;
+	gatewayId: string;
+	id: string;
+	inputTokens: number;
+	latencyMs: number;
+	managedInference: boolean;
+	model: string;
+	outputTokens: number;
+	projectId: string | null;
+	provider: string;
+	providerCostMicroUsd: number | null;
+	requestId: string;
+	sessionId: string | null;
+	teamId: string | null;
+	timestamp: string;
+	userName: string | null;
+}
+
 /** The orgs the caller belongs to. Empty when signed out. */
 export async function listOrgs(): Promise<OrgListEntry[]> {
 	if (!authToken()) {
@@ -172,11 +232,54 @@ export async function getActiveOrgId(): Promise<string | null> {
 	return body?.session?.activeOrganizationId ?? null;
 }
 
+/** The Better Auth teams the current user belongs to in one organization. */
+export async function listMyOrganizationTeams(
+	organizationId: string
+): Promise<OrgTeamEntry[]> {
+	const response = await fetch(
+		`${BASE}/api/auth/organization/list-user-teams?organizationId=${encodeURIComponent(organizationId)}`,
+		{ headers: authHeaders() }
+	);
+	if (!response.ok) {
+		throw new Error(await readError(response));
+	}
+	const body = (await response.json()) as unknown;
+	return Array.isArray(body)
+		? (body as unknown[]).flatMap((team) => {
+				if (!team || typeof team !== "object") {
+					return [];
+				}
+				const record = team as { id?: unknown; name?: unknown };
+				return typeof record.id === "string" && typeof record.name === "string"
+					? [{ id: record.id, name: record.name }]
+					: [];
+			})
+		: [];
+}
+
+/** The Better Auth active team stored on this session, or null when unset. */
+export async function getActiveTeamId(): Promise<string | null> {
+	if (!authToken()) {
+		return null;
+	}
+	const response = await fetch(`${BASE}/api/auth/get-session`, {
+		headers: authHeaders(),
+	});
+	if (!response.ok) {
+		return null;
+	}
+	const body = (await response.json().catch(() => null)) as {
+		session?: { activeTeamId?: string | null };
+	} | null;
+	return body?.session?.activeTeamId ?? null;
+}
+
 /**
  * Where {@link getActiveOrgId}'s answer is cached. Exported so the switcher can
  * name it, and so nobody re-derives a second key for the same fact.
  */
 export const ACTIVE_ORG_KEY = ["settings", "orgs", "active"] as const;
+export const ACTIVE_TEAM_KEY = ["settings", "orgs", "active-team"] as const;
 
 /**
  * The org THIS session is scoped to, as a hook.
@@ -214,6 +317,21 @@ export function useActiveOrgId(): string | null {
 	return data ?? null;
 }
 
+/** The current Better Auth active team, scoped to the current active org. */
+export function useActiveTeamId(): string | null {
+	const activeOrgId = useActiveOrgId();
+	const { data } = useQuery(
+		{
+			enabled: hasOrgAuth() && Boolean(activeOrgId),
+			queryFn: getActiveTeamId,
+			queryKey: [...ACTIVE_TEAM_KEY, activeOrgId],
+			staleTime: 0,
+		},
+		appQueryClient
+	);
+	return data ?? null;
+}
+
 /** Rescope this session to `organizationId`. */
 export async function setActiveOrg(organizationId: string): Promise<void> {
 	const response = await fetch(`${BASE}/api/auth/organization/set-active`, {
@@ -224,6 +342,23 @@ export async function setActiveOrg(organizationId: string): Promise<void> {
 	if (!response.ok) {
 		throw new Error(await readError(response));
 	}
+	await appQueryClient.invalidateQueries({ queryKey: ACTIVE_TEAM_KEY });
+}
+
+/** Rescope this session to a Better Auth team in its active organization. */
+export async function setActiveTeam(teamId: string | null): Promise<void> {
+	const response = await fetch(
+		`${BASE}/api/auth/organization/set-active-team`,
+		{
+			body: JSON.stringify({ teamId }),
+			headers: authHeaders(),
+			method: "POST",
+		}
+	);
+	if (!response.ok) {
+		throw new Error(await readError(response));
+	}
+	await appQueryClient.invalidateQueries({ queryKey: ACTIVE_TEAM_KEY });
 }
 
 /** What the caller can move, and the orgs they can move it between. */
@@ -238,6 +373,56 @@ export async function fetchTransferable(
 		throw new Error(await readError(response));
 	}
 	return (await response.json()) as TransferableView;
+}
+
+/**
+ * Fetch the org's gateway activity for one agent. Request/model/tool rows are
+ * kept separate from control changes by the server, then joined in the Agent
+ * passport with the control projection below.
+ */
+export async function fetchOrganizationAgentActivity(
+	orgId: string,
+	agentId: string,
+	limit = 200
+): Promise<{ count: number; entries: OrganizationGatewayActivityEntry[] }> {
+	const params = new URLSearchParams({
+		agentId,
+		limit: String(Math.min(Math.max(limit, 1), 200)),
+	});
+	const response = await fetch(
+		`${BASE}/api/aggregation/orgs/${encodeURIComponent(orgId)}/audit?${params.toString()}`,
+		{ headers: authHeaders() }
+	);
+	if (!response.ok) {
+		throw new Error(await readError(response));
+	}
+	return (await response.json()) as {
+		count: number;
+		entries: OrganizationGatewayActivityEntry[];
+	};
+}
+
+/** Fetch organization and gateway control mutations scoped to one agent. */
+export async function fetchOrganizationAgentControls(
+	orgId: string,
+	agentId: string,
+	limit = 200
+): Promise<{ count: number; entries: OrganizationAuditEntry[] }> {
+	const params = new URLSearchParams({
+		agentId,
+		limit: String(Math.min(Math.max(limit, 1), 200)),
+	});
+	const response = await fetch(
+		`${BASE}/api/control-plane/orgs/${encodeURIComponent(orgId)}/audit?${params.toString()}`,
+		{ headers: authHeaders() }
+	);
+	if (!response.ok) {
+		throw new Error(await readError(response));
+	}
+	return (await response.json()) as {
+		count: number;
+		entries: OrganizationAuditEntry[];
+	};
 }
 
 export interface TransferResult {
@@ -257,7 +442,10 @@ export async function transferCredits(input: {
 }): Promise<TransferResult> {
 	const response = await fetch(`${BASE}/api/credits/transfer`, {
 		body: JSON.stringify(input),
-		headers: authHeaders(),
+		headers: {
+			...authHeaders(),
+			"Idempotency-Key": crypto.randomUUID(),
+		},
 		method: "POST",
 	});
 	if (!response.ok) {

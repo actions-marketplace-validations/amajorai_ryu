@@ -19,7 +19,9 @@ import {
 	KERNEL_QUOTAS,
 	MAIL_LIFECYCLE,
 	managedInferenceAvailable,
+	monthlyCreditPoolMicroUsdForSeats,
 	monthlyPriceMicroUsdForSeats,
+	PLAN_IDS,
 	PLANS,
 	type PlanLimitField,
 	type PolarBinding,
@@ -51,32 +53,65 @@ function requireBinding(
 	return binding;
 }
 
-describe("depositFee (max of the plan rate or the $2.40 floor)", () => {
+describe("depositFee (max of the plan rate or the $2.75 floor)", () => {
 	it("charges the floor on a zero/negative amount", () => {
 		expect(depositFee(0)).toBe(DEPOSIT_FEE_FIXED_MICRO_USD);
 		expect(depositFee(-100)).toBe(DEPOSIT_FEE_FIXED_MICRO_USD);
 	});
 
-	it("charges the 15% percentage when it exceeds the floor", () => {
-		// $100 top-up: 15% = $15.00 (> $1.50 floor) → $15.00.
-		expect(depositFee(usdToMicro(100))).toBe(usdToMicro(15));
+	it("charges the 17% percentage when it exceeds the floor", () => {
+		// $100 top-up: 17% = $17.00 (> $2.75 floor) → $17.00.
+		expect(depositFee(usdToMicro(100))).toBe(usdToMicro(17));
 	});
 
-	it("meets the floor exactly at the $16 crossover", () => {
-		// $16 top-up: 15% = $2.40 = the floor. The crossover moved with the floor
-		// ($1.50 met 15% at $10); it is derived, not chosen — see
-		// DEPOSIT_FEE_FIXED_MICRO_USD for why the floor had to rise.
-		expect(depositFee(usdToMicro(16))).toBe(usdToMicro(2.4));
+	it("keeps the $2.75 floor at the $16 point below the 17% crossover", () => {
+		// $16 top-up: 17% = $2.72, so the $2.75 floor still applies.
+		expect(depositFee(usdToMicro(16))).toBe(usdToMicro(2.75));
 	});
 
-	it("the $2.40 floor dominates below the crossover (nudges bigger top-ups)", () => {
-		// $5 pack: 15% = $0.75, but the floor is $2.40 (48% effective). The floor
-		// is not a nudge alone — Polar's fixed $0.40 makes a small top-up
-		// unprofitable on the percentage by itself, and the floor also has to stay
-		// profitable far enough up to meet the LOWEST plan rate (12%), which does
-		// not break even until ~$19.80.
-		expect(depositFee(usdToMicro(5))).toBe(usdToMicro(2.4));
+	it("the $2.75 floor dominates below the crossover (nudges bigger top-ups)", () => {
+		// $5 pack: 17% = $0.85, but the floor is $2.75 (55% effective). The
+		// floor keeps the conservative provider-cost curve profitable.
+		expect(depositFee(usdToMicro(5))).toBe(usdToMicro(2.75));
 		expect(depositFee(usdToMicro(1))).toBe(DEPOSIT_FEE_FIXED_MICRO_USD);
+	});
+});
+
+describe("current Pro pricing", () => {
+	it("uses the margin-safe $49/$490 ladder for new contracts", () => {
+		expect(PLANS.pro.monthlyPriceMicroUsd).toBe(usdToMicro(49));
+		expect(currentPlanVersionFor("pro")).toBe(6);
+		expect(planVersionFor("pro", currentPlanVersionFor("pro"))).toMatchObject({
+			monthlyPriceMicroUsd: usdToMicro(49),
+			monthlyCreditPoolMicroUsd: usdToMicro(15),
+			version: 6,
+		});
+	});
+
+	it("keeps the previous Pro price available for grandfathered contracts", () => {
+		expect(planVersionFor("pro", 4)).toMatchObject({
+			monthlyPriceMicroUsd: usdToMicro(39),
+			monthlyCreditPoolMicroUsd: usdToMicro(15),
+			version: 4,
+		});
+	});
+});
+
+describe("current Plus pricing", () => {
+	it("uses the private lower-usage $39/$390 ladder", () => {
+		expect(PLAN_IDS.indexOf("plus")).toBeLessThan(PLAN_IDS.indexOf("pro"));
+		expect(PLANS.plus.monthlyPriceMicroUsd).toBe(usdToMicro(39));
+		expect(PLANS.plus.monthlyCreditPoolMicroUsd).toBe(usdToMicro(10));
+		expect(PLANS.plus.audience).toBe("individual");
+		expect(PLANS.plus.seatModel).toEqual({ kind: "single" });
+		expect(currentPlanVersionFor("plus")).toBe(1);
+		expect(planVersionFor("plus", currentPlanVersionFor("plus"))).toMatchObject(
+			{
+				monthlyPriceMicroUsd: usdToMicro(39),
+				monthlyCreditPoolMicroUsd: usdToMicro(10),
+				version: 1,
+			}
+		);
 	});
 });
 
@@ -97,19 +132,20 @@ describe("emailQuotaForPlan (Agent Inboxes)", () => {
 		expect(q.monthlySendLimit).toBe(0);
 	});
 
-	it("enables email on the individual subscription plans (pro, max)", () => {
-		for (const plan of ["pro", "max"] as const) {
+	it("enables email on every paid subscription plan", () => {
+		for (const plan of [
+			"pro",
+			"plus",
+			"max",
+			"teams",
+			"teams-lite",
+			"business",
+		] as const) {
 			const q = emailQuotaForPlan(plan);
 			expect(q.enabled).toBe(true);
 			expect(q.inboxLimit).toBeGreaterThan(0);
 			expect(q.monthlySendLimit).toBeGreaterThan(0);
 		}
-	});
-
-	it("enables email on the teams plan", () => {
-		const q = emailQuotaForPlan("teams");
-		expect(q.enabled).toBe(true);
-		expect(q.inboxLimit).toBeGreaterThan(0);
 	});
 
 	it("mirrors the plan catalog numbers exactly (single source of truth)", () => {
@@ -121,20 +157,48 @@ describe("emailQuotaForPlan (Agent Inboxes)", () => {
 });
 
 describe("resolveEntitlement — subscriptions", () => {
-	it("marks recurring plans for Marketplace publisher-pool funding", () => {
+	it("separates Marketplace access from publisher-pool funding", () => {
 		expect(PLANS["marketplace-membership"].marketplaceApps).toBe(true);
 		expect(PLANS["marketplace-membership"].name).toBe("A Major Pass");
 		expect(PLANS["marketplace-membership"].monthlyPriceMicroUsd).toBe(
 			usdToMicro(20)
 		);
+		expect(PLANS["marketplace-membership"].seatModel).toEqual({
+			kind: "single",
+		});
+		expect(PLANS["marketplace-membership"].bindings.yearly).toEqual({
+			productIdEnv: "POLAR_PRODUCT_MARKETPLACE_MEMBERSHIP_YEARLY",
+			productIdDefault: "polar_product_marketplace_membership_yearly",
+		});
+		const yearlyProductId = resolveProductId(
+			requireBinding(
+				PLANS["marketplace-membership"].bindings.yearly,
+				"marketplace-membership.yearly"
+			),
+			defaultsOnly
+		);
+		expect(planByProductId(defaultsOnly).get(yearlyProductId)?.interval).toBe(
+			"yearly"
+		);
 		expect(currentPlanVersionFor("marketplace-membership")).toBe(6);
 		expect(PLANS.pro.marketplaceApps).toBe(true);
 		expect(PLANS.max.marketplaceApps).toBe(true);
 		expect(PLANS.teams.marketplaceApps).toBe(true);
+		expect(PLANS["marketplace-membership"].marketplacePublisherPool).toBe(true);
+		for (const id of [
+			"pro",
+			"plus",
+			"max",
+			"teams",
+			"teams-lite",
+			"business",
+		] as const) {
+			expect(PLANS[id].marketplacePublisherPool).toBe(false);
+		}
 		expect(PLANS["desktop-license"].marketplaceApps).toBe(false);
 	});
 
-	it("resolves the legacy A Major Pass publisher-pool plan without unrelated paid capabilities", () => {
+	it("resolves A Major Pass as one individual user without unrelated capabilities", () => {
 		const binding = requireBinding(
 			PLANS["marketplace-membership"].bindings.monthly,
 			"marketplace-membership.monthly"
@@ -153,7 +217,14 @@ describe("resolveEntitlement — subscriptions", () => {
 		expect(entitlement.desktopAccess).toBe(false);
 		expect(entitlement.managedInference).toBe(false);
 		expect(entitlement.monthlyCreditPoolMicroUsd).toBe(0);
-		expect(entitlement.seats).toBe(3);
+		expect(entitlement.seats).toBe(1);
+		expect(channelUserLimitForEntitlement(entitlement)).toBe(0);
+		expect(managedInferenceAvailable(entitlement, usdToMicro(100))).toBe(false);
+		expect(emailQuotaForPlan("marketplace-membership")).toMatchObject({
+			enabled: false,
+			inboxLimit: 0,
+			monthlySendLimit: 0,
+		});
 	});
 
 	it("does not mark a desktop license for the Marketplace publisher pool", () => {
@@ -230,16 +301,26 @@ describe("resolveEntitlement — subscriptions", () => {
 });
 
 describe("plan audience — personal versus organization ownership", () => {
-	it("keeps Pro and Max personal while Teams and Business own the shared boundary", () => {
+	it("keeps Pro, Plus, and Max personal while organization plans own the shared boundary", () => {
 		expect(PLANS.pro.audience).toBe("individual");
+		expect(PLANS.plus.audience).toBe("individual");
 		expect(PLANS.max.audience).toBe("individual");
 		expect(PLANS.teams.audience).toBe("organization");
+		expect(PLANS["teams-lite"].audience).toBe("organization");
+		expect(PLANS["teams-lite"].seatModel).toEqual({
+			kind: "per_seat",
+			minSeats: 5,
+		});
+		expect(PLANS["teams-lite"].monthlyCreditPoolMicroUsd).toBe(usdToMicro(20));
+		expect(currentPlanVersionFor("teams-lite")).toBe(1);
 		expect(PLANS.business.audience).toBe("organization");
 		expect(PLANS.business.seatModel).toEqual({
 			kind: "per_seat",
 			minSeats: 5,
 		});
 		expect(PLANS.business.monthlyCreditPoolMicroUsd).toBe(usdToMicro(100));
+		expect(currentPlanVersionFor("business")).toBe(2);
+		expect(PLANS.business.creditPoolModel).toBe("per_completed_bundle");
 	});
 
 	it("resolves Business products and its graduated monthly quote", () => {
@@ -265,6 +346,86 @@ describe("plan audience — personal versus organization ownership", () => {
 				version: planVersionFor("business"),
 			})
 		).toBe(usdToMicro(350));
+	});
+
+	it("resolves the private Teams Lite price and lower usage pool", () => {
+		const binding = requireBinding(
+			PLANS["teams-lite"].bindings.monthly,
+			"teams-lite.monthly"
+		);
+		const productId = resolveProductId(binding, defaultsOnly);
+		const entitlement = resolveEntitlement(
+			{ productId, status: "active", seats: 5 },
+			null,
+			defaultsOnly
+		);
+		expect(planByProductId(defaultsOnly).get(productId)?.plan.id).toBe(
+			"teams-lite"
+		);
+		expect(entitlement.plan).toBe("teams-lite");
+		expect(entitlement.seats).toBe(5);
+		expect(entitlement.monthlyCreditPoolMicroUsd).toBe(usdToMicro(20));
+		expect(
+			monthlyPriceMicroUsdForSeats({
+				plan: PLANS["teams-lite"],
+				seats: 5,
+				version: planVersionFor("teams-lite"),
+			})
+		).toBe(usdToMicro(150));
+		expect(
+			monthlyPriceMicroUsdForSeats({
+				plan: PLANS["teams-lite"],
+				seats: 6,
+				version: planVersionFor("teams-lite"),
+			})
+		).toBe(usdToMicro(200));
+	});
+
+	it("resolves the private Plus price and lower usage pool", () => {
+		const binding = requireBinding(PLANS.plus.bindings.monthly, "plus.monthly");
+		const productId = resolveProductId(binding, defaultsOnly);
+		const entitlement = resolveEntitlement(
+			{ productId, status: "active" },
+			null,
+			defaultsOnly
+		);
+		expect(planByProductId(defaultsOnly).get(productId)?.plan.id).toBe("plus");
+		expect(entitlement.plan).toBe("plus");
+		expect(entitlement.seats).toBe(1);
+		expect(entitlement.monthlyCreditPoolMicroUsd).toBe(usdToMicro(10));
+		expect(PLANS.plus.bindings.yearly).toEqual({
+			productIdEnv: "POLAR_PRODUCT_PLUS_YEARLY",
+			productIdDefault: "polar_product_plus_yearly",
+		});
+	});
+
+	it("keeps the Business pool stable until a complete five-seat bundle", () => {
+		const plan = PLANS.business;
+		const current = planVersionFor(
+			"business",
+			currentPlanVersionFor("business")
+		);
+		expect(
+			monthlyPriceMicroUsdForSeats({ plan, seats: 6, version: current })
+		).toBe(usdToMicro(350));
+		// v2: 5–9 seats receive one $100 pool; the next grant begins at 10.
+		expect(
+			monthlyCreditPoolMicroUsdForSeats({ plan, seats: 6, version: current })
+		).toBe(usdToMicro(100));
+		expect(
+			monthlyCreditPoolMicroUsdForSeats({ plan, seats: 10, version: current })
+		).toBe(usdToMicro(200));
+		expect(
+			monthlyCreditPoolMicroUsdForSeats({ plan, seats: 25, version: current })
+		).toBe(usdToMicro(500));
+		// v1 remains the grandfathered ceiling semantics.
+		expect(
+			monthlyCreditPoolMicroUsdForSeats({
+				plan,
+				seats: 6,
+				version: planVersionFor("business", 1),
+			})
+		).toBe(usdToMicro(200));
 	});
 });
 
@@ -339,7 +500,7 @@ describe("resolveEntitlement — Teams member-seat billing with bundled org cred
 });
 
 describe("channelUserLimitForEntitlement", () => {
-	it("allows one configured channel user on personal subscription plans", () => {
+	it("allows one configured channel user on personal managed plans", () => {
 		const productId = resolveProductId(
 			requireBinding(PLANS.max.bindings.monthly, "max.monthly"),
 			defaultsOnly
@@ -350,6 +511,22 @@ describe("channelUserLimitForEntitlement", () => {
 			defaultsOnly
 		);
 		expect(channelUserLimitForEntitlement(e)).toBe(1);
+	});
+
+	it("does not grant a hosted channel user to A Major Pass", () => {
+		const productId = resolveProductId(
+			requireBinding(
+				PLANS["marketplace-membership"].bindings.monthly,
+				"marketplace-membership.monthly"
+			),
+			defaultsOnly
+		);
+		const entitlement = resolveEntitlement(
+			{ productId, status: "active" },
+			null,
+			defaultsOnly
+		);
+		expect(channelUserLimitForEntitlement(entitlement)).toBe(0);
 	});
 
 	it("allows one hosted channel user per billed Teams seat", () => {
@@ -711,7 +888,15 @@ describe("planLimit — numeric caps (free baseline vs paid rows)", () => {
 	});
 
 	it("gives paid rows unbounded symbolic caps", () => {
-		for (const plan of ["desktop-license", "pro", "max", "teams"] as const) {
+		for (const plan of [
+			"desktop-license",
+			"pro",
+			"plus",
+			"max",
+			"teams",
+			"teams-lite",
+			"business",
+		] as const) {
 			expect(planLimit(plan, "maxAgents")).toBe(Number.POSITIVE_INFINITY);
 			expect(planLimit(plan, "maxOpenTabs")).toBe(Number.POSITIVE_INFINITY);
 			expect(planLimit(plan, "maxRemoteNodes")).toBe(Number.POSITIVE_INFINITY);
@@ -721,13 +906,19 @@ describe("planLimit — numeric caps (free baseline vs paid rows)", () => {
 	it("keeps the two real-cost levers finite per plan", () => {
 		expect(planLimit("desktop-license", "maxConcurrentRuns")).toBe(3);
 		expect(planLimit("pro", "maxConcurrentRuns")).toBe(3);
+		expect(planLimit("plus", "maxConcurrentRuns")).toBe(3);
 		expect(planLimit("max", "maxConcurrentRuns")).toBe(3);
 		expect(planLimit("teams", "maxConcurrentRuns")).toBe(8);
+		expect(planLimit("teams-lite", "maxConcurrentRuns")).toBe(8);
+		expect(planLimit("business", "maxConcurrentRuns")).toBe(8);
 
 		expect(planLimit("desktop-license", "spaceStorageLimitGb")).toBe(20);
 		expect(planLimit("pro", "spaceStorageLimitGb")).toBe(20);
+		expect(planLimit("plus", "spaceStorageLimitGb")).toBe(20);
 		expect(planLimit("max", "spaceStorageLimitGb")).toBe(50);
 		expect(planLimit("teams", "spaceStorageLimitGb")).toBe(50);
+		expect(planLimit("teams-lite", "spaceStorageLimitGb")).toBe(50);
+		expect(planLimit("business", "spaceStorageLimitGb")).toBe(50);
 	});
 
 	/**
@@ -740,27 +931,43 @@ describe("planLimit — numeric caps (free baseline vs paid rows)", () => {
 		const INF = Number.POSITIVE_INFINITY;
 		const matrix: Record<
 			PlanLimitField,
-			[free: number, license: number, pro: number, max: number, teams: number]
+			[
+				free: number,
+				license: number,
+				pro: number,
+				plus: number,
+				max: number,
+				teams: number,
+				teamsLite: number,
+				business: number,
+			]
 		> = {
-			maxAgents: [3, INF, INF, INF, INF],
-			maxConcurrentRuns: [1, 3, 3, 3, 8],
-			maxEvalRunsMonthly: [10, INF, INF, INF, INF],
-			maxOpenTabs: [3, INF, INF, INF, INF],
-			maxRemoteNodes: [1, INF, INF, INF, INF],
-			maxSpaces: [1, INF, INF, INF, INF],
-			spaceStorageLimitGb: [1, 20, 20, 50, 50],
+			maxAgents: [3, INF, INF, INF, INF, INF, INF, INF],
+			maxConcurrentRuns: [1, 3, 3, 3, 3, 8, 8, 8],
+			maxEvalRunsMonthly: [10, INF, INF, INF, INF, INF, INF, INF],
+			maxOpenTabs: [3, INF, INF, INF, INF, INF, INF, INF],
+			maxRemoteNodes: [1, INF, INF, INF, INF, INF, INF, INF],
+			maxSpaces: [1, INF, INF, INF, INF, INF, INF, INF],
+			spaceStorageLimitGb: [1, 20, 20, 20, 50, 50, 50, 50],
 		};
 		// Every declared key is in the matrix, and vice versa: a new quota that
 		// forgot its numbers fails here rather than shipping a silent Infinity.
 		expect(Object.keys(matrix).sort()).toEqual(Object.keys(QUOTAS).sort());
-		for (const [field, [free, license, pro, max, teams]] of Object.entries(
-			matrix
-		) as [PlanLimitField, [number, number, number, number, number]][]) {
+		for (const [
+			field,
+			[free, license, pro, plus, max, teams, teamsLite, business],
+		] of Object.entries(matrix) as [
+			PlanLimitField,
+			[number, number, number, number, number, number, number, number],
+		][]) {
 			expect(planLimit(null, field)).toBe(free);
 			expect(planLimit("desktop-license", field)).toBe(license);
 			expect(planLimit("pro", field)).toBe(pro);
+			expect(planLimit("plus", field)).toBe(plus);
 			expect(planLimit("max", field)).toBe(max);
 			expect(planLimit("teams", field)).toBe(teams);
+			expect(planLimit("teams-lite", field)).toBe(teamsLite);
+			expect(planLimit("business", field)).toBe(business);
 		}
 	});
 });

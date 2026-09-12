@@ -411,7 +411,7 @@ export function VideoGeneration({
 								aria-live="polite"
 								className={cn(
 									"flex min-h-5 items-center gap-2 font-medium text-foreground text-sm",
-									status === "error" && "text-destructive",
+									status === "error" && "text-status-destructive",
 									statusClassName
 								)}
 							>

@@ -43,6 +43,7 @@ fn models_dev_key(provider_id: &str) -> &str {
     match provider_id {
         // Subscription providers reuse the underlying vendor's models.
         "openai-codex" => "openai",
+        "chatgpt" => "openai",
         "claude-pro-max" => "anthropic",
         // Known key spelling differences on models.dev.
         "zai" | "zai-coding-cn" => "z-ai",

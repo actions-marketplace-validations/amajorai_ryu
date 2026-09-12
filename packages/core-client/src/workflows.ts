@@ -12,7 +12,12 @@
 // (`{ success: false, error }`), and we want to surface that exact message —
 // the generic helper throws only the status code.
 
-import { type ApiTarget, apiUrl, makeHeaders } from "./client.ts";
+import {
+	type ApiTarget,
+	apiUrl,
+	fetchForTarget,
+	makeHeaders,
+} from "./client.ts";
 
 /** A single node in a workflow definition. `type` selects the node kind and
  * carries its config (Core flattens the kind onto the node). We keep the config
@@ -109,6 +114,8 @@ export interface WorkflowRun {
 	 * `awaiting_input`); identifies which Awakeable to resume. */
 	awaitingNode?: string | null;
 	createdAt: string;
+	/** True when this is a transient read-only dry-run projection. */
+	dryRun: boolean;
 	error?: string | null;
 	input: Record<string, string>;
 	nodes: Record<string, NodeRunState>;
@@ -122,6 +129,8 @@ export interface WorkflowRun {
 interface WorkflowRunWire {
 	awaiting_node?: string | null;
 	created_at: string;
+	dry_run?: boolean | null;
+	dryRun?: boolean | null;
 	error?: string | null;
 	input?: Record<string, string>;
 	nodes?: Record<string, NodeRunState>;
@@ -137,6 +146,7 @@ function toRun(r: WorkflowRunWire): WorkflowRun {
 		runId: r.run_id,
 		workflowId: r.workflow_id,
 		status: r.status,
+		dryRun: r.dryRun ?? r.dry_run ?? false,
 		input: r.input ?? {},
 		output: r.output ?? {},
 		nodes: r.nodes ?? {},
@@ -145,6 +155,11 @@ function toRun(r: WorkflowRunWire): WorkflowRun {
 		createdAt: r.created_at,
 		updatedAt: r.updated_at,
 	};
+}
+
+export interface RunWorkflowOptions {
+	/** Evaluate without durable state or effectful node execution. */
+	dryRun?: boolean;
 }
 
 /** Read the Core error message out of a non-2xx JSON body, falling back to the
@@ -168,7 +183,7 @@ async function postJson<T>(
 	path: string,
 	body: unknown
 ): Promise<T> {
-	const resp = await fetch(apiUrl(target, path), {
+	const resp = await fetchForTarget(target)(apiUrl(target, path), {
 		method: "POST",
 		headers: makeHeaders(target.token, target.userJwt),
 		body: JSON.stringify(body),
@@ -180,9 +195,13 @@ async function postJson<T>(
 	return (text ? JSON.parse(text) : undefined) as T;
 }
 
-export async function fetchWorkflows(target: ApiTarget): Promise<Workflow[]> {
-	const resp = await fetch(apiUrl(target, "/workflows"), {
+export async function fetchWorkflows(
+	target: ApiTarget,
+	signal?: AbortSignal
+): Promise<Workflow[]> {
+	const resp = await fetchForTarget(target)(apiUrl(target, "/workflows"), {
 		headers: makeHeaders(target.token, target.userJwt),
+		signal,
 	});
 	if (!resp.ok) {
 		throw await errorFromResponse(resp, "/workflows");
@@ -197,9 +216,12 @@ export async function fetchWorkflow(
 	target: ApiTarget,
 	id: string
 ): Promise<Workflow> {
-	const resp = await fetch(apiUrl(target, `/workflows/${id}`), {
-		headers: makeHeaders(target.token, target.userJwt),
-	});
+	const resp = await fetchForTarget(target)(
+		apiUrl(target, `/workflows/${id}`),
+		{
+			headers: makeHeaders(target.token, target.userJwt),
+		}
+	);
 	if (!resp.ok) {
 		throw await errorFromResponse(resp, `/workflows/${id}`);
 	}
@@ -225,25 +247,35 @@ export async function deleteWorkflow(
 	target: ApiTarget,
 	id: string
 ): Promise<void> {
-	const resp = await fetch(apiUrl(target, `/workflows/${id}`), {
-		method: "DELETE",
-		headers: makeHeaders(target.token, target.userJwt),
-	});
+	const resp = await fetchForTarget(target)(
+		apiUrl(target, `/workflows/${id}`),
+		{
+			method: "DELETE",
+			headers: makeHeaders(target.token, target.userJwt),
+		}
+	);
 	if (!resp.ok) {
 		throw await errorFromResponse(resp, `/workflows/${id}`);
 	}
 }
 
-/** Run a workflow end-to-end with an initial input map and return the run. */
+/** Run a workflow end-to-end with an initial input map and return the run. Set
+ * `dryRun` to receive a transient read-only projection instead of creating run
+ * history or invoking effectful nodes. */
 export async function runWorkflow(
 	target: ApiTarget,
 	id: string,
-	input: Record<string, string>
+	input: Record<string, string>,
+	options: RunWorkflowOptions = {}
 ): Promise<WorkflowRun> {
+	const body: { input: Record<string, string>; dryRun?: boolean } = { input };
+	if (options.dryRun) {
+		body.dryRun = true;
+	}
 	const json = await postJson<{ run: WorkflowRunWire }>(
 		target,
 		`/workflows/${id}/run`,
-		{ input }
+		body
 	);
 	return toRun(json.run);
 }
@@ -251,11 +283,16 @@ export async function runWorkflow(
 /** Fetch the current state of a run (e.g. to poll a suspended run). */
 export async function getWorkflowRun(
 	target: ApiTarget,
-	runId: string
+	runId: string,
+	signal?: AbortSignal
 ): Promise<WorkflowRun> {
-	const resp = await fetch(apiUrl(target, `/workflows/runs/${runId}`), {
-		headers: makeHeaders(target.token, target.userJwt),
-	});
+	const resp = await fetchForTarget(target)(
+		apiUrl(target, `/workflows/runs/${runId}`),
+		{
+			headers: makeHeaders(target.token, target.userJwt),
+			signal,
+		}
+	);
 	if (!resp.ok) {
 		throw await errorFromResponse(resp, `/workflows/runs/${runId}`);
 	}
@@ -362,9 +399,12 @@ function toTemplateMeta(w: WorkflowTemplateMetaWire): WorkflowTemplateMeta {
 export async function fetchWorkflowTemplates(
 	target: ApiTarget
 ): Promise<WorkflowTemplateMeta[]> {
-	const resp = await fetch(apiUrl(target, "/api/workflows/catalog"), {
-		headers: makeHeaders(target.token, target.userJwt),
-	});
+	const resp = await fetchForTarget(target)(
+		apiUrl(target, "/api/workflows/catalog"),
+		{
+			headers: makeHeaders(target.token, target.userJwt),
+		}
+	);
 	if (!resp.ok) {
 		throw await errorFromResponse(resp, "/api/workflows/catalog");
 	}
@@ -380,7 +420,7 @@ export async function fetchWorkflowTemplate(
 	id: string
 ): Promise<WorkflowTemplateDetail> {
 	const path = `/api/workflows/catalog/${id}`;
-	const resp = await fetch(apiUrl(target, path), {
+	const resp = await fetchForTarget(target)(apiUrl(target, path), {
 		headers: makeHeaders(target.token, target.userJwt),
 	});
 	if (!resp.ok) {
@@ -446,9 +486,12 @@ export async function listWorkflowVersions(
 	target: ApiTarget,
 	id: string
 ): Promise<WorkflowVersionMeta[]> {
-	const resp = await fetch(apiUrl(target, `/workflows/${id}/versions`), {
-		headers: makeHeaders(target.token, target.userJwt),
-	});
+	const resp = await fetchForTarget(target)(
+		apiUrl(target, `/workflows/${id}/versions`),
+		{
+			headers: makeHeaders(target.token, target.userJwt),
+		}
+	);
 	if (!resp.ok) {
 		throw await errorFromResponse(resp, `/workflows/${id}/versions`);
 	}
@@ -463,7 +506,7 @@ export async function getWorkflowVersionDefinition(
 	id: string,
 	versionId: string
 ): Promise<Record<string, unknown>> {
-	const resp = await fetch(
+	const resp = await fetchForTarget(target)(
 		apiUrl(target, `/workflows/${id}/versions/${versionId}`),
 		{ headers: makeHeaders(target.token, target.userJwt) }
 	);

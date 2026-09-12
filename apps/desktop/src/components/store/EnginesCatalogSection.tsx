@@ -39,6 +39,7 @@ import {
 	ListingSection,
 	ListingStatStrip,
 } from "@ryu/marketplace/catalog/detail/listing-detail-shell";
+import { engineLogoProps } from "@ryu/marketplace/catalog/engine-logos";
 import { Badge } from "@ryu/ui/components/badge";
 import { Button } from "@ryu/ui/components/button";
 import {
@@ -476,7 +477,7 @@ function EngineList({
 	}
 	if (error && total === 0) {
 		return (
-			<div className="p-4 text-destructive text-sm">
+			<div className="p-4 text-sm text-status-destructive">
 				Couldn't load engines: {error}
 			</div>
 		);
@@ -538,11 +539,10 @@ function EngineList({
 								// hidden — the platform answer is exactly what the user came to
 								// find. Its status glyph carries the reason.
 								dimmed={!item.available}
-								icon={<HugeiconsIcon className="size-5" icon={LayerIcon} />}
+								{...engineLogoProps(item.name)}
 								key={item.id}
 								name={item.displayName}
 								onClick={() => onSelect(item.id)}
-								seedId={item.id}
 								selected={item.id === selectedId}
 							/>
 						))}
@@ -808,7 +808,7 @@ function EngineDetailPanel({
 				}
 				hero={
 					<ListingHero
-						icon={<HugeiconsIcon className="size-8" icon={LayerIcon} />}
+						{...engineLogoProps(engine.name)}
 						name={engine.displayName}
 						statusIcons={
 							<>
@@ -944,7 +944,7 @@ function EngineDetailPanel({
 				}
 				hero={
 					<ListingHero
-						icon={<HugeiconsIcon className="size-8" icon={LayerIcon} />}
+						{...engineLogoProps(engine.name)}
 						name={engine.displayName}
 						statusIcons={
 							engine.running ? (
@@ -1038,7 +1038,7 @@ function EngineDetailPanel({
 				}
 				hero={
 					<ListingHero
-						icon={<HugeiconsIcon className="size-8" icon={LayerIcon} />}
+						{...engineLogoProps(backend.name)}
 						name={backend.displayName}
 						statusIcons={
 							<>

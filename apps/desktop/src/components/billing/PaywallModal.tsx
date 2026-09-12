@@ -1,7 +1,7 @@
 // apps/desktop/src/components/billing/PaywallModal.tsx
 //
 // The desktop paywall (epic #496, Unit C1). Shown after the 7-day trial expires
-// with no active Pro/Max/Teams subscription AND no valid desktop license key.
+// with no active Pro/Max/Teams/Business subscription AND no valid desktop license key.
 //
 // Open-core: this gates Pro features + managed inference, NOT the app shell. It
 // is DISMISSIBLE — closing it drops the user into free local chat (which stays
@@ -98,7 +98,7 @@ export function PaywallModal({
 				<DialogHeader>
 					<div className="flex items-center gap-2">
 						<HugeiconsIcon
-							className="text-warning"
+							className="text-status-warning"
 							icon={SparklesIcon}
 							strokeWidth={2}
 						/>
@@ -145,7 +145,7 @@ export function PaywallModal({
 					].map((feature) => (
 						<li className="flex items-center gap-2" key={feature}>
 							<HugeiconsIcon
-								className="text-success"
+								className="text-status-success"
 								icon={CheckmarkCircle02Icon}
 								strokeWidth={2}
 							/>

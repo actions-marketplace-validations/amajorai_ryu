@@ -3,7 +3,7 @@ name: canary
 # Bleeding-edge build of the open-core headless set (core / gateway / cli + the 11
 # feature-app backend sidecars) on EVERY push to main that touches the built sources,
 # published as a PRERELEASE on its own versioned tag (`v0.1.2-canary.20260804.36`). This is
-# the fresh-on-merge companion to nightly.yml (the once-a-day snapshot); use canary to test
+# the fresh-on-merge companion to nightly.yml (the every-three-hours snapshot); use canary to test
 # the very latest main. The channel keeps the last `RETAIN` builds (see `prepare`); before
 # 2026-08-04 it was a single rolling `canary` tag, so only one build ever existed.
 #
@@ -92,6 +92,7 @@ jobs:
           # Optional. Unset = the changelog is the raw mirror-commit bullets,
           # which is already real content; set, they are merged into highlights.
           OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
+          OPENCODE_SESSION_ID: "ryu-${{ github.repository }}-${{ github.run_id }}"
         run: |
           set -e
           # Notes must be GENERATED before the release references them — the
@@ -212,7 +213,8 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-          NODE_OPTIONS: --max-old-space-size=8192
+          # Windows needs the larger heap for the full desktop renderer bundle.
+          NODE_OPTIONS: ${{ matrix.platform == 'windows-latest' && '--max-old-space-size=16384' || '--max-old-space-size=8192' }}
           # Vite INLINES these; apps/desktop/.env is gitignored, so without them a
           # released build bakes the localhost fallbacks and cannot sign in.
           VITE_APP_BACKEND_URL: ${{ vars.VITE_APP_BACKEND_URL || 'https://api.ryuhq.com' }}
@@ -318,6 +320,8 @@ jobs:
         working-directory: apps/island
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # The full renderer bundle peaks above Node's default heap on macOS.
+          NODE_OPTIONS: --max-old-space-size=8192
           # node-gyp cannot locate Visual Studio on windows-latest without this.
           GYP_MSVS_VERSION: "2022"
           npm_config_msvs_version: "2022"

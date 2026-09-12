@@ -51,7 +51,12 @@ import {
 	type StoreSectionTab,
 	StoreSectionTabs,
 } from "@ryu/blocks/desktop/store.tsx";
-import type { LibraryViewMode } from "@ryu/blocks/desktop/view-toggle.tsx";
+import type {
+	LibraryViewMode,
+	ViewMode,
+} from "@ryu/blocks/desktop/view-toggle.tsx";
+import AppIcon from "@ryu/marketplace/catalog/chrome/app-icon";
+import { engineLogoProps } from "@ryu/marketplace/catalog/engine-logos";
 import { Badge } from "@ryu/ui/components/badge.tsx";
 import { Button } from "@ryu/ui/components/button.tsx";
 import {
@@ -94,6 +99,7 @@ import SidebarLibrarySection, {
 import SkillRelationsGraph from "@/src/components/library/SkillRelationsGraph.tsx";
 import { SpaceProjectFolder } from "@/src/components/library/SpaceProjectFolder.tsx";
 import { MemoryLibrary } from "@/src/components/memory/MemoryLibrary.tsx";
+import { useSkillDistributionFlow } from "@/src/components/skills/SkillDistributionProvider.tsx";
 import { CreateSpaceDialog } from "@/src/components/spaces/CreateSpaceDialog.tsx";
 import {
 	TeamDialog,
@@ -103,7 +109,7 @@ import ToolsLibrary from "@/src/components/tools/ToolsLibrary.tsx";
 import { DestructiveConfirmDialog } from "@/src/components/ui/DestructiveConfirmDialog.tsx";
 import { useChatHistoryContext } from "@/src/contexts/ChatHistoryContext.tsx";
 import { useSpacesContext } from "@/src/contexts/SpacesContext.tsx";
-import { useTabsContext } from "@/src/contexts/TabsContext.tsx";
+import { useTabSelector } from "@/src/contexts/TabsContext.tsx";
 import { useCompanionAlias } from "@/src/contributions/use-companion-alias.ts";
 import { useActiveNode } from "@/src/hooks/useActiveNode.ts";
 import { useAgents } from "@/src/hooks/useAgents.ts";
@@ -127,6 +133,7 @@ import { useSandboxBackends } from "@/src/hooks/useSandboxBackends.ts";
 import { useSidebarSectionSources } from "@/src/hooks/useSidebarSectionSource.ts";
 import { useSkillRelations } from "@/src/hooks/useSkillRelations.ts";
 import { installedSkillsQuery } from "@/src/hooks/useSkillsCatalog.ts";
+import { useTabViewMode } from "@/src/hooks/useTabViewMode.ts";
 import { useTeams } from "@/src/hooks/useTeams.ts";
 import { useVoiceEngines } from "@/src/hooks/useVoiceEngines.ts";
 import { useWorkflows } from "@/src/hooks/useWorkflows.ts";
@@ -195,6 +202,25 @@ type LibrarySection =
 	| "tools"
 	| LibraryItemType
 	| SidebarOnlySection;
+
+/** Collections whose existing cards carry a richer, playful presentation. */
+const LIBRARY_SHOWCASE_SECTIONS: ReadonlySet<LibrarySection> = new Set([
+	"agent",
+	"space",
+	"skills",
+	"workflow",
+]);
+
+const LIBRARY_VIEW_MODES: readonly LibraryViewMode[] = [
+	"grid",
+	"list",
+	"showcase",
+	"graph",
+];
+
+function defaultLibraryView(section: LibrarySection): LibraryViewMode {
+	return LIBRARY_SHOWCASE_SECTIONS.has(section) ? "showcase" : "grid";
+}
 
 /** Sections that render their OWN surface instead of the shared card grid, and so
  *  bypass the collection pipeline (normalise → filter → sort → cards). They keep
@@ -359,15 +385,15 @@ function LibraryCollections({
 	const section: LibrarySection = isLibrarySection(active) ? active : "recents";
 	const setSection = setActive;
 
-	// View mode persists across tabs and sessions; query/sort reset per tab.
-	const [view, setView] = useState<LibraryViewMode>(() => {
-		try {
-			const stored = localStorage.getItem("ryu:library-view");
-			return stored === "list" || stored === "graph" ? stored : "grid";
-		} catch {
-			return "grid";
-		}
+	// View mode persists per Library section and session; query/sort reset per tab.
+	const [storedView, onViewChange] = useTabViewMode({
+		defaultMode: defaultLibraryView(section),
+		storageKey: "ryu:library-view",
+		tabKey: active,
+		validModes: LIBRARY_VIEW_MODES,
 	});
+	const view: LibraryViewMode =
+		storedView === "graph" && section !== "skills" ? "grid" : storedView;
 	const [query, setQuery] = useState("");
 	const [sort, setSort] = useState("updated");
 	// Type filter for the mixed tabs (Recents/Favorites); null = all.
@@ -383,16 +409,10 @@ function LibraryCollections({
 		setTypeFilter(null);
 	}, [section]);
 
-	const onViewChange = (mode: LibraryViewMode) => {
-		setView(mode);
-		try {
-			localStorage.setItem("ryu:library-view", mode);
-		} catch {
-			// best-effort persistence
-		}
-	};
-
-	const { activateTab, openTab, tabs } = useTabsContext();
+	const activateTab = useTabSelector((state) => state.activateTab);
+	const openTab = useTabSelector((state) => state.openTab);
+	const tabs = useTabSelector((state) => state.tabs);
+	const { distributeInstalledSkill } = useSkillDistributionFlow();
 	const { openCreateAgent } = useCreateAgentDialog();
 	const { favorites, toggle: toggleFavorite } = useFavorites();
 	const recents = useRecents();
@@ -864,6 +884,13 @@ function LibraryCollections({
 		});
 		const engineItems = [
 			...localEngines.map((engine) => ({
+				iconNode: (
+					<AppIcon
+						{...engineLogoProps(engine.name)}
+						className="size-8"
+						name={engine.name}
+					/>
+				),
 				icon: SECTION_ICONS.engines,
 				id: `provider:${engine.name}`,
 				name: engine.displayName || engine.name,
@@ -871,6 +898,13 @@ function LibraryCollections({
 				subtitle: "Text",
 			})),
 			...alongsideEngines.map((engine) => ({
+				iconNode: (
+					<AppIcon
+						{...engineLogoProps(engine.name)}
+						className="size-8"
+						name={engine.name}
+					/>
+				),
 				icon: SECTION_ICONS.engines,
 				id: `${engine.category}:${engine.name}`,
 				name: engine.displayName || engine.name,
@@ -878,6 +912,13 @@ function LibraryCollections({
 				subtitle: engine.category,
 			})),
 			...sandboxBackends.map((backend) => ({
+				iconNode: (
+					<AppIcon
+						{...engineLogoProps(backend.name)}
+						className="size-8"
+						name={backend.name}
+					/>
+				),
 				icon: SECTION_ICONS.engines,
 				id: `sandbox:${backend.name}`,
 				name: backend.name,
@@ -951,6 +992,10 @@ function LibraryCollections({
 				id: skill.id,
 				name: skill.name,
 				onOpen: () => openTab("/store/skills", { title: "Skills" }),
+				secondaryAction: {
+					label: `Use ${skill.name} with agents`,
+					onSelect: () => void distributeInstalledSkill(skill.id),
+				},
 				subtitle: skill.description,
 			})),
 			tabs: tabs.map((tab) => ({
@@ -976,6 +1021,7 @@ function LibraryCollections({
 		companions,
 		composioConnections.data,
 		chatItems,
+		distributeInstalledSkill,
 		installedSkills,
 		localEngines,
 		mcpServers,
@@ -1421,7 +1467,7 @@ function LibraryCollections({
 		// local data, so it renders wherever a workflow card appears. Spaces used to
 		// mount a fetched markdown snippet here; the Spaces grid is a book shelf now
 		// and never reaches this card, so nothing space-shaped is left to preview.
-		const preview = view === "grid" ? item.preview : undefined;
+		const preview = view === "showcase" ? item.preview : undefined;
 		return {
 			key: refKey(item.type, item.id),
 			icon: item.icon,
@@ -1480,7 +1526,10 @@ function LibraryCollections({
 	// than rendered dead beside them — two search fields on one screen is the exact
 	// kind of duplication that made this area feel bolted together.
 	const customSurface = CUSTOM_SURFACE_SECTIONS.has(section);
-	const collectionView = view === "graph" ? "grid" : view;
+	const collectionView: ViewMode =
+		view === "list" ? "list" : view === "showcase" ? "showcase" : "grid";
+	const standardView: ViewMode = view === "list" ? "list" : "grid";
+	const showShowcase = LIBRARY_SHOWCASE_SECTIONS.has(section);
 
 	// Neither a built-in collection's controls nor the shell's search apply to a
 	// surface that owns its own (Tools) or to an app-registered collection, which
@@ -1549,6 +1598,7 @@ function LibraryCollections({
 									onViewChange={onViewChange}
 									showGraph={section === "skills"}
 									showSearch={false}
+									showShowcase={showShowcase}
 									sort={section === "recents" ? undefined : sort}
 									sortOptions={section === "recents" ? [] : SORT_OPTIONS}
 									view={view}
@@ -1594,7 +1644,7 @@ function LibraryCollections({
 										total: null,
 									}
 								}
-								view={collectionView}
+								view={standardView}
 							/>
 						) : skillRelationsEnabled ? (
 							<SkillRelationsGraph
@@ -1645,7 +1695,7 @@ function LibraryCollections({
 										: `No ${sectionMeta?.label.toLowerCase() ?? "items"} yet`
 								}
 							/>
-						) : section === "space" && collectionView === "grid" ? (
+						) : section === "space" && view === "showcase" ? (
 							<div className="flex flex-wrap gap-6 pt-1">
 								{visibleItems.flatMap((item) => {
 									const space = spaces.find(
@@ -1669,7 +1719,7 @@ function LibraryCollections({
 									);
 								})}
 							</div>
-						) : section === "agent" && collectionView === "grid" ? (
+						) : section === "agent" && view === "showcase" ? (
 							/* An agent gets the card it already has everywhere else: the
 							   employee badge, the same physical object its profile page and
 							   the Store's Agents tab show. Gated on the SECTION exactly like
@@ -1677,7 +1727,7 @@ function LibraryCollections({
 							   a card among cards, because those tabs mix types (a 27rem badge
 							   beside a 5rem chat card reads as a broken grid) and Recents is
 							   the tab the app lands on. */
-							<LibraryGrid columns={2} view={collectionView}>
+							<LibraryGrid columns={2} view="grid">
 								{visibleItems.map((item) => (
 									<AgentBadgeCard
 										action={
@@ -1710,7 +1760,7 @@ function LibraryCollections({
 								))}
 							</LibraryGrid>
 						) : (
-							<LibraryGrid columns={2} view={collectionView}>
+							<LibraryGrid columns={2} view={standardView}>
 								{visibleItems.map((item) => (
 									<LibraryCard
 										contextMenu={menuFor(item)}
@@ -1718,7 +1768,7 @@ function LibraryCollections({
 										key={refKey(item.type, item.id)}
 										onOpen={item.open}
 										onToggleFavorite={() => toggleFavorite(item.type, item.id)}
-										view={collectionView}
+										view={standardView}
 									/>
 								))}
 							</LibraryGrid>

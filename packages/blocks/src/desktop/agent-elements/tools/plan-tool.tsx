@@ -86,9 +86,7 @@ export const PlanTool = memo(function PlanTool({
 						</p>
 					)}
 					{isAlreadyApproved ? (
-						<p className="text-emerald-600 text-xs dark:text-emerald-400">
-							{approveText}
-						</p>
+						<p className="text-status-success text-xs">{approveText}</p>
 					) : (
 						<div className="flex items-center gap-2 border-border/60 border-t pt-2">
 							<Button

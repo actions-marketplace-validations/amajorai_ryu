@@ -54,7 +54,7 @@ function ServersList({
 		);
 	}
 	if (error) {
-		return <p className="px-3 text-destructive text-sm">{error}</p>;
+		return <p className="px-3 text-sm text-status-destructive">{error}</p>;
 	}
 	if (servers.length === 0) {
 		return (
@@ -142,7 +142,7 @@ function ToolsList({
 		);
 	}
 	if (error) {
-		return <p className="px-3 text-destructive text-sm">{error}</p>;
+		return <p className="px-3 text-sm text-status-destructive">{error}</p>;
 	}
 	if (tools.length === 0) {
 		return (

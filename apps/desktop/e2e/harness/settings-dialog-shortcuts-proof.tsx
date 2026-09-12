@@ -1,4 +1,5 @@
 import { HotkeysProvider, useHotkey } from "@ryu/hotkeys/react";
+import { I18nProvider } from "@ryu/i18n/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { ThemeProvider } from "next-themes";
 import { useEffect, useState } from "react";
@@ -41,6 +42,9 @@ window.fetch = async (input, init) => {
 		});
 	}
 	if (pathname === "/api/gateway/status") {
+		document.body.dataset.gatewayRequests = String(
+			Number(document.body.dataset.gatewayRequests ?? "0") + 1
+		);
 		return new Response(JSON.stringify({ reachable: false, url: null }), {
 			headers,
 			status: 200,
@@ -166,9 +170,11 @@ const root = document.getElementById("root");
 if (root) {
 	createRoot(root).render(
 		<QueryClientProvider client={queryClient}>
-			<MemoryRouter>
-				<ProofSurface />
-			</MemoryRouter>
+			<I18nProvider>
+				<MemoryRouter>
+					<ProofSurface />
+				</MemoryRouter>
+			</I18nProvider>
 		</QueryClientProvider>
 	);
 }

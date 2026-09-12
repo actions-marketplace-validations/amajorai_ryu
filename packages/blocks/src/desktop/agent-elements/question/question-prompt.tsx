@@ -380,7 +380,7 @@ export function QuestionPrompt({
 				</div>
 			)}
 			{voice && voiceError && (
-				<p aria-live="polite" className="text-destructive text-xs">
+				<p aria-live="polite" className="text-status-destructive text-xs">
 					{voiceError}
 				</p>
 			)}

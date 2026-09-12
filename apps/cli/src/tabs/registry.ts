@@ -131,8 +131,3 @@ export const TABS: TabModule[] = [
 		Component: AccountTab,
 	},
 ];
-
-/** Look up a tab module by id. */
-export function tabById(id: string): TabModule | undefined {
-	return TABS.find((tab) => tab.id === id);
-}

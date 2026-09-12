@@ -47,7 +47,7 @@ export function ConsentCardView({
 	onSet = noop,
 }: ConsentCardViewProps) {
 	return (
-		<section className="flex flex-col gap-3 rounded-2xl bg-white/5 p-3">
+		<section className="flex flex-col gap-3 rounded-2xl bg-card p-3">
 			<ul className="flex flex-col gap-3">
 				{CAPABILITIES.map((cap) => {
 					const value = values[cap.key] ?? null;
@@ -55,10 +55,10 @@ export function ConsentCardView({
 					return (
 						<li className="flex flex-col gap-2" key={cap.key}>
 							<div>
-								<p className="font-medium text-neutral-100 text-xs">
+								<p className="font-medium text-foreground text-xs">
 									{cap.title}
 								</p>
-								<p className="mt-0.5 text-[11px] text-neutral-400">
+								<p className="mt-0.5 text-[11px] text-muted-foreground">
 									{cap.body}
 								</p>
 							</div>
@@ -67,7 +67,7 @@ export function ConsentCardView({
 									className={
 										value === true
 											? ""
-											: "bg-white/10 text-neutral-100 hover:bg-white/20"
+											: "bg-muted text-foreground hover:bg-accent"
 									}
 									onClick={() => onSet(cap.key, true)}
 									size="xs"
@@ -78,8 +78,8 @@ export function ConsentCardView({
 								<Button
 									className={
 										value === false
-											? "bg-white/15 text-neutral-200"
-											: "text-neutral-400 hover:text-neutral-200"
+											? "bg-secondary text-foreground"
+											: "text-muted-foreground hover:text-foreground"
 									}
 									onClick={() => onSet(cap.key, false)}
 									size="xs"
@@ -88,7 +88,7 @@ export function ConsentCardView({
 									Decline
 								</Button>
 								{answered ? (
-									<span className="ml-auto self-center text-[11px] text-neutral-500">
+									<span className="ml-auto self-center text-[11px] text-muted-foreground">
 										{value ? "Allowed" : "Declined"}
 									</span>
 								) : null}

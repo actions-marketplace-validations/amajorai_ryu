@@ -27,10 +27,15 @@ import {
 	type Capability,
 	type CryptoStatus,
 	capabilitiesFromGrants,
+	createI18nHostServices,
 	type HostServices,
 	validatePluginRoute,
 } from "@ryu/app-host/rpc";
-import { thirdPartyPluginSrcdoc } from "@ryu/app-host/third-party-plugin";
+import {
+	htmlCompanionSrcdoc,
+	thirdPartyPluginSrcdoc,
+} from "@ryu/app-host/third-party-plugin";
+import { useI18n } from "@ryu/i18n/react";
 import { useEffect, useMemo, useState } from "react";
 import type { PluginCompanion } from "../../shared/ipc.ts";
 import {
@@ -60,6 +65,7 @@ export function IslandPluginHost({
 }: {
 	companion: PluginCompanion;
 }) {
+	const i18n = useI18n();
 	const [connected, setConnected] = useState(false);
 	const [bundle, setBundle] = useState<BundleState>({ status: "loading" });
 
@@ -112,6 +118,15 @@ export function IslandPluginHost({
 	// keyed by the OWNING plugin id (`companion.pluginId`, NOT `companion.id`).
 	const services = useMemo<HostServices>(
 		() => ({
+			...createI18nHostServices(i18n),
+			storageCompareAndSet: (input) =>
+				pluginHostInvoke(
+					companion.pluginId,
+					"storage.compareAndSet",
+					input
+				) as Promise<boolean>,
+			timelineTranscripts: (input) =>
+				window.island.shadow.getSpeechHistory(input),
 			listAgents: async () => {
 				const result = await window.island.core.agents();
 				if (!result.available) {
@@ -207,20 +222,26 @@ export function IslandPluginHost({
 					signal,
 				}),
 		}),
-		[companion.id, companion.pluginId]
+		[companion.id, companion.pluginId, i18n]
 	);
 
 	const srcdoc = useMemo(
 		() =>
 			bundle.status === "ready" && bundle.code
-				? thirdPartyPluginSrcdoc(nonce, toBase64Utf8(bundle.code), companion.id)
+				? /^\s*(?:<!doctype\s+html|<html[\s>])/i.test(bundle.code)
+					? htmlCompanionSrcdoc(nonce, bundle.code, companion.id)
+					: thirdPartyPluginSrcdoc(
+							nonce,
+							toBase64Utf8(bundle.code),
+							companion.id
+						)
 				: null,
 		[bundle, nonce, companion.id]
 	);
 
 	if (bundle.status === "loading") {
 		return (
-			<div className="flex h-full items-center justify-center p-6 text-neutral-400 text-sm">
+			<div className="flex h-full items-center justify-center p-6 text-muted-foreground text-sm">
 				Loading app…
 			</div>
 		);
@@ -228,7 +249,7 @@ export function IslandPluginHost({
 
 	if (!srcdoc) {
 		return (
-			<div className="flex h-full items-center justify-center p-6 text-neutral-400 text-sm">
+			<div className="flex h-full items-center justify-center p-6 text-muted-foreground text-sm">
 				This app does not provide a runnable UI.
 			</div>
 		);
@@ -238,11 +259,11 @@ export function IslandPluginHost({
 		<div className="flex h-full flex-col overflow-hidden">
 			{/* Visible attribution: this is app content, namespaced, never system
 			    chrome. */}
-			<div className="flex items-center gap-2 border-white/10 border-b bg-white/5 px-3 py-2">
-				<span className="font-medium text-neutral-200 text-sm">
+			<div className="flex items-center gap-2 border-border border-b bg-card px-3 py-2">
+				<span className="font-medium text-foreground text-sm">
 					App · {companion.label || companion.name}
 				</span>
-				<span className="ml-auto text-neutral-500 text-xs">
+				<span className="ml-auto text-muted-foreground text-xs">
 					{connected ? "sandboxed · connected" : "sandboxed · starting…"}
 				</span>
 			</div>

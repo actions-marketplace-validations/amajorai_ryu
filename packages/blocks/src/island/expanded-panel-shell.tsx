@@ -44,13 +44,13 @@ export function ExpandedPanelShell({
 		<div className="flex h-full w-full flex-col gap-3 overflow-y-auto p-1">
 			<header className="flex items-center justify-between gap-2">
 				<div className="flex items-center gap-2">
-					<span className="size-2 rounded-full bg-emerald-400" />
-					<h1 className="font-semibold text-neutral-100 text-sm">Ryu Island</h1>
+					<span className="size-2 rounded-full bg-success" />
+					<h1 className="font-medium text-foreground text-sm">Ryu Island</h1>
 				</div>
 				<div className="flex items-center gap-1.5">
 					{onHome ? (
 						<Button
-							className="bg-white/10 text-neutral-200 hover:bg-white/20"
+							className="bg-muted text-foreground hover:bg-accent"
 							onClick={onHome}
 							size="xs"
 							variant="ghost"
@@ -62,8 +62,8 @@ export function ExpandedPanelShell({
 						<Button
 							className={
 								view === tab.target
-									? "bg-white/20 text-neutral-100 hover:bg-white/20"
-									: "bg-white/10 text-neutral-200 hover:bg-white/20"
+									? "bg-accent text-foreground hover:bg-accent"
+									: "bg-muted text-foreground hover:bg-accent"
 							}
 							key={tab.target}
 							onClick={() => onSelect(tab.target)}
@@ -75,7 +75,7 @@ export function ExpandedPanelShell({
 					))}
 					{view === "chat" ? null : (
 						<Button
-							className="bg-white/10 text-neutral-200 hover:bg-white/20"
+							className="bg-muted text-foreground hover:bg-accent"
 							onClick={() => onSelect("chat")}
 							size="xs"
 							variant="ghost"
@@ -85,7 +85,7 @@ export function ExpandedPanelShell({
 					)}
 					<Button
 						aria-label="Close panel"
-						className="bg-white/10 text-neutral-200 hover:bg-white/20"
+						className="bg-muted text-foreground hover:bg-accent"
 						onClick={onClose}
 						size="icon-xs"
 						variant="ghost"

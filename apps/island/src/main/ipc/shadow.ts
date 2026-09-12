@@ -14,12 +14,16 @@ import {
 	getCurrentContext,
 	getProactive,
 	getProactiveInbox,
+	getSpeechHistory,
 	postFeedback,
 	setCaptureControl,
 } from "../services/shadow.ts";
 
 /** Register all Shadow IPC handlers. */
 export function registerShadowIpc(): void {
+	ipcMain.handle(IPC.shadow.getSpeechHistory, (_event, input) =>
+		getSpeechHistory(input)
+	);
 	ipcMain.handle(IPC.shadow.getCurrentContext, () => getCurrentContext());
 	ipcMain.handle(IPC.shadow.getProactive, () => getProactive());
 	ipcMain.handle(IPC.shadow.getProactiveInbox, () => getProactiveInbox());

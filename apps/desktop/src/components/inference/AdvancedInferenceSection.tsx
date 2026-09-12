@@ -89,7 +89,9 @@ function JsonObjectField({
 				placeholder={placeholder}
 				value={text}
 			/>
-			{error ? <p className="text-destructive text-xs">{error}</p> : null}
+			{error ? (
+				<p className="text-status-destructive text-xs">{error}</p>
+			) : null}
 			{hint ? <p className="text-muted-foreground text-xs">{hint}</p> : null}
 		</div>
 	);
@@ -165,7 +167,7 @@ export function AdvancedInferenceSection({
 				onClick={() => setOpen((o) => !o)}
 				type="button"
 			>
-				<span className="font-semibold text-sm">Advanced inference</span>
+				<span className="font-medium text-sm">Advanced inference</span>
 				<span className="ml-auto text-muted-foreground">
 					<HugeiconsIcon
 						className="size-4"
@@ -499,7 +501,9 @@ export function AdvancedInferenceSection({
 									value={extraText}
 								/>
 								{extraError ? (
-									<p className="text-destructive text-xs">{extraError}</p>
+									<p className="text-status-destructive text-xs">
+										{extraError}
+									</p>
 								) : null}
 							</div>
 						</FieldGroup>

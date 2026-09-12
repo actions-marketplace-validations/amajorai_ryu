@@ -9,7 +9,13 @@
 // the client-side view exposed to React components. The internal symbol names
 // (App*, fetchApps, etc.) are kept stable to limit churn across importers.
 
-import { type ApiTarget, apiUrl, makeHeaders, request } from "./client.ts";
+import {
+	type ApiTarget,
+	apiUrl,
+	fetchForTarget,
+	makeHeaders,
+	request,
+} from "./client.ts";
 
 // ── Wire types (Rust/serde shape) ────────────────────────────────────────────
 
@@ -480,7 +486,7 @@ async function parseLifecycleError(
 
 // ── Public API ────────────────────────────────────────────────────────────────
 
-type AppLifecycleAction =
+export type AppLifecycleAction =
 	| "install"
 	| "enable"
 	| "disable"
@@ -493,9 +499,70 @@ function appLifecyclePath(id: string, action: AppLifecycleAction): string {
 	return `/api/plugins/${encodeURIComponent(id)}/${action}`;
 }
 
+export interface AppLifecyclePreview {
+	action: AppLifecycleAction;
+	dryRun: true;
+	success: boolean;
+	[key: string]: unknown;
+}
+
+export interface AppLifecyclePreviewOptions {
+	cascade?: boolean;
+	channel?: string;
+	force?: boolean;
+	version?: string;
+}
+
+/** Run the lifecycle's server-side validation and dependency planner without
+ * changing plugin state. The response is intentionally kept as a plan payload
+ * rather than being coerced into an {@link AppRecord}; dry runs are not installs,
+ * enables, disables, uninstalls, or updates. */
+export async function previewAppLifecycle(
+	target: ApiTarget,
+	id: string,
+	action: AppLifecycleAction,
+	options: AppLifecyclePreviewOptions = {}
+): Promise<AppLifecyclePreview> {
+	const endpoint = appLifecyclePath(id, action);
+	const query = new URLSearchParams();
+	const isQueryAction = action === "disable" || action === "uninstall";
+	if (isQueryAction) {
+		query.set("dryRun", "true");
+		if (options.cascade) {
+			query.set("cascade", "true");
+		}
+		if (options.force) {
+			query.set("force", "true");
+		}
+	} else {
+		query.delete("dryRun");
+	}
+	const queryString = query.toString();
+	const path = queryString ? `${endpoint}?${queryString}` : endpoint;
+	const body =
+		action === "update"
+			? {
+					channel: options.channel,
+					dryRun: true,
+					force: options.force ?? false,
+					version: options.version,
+				}
+			: { dryRun: true };
+	const resp = await fetchForTarget(target)(apiUrl(target, path), {
+		method: "POST",
+		headers: makeHeaders(target.token, target.userJwt),
+		body: isQueryAction ? undefined : JSON.stringify(body),
+	});
+	if (!resp.ok) {
+		const err = await parseLifecycleError(resp, path);
+		throw Object.assign(new Error(err.message), err);
+	}
+	return (await resp.json()) as AppLifecyclePreview;
+}
+
 /** `GET /api/plugins` — list all app manifests merged with their lifecycle state. */
 export async function fetchApps(target: ApiTarget): Promise<AppInfo[]> {
-	const resp = await fetch(apiUrl(target, "/api/plugins"), {
+	const resp = await fetchForTarget(target)(apiUrl(target, "/api/plugins"), {
 		method: "GET",
 		headers: makeHeaders(target.token, target.userJwt),
 	});
@@ -524,10 +591,13 @@ export interface HookEventInfo {
 export async function fetchHookEvents(
 	target: ApiTarget
 ): Promise<HookEventInfo[]> {
-	const resp = await fetch(apiUrl(target, "/api/plugins/contributions"), {
-		method: "GET",
-		headers: makeHeaders(target.token, target.userJwt),
-	});
+	const resp = await fetchForTarget(target)(
+		apiUrl(target, "/api/plugins/contributions"),
+		{
+			method: "GET",
+			headers: makeHeaders(target.token, target.userJwt),
+		}
+	);
 	if (!resp.ok) {
 		throw new Error(`/api/plugins/contributions failed: ${resp.status}`);
 	}
@@ -541,7 +611,7 @@ export async function installApp(
 	id: string
 ): Promise<AppRecord> {
 	const path = appLifecyclePath(id, "install");
-	const resp = await fetch(apiUrl(target, path), {
+	const resp = await fetchForTarget(target)(apiUrl(target, path), {
 		method: "POST",
 		headers: makeHeaders(target.token, target.userJwt),
 	});
@@ -563,7 +633,7 @@ export async function enableApp(
 	id: string
 ): Promise<AppRecord> {
 	const path = appLifecyclePath(id, "enable");
-	const resp = await fetch(apiUrl(target, path), {
+	const resp = await fetchForTarget(target)(apiUrl(target, path), {
 		method: "POST",
 		headers: makeHeaders(target.token, target.userJwt),
 	});
@@ -588,7 +658,7 @@ export async function disableApp(
 ): Promise<AppRecord> {
 	const endpoint = appLifecyclePath(id, "disable");
 	const path = options?.cascade ? `${endpoint}?cascade=true` : endpoint;
-	const resp = await fetch(apiUrl(target, path), {
+	const resp = await fetchForTarget(target)(apiUrl(target, path), {
 		method: "POST",
 		headers: makeHeaders(target.token, target.userJwt),
 	});
@@ -636,7 +706,7 @@ export async function uninstallApp(
 ): Promise<AppUninstallResult> {
 	const endpoint = appLifecyclePath(id, "uninstall");
 	const path = options?.cascade ? `${endpoint}?cascade=true` : endpoint;
-	const resp = await fetch(apiUrl(target, path), {
+	const resp = await fetchForTarget(target)(apiUrl(target, path), {
 		method: "POST",
 		headers: makeHeaders(target.token, target.userJwt),
 	});
@@ -677,7 +747,7 @@ export async function updateApp(
 	options?: { force?: boolean }
 ): Promise<AppRecord> {
 	const path = appLifecyclePath(id, "update");
-	const resp = await fetch(apiUrl(target, path), {
+	const resp = await fetchForTarget(target)(apiUrl(target, path), {
 		method: "POST",
 		headers: makeHeaders(target.token, target.userJwt),
 		body: JSON.stringify({ force: options?.force ?? false }),
@@ -784,11 +854,14 @@ export async function installAppFromUrl(
 	target: ApiTarget,
 	url: string
 ): Promise<void> {
-	const resp = await fetch(apiUrl(target, "/api/plugins/install"), {
-		method: "POST",
-		headers: makeHeaders(target.token, target.userJwt),
-		body: JSON.stringify({ url }),
-	});
+	const resp = await fetchForTarget(target)(
+		apiUrl(target, "/api/plugins/install"),
+		{
+			method: "POST",
+			headers: makeHeaders(target.token, target.userJwt),
+			body: JSON.stringify({ url }),
+		}
+	);
 	if (!resp.ok) {
 		const err = await parseLifecycleError(resp, "/api/plugins/install");
 		throw Object.assign(new Error(err.message), err);
@@ -803,7 +876,7 @@ export async function installPluginFromCatalog(
 	id: string
 ): Promise<void> {
 	const path = "/api/plugins/catalog/install";
-	const resp = await fetch(apiUrl(target, path), {
+	const resp = await fetchForTarget(target)(apiUrl(target, path), {
 		method: "POST",
 		headers: makeHeaders(target.token, target.userJwt),
 		body: JSON.stringify({ id }),
@@ -821,10 +894,13 @@ export async function installPluginFromCatalog(
 export async function fetchSidecarStatus(
 	target: ApiTarget
 ): Promise<Record<string, boolean>> {
-	const resp = await fetch(apiUrl(target, "/api/sidecar/status"), {
-		method: "GET",
-		headers: makeHeaders(target.token, target.userJwt),
-	});
+	const resp = await fetchForTarget(target)(
+		apiUrl(target, "/api/sidecar/status"),
+		{
+			method: "GET",
+			headers: makeHeaders(target.token, target.userJwt),
+		}
+	);
 	if (!resp.ok) {
 		throw new Error(`/api/sidecar/status failed: ${resp.status}`);
 	}
@@ -844,13 +920,48 @@ export async function installSidecar(
 	target: ApiTarget,
 	name: string
 ): Promise<void> {
-	const resp = await fetch(apiUrl(target, `/api/setup/${name}/install`), {
-		method: "POST",
-		headers: makeHeaders(target.token, target.userJwt),
-	});
+	const resp = await fetchForTarget(target)(
+		apiUrl(target, `/api/setup/${name}/install`),
+		{
+			method: "POST",
+			headers: makeHeaders(target.token, target.userJwt),
+		}
+	);
 	if (!resp.ok) {
 		throw new Error(`/api/setup/${name}/install failed: ${resp.status}`);
 	}
+}
+
+export interface SidecarLifecyclePreview {
+	action: "install" | "uninstall";
+	dryRun: true;
+	name: string;
+	success: boolean;
+	[key: string]: unknown;
+}
+
+export function previewSidecarInstall(
+	target: ApiTarget,
+	name: string
+): Promise<SidecarLifecyclePreview> {
+	return request<SidecarLifecyclePreview>(
+		target,
+		`/api/setup/${encodeURIComponent(name)}/install?dryRun=true`,
+		{ method: "POST" }
+	);
+}
+
+export function previewSidecarUninstall(
+	target: ApiTarget,
+	name: string,
+	withData = false
+): Promise<SidecarLifecyclePreview> {
+	const route = withData ? "uninstall-with-data" : "uninstall";
+	return request<SidecarLifecyclePreview>(
+		target,
+		`/api/setup/${encodeURIComponent(name)}/${route}?dryRun=true`,
+		{ method: "POST" }
+	);
 }
 
 /** `POST /api/sidecar/:name/start` — start a sidecar process. */
@@ -858,10 +969,13 @@ export async function startSidecar(
 	target: ApiTarget,
 	name: string
 ): Promise<void> {
-	const resp = await fetch(apiUrl(target, `/api/sidecar/${name}/start`), {
-		method: "POST",
-		headers: makeHeaders(target.token, target.userJwt),
-	});
+	const resp = await fetchForTarget(target)(
+		apiUrl(target, `/api/sidecar/${name}/start`),
+		{
+			method: "POST",
+			headers: makeHeaders(target.token, target.userJwt),
+		}
+	);
 	if (!resp.ok) {
 		throw new Error(`/api/sidecar/${name}/start failed: ${resp.status}`);
 	}
@@ -872,10 +986,13 @@ export async function stopSidecar(
 	target: ApiTarget,
 	name: string
 ): Promise<void> {
-	const resp = await fetch(apiUrl(target, `/api/sidecar/${name}/stop`), {
-		method: "POST",
-		headers: makeHeaders(target.token, target.userJwt),
-	});
+	const resp = await fetchForTarget(target)(
+		apiUrl(target, `/api/sidecar/${name}/stop`),
+		{
+			method: "POST",
+			headers: makeHeaders(target.token, target.userJwt),
+		}
+	);
 	if (!resp.ok) {
 		throw new Error(`/api/sidecar/${name}/stop failed: ${resp.status}`);
 	}

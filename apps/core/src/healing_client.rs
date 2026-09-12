@@ -28,10 +28,10 @@
 //! - **workflow run** — `fail_run` posts via [`global_client`].
 //!
 //! Security mirrors the ext-proxy hop exactly: loopback target on the sidecar's
-//! declared port ([`crate::profile::port`]-shifted), with the per-plugin minted
-//! bearer ([`crate::sidecar::ext_proxy::ext_token`]) the sidecar was spawned with —
-//! nothing hardcoded. Fail-open: an unreachable sidecar (Self-Healing app disabled,
-//! so the sidecar isn't spawned) means a run simply isn't auto-healed, never a wedge.
+//! live manager-owned registration, with the per-plugin minted bearer
+//! ([`crate::sidecar::ext_proxy::ext_token`]) the sidecar was spawned with — nothing
+//! hardcoded. Fail-open: an unreachable sidecar (Self-Healing app disabled, so the
+//! sidecar isn't spawned) means a run simply isn't auto-healed, never a wedge.
 //!
 //! **Core links no `ryu-healing` code.** The app is a satellite (AGENTS.md); the only
 //! Rust the two halves share is `ryu-healing-contracts`, a serde-only crate that
@@ -159,26 +159,29 @@ impl CoreHealingHost {
 // ---------------------------------------------------------------------------
 
 /// Typed loopback client for the `ryu-healing` sidecar. Cheap to clone (holds the
-/// resolved port + a shared [`CoreHealingHost`]); the bearer is minted per call so
+/// manager + a shared [`CoreHealingHost`]); the bearer is minted per call so
 /// it always tracks the current node token.
 #[derive(Clone)]
 pub struct HealingClient {
-    port: u16,
+    manager: std::sync::Arc<crate::sidecar::SidecarManager>,
     host: Arc<CoreHealingHost>,
 }
 
 impl HealingClient {
-    /// Build a client bound to the sidecar's resolved loopback port, applying
+    /// Build a client using the manager's live target, applying
     /// verdicts against a [`CoreHealingHost`].
-    pub fn new(port: u16) -> Self {
+    pub fn new(manager: std::sync::Arc<crate::sidecar::SidecarManager>) -> Self {
         Self {
-            port,
+            manager,
             host: Arc::new(CoreHealingHost),
         }
     }
 
-    fn base_url(&self) -> String {
-        format!("http://127.0.0.1:{}/api/healing", self.port)
+    fn base_url(&self) -> std::result::Result<String, String> {
+        self.manager
+            .sidecar_base_url(HEALING_PLUGIN_ID, HEALING_SIDECAR)
+            .map(|url| format!("{url}/api/healing"))
+            .map_err(|denied| denied.reason())
     }
 
     /// The per-plugin minted bearer the sidecar was spawned with — the same value
@@ -214,8 +217,11 @@ impl HealingClient {
             "instruction": instruction,
             "failure": failure,
         });
+        let Ok(base_url) = self.base_url() else {
+            return;
+        };
         let resp = reqwest::Client::new()
-            .post(format!("{}/report-failure", self.base_url()))
+            .post(format!("{}/report-failure", base_url))
             .bearer_auth(self.bearer())
             .json(&body)
             .send()
@@ -305,19 +311,6 @@ pub fn set_global_client(client: HealingClient) {
 /// The process-global healing client, or `None` before `main.rs` has set it.
 pub fn global_client() -> Option<&'static HealingClient> {
     GLOBAL_CLIENT.get()
-}
-
-/// Resolve the `ryu-healing` sidecar's loopback port from the loaded manifests,
-/// profile-shifted the same way the ext-proxy forwards ([`crate::profile::port`]). The
-/// port comes from the manifest and ONLY the manifest — see
-/// [`crate::sidecar::ext_proxy::sidecar_port`] for why a built-in absence is a
-/// build-time invariant rather than a runtime fallback. (This is orthogonal to the
-/// fail-open posture above: that covers an *unreachable* sidecar, checked per call.)
-pub fn sidecar_port(manifests: &[crate::plugin_manifest::PluginManifest]) -> u16 {
-    crate::sidecar::ext_proxy::sidecar_port(manifests, HEALING_PLUGIN_ID, HEALING_SIDECAR).expect(
-        "built-in healing.manifest.json must declare the ryu-healing sidecar (see \
-         plugin_manifest::BUILTIN_MANIFESTS)",
-    )
 }
 
 // ---------------------------------------------------------------------------

@@ -523,8 +523,13 @@ export function formatBytes(bytes: number): string {
 }
 
 /** List all Spaces, most-recently-updated first. */
-export async function fetchSpaces(target: ApiTarget): Promise<Space[]> {
-	const json = await request<{ spaces?: SpaceWire[] }>(target, "/api/spaces");
+export async function fetchSpaces(
+	target: ApiTarget,
+	signal?: AbortSignal
+): Promise<Space[]> {
+	const json = await request<{ spaces?: SpaceWire[] }>(target, "/api/spaces", {
+		signal,
+	});
 	return (json.spaces ?? []).map(toSpace);
 }
 
@@ -971,11 +976,13 @@ export async function setDocumentIcon(
 /** List the documents in a Space. */
 export async function fetchDocuments(
 	target: ApiTarget,
-	spaceId: string
+	spaceId: string,
+	signal?: AbortSignal
 ): Promise<SpaceDocument[]> {
 	const json = await request<{ documents?: DocumentWire[] }>(
 		target,
-		`/api/spaces/${spaceId}/documents`
+		`/api/spaces/${spaceId}/documents`,
+		{ signal }
 	);
 	return (json.documents ?? []).map(toDocument);
 }

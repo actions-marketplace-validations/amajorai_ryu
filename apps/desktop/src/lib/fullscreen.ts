@@ -28,10 +28,6 @@ const listeners = new Set<Listener>();
 let cached = false;
 let watching = false;
 
-function isTauri(): boolean {
-	return isTauriReady();
-}
-
 function publish(value: boolean): void {
 	if (value === cached) {
 		return;
@@ -49,7 +45,7 @@ export function getFullscreen(): boolean {
 
 /** Re-read the real window state and notify subscribers if it changed. */
 export async function syncFullscreen(): Promise<boolean> {
-	if (!isTauri()) {
+	if (!isTauriReady()) {
 		const value = Boolean(document.fullscreenElement);
 		publish(value);
 		return value;
@@ -78,7 +74,7 @@ function startWatching(): void {
 	// Seed the cache once, when the watcher starts — not per subscriber, or every
 	// mount costs an IPC round-trip.
 	void syncFullscreen();
-	if (!isTauri()) {
+	if (!isTauriReady()) {
 		document.addEventListener("fullscreenchange", () => {
 			publish(Boolean(document.fullscreenElement));
 		});
@@ -117,7 +113,7 @@ const subscribe = (onStoreChange: () => void) =>
  * up in. Throws if the shell refuses the transition, so callers can surface it.
  */
 export async function toggleFullscreen(): Promise<boolean> {
-	if (!isTauri()) {
+	if (!isTauriReady()) {
 		if (document.fullscreenElement) {
 			await document.exitFullscreen();
 			publish(false);

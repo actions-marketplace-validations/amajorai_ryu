@@ -178,6 +178,7 @@ fn reserved_namespaces() -> Vec<String> {
         "native",
         "shell",
         "storage",
+        "backups",
         "chat",
         "widget",
         "media",
@@ -264,6 +265,7 @@ fn default_grant_allowlist() -> Vec<String> {
         // `mcp:web_search`/`mcp:file_read` are intentionally NOT here.)
         "mcp:spider",
         "mcp:agentbrowser",
+        "mcp:checks",
         // `@ryu/news` and `@ryu/tuition` are apps rather than plugins, but they hit
         // the same rule for the same reason: each declares its OWN server in
         // `mcp_servers` (`news`, `tuition`) and grants itself `mcp:<that server>`.
@@ -322,11 +324,13 @@ fn default_grant_allowlist() -> Vec<String> {
         // Platform), carrying `/v3/workspaces/{ws}/peers/{peer}/chat` and
         // `/v3/workspaces/{ws}/peers/{peer}/search`.
         "tool:http-egress:api.honcho.dev",
-        // `spider` and `rtk` were decoupled from Core into declarative `command`
-        // tool plugins, so each declares a `tool:command:<bin>` grant instead of
-        // its old in-Core provider. Same re-enable rationale as the scopes above.
+        // `spider`, `rtk`, and `ripgrep` were decoupled from Core into declarative
+        // `command` tool plugins, so each declares a `tool:command:<bin>` grant
+        // instead of an in-Core provider. Same re-enable rationale as the scopes
+        // above.
         "tool:command:spider",
         "tool:command:rtk",
+        "tool:command:rg",
         "tool:command:bws",
         // Ship-code-in-a-manifest, for BOTH an `inline_deno` tool and a capability
         // ADAPTER (the JS a layer provider ships when its shape — an async job API,
@@ -364,6 +368,7 @@ fn default_grant_allowlist() -> Vec<String> {
         "mcp:agentation",
         "mcp:docs",
         "mcp:expect",
+        "mcp:zvec_grep",
         // Same rule, same reason: `@ryu/reasoning` declares `mcp:reasoning` and shipped
         // without this row, so `every_builtin_fixture_grant_is_allowlisted` has been red
         // and a disable→re-enable of that app fails with GrantsDenied. Every sidecar app
@@ -413,6 +418,10 @@ fn default_grant_allowlist() -> Vec<String> {
         "warmup:crud",
         "preferences:write",
         "usage:read",
+        // Only the verified current caller projection, never credentials or a user roster.
+        "identity:read",
+        // Read-only scan of caller-supplied text through the existing firewall.
+        "security:check",
         // Widget-render consent: a plugin (built-in Ryu App or third-party MCP
         // server) that declares a `contributes.widgets[]` binding must hold this
         // grant for its tool to auto-promote a sandboxed widget into chat. Gated
@@ -528,6 +537,9 @@ fn default_grant_allowlist() -> Vec<String> {
         // plugins (`goal`, `proof`) so they can persist run state. Same re-enable
         // rationale as the companion scopes above. Swappable via the env override.
         "storage:kv",
+        // App/tenant-scoped encrypted snapshots to operator-approved destinations.
+        // No node backups, other apps, filesystem paths, or credential access.
+        "backups:app",
         // The sealing primitive: an app seals/opens its OWN data under a per-plugin
         // subkey Core derives and the app never holds (`host.crypto_*`). On the
         // allowlist rather than owner-scoped because `crypto` is a RESERVED
@@ -1022,10 +1034,8 @@ mod tests {
         assert_eq!(d.approved.len(), 2);
 
         // The capability is deliberately reusable by another first-party consumer.
-        let consumer = validate_grants_for(
-            Some("@ryu/feedback-board"),
-            &scopes(&["blueprint:review"]),
-        );
+        let consumer =
+            validate_grants_for(Some("@ryu/feedback-board"), &scopes(&["blueprint:review"]));
         assert!(consumer.all_approved(), "denied: {:?}", consumer.denied);
     }
 
@@ -1394,7 +1404,7 @@ mod tests {
             }));
         }
         for root in ["apps-store", "plugins-store"] {
-            if let Ok(entries) = std::fs::read_dir(gateway.join("../..").join(root)) {
+            if let Ok(entries) = std::fs::read_dir(gateway.join("../..").join("generated/ryu-runtime").join(root)) {
                 manifest_paths.extend(
                     entries
                         .flatten()

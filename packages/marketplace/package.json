@@ -16,6 +16,7 @@
     "./likes/store": "./src/likes/likes-store.ts",
     "./catalog/host": "./src/catalog/host.tsx",
     "./catalog/scorecard": "./src/catalog/scorecard.ts",
+    "./catalog/design-system-scorecard": "./src/catalog/design-system-scorecard.ts",
     "./catalog/recommendations": "./src/catalog/recommendations.ts",
     "./catalog/chrome/for-you-section": "./src/catalog/chrome/for-you-section.tsx",
     "./catalog/chrome/marketplace-home": "./src/catalog/chrome/marketplace-home.tsx",
@@ -23,6 +24,7 @@
     "./catalog/chrome/marketplace-sections": "./src/catalog/chrome/marketplace-sections.ts",
     "./catalog/chrome/marketplace-surface": "./src/catalog/chrome/marketplace-surface.tsx",
     "./catalog/types": "./src/catalog/types.ts",
+    "./catalog/bundle-types": "./src/catalog/bundle-types.ts",
     "./catalog/pack-types": "./src/catalog/pack-types.ts",
     "./catalog/grant-labels": "./src/catalog/grant-labels.ts",
     "./catalog/realm-icons": "./src/catalog/realm-icons.ts",
@@ -56,32 +58,38 @@
     "./catalog/detail/support-extension-panel": "./src/catalog/detail/support-extension-panel.tsx",
     "./catalog/detail/publisher-health": "./src/catalog/detail/publisher-health.ts",
     "./catalog/detail/publisher-health-card": "./src/catalog/detail/publisher-health-card.tsx",
+    "./catalog/detail/agent-audit-panel": "./src/catalog/detail/agent-audit-panel.tsx",
+    "./catalog/detail/scorecard-panel": "./src/catalog/detail/scorecard-panel.tsx",
     "./catalog/chrome/dither-banner": "./src/catalog/chrome/dither-banner.tsx",
     "./catalog/chrome/marketplace-prompt-banner": "./src/catalog/chrome/marketplace-prompt-banner.tsx",
     "./catalog/detail/dependency-graph": "./src/catalog/detail/dependency-graph.tsx",
     "./report": "./src/report/report-provider.tsx",
     "./report/types": "./src/report/types.ts",
-    "./report/dialog": "./src/report/report-dialog.tsx"
+    "./report/dialog": "./src/report/report-dialog.tsx",
+    "./catalog/engine-logos": "./src/catalog/engine-logos.ts"
   },
   "scripts": {
     "check-types": "tsc --noEmit",
-    "test": "bun test src"
+    "test": "bun test --isolate src"
   },
   "dependencies": {
     "@hugeicons/core-free-icons": "^4.2.0",
     "@hugeicons/react": "^1.1.6",
     "@pierre/trees": "^1.0.0-beta.4",
     "@ryu/blocks": "workspace:*",
+    "@ryu/i18n": "workspace:*",
     "@ryu/ui": "workspace:*",
     "@ryuhq/protocol": "workspace:*",
     "lucide-react": "catalog:",
-    "sileo": "latest"
+    "motion": "^12.40.0",
+    "sileo": "catalog:"
   },
   "peerDependencies": {
     "react": "^19",
     "react-dom": "^19"
   },
   "devDependencies": {
+    "@happy-dom/global-registrator": "^20.10.6",
     "@ryu/config": "workspace:*",
     "@types/react": "^19.2.10",
     "@types/react-dom": "catalog:",

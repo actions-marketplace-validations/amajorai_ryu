@@ -26,6 +26,8 @@ export interface GenerateImageOptions {
 	 * stable-diffusion.cpp engine.
 	 */
 	provider?: string;
+	/** Correlates this generation with an app-owned Gateway audit request. */
+	requestId?: string;
 	/** Optional size hint forwarded to the engine (e.g. "512x512"). */
 	size?: string;
 }
@@ -45,6 +47,7 @@ export async function generateImage(
 		prompt,
 		n: options.count ?? 1,
 		size: options.size,
+		request_id: options.requestId,
 	};
 	if (options.provider) {
 		body.provider = options.provider;

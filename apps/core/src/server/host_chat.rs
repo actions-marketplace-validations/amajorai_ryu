@@ -117,6 +117,10 @@ pub async fn host_chat_start_turn(
         Ok((id, _grants)) => id,
         Err((status, msg)) => return (status, Json(json!({ "error": msg }))).into_response(),
     };
+    // The authenticated calling app is the only trustworthy source for this
+    // app-run signal. Core keeps it local until the existing anonymous beacon
+    // sends a consented aggregate snapshot.
+    crate::stats_beacon::record_marketplace_event("app", &plugin_id, false);
 
     let text = body.text.trim();
     if text.is_empty() {
@@ -147,13 +151,18 @@ pub async fn host_chat_start_turn(
     )
     .await;
     if let crate::sidecar::gateway::ExecScanOutcome::Deny(reason) = scan {
-        crate::sidecar::gateway::report_exec_audit(
+        crate::sidecar::gateway::report_exec_audit_with_attribution(
             "app-send",
             "start_turn",
             0,
             1,
             Some(conversation_id.clone()),
             Some(reason.clone()),
+            crate::sidecar::gateway::ExecAuditAttribution {
+                agent_id: body.agent_id.clone(),
+                feature: Some("agent".to_owned()),
+                ..Default::default()
+            },
         )
         .await;
         return (StatusCode::FORBIDDEN, Json(json!({ "error": reason }))).into_response();

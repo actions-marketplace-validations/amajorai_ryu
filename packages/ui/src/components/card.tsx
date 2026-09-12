@@ -1,3 +1,6 @@
+"use client";
+
+import { useLocalizedText } from "@ryu/i18n/react";
 import { cn } from "@ryu/ui/lib/utils.ts";
 import type * as React from "react";
 
@@ -9,7 +12,7 @@ function Card({
 	return (
 		<div
 			className={cn(
-				"group/card flex flex-col gap-(--card-spacing) overflow-hidden rounded-4xl bg-card py-(--card-spacing) text-card-foreground text-sm [--card-spacing:var(--card-pad,calc(var(--spacing)*4))] has-[>img:first-child]:pt-0 data-[size=sm]:[--card-spacing:var(--card-pad-sm,calc(var(--spacing)*3))] *:[img:first-child]:rounded-t-4xl *:[img:last-child]:rounded-b-4xl",
+				"group/card corner-squircle *:[img:first-child]:corner-t-squircle *:[img:last-child]:corner-b-squircle flex flex-col gap-(--card-spacing) overflow-hidden rounded-4xl bg-card py-(--card-spacing) text-card-foreground text-sm [--card-spacing:var(--card-pad,calc(var(--spacing)*4))] has-[>img:first-child]:pt-0 data-[size=sm]:[--card-spacing:var(--card-pad-sm,calc(var(--spacing)*3))] *:[img:first-child]:rounded-t-4xl *:[img:last-child]:rounded-b-4xl",
 				className
 			)}
 			data-size={size}
@@ -23,7 +26,7 @@ function CardHeader({ className, ...props }: React.ComponentProps<"div">) {
 	return (
 		<div
 			className={cn(
-				"group/card-header @container/card-header grid auto-rows-min items-start gap-1.5 rounded-t-4xl px-(--card-spacing) has-data-[slot=card-action]:grid-cols-[1fr_auto] has-data-[slot=card-description]:grid-rows-[auto_auto] [.border-b]:pb-(--card-spacing)",
+				"group/card-header @container/card-header corner-t-squircle grid auto-rows-min items-start gap-1.5 rounded-t-4xl px-(--card-spacing) has-data-[slot=card-action]:grid-cols-[1fr_auto] has-data-[slot=card-description]:grid-rows-[auto_auto] [.border-b]:pb-(--card-spacing)",
 				className
 			)}
 			data-slot="card-header"
@@ -32,23 +35,37 @@ function CardHeader({ className, ...props }: React.ComponentProps<"div">) {
 	);
 }
 
-function CardTitle({ className, ...props }: React.ComponentProps<"div">) {
+function CardTitle({
+	children,
+	className,
+	...props
+}: React.ComponentProps<"div">) {
+	const localizedChildren = useLocalizedText(children, { literal: true });
 	return (
 		<div
 			className={cn("font-heading font-medium text-base", className)}
 			data-slot="card-title"
 			{...props}
-		/>
+		>
+			{localizedChildren}
+		</div>
 	);
 }
 
-function CardDescription({ className, ...props }: React.ComponentProps<"div">) {
+function CardDescription({
+	children,
+	className,
+	...props
+}: React.ComponentProps<"div">) {
+	const localizedChildren = useLocalizedText(children, { literal: true });
 	return (
 		<div
 			className={cn("text-muted-foreground text-sm", className)}
 			data-slot="card-description"
 			{...props}
-		/>
+		>
+			{localizedChildren}
+		</div>
 	);
 }
 
@@ -79,7 +96,7 @@ function CardFooter({ className, ...props }: React.ComponentProps<"div">) {
 	return (
 		<div
 			className={cn(
-				"flex items-center rounded-b-4xl px-(--card-spacing) [.border-t]:pt-(--card-spacing)",
+				"corner-b-squircle flex items-center rounded-b-4xl px-(--card-spacing) [.border-t]:pt-(--card-spacing)",
 				className
 			)}
 			data-slot="card-footer"

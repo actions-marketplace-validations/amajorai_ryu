@@ -1,10 +1,10 @@
 import { describe, expect, it } from "bun:test";
 import {
-	baseNodeCountForPlan,
-	baseNodeTypeForPlan,
+	baseNodeCountForPlanAtLocation,
 	baseNodeTypeForPlanAtLocation,
 	TEAMS_NODE_TIERS,
 } from "./base-node.ts";
+import { DEFAULT_MARKETPLACE_MEMBERSHIP_PUBLISHER_SHARE_BPS } from "./marketplace-membership.ts";
 import {
 	currentPlanVersionFor,
 	DEPOSIT_FEE_BPS,
@@ -19,6 +19,10 @@ import {
 	PLANS,
 	type PlanId,
 	planVersionFor,
+	TOPUP_OPENROUTER_FEE_BPS,
+	TOPUP_OPENROUTER_MINIMUM_USD,
+	TOPUP_POLAR_PROCESSING_BPS,
+	TOPUP_POLAR_PROCESSING_FIXED_USD,
 	topupBreakEvenUsd,
 	usdToMicro,
 } from "./plans.ts";
@@ -43,23 +47,25 @@ import {
  * a slow bleed nobody reads.
  */
 
-/** OpenRouter's fee to BUY the credits we then meter at cost (5.5%, verified). */
-const OPENROUTER_CREDIT_FEE = 0.055;
-/** Polar merchant-of-record, Early Member (grandfathered pre-2026-05-27). */
-const POLAR_RATE_ONE_TIME = 0.04;
-/** Polar adds 0.5% on top for SUBSCRIPTION transactions. */
-const POLAR_RATE_SUBSCRIPTION = 0.045;
-const POLAR_FIXED_USD = 0.4;
+/** OpenRouter's fee to BUY the credits we then meter at cost (5.5%). */
+const OPENROUTER_CREDIT_FEE = TOPUP_OPENROUTER_FEE_BPS / 10_000;
+/** OpenRouter's current minimum fee when buying a small credit balance. */
+const OPENROUTER_CREDIT_MINIMUM_USD = TOPUP_OPENROUTER_MINIMUM_USD;
+/** Conservative Polar Starter plus international-card processing case. */
+const POLAR_RATE_ONE_TIME = TOPUP_POLAR_PROCESSING_BPS / 10_000;
+const POLAR_RATE_SUBSCRIPTION = TOPUP_POLAR_PROCESSING_BPS / 10_000;
+const POLAR_FIXED_USD = TOPUP_POLAR_PROCESSING_FIXED_USD;
 /**
  * Conservative USD planning reserves by server type. These use the current
- * German gross price + one IPv4, the 2026-08-19 ECB EUR/USD reference rate,
- * a 25% infrastructure buffer, and a final round-up for ordinary drift.
+ * German net price + one IPv4, the 2026-08-19 ECB EUR/USD reference rate,
+ * a 50% infrastructure/operations buffer, and a final round-up for ordinary
+ * drift.
  *
  * NOT one number any more. The free node is sized by PLAN, and for Teams by SEAT
- * COUNT — Max runs a `cx33`, and Teams climbs `cx23` → `cx33` → `cpx32` → 2 ×
- * `cpx32` as the org grows. Charging every plan a flat `cx23` (which this file
- * did until the seat ladder shipped) understates the node cost by up to 13× at
- * the top band, so the margin guard would have passed a band that lost money.
+ * COUNT — Plus and Pro run `cx23`, Max `cx33`, Teams `cx43`, and Business `cx53`.
+ * Teams uses one `cx43` through 49 seats and two at 50. Charging every plan a
+ * flat `cx23` would understate the cost of the larger tiers, so the margin guard
+ * resolves the node from the same plan/seat ladder as provisioning.
  *
  * `nodeUsdPerMonth` resolves through the SAME `baseNodeTypeForPlan` /
  * `baseNodeCountForPlan` the provisioner uses, so a new band cannot be added to
@@ -68,14 +74,31 @@ const POLAR_FIXED_USD = 0.4;
 const NODE_USD_PER_MONTH: Readonly<Record<string, number>> = {
 	cx23: 12,
 	cx33: 16,
-	cpx32: 63,
-	ccx13: 80,
+	cx43: 30,
+	cx53: 55,
+};
+const NODE_USD_PER_MONTH_SINGAPORE: Readonly<Record<string, number>> = {
+	cpx22: 44,
+	cpx32: 80,
+	ccx13: 88,
 };
 /** Annual terms bill 10 months and serve 12 ("two months free"). */
 const YEARLY_MONTHS_BILLED = 10;
 const YEARLY_MONTHS_SERVED = 12;
+const CURRENT_YEARLY_MARGIN_FLOOR = 0.2;
 
 const usd = (micro: number): number => micro / 1_000_000;
+
+/** Cost of funding one non-zero included monthly pool through OpenRouter. */
+function fundedPoolUsd(poolUsd: number): number {
+	if (poolUsd <= 0) {
+		return 0;
+	}
+	return (
+		poolUsd +
+		Math.max(poolUsd * OPENROUTER_CREDIT_FEE, OPENROUTER_CREDIT_MINIMUM_USD)
+	);
+}
 
 /** Plans with a recurring price — the only ones this model describes. */
 const RECURRING: PlanId[] = PLAN_IDS.filter(
@@ -104,10 +127,16 @@ describe("included credit pool", () => {
 describe("regional included node profiles", () => {
 	it("keeps the EU defaults while selecting Singapore's available shapes", () => {
 		expect(baseNodeTypeForPlanAtLocation("pro", "nbg1")).toBe("cx23");
-		expect(baseNodeTypeForPlanAtLocation("pro", "sin")).toBe("cpx22");
-		expect(baseNodeTypeForPlanAtLocation("max", "sin")).toBe("ccx13");
+		expect(baseNodeTypeForPlanAtLocation("plus", "nbg1")).toBe("cx23");
+		expect(baseNodeTypeForPlanAtLocation("pro", "sin")).toBeNull();
+		expect(baseNodeTypeForPlanAtLocation("plus", "sin")).toBeNull();
+		expect(baseNodeTypeForPlanAtLocation("max", "sin")).toBeNull();
 		expect(baseNodeTypeForPlanAtLocation("teams", "sin", 20)).toBe("cpx22");
 		expect(baseNodeTypeForPlanAtLocation("business", "sin", 20)).toBe("cpx32");
+		expect(baseNodeCountForPlanAtLocation("pro", "sin")).toBe(0);
+		expect(baseNodeCountForPlanAtLocation("max", "sin")).toBe(0);
+		expect(baseNodeCountForPlanAtLocation("teams", "sin", 50)).toBe(2);
+		expect(baseNodeCountForPlanAtLocation("business", "sin", 50)).toBe(1);
 	});
 });
 
@@ -119,18 +148,21 @@ describe("regional included node profiles", () => {
  * zero: silently costing a band $0 is precisely how an unprofitable tier would
  * slip through.
  */
-function nodeUsdPerMonth(id: PlanId, seats: number): number {
-	const type = baseNodeTypeForPlan(id, seats);
+function nodeUsdPerMonth(id: PlanId, seats: number, location = "nbg1"): number {
+	const type = baseNodeTypeForPlanAtLocation(id, location, seats);
 	if (!type) {
 		return 0;
 	}
-	const unit = NODE_USD_PER_MONTH[type];
+	const unit =
+		location === "sin"
+			? NODE_USD_PER_MONTH_SINGAPORE[type]
+			: NODE_USD_PER_MONTH[type];
 	if (unit === undefined) {
 		throw new Error(
 			`no monthly cost known for Hetzner type "${type}" — add it to NODE_USD_PER_MONTH before shipping a plan that provisions it`
 		);
 	}
-	return unit * baseNodeCountForPlan(id, seats);
+	return unit * baseNodeCountForPlanAtLocation(id, location, seats);
 }
 
 /**
@@ -141,7 +173,12 @@ function nodeUsdPerMonth(id: PlanId, seats: number): number {
  * unspent credit only ever makes the true figure better — which is what makes a
  * pass here a floor rather than an average.
  */
-function periodMarginUsd(id: PlanId, yearly: boolean, seats: number): number {
+function periodMarginUsd(
+	id: PlanId,
+	yearly: boolean,
+	seats: number,
+	location = "nbg1"
+): number {
 	const plan = PLANS[id];
 	const billedSeats = plan.seatModel.kind === "per_seat" ? seats : 1;
 	const currentVersion = planVersionFor(id, currentPlanVersionFor(id));
@@ -155,20 +192,21 @@ function periodMarginUsd(id: PlanId, yearly: boolean, seats: number): number {
 				version: currentVersion,
 			})
 		) * monthsBilled;
-	const credits =
-		usd(
-			monthlyCreditPoolMicroUsdForSeats({
-				plan,
-				seats: billedSeats,
-				version: currentVersion,
-			})
-		) *
-		monthsServed *
-		(1 + OPENROUTER_CREDIT_FEE);
-	const node = nodeUsdPerMonth(id, seats) * monthsServed;
+	const monthlyPoolUsd = usd(
+		monthlyCreditPoolMicroUsdForSeats({
+			plan,
+			seats: billedSeats,
+			version: currentVersion,
+		})
+	);
+	const credits = fundedPoolUsd(monthlyPoolUsd) * monthsServed;
+	const node = nodeUsdPerMonth(id, seats, location) * monthsServed;
 	const fee = revenue * POLAR_RATE_SUBSCRIPTION + POLAR_FIXED_USD;
+	const publisherPool = plan.marketplacePublisherPool
+		? (revenue * DEFAULT_MARKETPLACE_MEMBERSHIP_PUBLISHER_SHARE_BPS) / 10_000
+		: 0;
 
-	return revenue - credits - node - fee;
+	return revenue - credits - node - fee - publisherPool;
 }
 
 describe("plan margin (worst case: the whole pool is spent)", () => {
@@ -236,6 +274,113 @@ describe("plan margin (worst case: the whole pool is spent)", () => {
 	});
 });
 
+describe("current pricing margin floor", () => {
+	for (const id of RECURRING) {
+		const minSeats =
+			PLANS[id].seatModel.kind === "per_seat"
+				? PLANS[id].seatModel.minSeats
+				: 1;
+
+		it(
+			id +
+				" yearly clears the " +
+				CURRENT_YEARLY_MARGIN_FLOOR * 100 +
+				"% contribution floor",
+			() => {
+				const plan = PLANS[id];
+				const billedSeats = plan.seatModel.kind === "per_seat" ? minSeats : 1;
+				const revenue =
+					usd(
+						monthlyPriceMicroUsdForSeats({
+							plan,
+							seats: billedSeats,
+							version: planVersionFor(id, currentPlanVersionFor(id)),
+						})
+					) * YEARLY_MONTHS_BILLED;
+				expect(
+					periodMarginUsd(id, true, minSeats) / revenue
+				).toBeGreaterThanOrEqual(CURRENT_YEARLY_MARGIN_FLOOR);
+			}
+		);
+	}
+});
+
+describe("current pricing worksheet", () => {
+	const cases = [
+		["marketplace-membership", 1, false, 4.2, 0.21],
+		["marketplace-membership", 1, true, 46.5, 0.2325],
+		["plus", 1, false, 13.165, 0.3376],
+		["plus", 1, true, 90.55, 0.2322],
+		["pro", 1, false, 17.49, 0.3569],
+		["pro", 1, true, 123.75, 0.2526],
+		["max", 1, false, 44.415, 0.4486],
+		["max", 1, true, 353.35, 0.3569],
+		["teams", 5, false, 150.5, 0.602],
+		["teams", 5, true, 1344, 0.5376],
+		["teams-lite", 5, false, 88.65, 0.591],
+		["teams-lite", 5, true, 788.8, 0.5259],
+		["teams-lite", 6, false, 114.3, 0.5715],
+		["teams-lite", 6, true, 1003.1, 0.5016],
+		["teams-lite", 10, false, 301.3, 0.7533],
+		["teams-lite", 10, true, 2873.1, 0.7183],
+		["teams-lite", 25, false, 939.25, 0.8167],
+		["teams-lite", 25, true, 9126, 0.7936],
+		["teams-lite", 50, false, 1972.5, 0.8219],
+		["teams-lite", 50, true, 19_187.5, 0.7995],
+		["business", 5, false, 119.5, 0.3983],
+		["business", 5, true, 878.5, 0.2928],
+		["business", 25, false, 632.5, 0.4865],
+		["business", 25, true, 5164.5, 0.3973],
+		["business", 50, false, 1273.75, 0.4995],
+		["business", 50, true, 10_522, 0.4126],
+	] as const;
+
+	for (const [id, seats, yearly, contribution, margin] of cases) {
+		it(
+			id +
+				" " +
+				(yearly ? "yearly" : "monthly") +
+				" at " +
+				seats +
+				" seats matches the worksheet",
+			() => {
+				const plan = PLANS[id];
+				const revenue =
+					usd(
+						monthlyPriceMicroUsdForSeats({
+							plan,
+							seats,
+							version: planVersionFor(id, currentPlanVersionFor(id)),
+						})
+					) * (yearly ? YEARLY_MONTHS_BILLED : 1);
+				const actual = periodMarginUsd(id, yearly, seats);
+				expect(actual).toBeCloseTo(contribution, 3);
+				expect(actual / revenue).toBeCloseTo(margin, 3);
+			}
+		);
+	}
+});
+
+describe("regional margin floor", () => {
+	for (const id of RECURRING) {
+		const minSeats =
+			PLANS[id].seatModel.kind === "per_seat"
+				? PLANS[id].seatModel.minSeats
+				: 1;
+
+		it(`${id} stays profitable in Singapore on the supported included-node policy`, () => {
+			expect(periodMarginUsd(id, false, minSeats, "sin")).toBeGreaterThan(0);
+			expect(periodMarginUsd(id, true, minSeats, "sin")).toBeGreaterThan(0);
+		});
+	}
+
+	for (const seats of [5, 10, 25, 50]) {
+		it(`Teams Singapore ${seats}-seat band has a priced node reserve`, () => {
+			expect(periodMarginUsd("teams", true, seats, "sin")).toBeGreaterThan(0);
+		});
+	}
+});
+
 /**
  * Margin on a top-up: the buyer is charged `face + fee` and the wallet is
  * credited `face` (`computeTopupQuote`), so Ryu receives the fee and pays to
@@ -246,7 +391,8 @@ function topupMarginUsd(faceUsd: number, plan: PlanId | null): number {
 	const charged = faceUsd + fee;
 	return (
 		charged -
-		faceUsd * (1 + OPENROUTER_CREDIT_FEE) -
+		faceUsd -
+		Math.max(faceUsd * OPENROUTER_CREDIT_FEE, OPENROUTER_CREDIT_MINIMUM_USD) -
 		(charged * POLAR_RATE_ONE_TIME + POLAR_FIXED_USD)
 	);
 }
@@ -254,22 +400,16 @@ function topupMarginUsd(faceUsd: number, plan: PlanId | null): number {
 describe("deposit fee", () => {
 	// A top-up must not lose money at ANY plausible size.
 	//
-	// $12.50 and $15 are here because their ABSENCE hid a real hole. The list was
-	// [5, 10, 20, 50, 100, 500] — six values that straddled a loss band without
-	// landing in it, so the suite passed while Pro lost money on every deposit
-	// between $10.95 and $13.42 and Max/Teams on everything up to $19.80. At $20
-	// on Max it passed by $0.004.
-	//
-	// Sampled sizes cannot be the real guard, which is why the structural no-gap
-	// assertion below exists. These stay as a cheap, readable canary.
+	// These stay as a readable canary; the exhaustive whole-cent assertion below is
+	// the actual guard against a loss band.
 	const SIZES = [5, 10, 12.5, 15, 20, 50, 100, 500];
 
 	/**
 	 * The largest face value at which the FIXED floor still covers its own costs.
 	 *
-	 * A flat fee `F` nets `F − 0.055·face − (face + F)·0.04 − 0.40`, so it goes
-	 * negative once `face > (0.96·F − 0.40) / 0.095`. Derived rather than written
-	 * down so it tracks the constant.
+	 * At the floor/percentage join, OpenRouter is above its $0.80 minimum. A flat
+	 * fee `F` nets `F − 0.055·face − (face + F)·0.065 − 0.50`; derive the coverage
+	 * point from the constants rather than writing it down.
 	 */
 	const floorProfitableToUsd = (): number => {
 		const floor = usd(DEPOSIT_FEE_FIXED_MICRO_USD);
@@ -280,8 +420,13 @@ describe("deposit fee", () => {
 	};
 
 	it("the base rate clears break-even", () => {
-		// Break-even is ~10.3%; the old base was 10%, i.e. under water.
-		expect(DEPOSIT_FEE_BPS).toBeGreaterThan(1030);
+		// The 17% base rate leaves room for the current processor schedule.
+		expect(DEPOSIT_FEE_BPS).toBeGreaterThan(1600);
+		expect(topupBreakEvenUsd(DEPOSIT_FEE_BPS)).toBeCloseTo(13.84, 2);
+		expect(topupBreakEvenUsd(DEPOSIT_FEE_BPS_BY_PLAN.max)).toBeCloseTo(
+			16.89,
+			2
+		);
 	});
 
 	for (const plan of [null, ...PLAN_IDS] as (PlanId | null)[]) {
@@ -334,16 +479,22 @@ describe("deposit fee", () => {
 		// it can never use. Asserted because the docs advertised a Lifetime
 		// deposit rate for months, which promised a purchase the API rejects.
 		expect(PLANS["desktop-license"].managedInference).toBe(false);
-		for (const id of ["pro", "max", "teams"] as PlanId[]) {
+		for (const id of [
+			"pro",
+			"plus",
+			"max",
+			"teams",
+			"teams-lite",
+			"business",
+		] as PlanId[]) {
 			expect(PLANS[id].managedInference).toBe(true);
 		}
 	});
 
 	it("every plan rate is above the point where the fee stops covering costs", () => {
 		// `topupBreakEvenUsd` returns the smallest profitable top-up for a rate.
-		// Requiring it to stay under $20 is what stops a "generous" subscriber
-		// discount from quietly becoming a subsidy — at 10% it was $400, meaning
-		// nearly every real top-up lost money.
+		// Requiring it to stay under $20 keeps the managed-plan discount from
+		// becoming a subsidy under the conservative processor case.
 		for (const id of PLAN_IDS) {
 			expect(topupBreakEvenUsd(DEPOSIT_FEE_BPS_BY_PLAN[id])).toBeLessThan(20);
 		}
@@ -390,8 +541,7 @@ describe("the ladder is coherent", () => {
 		expect(PLANS.teams.creditPoolModel).toBe("per_bundle");
 		expect(PLANS.teams.creditPoolBundleSize).toBe(5);
 		expect(PLANS["marketplace-membership"].seatModel).toEqual({
-			kind: "per_seat",
-			minSeats: 1,
+			kind: "single",
 		});
 		expect(PLANS.pro.seatModel.kind).toBe("single");
 		expect(PLANS.max.seatModel.kind).toBe("single");
@@ -433,23 +583,24 @@ function versionMarginUsd(
 				version: row,
 			})
 		) * monthsBilled;
-	const credits =
-		usd(
-			monthlyCreditPoolMicroUsdForSeats({
-				plan: PLANS[id],
-				seats: billedSeats,
-				version: row,
-			})
-		) *
-		monthsServed *
-		(1 + OPENROUTER_CREDIT_FEE);
+	const monthlyPoolUsd = usd(
+		monthlyCreditPoolMicroUsdForSeats({
+			plan: PLANS[id],
+			seats: billedSeats,
+			version: row,
+		})
+	);
+	const credits = fundedPoolUsd(monthlyPoolUsd) * monthsServed;
 	// Today's node, at the seat count being modelled — so a grandfathered Teams
 	// org is charged the same ladder a new one is. Node type and COUNT are not
 	// versioned, which means a seat-band upgrade reaches old subscribers too.
 	const node = nodeUsdPerMonth(id, seats) * monthsServed;
 	const fee = revenue * POLAR_RATE_SUBSCRIPTION + POLAR_FIXED_USD;
+	const publisherPool = PLANS[id].marketplacePublisherPool
+		? (revenue * DEFAULT_MARKETPLACE_MEMBERSHIP_PUBLISHER_SHARE_BPS) / 10_000
+		: 0;
 
-	return revenue - credits - node - fee;
+	return revenue - credits - node - fee - publisherPool;
 }
 
 describe("grandfathering", () => {

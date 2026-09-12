@@ -1,7 +1,19 @@
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import tailwindcss from "@tailwindcss/postcss";
 import react from "@vitejs/plugin-react";
 import { defineConfig } from "vite";
+
+// Keep individual icon modules available to Rollup. The package production
+// entry is flattened into one module, which ties lazy-only icons to startup.
+const modularIcons = path.join(
+	path.dirname(
+		fileURLToPath(
+			import.meta.resolve("@hugeicons/core-free-icons/package.json")
+		)
+	),
+	"dist/esm/index.js"
+);
 
 export default defineConfig({
 	plugins: [react()],
@@ -14,6 +26,7 @@ export default defineConfig({
 	// The Lanyard component (@ryu/ui) imports a binary .glb model as a URL asset.
 	assetsInclude: ["**/*.glb"],
 	optimizeDeps: {
+		include: ["lucide-react"],
 		// The desktop root also contains standalone e2e HTML stories. Let their
 		// dedicated Vite configs own those graphs; the app dev server should only
 		// pre-bundle the actual desktop entry point.
@@ -54,8 +67,9 @@ export default defineConfig({
 		sourcemap: true,
 	},
 	resolve: {
-		alias: {
-			"@": path.resolve(import.meta.dirname, "."),
-		},
+		alias: [
+			{ find: "@", replacement: path.resolve(import.meta.dirname, ".") },
+			{ find: /^@hugeicons\/core-free-icons$/, replacement: modularIcons },
+		],
 	},
 });

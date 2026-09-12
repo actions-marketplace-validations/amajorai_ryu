@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 /** How often the status hook re-probes Core/Shadow reachability. */
 const POLL_MS = 5000;
@@ -41,47 +41,106 @@ export function useSidecarStatus(contextReadAllowed: boolean): {
 	startShadow: () => Promise<void>;
 	starting: boolean;
 } {
-	const [snapshot, setSnapshot] = useState<SidecarSnapshot>(EMPTY);
+	const [state, setState] = useState({
+		allowed: contextReadAllowed,
+		snapshot: EMPTY,
+	});
 	const [starting, setStarting] = useState(false);
+	const refreshRef = useRef<() => Promise<void>>(() => Promise.resolve());
 
-	const refresh = useCallback(async (): Promise<void> => {
-		const [health, status] = await Promise.all([
-			window.island.core.health(),
-			window.island.core.sidecarStatus(),
-		]);
-		const coreUp = health.available;
-		const shadowUp =
-			status.available &&
-			status.sidecars.some((s) => s.name === SHADOW_SIDECAR_NAME && s.running);
-
-		// Capture/recording state is consent-gated: only probe :3030 when allowed.
-		if (!(contextReadAllowed && shadowUp)) {
-			setSnapshot({ coreUp, shadowUp, recording: false, paused: false });
-			return;
-		}
-
-		const control = await window.island.shadow.getCaptureControl();
-		if (control.available) {
-			const { paused } = control.control;
-			const context = await window.island.shadow.getCurrentContext();
-			const captureActive = context.available && context.context.capture_active;
-			setSnapshot({
+	useEffect(() => {
+		let alive = true;
+		let pending: Promise<void> | null = null;
+		let again = false;
+		const publish = (snapshot: SidecarSnapshot) => {
+			if (!alive) {
+				return;
+			}
+			setState((previous) =>
+				previous.allowed === contextReadAllowed &&
+				previous.snapshot.coreUp === snapshot.coreUp &&
+				previous.snapshot.shadowUp === snapshot.shadowUp &&
+				previous.snapshot.paused === snapshot.paused &&
+				previous.snapshot.recording === snapshot.recording
+					? previous
+					: { allowed: contextReadAllowed, snapshot }
+			);
+		};
+		const read = async () => {
+			const [health, status] = await Promise.all([
+				window.island.core.health(),
+				window.island.core.sidecarStatus(),
+			]);
+			if (!alive) {
+				return;
+			}
+			const coreUp = health.available;
+			const shadowUp =
+				status.available &&
+				status.sidecars.some(
+					(s) => s.name === SHADOW_SIDECAR_NAME && s.running
+				);
+			if (!(contextReadAllowed && shadowUp)) {
+				publish({ coreUp, shadowUp, recording: false, paused: false });
+				return;
+			}
+			const [control, context] = await Promise.all([
+				window.island.shadow.getCaptureControl(),
+				window.island.shadow.getCurrentContext(),
+			]);
+			const paused = control.available && control.control.paused;
+			publish({
 				coreUp,
 				shadowUp,
 				paused,
-				recording: captureActive && !paused,
+				recording:
+					control.available &&
+					context.available &&
+					context.context.capture_active &&
+					!paused,
 			});
-			return;
-		}
-		setSnapshot({ coreUp, shadowUp, recording: false, paused: false });
+		};
+		const run = (manual = false): Promise<void> => {
+			if (!alive || (!manual && document.hidden)) {
+				return Promise.resolve();
+			}
+			if (pending) {
+				if (manual) {
+					again = true;
+				}
+				return pending;
+			}
+			pending = Promise.resolve()
+				.then(async () => {
+					do {
+						again = false;
+						if (!alive) {
+							return;
+						}
+						try {
+							await read();
+						} catch {
+							publish(EMPTY);
+						}
+					} while (again && alive);
+				})
+				.finally(() => {
+					pending = null;
+				});
+			return pending;
+		};
+		refreshRef.current = () => run(true);
+		const automatic = () => void run();
+		automatic();
+		const timer = setInterval(automatic, POLL_MS);
+		document.addEventListener("visibilitychange", automatic);
+		return () => {
+			alive = false;
+			clearInterval(timer);
+			document.removeEventListener("visibilitychange", automatic);
+		};
 	}, [contextReadAllowed]);
-
-	useEffect(() => {
-		refresh();
-		const timer = setInterval(refresh, POLL_MS);
-		return () => clearInterval(timer);
-	}, [refresh]);
-
+	const refresh = useCallback(() => refreshRef.current(), []);
 	const startShadow = useCallback(async (): Promise<void> => {
 		setStarting(true);
 		try {
@@ -91,6 +150,8 @@ export function useSidecarStatus(contextReadAllowed: boolean): {
 			setStarting(false);
 		}
 	}, [refresh]);
-
+	// Consent changes must hide capture information before the next effect/read.
+	const snapshot =
+		state.allowed === contextReadAllowed ? state.snapshot : EMPTY;
 	return { refresh, snapshot, startShadow, starting };
 }

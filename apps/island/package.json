@@ -1,7 +1,7 @@
 {
   "name": "island",
   "private": true,
-  "version": "0.2.2",
+  "version": "0.3.1",
   "type": "module",
   "main": "out/main/index.js",
   "scripts": {
@@ -22,9 +22,11 @@
     "@ryu/app-host": "workspace:*",
     "@ryu/blocks": "workspace:*",
     "@ryu/command": "workspace:*",
+    "@ryu/i18n": "workspace:*",
     "@ryu/ui": "workspace:*",
     "@ryuhq/core-client": "workspace:*",
     "@ryuhq/protocol": "workspace:*",
+    "@toolwind/corner-shape": "0.0.8-3",
     "ai": "catalog:",
     "electron-updater": "^6.3.9",
     "motion": "^11",

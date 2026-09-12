@@ -1,0 +1,21 @@
+{
+  "agent_id": "ryu",
+  "model": "audit-model",
+  "status": "complete",
+  "auditedAt": "2026-09-09T00:00:00Z",
+  "report": "",
+  "assessment": {
+    "score": 78,
+    "confidence": "medium",
+    "summary": "Review capability scope.",
+    "evidence": ["The snapshot declares broad access."],
+    "recommendations": [
+      {
+        "priority": "medium",
+        "action": "Narrow access",
+        "reason": "Match the intended task."
+      }
+    ],
+    "limitations": ["Snapshot only; no live tools were executed."]
+  }
+}

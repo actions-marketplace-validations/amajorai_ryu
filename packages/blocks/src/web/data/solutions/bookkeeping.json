@@ -4,10 +4,10 @@
   "navLabel": "Bookkeeping",
   "category": "Finance & Risk",
   "icon": "BookOpen",
-  "tagline": "Automate categorization, reconciliation, and recurring entries with workflows that keep client books on your machine.",
+  "tagline": "Categorize transactions, reconcile accounts, and follow up on missing receipts.",
   "heroEyebrow": "Ryu for Bookkeeping",
-  "heroTitle": "An AI bookkeeper that runs on a schedule.",
-  "heroSubtitle": "Categorize transactions, reconcile accounts, and chase receipts with workflows that run on your own machine and on a schedule. Client books never leave your device unless you say so, and every run is governed, logged, and auditable.",
+  "heroTitle": "Ryu for bookkeeping",
+  "heroSubtitle": "Categorize transactions, reconcile accounts, and follow up on missing receipts.",
   "visualKey": "WorkflowsVisual",
   "intro": "Bookkeeping is repetitive, deadline-driven, and full of sensitive client data that doesn't belong in a public chatbot. Ryu lets you build workflows that categorize, reconcile, and follow up on a schedule, connect into your accounting tools, and log every run, so the routine work runs itself while a human reviews the result.",
   "highlights": [

@@ -131,7 +131,7 @@ export function SellTab() {
 	return (
 		<div className="mx-auto max-w-2xl px-6 py-8">
 			<div className="mb-6 flex items-center justify-between">
-				<h2 className="font-semibold text-lg">Marketplace & payouts</h2>
+				<h2 className="font-medium text-lg">Marketplace & payouts</h2>
 				<Button onClick={() => refresh()} size="sm" variant="ghost">
 					<HugeiconsIcon className="mr-2 size-3.5" icon={Refresh01Icon} />
 					Refresh
@@ -156,7 +156,7 @@ export function SellTab() {
 								{payoutsEnabled ? (
 									<Badge className="gap-1" variant="secondary">
 										<HugeiconsIcon
-											className="size-3.5 text-success"
+											className="size-3.5 text-status-success"
 											icon={CheckmarkBadge04Icon}
 										/>
 										Payouts enabled
@@ -170,7 +170,7 @@ export function SellTab() {
 								<span>Identity verified via Stripe Connect</span>
 							</div>
 						) : stripeIdentityStatus === "restricted" ? (
-							<p className="mt-3 text-destructive text-xs">
+							<p className="mt-3 text-status-destructive text-xs">
 								Stripe identity verification needs attention before the blue
 								publisher mark can be shown.
 							</p>
@@ -200,7 +200,9 @@ export function SellTab() {
 							{payoutButtonLabel(payoutsEnabled, onboardingStatus)}
 						</Button>
 						{error && !stripeUnavailable ? (
-							<p className="mt-3 text-destructive text-xs">{error.message}</p>
+							<p className="mt-3 text-status-destructive text-xs">
+								{error.message}
+							</p>
 						) : null}
 					</div>
 				)}
@@ -229,13 +231,13 @@ export function SellTab() {
 							Loading A Major Pass totals…
 						</div>
 					) : membership.error ? (
-						<p className="mt-4 text-destructive text-xs">
+						<p className="mt-4 text-status-destructive text-xs">
 							{membership.error.message}
 						</p>
 					) : membership.report ? (
 						<div className="mt-4 grid grid-cols-2 gap-3 text-sm sm:grid-cols-4">
 							<div>
-								<p className="font-semibold text-base">
+								<p className="font-medium text-base">
 									{membership.report.eligibleListingCount}
 								</p>
 								<p className="text-muted-foreground text-xs">
@@ -243,7 +245,7 @@ export function SellTab() {
 								</p>
 							</div>
 							<div>
-								<p className="font-semibold text-base">
+								<p className="font-medium text-base">
 									{formatMinorCurrency(
 										membershipTotals?.pendingMinor ?? 0,
 										membershipTotals?.currency ?? "usd"
@@ -252,7 +254,7 @@ export function SellTab() {
 								<p className="text-muted-foreground text-xs">Pending</p>
 							</div>
 							<div>
-								<p className="font-semibold text-base">
+								<p className="font-medium text-base">
 									{formatMinorCurrency(
 										membershipTotals?.paidMinor ?? 0,
 										membershipTotals?.currency ?? "usd"
@@ -261,7 +263,7 @@ export function SellTab() {
 								<p className="text-muted-foreground text-xs">Paid out</p>
 							</div>
 							<div>
-								<p className="font-semibold text-base">
+								<p className="font-medium text-base">
 									{membershipTotals?.usageCount ?? 0}
 								</p>
 								<p className="text-muted-foreground text-xs">Usage signals</p>

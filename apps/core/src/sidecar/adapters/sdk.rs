@@ -105,7 +105,7 @@ pub fn sdk_app_base_url() -> String {
 pub fn sdk_app_spawn_parts(package: &str) -> (String, Vec<String>, Vec<(String, String)>) {
     let gateway_base = crate::sidecar::gateway::gateway_url();
     let gateway_v1 = format!("{}/v1", gateway_base.trim_end_matches('/'));
-    let token = crate::sidecar::gateway::gateway_token().unwrap_or_else(|| "ryu-local".to_owned());
+    let token = crate::sidecar::gateway::gateway_token().unwrap_or_default();
 
     let env = vec![
         ("OPENAI_BASE_URL".to_owned(), gateway_v1),
@@ -136,7 +136,7 @@ pub fn sdk_app_spawn_parts(package: &str) -> (String, Vec<String>, Vec<(String, 
 pub fn sdk_app_spawn_cmd(package: &str) -> String {
     let gateway_base = crate::sidecar::gateway::gateway_url();
     let gateway_v1 = format!("{}/v1", gateway_base.trim_end_matches('/'));
-    let token = crate::sidecar::gateway::gateway_token().unwrap_or_else(|| "ryu-local".to_owned());
+    let token = "<gateway-relay>";
 
     #[cfg(target_os = "windows")]
     return format!(
@@ -204,6 +204,8 @@ impl Sidecar for SdkAppSidecar {
                 return Ok(());
             }
 
+            // Refuse launch rather than emitting an empty or shared fallback key.
+            crate::sidecar::gateway::gateway_bearer()?;
             let (program, args, env) = sdk_app_spawn_parts(package);
             tracing::info!(name = %id, package = %package, "sdk app: spawning via bunx");
             handle

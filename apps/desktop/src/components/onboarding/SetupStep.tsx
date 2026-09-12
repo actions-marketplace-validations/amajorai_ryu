@@ -277,7 +277,7 @@ export function SetupStep({ nodeUrl, token, onInstall }: SetupStepProps) {
 			<div className="flex flex-col items-center gap-3 py-12 text-muted-foreground text-sm">
 				{!online && (
 					<HugeiconsIcon
-						className="h-5 w-5 text-warning"
+						className="h-5 w-5 text-status-warning"
 						icon={WifiOff01Icon}
 					/>
 				)}
@@ -303,14 +303,14 @@ export function SetupStep({ nodeUrl, token, onInstall }: SetupStepProps) {
 		return (
 			<div className="flex flex-col gap-6">
 				<div>
-					<h2 className="mb-1 font-semibold text-xl">Get Ryu ready</h2>
+					<h2 className="mb-1 font-medium text-xl">Get Ryu ready</h2>
 					<p className="text-muted-foreground text-sm">
 						We'll install what you need to get started.
 					</p>
 				</div>
 
 				{!online && (
-					<div className="flex items-center gap-2 rounded-md bg-warning/10 px-3 py-2 text-sm text-warning dark:text-warning">
+					<div className="flex items-center gap-2 rounded-md bg-warning/10 px-3 py-2 text-sm text-status-warning dark:text-status-warning">
 						<HugeiconsIcon
 							className="h-4 w-4 flex-shrink-0"
 							icon={WifiOff01Icon}
@@ -369,14 +369,14 @@ export function SetupStep({ nodeUrl, token, onInstall }: SetupStepProps) {
 	return (
 		<div className="flex flex-col gap-4">
 			<div>
-				<h2 className="mb-1 font-semibold text-xl">Choose what to install</h2>
+				<h2 className="mb-1 font-medium text-xl">Choose what to install</h2>
 				<p className="text-muted-foreground text-sm">
 					Select categories or individual items.
 				</p>
 			</div>
 
 			{!online && (
-				<div className="flex items-center gap-2 rounded-md bg-warning/10 px-3 py-2 text-sm text-warning dark:text-warning">
+				<div className="flex items-center gap-2 rounded-md bg-warning/10 px-3 py-2 text-sm text-status-warning dark:text-status-warning">
 					<HugeiconsIcon
 						className="h-4 w-4 flex-shrink-0"
 						icon={WifiOff01Icon}

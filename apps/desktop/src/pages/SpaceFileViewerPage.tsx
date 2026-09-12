@@ -15,17 +15,18 @@ import {
 } from "@ryu/ui/components/empty";
 import { toast } from "@ryu/ui/components/sileo";
 import { Spinner } from "@ryu/ui/components/spinner";
-import { useCallback, useEffect, useRef, useState } from "react";
 import {
-	DocxEditor,
-	type FileEditorHandle,
-} from "@/src/components/files/DocxEditor.tsx";
-import { PdfViewer } from "@/src/components/files/PdfViewer.tsx";
-import { SlidesEditor } from "@/src/components/files/SlidesEditor.tsx";
-import { SpreadsheetEditor } from "@/src/components/files/SpreadsheetEditor.tsx";
+	lazy,
+	Suspense,
+	useCallback,
+	useEffect,
+	useRef,
+	useState,
+} from "react";
+import type { FileEditorHandle } from "@/src/components/files/DocxEditor.tsx";
 import {
 	useCurrentTabId,
-	useTabsContext,
+	useTabSelector,
 } from "@/src/contexts/TabsContext.tsx";
 import { useActiveNode } from "@/src/hooks/useActiveNode.ts";
 import {
@@ -38,6 +39,44 @@ import {
 	workspaceFileKind,
 	workspaceFileLabel,
 } from "@/src/lib/office-files.ts";
+
+const loadDocxEditor = () =>
+	import("@/src/components/files/DocxEditor.tsx").then((module) => ({
+		default: module.DocxEditor,
+	}));
+const loadPdfViewer = () =>
+	import("@/src/components/files/PdfViewer.tsx").then((module) => ({
+		default: module.PdfViewer,
+	}));
+const loadSlidesEditor = () =>
+	import("@/src/components/files/SlidesEditor.tsx").then((module) => ({
+		default: module.SlidesEditor,
+	}));
+const loadSpreadsheetEditor = () =>
+	import("@/src/components/files/SpreadsheetEditor.tsx").then((module) => ({
+		default: module.SpreadsheetEditor,
+	}));
+const DocxEditor = lazy(loadDocxEditor);
+const PdfViewer = lazy(loadPdfViewer);
+const SlidesEditor = lazy(loadSlidesEditor);
+const SpreadsheetEditor = lazy(loadSpreadsheetEditor);
+
+function preloadEditor(
+	kind: ReturnType<typeof workspaceFileKind>
+): Promise<unknown> {
+	switch (kind) {
+		case "document":
+			return loadDocxEditor();
+		case "pdf":
+			return loadPdfViewer();
+		case "slides":
+			return loadSlidesEditor();
+		case "spreadsheet":
+			return loadSpreadsheetEditor();
+		default:
+			return Promise.resolve();
+	}
+}
 
 interface LoadedFile {
 	bytes: ArrayBuffer;
@@ -65,7 +104,7 @@ export default function SpaceFileViewerPage({
 }) {
 	const node = useActiveNode();
 	const tabId = useCurrentTabId();
-	const { updateTabTitle } = useTabsContext();
+	const updateTabTitle = useTabSelector((state) => state.updateTabTitle);
 	const editorRef = useRef<FileEditorHandle>(null);
 	const [loaded, setLoaded] = useState<LoadedFile | null>(null);
 	const [download, setDownload] = useState<Blob | null>(null);
@@ -92,8 +131,14 @@ export default function SpaceFileViewerPage({
 				if (!document) {
 					throw new Error("This file no longer exists in the Space.");
 				}
-				const bytes = await blob.arrayBuffer();
 				const mime = document.mime || blob.type || "application/octet-stream";
+				const [bytes] = await Promise.all([
+					blob.arrayBuffer(),
+					preloadEditor(workspaceFileKind(document.title, mime)),
+				]);
+				if (controller.signal.aborted) {
+					return;
+				}
 				setLoaded({ bytes, document, mime });
 				setDownload(new Blob([bytes], { type: mime }));
 				setDirty(false);
@@ -115,6 +160,7 @@ export default function SpaceFileViewerPage({
 		documentId,
 		node.token,
 		node.url,
+		node.userJwt,
 		reloadNonce,
 		spaceId,
 		tabId,
@@ -164,7 +210,7 @@ export default function SpaceFileViewerPage({
 		} finally {
 			setSaving(false);
 		}
-	}, [documentId, loaded, node.token, node.url, spaceId]);
+	}, [documentId, loaded, node.token, node.url, node.userJwt, spaceId]);
 
 	if (error) {
 		return (
@@ -236,49 +282,57 @@ export default function SpaceFileViewerPage({
 					</Button>
 				) : null}
 			</header>
-			{kind === "pdf" ? (
-				<PdfViewer bytes={loaded.bytes} onLoadError={handleEditorError} />
-			) : null}
-			{kind === "document" ? (
-				<DocxEditor
-					bytes={loaded.bytes}
-					onDirty={markDirty}
-					onLoadError={handleEditorError}
-					ref={editorRef}
-				/>
-			) : null}
-			{kind === "spreadsheet" ? (
-				<SpreadsheetEditor
-					bytes={loaded.bytes}
-					mime={loaded.mime}
-					onDirty={markDirty}
-					onLoadError={handleEditorError}
-					ref={editorRef}
-				/>
-			) : null}
-			{kind === "slides" ? (
-				<SlidesEditor
-					bytes={loaded.bytes}
-					mime={loaded.mime}
-					onDirty={markDirty}
-					onLoadError={handleEditorError}
-					ref={editorRef}
-				/>
-			) : null}
-			{kind === "unsupported" ? (
-				<Empty className="min-h-0 flex-1">
-					<EmptyHeader>
-						<EmptyMedia variant="icon">
-							<HugeiconsIcon icon={File01Icon} />
-						</EmptyMedia>
-						<EmptyTitle>Preview is not available</EmptyTitle>
-						<EmptyDescription>
-							Ryu can edit DOCX, XLSX, XLSM, PPTX and PPTM files, and view PDFs.
-							Download this file to open it in another app.
-						</EmptyDescription>
-					</EmptyHeader>
-				</Empty>
-			) : null}
+			<Suspense
+				fallback={
+					<div className="grid min-h-0 flex-1 place-items-center">
+						<Spinner />
+					</div>
+				}
+			>
+				{kind === "pdf" ? (
+					<PdfViewer bytes={loaded.bytes} onLoadError={handleEditorError} />
+				) : null}
+				{kind === "document" ? (
+					<DocxEditor
+						bytes={loaded.bytes}
+						onDirty={markDirty}
+						onLoadError={handleEditorError}
+						ref={editorRef}
+					/>
+				) : null}
+				{kind === "spreadsheet" ? (
+					<SpreadsheetEditor
+						bytes={loaded.bytes}
+						mime={loaded.mime}
+						onDirty={markDirty}
+						onLoadError={handleEditorError}
+						ref={editorRef}
+					/>
+				) : null}
+				{kind === "slides" ? (
+					<SlidesEditor
+						bytes={loaded.bytes}
+						mime={loaded.mime}
+						onDirty={markDirty}
+						onLoadError={handleEditorError}
+						ref={editorRef}
+					/>
+				) : null}
+				{kind === "unsupported" ? (
+					<Empty className="min-h-0 flex-1">
+						<EmptyHeader>
+							<EmptyMedia variant="icon">
+								<HugeiconsIcon icon={File01Icon} />
+							</EmptyMedia>
+							<EmptyTitle>Preview is not available</EmptyTitle>
+							<EmptyDescription>
+								Ryu can edit DOCX, XLSX, XLSM, PPTX and PPTM files, and view
+								PDFs. Download this file to open it in another app.
+							</EmptyDescription>
+						</EmptyHeader>
+					</Empty>
+				) : null}
+			</Suspense>
 		</div>
 	);
 }

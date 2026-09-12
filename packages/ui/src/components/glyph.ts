@@ -10,8 +10,7 @@
 
 import type { GradientDirection } from "@ryu/ui/components/dither-kit/gradient.tsx";
 import type { DitherColor } from "@ryu/ui/components/dither-kit/palette.ts";
-import type { ExpressiveExpressionSelection } from "@ryu/ui/components/expressive.ts";
-import type { ExpressiveAnimationSelection } from "@ryu/ui/components/expressive-animation.ts";
+import { type GhostAvatarSpec, parseGhostAvatar } from "./ghost-avatar.ts";
 
 /** Every glyph kind the primitive understands. */
 export type GlyphKind =
@@ -41,11 +40,7 @@ export type GlyphValue =
 	| { kind: "icon"; id: string; color?: string; dither?: GlyphDitherValue }
 	| { kind: "emoji"; emoji: string; dither?: GlyphDitherValue }
 	| { kind: "dicebear"; style: string; seed: string }
-	| {
-			animation?: ExpressiveAnimationSelection;
-			expression: ExpressiveExpressionSelection;
-			kind: "expressive";
-	  }
+	| (GhostAvatarSpec & { kind: "expressive" })
 	| { kind: "dither"; dither: GlyphDitherValue }
 	| null;
 
@@ -304,6 +299,10 @@ export function asGlyphValue(data: unknown): GlyphValue | undefined {
 	const kind = (data as { kind: unknown }).kind;
 	if (typeof kind !== "string" || !GLYPH_KINDS.has(kind as GlyphKind)) {
 		return undefined;
+	}
+	if (kind === "expressive") {
+		const ghost = parseGhostAvatar(data);
+		return ghost ? { ...ghost, kind: "expressive" } : undefined;
 	}
 	return data as GlyphValue;
 }

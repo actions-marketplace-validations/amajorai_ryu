@@ -671,7 +671,7 @@ export function DangerZoneSettings() {
 						    these three are NOT profile-scoped. Their Rust uses a plain
 						    ~/.shadow / ~/.ghost for every profile, so a "clean my canary"
 						    click clears stable's captures with it. */}
-						<AlertDialogDescription className="text-warning">
+						<AlertDialogDescription className="text-status-warning">
 							{cleanShared
 								? "Shadow and ghost are shared by every profile on this machine, so clearing them here clears them everywhere. "
 								: null}

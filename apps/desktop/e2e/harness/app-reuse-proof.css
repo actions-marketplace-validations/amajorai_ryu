@@ -1,0 +1,9 @@
+@import "tailwindcss";
+@import "@ryu/ui/app-ui.css";
+@source "./app-reuse-proof.tsx";
+@source "../../../../apps-store/slides/ui/src";
+@source "../../../../apps-store/canvas/ui/src";
+@source "../../../../apps-store/pull-requests/ui/src";
+@source "../../../../apps-store/feedback-board/ui/src";
+@source "../../../../apps-store/rooms/ui/src";
+@source "../../../../apps-store/teams/ui/src";

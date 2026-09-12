@@ -87,8 +87,14 @@ pub fn openapi() -> utoipa::openapi::OpenApi {
 }
 
 #[derive(utoipa::OpenApi)]
-#[openapi(paths(
+#[openapi(
+    tags((
+        name = "Output styles",
+        description = "Reusable response profiles and their user-authored source files."
+    )),
+    paths(
     list_styles,
+    create_style_handler,
     get_style,
     get_style_source,
     update_style_handler,
@@ -185,6 +191,14 @@ pub async fn get_style_source(Path(id): Path<String>) -> (StatusCode, Json<serde
 }
 
 /// `POST /api/output-styles` — create a new user style from the editor.
+#[utoipa::path(
+    post,
+    path = "/api/output-styles",
+    tag = "Output styles",
+    summary = "Create a user-authored output style",
+    request_body = serde_json::Value,
+    responses((status = 200, description = "OK", body = serde_json::Value))
+)]
 pub async fn create_style_handler(
     Json(draft): Json<store::OutputStyleDraft>,
 ) -> (StatusCode, Json<serde_json::Value>) {

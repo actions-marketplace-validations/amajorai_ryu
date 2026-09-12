@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+pub use crate::security_contact::PublicContactConfig;
+
 // The budget config value-types moved to the extracted `ryu-gw-budget` stage
 // crate; `AlertTier` (a cross-stage type used by firewall too) moved to
 // `ryu-gw-contracts`. Re-exported here so every `crate::config::{AlertTier,
@@ -34,6 +36,9 @@ pub use ryu_gw_cache::{CacheConfig, SemanticCacheConfig};
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct GatewayConfig {
+    /// Optional operator-published RFC 9116 contact. Never derived from account data.
+    #[serde(default)]
+    pub public_contact: PublicContactConfig,
     #[serde(default = "default_bind")]
     pub bind: String,
 
@@ -524,8 +529,8 @@ pub struct CreditsConfig {
     /// Per-tool-call cost in micro-USD for billable (Composio) tool executions.
     ///
     /// AT COST, and that is the whole pricing position: Composio charges per
-    /// action execution at $0.299/1k on the overage rate, so this defaults to
-    /// 299 micro-USD per call and the customer is billed exactly what the
+    /// action execution at $0.30/1k on the standard rate, so this defaults to
+    /// 300 micro-USD per call and the customer is billed exactly what the
     /// provider bills us. Margin lives in the deposit fee, never in a per-unit
     /// markup (`markup_bps` is 0) — see `docs/pricing-remaining-work.md` item 6.
     ///
@@ -634,13 +639,15 @@ pub struct CreditsConfig {
     #[serde(default = "default_credits_timeout_ms")]
     pub timeout_ms: u64,
     /// Fail CLOSED on debit errors for managed tenants (env
-    /// `GATEWAY_CREDITS_FAIL_CLOSED`). Default: false (preserves today's
-    /// fail-open behavior). When true and the request is a managed-inference
-    /// tenant, a debit transport error or non-2xx response flips that org's
-    /// wallet-empty flag so the NEXT request is refused, instead of the failure
-    /// being silently swallowed. The current in-flight response is never blocked
-    /// on the (async) debit — the failure is just made sticky.
-    #[serde(default)]
+    /// `GATEWAY_CREDITS_FAIL_CLOSED`). Default: true. When true and the request
+    /// is a managed-inference tenant, a debit transport error, non-2xx response,
+    /// or malformed success response marks accounting unavailable so the NEXT
+    /// request is refused with a retryable 503. This is separate from an empty
+    /// wallet, so a transient control-plane outage cannot strand a funded org.
+    /// The current in-flight response is never blocked on the async debit; its
+    /// cost is retried/reconciled by the control plane, and new provider spend
+    /// stops until accounting recovers.
+    #[serde(default = "default_true")]
     pub fail_closed: bool,
 
     // ─── Sandbox per-resource rates (Daytona), nano-USD per unit-second ───────
@@ -830,7 +837,7 @@ impl Default for CreditsConfig {
             reserve_enabled: default_true(),
             min_reserve_micro_usd: default_min_reserve_micro_usd(),
             timeout_ms: default_credits_timeout_ms(),
-            fail_closed: false,
+            fail_closed: true,
             // Delegated, not repeated: these must equal the serde `default = "…"`
             // fns on the same fields or an absent `[credits]` table and a present
             // one that omits the rates would bill differently.
@@ -985,7 +992,7 @@ impl CreditsConfig {
             anyhow::bail!(
                 "credits are ENABLED but GATEWAY_CREDITS_COST_PER_TOOL_CALL_MICRO_USD is 0, \
 so every Composio tool call bills the customer nothing while Composio still charges us. \
-Unset it to take the at-cost default (299 = $0.299/1k), or set \
+Unset it to take the at-cost default (300 = $0.30/1k), or set \
 GATEWAY_CREDITS_ALLOW_FREE_MODALITIES=1 to give tool calls away on purpose."
             );
         }
@@ -1116,11 +1123,17 @@ GATEWAY_CREDITS_ALLOW_FREE_MODALITIES=1 to give videos away on purpose."
         }
     }
 
-    /// Whether the hook is active: enabled with both a control-plane URL and an
-    /// internal secret. Without the secret the control plane rejects the debit,
-    /// so treat it as disabled rather than emitting doomed calls.
+    /// Whether the hook is active: enabled with both a non-empty control-plane
+    /// URL and a non-empty internal secret. Without the secret the control plane
+    /// rejects the debit, so startup validation must not allow a silently
+    /// unmetered enabled configuration.
     pub fn is_active(&self) -> bool {
-        self.enabled && self.internal_secret.is_some() && !self.base_url.trim().is_empty()
+        self.enabled
+            && self
+                .internal_secret
+                .as_deref()
+                .is_some_and(|secret| !secret.trim().is_empty())
+            && !self.base_url.trim().is_empty()
     }
 
     /// Per-GPU-second rate in nano-USD for a GPU tier. `None` costs nothing.
@@ -1407,10 +1420,12 @@ impl ControlPlaneConfig {
     }
 }
 
-/// Composio's own overage rate, $0.299 per 1000 executions, in micro-USD per
-/// call. Billed straight through at cost.
+/// Composio's current standard rate, $0.30 per 1000 executions, in micro-USD
+/// per call. Billed straight through at cost. Managed-app and premium-tool
+/// contracts can override this deployment value when their provider invoice
+/// is higher.
 fn default_cost_per_tool_call_micro_usd() -> u64 {
-    299
+    300
 }
 
 /// Replicate's published Nvidia L40S rate, $0.000975/sec, in micro-USD.
@@ -2709,9 +2724,9 @@ pub struct FirewallConfig {
     /// `log_detections`, `redact_pii`, `redact_secrets`,
     /// `wrap_untrusted_tool_results`, `inspector`, `alert` (locking that one means a
     /// narrower scope may only RAISE the tier, never go quieter). Defaults to locking
-    /// `enabled`, `scan_inbound`, and `policy` — the three dials whose
-    /// loosening silently disables the inbound firewall for a scope — so an
-    /// org/agent overlay can only tighten them. A node admin opts out with an
+    /// `enabled`, `policy`, `scan_inbound`, `scan_outbound`, `redact_pii`, and
+    /// `redact_secrets`, so an org/agent overlay cannot disable inherited
+    /// inbound or egress protections. A node admin opts out with an
     /// explicit `locked_fields = []`.
     #[serde(default = "default_firewall_locked_fields")]
     pub locked_fields: Vec<String>,
@@ -3040,16 +3055,19 @@ impl Default for FirewallConfig {
     }
 }
 
-/// The node-base lock set applied when `locked_fields` is omitted: the three
-/// dials whose loosening lets an org/agent overlay silently disable the inbound
-/// firewall for its scope. Kept in sorted order so a resolve of the bare node
+/// The node-base lock set applied when `locked_fields` is omitted. Inbound and
+/// egress protection settings cannot be loosened by narrower overlays.
+/// Kept in sorted order so a resolve of the bare node
 /// base is byte-identical to the resolver's sorted lock union (stable
 /// scanner-cache keys).
 fn default_firewall_locked_fields() -> Vec<String> {
     vec![
         "enabled".to_string(),
         "policy".to_string(),
+        "redact_pii".to_string(),
+        "redact_secrets".to_string(),
         "scan_inbound".to_string(),
+        "scan_outbound".to_string(),
     ]
 }
 
@@ -3188,10 +3206,10 @@ impl Default for RateLimitConfig {
     }
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct AuthConfig {
-    /// When false, all requests are accepted regardless of API key
-    #[serde(default)]
+    /// Authentication is required unless explicitly disabled for local development.
+    #[serde(default = "default_true")]
     pub require_auth: bool,
 
     /// Statically configured API keys
@@ -3200,6 +3218,86 @@ pub struct AuthConfig {
 
     /// A single master key that bypasses all per-key limits
     pub master_key: Option<String>,
+}
+
+impl Default for AuthConfig {
+    fn default() -> Self {
+        Self {
+            require_auth: true,
+            api_keys: Vec::new(),
+            master_key: None,
+        }
+    }
+}
+
+impl AuthConfig {
+    fn add_relay(
+        &mut self,
+        key: String,
+        name: &str,
+        trusted_forwarder: bool,
+    ) -> anyhow::Result<()> {
+        ryu_gw_credentials::validate(&key)?;
+        anyhow::ensure!(
+            self.master_key.as_deref() != Some(&key),
+            "Gateway relay and admin keys must differ"
+        );
+        if let Some(existing) = self.api_keys.iter().find(|entry| entry.key == key) {
+            anyhow::ensure!(
+                existing.trusted_forwarder == trusted_forwarder,
+                "Gateway relay credential has conflicting authority"
+            );
+            return Ok(());
+        }
+        self.api_keys.push(ApiKeyConfig {
+            key,
+            name: name.to_owned(),
+            org_id: None,
+            team_id: None,
+            channel_id: None,
+            project_id: None,
+            requests_per_minute: None,
+            tokens_per_minute: None,
+            token_budget_total: None,
+            downgrade_to: None,
+            trusted_forwarder,
+        });
+        Ok(())
+    }
+
+    /// Bootstrap only at service startup, never during config serialization.
+    /// Existing explicit credentials are validated rather than silently replaced.
+    pub fn bootstrap(&mut self, directory: &std::path::Path) -> anyhow::Result<()> {
+        if let Some(key) = &self.master_key {
+            ryu_gw_credentials::validate(key)?;
+        }
+        for entry in &self.api_keys {
+            ryu_gw_credentials::validate(&entry.key)?;
+        }
+        if !self.require_auth {
+            return Ok(());
+        }
+        if self.master_key.is_none() {
+            self.master_key = Some(ryu_gw_credentials::load_or_create(
+                &directory.join("gateway-admin.key"),
+                "gwadm_",
+            )?);
+        }
+        if self.api_keys.is_empty() {
+            let relay = ryu_gw_credentials::load_or_create(
+                &directory.join("gateway-relay.key"),
+                "gwrelay_",
+            )?;
+            self.add_relay(relay, "local-inference", false)?;
+        }
+        anyhow::ensure!(
+            self.api_keys
+                .iter()
+                .all(|entry| Some(&entry.key) != self.master_key.as_ref()),
+            "Gateway relay and admin keys must differ"
+        );
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -3849,7 +3947,19 @@ impl GatewayConfig {
             .map_err(|e| anyhow::anyhow!("Failed to serialize config: {e}"))?;
 
         let tmp_path = path.with_extension("toml.tmp");
-        std::fs::write(&tmp_path, &toml_str)?;
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        // A unique temporary path avoids following a stale or malicious .tmp symlink.
+        let tmp_path = tmp_path.with_extension(format!("{}.tmp", uuid::Uuid::new_v4().simple()));
+        let mut file = options.open(&tmp_path)?;
+        use std::io::Write;
+        file.write_all(toml_str.as_bytes())?;
+        file.sync_all()?;
         std::fs::rename(&tmp_path, &path)?;
 
         Ok(())
@@ -3980,36 +4090,21 @@ impl GatewayConfig {
             config.auth.require_auth = true;
         }
 
-        // Admin key WITHOUT flipping base auth.
-        //
-        // `GATEWAY_MASTER_KEY` above does two things at once — provisions an admin
-        // credential and turns on auth for EVERY route. That coupling is right for
-        // an operator hardening a deployment, and wrong for the one caller that
-        // needs an admin credential by construction: Core, which spawns this
-        // gateway as its own child.
-        //
-        // The problem it solves: the admin surface (`/v1/config`, audit,
-        // budget/spend) is otherwise reachable only by loopback trust, and
-        // `admin_loopback_allowed` deliberately revokes that trust whenever the
-        // MESH is on — mesh peers arrive as `127.0.0.1`, so loopback would
-        // otherwise fail open to them. Correct, but it also locked out Core, which
-        // had no admin credential to fall back on: every gateway settings tab
-        // answered 401 the moment the user enabled the mesh.
-        //
-        // Core cannot use `GATEWAY_MASTER_KEY` for this, because flipping
-        // `require_auth` would demand a bearer on every ordinary call (chat,
-        // media, titles, widgets, …) that Core and its sidecars make without one.
-        // So this sets the credential alone: admin routes start demanding it,
-        // everything else is untouched.
-        //
-        // Ignored when `GATEWAY_MASTER_KEY` already provisioned one — an explicit
-        // operator key outranks the one Core mints for itself.
+        // Core-owned admin and relay credentials have distinct authority.
         if config.auth.master_key.is_none() {
             if let Ok(key) = std::env::var("GATEWAY_ADMIN_KEY") {
-                let key = key.trim().to_owned();
-                if !key.is_empty() {
-                    config.auth.master_key = Some(key);
-                }
+                ryu_gw_credentials::validate(&key)?;
+                config.auth.master_key = Some(key);
+            }
+        }
+        for (variable, name, trusted) in [
+            ("GATEWAY_CORE_RELAY_KEY", "local-core", true),
+            ("GATEWAY_RELAY_KEY", "local-inference", false),
+        ] {
+            if let Ok(key) = std::env::var(variable) {
+                config.auth.add_relay(key, name, trusted)?;
+                // A managed child never inherits an old anonymous local setting.
+                config.auth.require_auth = true;
             }
         }
 
@@ -4738,6 +4833,17 @@ impl GatewayConfig {
             if let Some(enabled) = parse_bool_env(&raw) {
                 config.fleet = enabled;
             }
+        }
+
+        if config.credits.enabled && !config.credits.is_active() {
+            anyhow::bail!(
+                "credit billing is enabled but requires a non-empty control-plane URL and RYU_CREDITS_INTERNAL_SECRET"
+            );
+        }
+        if config.fleet && config.credits.enabled && !config.credits.fail_closed {
+            anyhow::bail!(
+                "refusing to start a managed gateway fleet with credit debit fail-open; +set GATEWAY_CREDITS_FAIL_CLOSED=true"
+            );
         }
 
         // Money config is validated at BOOT, not at first debit: a gateway that
@@ -5690,6 +5796,7 @@ impl Default for MarketplaceRecommendationsCadence {
 impl Default for GatewayConfig {
     fn default() -> Self {
         Self {
+            public_contact: PublicContactConfig::default(),
             bind: default_bind(),
             providers: ProvidersConfig::default(),
             routing: RoutingConfig::default(),
@@ -5977,24 +6084,24 @@ mod admin_key_env_tests {
         }
     }
 
-    /// The whole point of `GATEWAY_ADMIN_KEY`: provision the admin credential
-    /// WITHOUT turning on base auth.
-    ///
-    /// If this ever starts flipping `require_auth`, every ordinary call Core and
-    /// its sidecars make without a bearer (chat, media, titles, widgets, …) starts
-    /// answering 401 — which is exactly why Core could not just use
-    /// `GATEWAY_MASTER_KEY` for this.
+    /// Provisioning an administrator retains the authenticated default.
     #[test]
-    fn admin_key_sets_master_key_without_enabling_require_auth() {
+    fn admin_key_preserves_authenticated_default() {
         let _path = ConfigPathGuard::isolated("admin-key");
         let _master = EnvVar::cleared("GATEWAY_MASTER_KEY");
-        let _admin = EnvVar::set("GATEWAY_ADMIN_KEY", "gwadm_test");
+        let _admin = EnvVar::set(
+            "GATEWAY_ADMIN_KEY",
+            "gwadm_0123456789abcdef0123456789abcdef",
+        );
 
         let cfg = GatewayConfig::load().expect("gateway config loads");
-        assert_eq!(cfg.auth.master_key.as_deref(), Some("gwadm_test"));
+        assert_eq!(
+            cfg.auth.master_key.as_deref(),
+            Some("gwadm_0123456789abcdef0123456789abcdef")
+        );
         assert!(
-            !cfg.auth.require_auth,
-            "GATEWAY_ADMIN_KEY must not turn on base auth"
+            cfg.auth.require_auth,
+            "authentication must be enabled by default"
         );
     }
 
@@ -6003,26 +6110,30 @@ mod admin_key_env_tests {
     #[test]
     fn explicit_master_key_outranks_admin_key() {
         let _path = ConfigPathGuard::isolated("admin-key-precedence");
-        let _master = EnvVar::set("GATEWAY_MASTER_KEY", "operator-key");
-        let _admin = EnvVar::set("GATEWAY_ADMIN_KEY", "gwadm_test");
+        let _master = EnvVar::set(
+            "GATEWAY_MASTER_KEY",
+            "operator_0123456789abcdef0123456789abcdef",
+        );
+        let _admin = EnvVar::set(
+            "GATEWAY_ADMIN_KEY",
+            "gwadm_0123456789abcdef0123456789abcdef",
+        );
 
         let cfg = GatewayConfig::load().expect("gateway config loads");
-        assert_eq!(cfg.auth.master_key.as_deref(), Some("operator-key"));
+        assert_eq!(
+            cfg.auth.master_key.as_deref(),
+            Some("operator_0123456789abcdef0123456789abcdef")
+        );
         assert!(cfg.auth.require_auth);
     }
 
-    /// Blank is not a credential. An empty value must leave the admin surface on
-    /// its previous behaviour rather than provisioning an unusable empty key that
-    /// would neutralize loopback trust and lock everyone out.
+    /// An explicitly blank credential is a startup error, never an auth opt-out.
     #[test]
-    fn blank_admin_key_is_ignored() {
+    fn blank_admin_key_is_rejected() {
         let _path = ConfigPathGuard::isolated("admin-key-blank");
         let _master = EnvVar::cleared("GATEWAY_MASTER_KEY");
         let _admin = EnvVar::set("GATEWAY_ADMIN_KEY", "   ");
-
-        let cfg = GatewayConfig::load().expect("gateway config loads");
-        assert_eq!(cfg.auth.master_key, None);
-        assert!(!cfg.auth.require_auth);
+        assert!(GatewayConfig::load().is_err());
     }
 }
 
@@ -6311,6 +6422,12 @@ mod credits_config_tests {
         };
         assert!(!no_secret.is_active());
 
+        let blank_secret = CreditsConfig {
+            internal_secret: Some("  ".to_string()),
+            ..base.clone()
+        };
+        assert!(!blank_secret.is_active());
+
         let disabled = CreditsConfig {
             enabled: false,
             ..base.clone()
@@ -6355,6 +6472,14 @@ enabled = true
         assert_eq!(
             partial.credits.reserve_enabled,
             CreditsConfig::default().reserve_enabled
+        );
+        assert!(
+            partial.credits.fail_closed,
+            "omitting fail_closed must not silently re-enable unbilled managed spend"
+        );
+        assert_eq!(
+            partial.credits.fail_closed,
+            CreditsConfig::default().fail_closed
         );
         assert_eq!(
             partial.credits.min_reserve_micro_usd,
@@ -6423,10 +6548,10 @@ mode = "pass_through"
 
     #[test]
     fn the_tool_call_rate_defaults_to_composios_cost() {
-        // AT COST. Composio's overage is $0.299/1k executions, so the default is
-        // 299 micro-USD per call and the customer pays exactly what we pay.
+        // AT COST. Composio's standard rate is $0.30/1k executions, so the
+        // default is 300 micro-USD per call and the customer pays exactly what we pay.
         // Margin is the deposit fee, never a per-unit markup.
-        assert_eq!(CreditsConfig::default().cost_per_tool_call_micro_usd, 299);
+        assert_eq!(CreditsConfig::default().cost_per_tool_call_micro_usd, 300);
         assert_eq!(CreditsConfig::default().markup_bps, 0);
     }
 
@@ -8414,5 +8539,40 @@ mod classify_tier_tests {
             "the operator's own table must survive a save, even though the env \
              overwrote it in memory"
         );
+    }
+}
+
+#[cfg(test)]
+mod authenticated_bootstrap_tests {
+    use super::*;
+    #[test]
+    fn default_auth_bootstraps_distinct_persistent_roles() {
+        let directory =
+            std::env::temp_dir().join(format!("gateway-bootstrap-{}", uuid::Uuid::new_v4()));
+        let mut first = AuthConfig::default();
+        assert!(first.require_auth);
+        first.bootstrap(&directory).unwrap();
+        assert!(first.master_key.is_some());
+        assert_eq!(first.api_keys.len(), 1);
+        assert!(!first.api_keys[0].trusted_forwarder);
+        assert_ne!(
+            first.master_key.as_deref(),
+            Some(first.api_keys[0].key.as_str())
+        );
+        let mut second = AuthConfig::default();
+        second.bootstrap(&directory).unwrap();
+        assert_eq!(first.master_key, second.master_key);
+        assert_eq!(first.api_keys[0].key, second.api_keys[0].key);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+    #[test]
+    fn rejects_shared_admin_relay_and_invalid_explicit_master() {
+        let mut config = AuthConfig::default();
+        config.master_key = Some("gwadm_0123456789abcdef0123456789abcdef".into());
+        assert!(config
+            .add_relay(config.master_key.clone().unwrap(), "relay", false)
+            .is_err());
+        config.master_key = Some("".into());
+        assert!(config.bootstrap(std::path::Path::new("/unused")).is_err());
     }
 }

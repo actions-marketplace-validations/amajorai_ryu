@@ -8,13 +8,77 @@
 // opened the OS file picker instead. Both spellings compile and both build, so
 // this has to be clicked to be certified.
 
-import { expect, test } from "@playwright/test";
+import { writeFile } from "node:fs/promises";
+import { expect, type Page, test } from "@playwright/test";
 
 // The story pulls a large module graph; vite compiles it on first navigation, so
 // allow generous headroom over the 30s default for cold-start CI runs.
 test.describe.configure({ timeout: 90_000 });
 
 const STORY_URL = "/composer-plus-story.html";
+
+interface CompactMorphEvidence {
+	finalHeight: number;
+	frameDeltas: number[];
+	initialHeight: number;
+	sameToolbarNode: boolean;
+	samples: {
+		height: number;
+		layout: string | null;
+		time: number;
+	}[];
+}
+
+async function collectCompactMorphEvidence(
+	page: Page
+): Promise<CompactMorphEvidence> {
+	return page.evaluate(
+		() =>
+			new Promise<CompactMorphEvidence>((resolve, reject) => {
+				const toolbar = document.querySelector<HTMLElement>(
+					'[data-testid="compact"] [data-composer-layout]'
+				);
+				if (!toolbar) {
+					reject(new Error("compact composer layout marker is missing"));
+					return;
+				}
+
+				const initialToolbar = toolbar;
+				const initialHeight = toolbar.getBoundingClientRect().height;
+				const samples: CompactMorphEvidence["samples"] = [];
+				const startedAt = performance.now();
+
+				const collect = (now: number) => {
+					const rect = toolbar.getBoundingClientRect();
+					samples.push({
+						height: rect.height,
+						layout: toolbar.getAttribute("data-composer-layout"),
+						time: now - startedAt,
+					});
+					if (now - startedAt < 800) {
+						requestAnimationFrame(collect);
+						return;
+					}
+
+					resolve({
+						finalHeight: samples.at(-1)?.height ?? initialHeight,
+						frameDeltas: samples
+							.slice(1)
+							.map((sample, index) => sample.height - samples[index]!.height),
+						initialHeight,
+						sameToolbarNode:
+							initialToolbar ===
+							document.querySelector(
+								'[data-testid="compact"] [data-composer-layout]'
+							),
+						samples,
+					});
+				};
+
+				requestAnimationFrame(collect);
+			})
+	);
+}
 
 /** The "+" trigger inside one of the story's two mounts. */
 function plusIn(page: import("@playwright/test").Page, testId: string) {
@@ -212,9 +276,9 @@ test.describe("composer + menu — real InputBar in isolation", () => {
 	// must switch to the full stacked layout instead of squeezing a taller editor
 	// between those controls. Both spellings compile, so only a laid-out browser can
 	// pin this transition.
-	test("compact switches to the full stacked layout when the textarea wraps", async ({
+	test("compact morphs to the full stacked layout when the textarea wraps", async ({
 		page,
-	}) => {
+	}, testInfo) => {
 		await page.goto(STORY_URL);
 		const mount = page.getByTestId("compact");
 		const plus = plusIn(page, "compact");
@@ -226,6 +290,7 @@ test.describe("composer + menu — real InputBar in isolation", () => {
 		await expect(plus).toBeVisible();
 		await expect(agent).toBeVisible();
 		await expect(toolbar).toHaveAttribute("data-composer-layout", "compact");
+		await expect(toolbar).toHaveAttribute("data-composer-motion", "on");
 
 		const [plusBox, agentBox, compactEditorBox] = await Promise.all([
 			plus.boundingBox(),
@@ -245,12 +310,45 @@ test.describe("composer + menu — real InputBar in isolation", () => {
 		expect(agentBox.x).toBeGreaterThan(plusBox.x);
 
 		// No explicit newline: this is the auto-wrap regression the product uses.
+		const morphEvidencePromise = collectCompactMorphEvidence(page);
 		await textarea.fill(
 			"Explain how this compact composer should grow naturally without squeezing its controls when a longer prompt wraps onto another visible line. ".repeat(
 				4
 			)
 		);
 		await expect(toolbar).toHaveAttribute("data-composer-layout", "full");
+		const morphEvidence = await morphEvidencePromise;
+		const totalHeightTravel =
+			morphEvidence.finalHeight - morphEvidence.initialHeight;
+		const animatedFrames = morphEvidence.frameDeltas.filter(
+			(delta) => Math.abs(delta) > 0.1
+		);
+		const largestFrameDelta = Math.max(
+			...morphEvidence.frameDeltas.map((delta) => Math.abs(delta))
+		);
+
+		// The layout morph grows the actual card over multiple frames, rather than
+		// toggling a class and jumping directly to the full height.
+		expect(totalHeightTravel).toBeGreaterThan(24);
+		expect(animatedFrames.length).toBeGreaterThan(10);
+		expect(largestFrameDelta).toBeLessThan(totalHeightTravel * 0.75);
+		expect(morphEvidence.sameToolbarNode).toBe(true);
+		await writeFile(
+			testInfo.outputPath("compact-composer-morph-proof.log.json"),
+			JSON.stringify(
+				{
+					morphEvidence,
+					animatedFrameCount: animatedFrames.length,
+					largestFrameDelta,
+				},
+				null,
+				2
+			)
+		);
+		await page.screenshot({
+			path: testInfo.outputPath("compact-composer-full-layout-proof.png"),
+			fullPage: true,
+		});
 
 		const [stackedPlusBox, stackedTextareaBox] = await Promise.all([
 			plus.boundingBox(),
@@ -270,6 +368,35 @@ test.describe("composer + menu — real InputBar in isolation", () => {
 		// Deleting back to one visual line restores the space-saving topology.
 		await textarea.fill("Short follow-up");
 		await expect(toolbar).toHaveAttribute("data-composer-layout", "compact");
+		await expect
+			.poll(() =>
+				toolbar.evaluate((element) => getComputedStyle(element).transform)
+			)
+			.toBe("none");
+		await page.screenshot({
+			path: testInfo.outputPath("compact-composer-morph-proof.png"),
+			fullPage: true,
+		});
+	});
+
+	test("compact layout changes respect reduced motion", async ({ page }) => {
+		await page.emulateMedia({ reducedMotion: "reduce" });
+		await page.goto(STORY_URL);
+		const mount = page.getByTestId("compact");
+		const toolbar = mount.locator("[data-composer-layout]");
+
+		await expect(toolbar).toHaveAttribute("data-composer-motion", "off");
+		await mount
+			.locator("textarea")
+			.fill(
+				"Respect reduced motion while moving the actions below the editor. ".repeat(
+					4
+				)
+			);
+		await expect(toolbar).toHaveAttribute("data-composer-layout", "full");
+		expect(
+			await toolbar.evaluate((element) => getComputedStyle(element).transform)
+		).toBe("none");
 	});
 
 	test("shows current-turn progress as separate side-by-side chips", async ({
@@ -348,5 +475,45 @@ test.describe("composer + menu — real InputBar in isolation", () => {
 		await page.getByRole("option", { name: "Temporary chat" }).click();
 
 		await expect(page.getByTestId("ghost-state")).toHaveText("on");
+	});
+
+	test("temporary chats can opt into memory and be saved later", async ({
+		page,
+	}) => {
+		await page.goto(STORY_URL);
+		const mount = page.getByTestId("full");
+
+		await mount.getByRole("button", { name: "Add", exact: true }).click();
+		const temporaryOption = page.getByRole("option", {
+			name: "Temporary chat",
+		});
+		await expect(temporaryOption).toBeVisible();
+		await temporaryOption.click();
+		await expect(page.getByTestId("temporary-memory-state")).toHaveText("off");
+
+		await mount.getByRole("button", { name: "Add", exact: true }).click();
+		await page
+			.getByRole("option", { name: "Use memory in temporary chat" })
+			.click();
+		await expect(page.getByTestId("temporary-memory-state")).toHaveText("on");
+		await expect(
+			mount.getByRole("button", { name: "Save temporary chat" })
+		).toBeVisible();
+		await mount.getByRole("button", { name: "Add", exact: true }).click();
+		await expect(
+			page.getByRole("option", { name: "Use memory in temporary chat" })
+		).toBeVisible();
+		await page.screenshot({
+			path: "test-results/temporary-chat-memory-save-proof.png",
+			fullPage: true,
+		});
+
+		await page.keyboard.press("Escape");
+		await page.screenshot({
+			path: "test-results/temporary-chat-save-bar-proof.png",
+			fullPage: true,
+		});
+		await mount.getByRole("button", { name: "Save temporary chat" }).click();
+		await expect(page.getByTestId("temporary-chat-saved")).toHaveText("saved");
 	});
 });

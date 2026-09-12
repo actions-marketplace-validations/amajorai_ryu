@@ -203,7 +203,10 @@ function HookPhase({
 					<p className="text-muted-foreground text-xs">{phase.description}</p>
 				</div>
 				{phase.hooks.some((hook) => hook.reviewRequired) ? (
-					<HugeiconsIcon className="size-4 text-warning" icon={Alert02Icon} />
+					<HugeiconsIcon
+						className="size-4 text-status-warning"
+						icon={Alert02Icon}
+					/>
 				) : null}
 			</div>
 			{phase.hooks.map((hook) => (
@@ -290,7 +293,7 @@ export function HooksSection({
 					/>
 					<div className="flex items-start gap-2 rounded-xl border border-warning/40 bg-warning/10 px-3 py-2.5 text-sm">
 						<HugeiconsIcon
-							className="mt-0.5 size-4 shrink-0 text-warning"
+							className="mt-0.5 size-4 shrink-0 text-status-warning"
 							icon={Alert02Icon}
 						/>
 						<p>
@@ -307,7 +310,7 @@ export function HooksSection({
 				</div>
 			) : null}
 			{hooksQuery.error ? (
-				<p className="px-3 text-destructive text-sm">
+				<p className="px-3 text-sm text-status-destructive">
 					{hooksQuery.error instanceof Error
 						? hooksQuery.error.message
 						: "Hooks could not be loaded."}
@@ -343,7 +346,7 @@ export function HooksSection({
 								{owner.reviewCount > 0 ? (
 									<Badge className="gap-1" variant="outline">
 										<HugeiconsIcon
-											className="size-3.5 text-warning"
+											className="size-3.5 text-status-warning"
 											icon={Alert02Icon}
 										/>
 										{owner.reviewCount} need{owner.reviewCount === 1 ? "s" : ""}{" "}

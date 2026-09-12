@@ -1,3 +1,6 @@
+"use client";
+
+import { useLocalizedString, useLocalizedText } from "@ryu/i18n/react";
 import { cn } from "@ryu/ui/lib/utils.ts";
 import { ChevronDown } from "lucide-react";
 import type * as React from "react";
@@ -11,6 +14,8 @@ function NativeSelect({
 	size = "default",
 	...props
 }: NativeSelectProps) {
+	const localizedAriaLabel = useLocalizedString(props["aria-label"]);
+	const localizedTitle = useLocalizedString(props.title);
 	return (
 		<div
 			className={cn(
@@ -21,10 +26,12 @@ function NativeSelect({
 			data-slot="native-select-wrapper"
 		>
 			<select
-				className="h-9 w-full min-w-0 select-none appearance-none rounded-3xl border border-transparent bg-input/50 py-1 pr-8 pl-3 text-sm outline-none transition-[color,box-shadow,background-color] selection:bg-primary selection:text-primary-foreground placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/30 disabled:pointer-events-none disabled:cursor-not-allowed aria-invalid:border-destructive aria-invalid:ring-3 aria-invalid:ring-destructive/20 data-[size=sm]:h-8 dark:aria-invalid:border-destructive/50 dark:aria-invalid:ring-destructive/40"
+				className="corner-squircle h-9 w-full min-w-0 select-none appearance-none rounded-3xl border border-transparent bg-input/50 py-1 pr-8 pl-3 text-sm outline-none transition-[color,box-shadow,background-color] selection:bg-primary selection:text-primary-foreground placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/30 disabled:pointer-events-none disabled:cursor-not-allowed aria-invalid:border-destructive aria-invalid:ring-3 aria-invalid:ring-destructive/20 data-[size=sm]:h-8 dark:aria-invalid:border-destructive/50 dark:aria-invalid:ring-destructive/40"
 				data-size={size}
 				data-slot="native-select"
 				{...props}
+				aria-label={localizedAriaLabel}
+				title={localizedTitle}
 			/>
 			<ChevronDown
 				aria-hidden="true"
@@ -36,15 +43,19 @@ function NativeSelect({
 }
 
 function NativeSelectOption({
+	children,
 	className,
 	...props
 }: React.ComponentProps<"option">) {
+	const localizedChildren = useLocalizedText(children, { literal: true });
 	return (
 		<option
 			className={cn("bg-[Canvas] text-[CanvasText]", className)}
 			data-slot="native-select-option"
 			{...props}
-		/>
+		>
+			{localizedChildren}
+		</option>
 	);
 }
 

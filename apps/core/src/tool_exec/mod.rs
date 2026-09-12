@@ -128,7 +128,13 @@ pub async fn execute_code(
 
     // Pre-run gateway budget gate (fail-closed).
     use crate::sidecar::gateway::{
-        check_exec_budget, check_exec_scan, report_exec_audit, ExecBudgetOutcome, ExecScanOutcome,
+        check_exec_budget, check_exec_scan, report_exec_audit_with_attribution,
+        ExecAuditAttribution, ExecBudgetOutcome, ExecScanOutcome,
+    };
+    let audit_attribution = ExecAuditAttribution {
+        agent_id: Some(agent_id.to_owned()),
+        feature: Some("agent".to_owned()),
+        ..Default::default()
     };
     if let ExecBudgetOutcome::Deny(reason) = check_exec_budget(backend, "tool_exec").await {
         return ExecOutcome::error(format!("gateway denied execution: {reason}"));
@@ -142,13 +148,14 @@ pub async fn execute_code(
         ExecScanOutcome::Deny(reason) => {
             // Block + audit the denied exec via the same reporter the budget path
             // uses, then surface the error the way a budget deny is surfaced.
-            report_exec_audit(
+            report_exec_audit_with_attribution(
                 backend,
                 "tool_exec",
                 0,
                 1,
                 None,
                 Some(format!("scan denied: {reason}")),
+                audit_attribution.clone(),
             )
             .await;
             return ExecOutcome::error(format!("gateway denied execution: {reason}"));
@@ -163,13 +170,14 @@ pub async fn execute_code(
                 %reason,
                 "exec scan requires approval but no in-process approval-await path exists; denying"
             );
-            report_exec_audit(
+            report_exec_audit_with_attribution(
                 backend,
                 "tool_exec",
                 0,
                 1,
                 None,
                 Some(format!("scan approval_required (denied): {reason}")),
+                audit_attribution.clone(),
             )
             .await;
             return ExecOutcome::error(format!("execution requires approval: {reason}"));
@@ -188,13 +196,14 @@ pub async fn execute_code(
         // A pause is not a failure — it is a successful partial run awaiting input.
         ExecOutcome::Paused { .. } => (0, None),
     };
-    report_exec_audit(
+    report_exec_audit_with_attribution(
         backend,
         "tool_exec",
         started.elapsed().as_millis() as u64,
         exit_code,
         None,
         err,
+        audit_attribution,
     )
     .await;
 
@@ -748,11 +757,14 @@ fn resolve_process_env_value(
 ///   - `vault:<domain>` → the governed `identity::read_credential` (grant
 ///     `identity.read` + audit) for the connection bound to `<domain>` among the
 ///     agent's `profile_ids`.
+///   - `secret:NAME`     → the encrypted user-managed vault, resolved against
+///     the server-derived node/user/team/org context for this MCP call.
 async fn resolve_secret_token(
     word: &str,
     plugin_id: &str,
     profile_ids: &[String],
     session_id: Option<&str>,
+    secret_context: Option<&crate::plugin_secrets::SecretResolutionContext>,
 ) -> SecretToken {
     if let Some(var) = word.strip_prefix("env:") {
         return resolve_env_secret_from(plugin_id, var, crate::plugin_secrets::global()).await;
@@ -783,7 +795,21 @@ async fn resolve_secret_token(
         }
         return SecretToken::Absent;
     }
-    SecretToken::Literal
+    if let Some(name) = word.strip_prefix("secret:") {
+        let (Some(store), Some(context)) = (crate::plugin_secrets::global(), secret_context) else {
+            return SecretToken::Absent;
+        };
+        match store.resolve_vault_secret(name, context).await {
+            Ok(Some(value)) if !value.is_empty() => SecretToken::Value(value),
+            Ok(_) => SecretToken::Absent,
+            Err(error) => {
+                tracing::warn!("reading user-managed vault secret failed: {error:#}");
+                SecretToken::Absent
+            }
+        }
+    } else {
+        SecretToken::Literal
+    }
 }
 
 /// Resolve a `secret_headers` value TEMPLATE to its concrete header value, or
@@ -804,6 +830,8 @@ async fn resolve_secret_token(
 ///   - `vault:<domain>` → the governed `identity::read_credential` (grant
 ///     `identity.read` + audit) for the connection bound to `<domain>` among the
 ///     agent's `profile_ids`.
+///   - `secret:NAME`     → the encrypted user-managed vault, resolved against
+///     the server-derived user/node/team/org context.
 ///
 /// A value carrying NO token at all is an `Err` (never a silent skip — mirrors
 /// the command `env:` unsupported-source rejection). Resolved values are spliced
@@ -815,6 +843,25 @@ async fn resolve_secret_header_source(
     plugin_id: &str,
     profile_ids: &[String],
     session_id: Option<&str>,
+) -> Result<Option<String>, String> {
+    resolve_secret_header_source_with_context(
+        header_name,
+        source,
+        plugin_id,
+        profile_ids,
+        session_id,
+        None,
+    )
+    .await
+}
+
+async fn resolve_secret_header_source_with_context(
+    header_name: &str,
+    source: &str,
+    plugin_id: &str,
+    profile_ids: &[String],
+    session_id: Option<&str>,
+    secret_context: Option<&crate::plugin_secrets::SecretResolutionContext>,
 ) -> Result<Option<String>, String> {
     let mut out = String::with_capacity(source.len());
     let mut saw_token = false;
@@ -834,7 +881,7 @@ async fn resolve_secret_header_source(
         let word_len = rest.find(char::is_whitespace).unwrap_or(rest.len());
         let word = &rest[..word_len];
         cursor += word_len;
-        match resolve_secret_token(word, plugin_id, profile_ids, session_id).await {
+        match resolve_secret_token(word, plugin_id, profile_ids, session_id, secret_context).await {
             SecretToken::Literal => out.push_str(word),
             SecretToken::Value(v) => {
                 saw_token = true;
@@ -846,7 +893,7 @@ async fn resolve_secret_header_source(
     }
     if !saw_token {
         return Err(format!(
-            "http tool: unsupported secret source '{source}' for header '{header_name}' (expected an 'env:VARNAME' or 'vault:<domain>' token)"
+            "http tool: unsupported secret source '{source}' for header '{header_name}' (expected an 'env:VARNAME', 'vault:<domain>', or 'secret:NAME' token)"
         ));
     }
     Ok(Some(out))
@@ -947,25 +994,82 @@ pub async fn run_http_tool(
     agent_id: &str,
     session_id: Option<&str>,
 ) -> Result<Value, String> {
-    // 0. Resolve the server-side SECRET headers (async + governed) BEFORE building
-    //    the request. Each source (`env:` / `vault:`) resolves to a concrete value
-    //    or "absent" (header omitted). These are pre-resolved so `build_rest_request`
-    //    stays PURE (no env, no await) — the same testability reason the allowlist
-    //    parse was extracted. Secret VALUES never enter the args map, so they never
-    //    reach the path/query/body or the model-visible schema.
-    //    The `env:` arm is scoped to what the OWNING PLUGIN may read (`agent_id` is
-    //    the owning plugin id at this seam — see `resolve_app_tool_backend`), so a
-    //    disk manifest cannot name an unrelated credential var.
-    let mut resolved_secret_headers: Vec<(String, String)> = Vec::new();
-    for (name, source) in secret_headers {
-        if let Some(value) =
-            resolve_secret_header_source(name, source, agent_id, profile_ids, session_id).await?
-        {
-            resolved_secret_headers.push((name.clone(), value));
-        }
-    }
+    run_http_tool_with_agent(
+        url,
+        method,
+        args,
+        header_params,
+        secret_headers,
+        fail_open,
+        unwrap_body,
+        body_defaults,
+        grants,
+        profile_ids,
+        agent_id,
+        session_id,
+        None,
+    )
+    .await
+}
 
-    // 0b. Lower the REST args onto the request BEFORE any guard, so the egress /
+/// Variant of [`run_http_tool`] that receives the actual calling agent id in
+/// addition to the owning plugin id used for grants and secret resolution.
+#[allow(clippy::too_many_arguments)]
+pub async fn run_http_tool_with_agent(
+    url: &str,
+    method: &str,
+    args: Value,
+    header_params: &[String],
+    secret_headers: &std::collections::BTreeMap<String, String>,
+    fail_open: bool,
+    unwrap_body: bool,
+    body_defaults: &Value,
+    grants: &std::collections::HashSet<String>,
+    profile_ids: &[String],
+    agent_id: &str,
+    session_id: Option<&str>,
+    audit_agent_id: Option<&str>,
+) -> Result<Value, String> {
+    run_http_tool_with_secret_context(
+        url,
+        method,
+        args,
+        header_params,
+        secret_headers,
+        fail_open,
+        unwrap_body,
+        body_defaults,
+        grants,
+        profile_ids,
+        agent_id,
+        session_id,
+        audit_agent_id,
+        None,
+    )
+    .await
+}
+
+/// Variant of [`run_http_tool_with_agent`] that carries the server-derived
+/// user/node/team/org context needed for `secret:NAME` references. The context
+/// is only used during this call and is never placed in the model-visible args.
+#[allow(clippy::too_many_arguments)]
+pub async fn run_http_tool_with_secret_context(
+    url: &str,
+    method: &str,
+    args: Value,
+    header_params: &[String],
+    secret_headers: &std::collections::BTreeMap<String, String>,
+    fail_open: bool,
+    unwrap_body: bool,
+    body_defaults: &Value,
+    grants: &std::collections::HashSet<String>,
+    profile_ids: &[String],
+    agent_id: &str,
+    session_id: Option<&str>,
+    audit_agent_id: Option<&str>,
+    secret_context: Option<&crate::plugin_secrets::SecretResolutionContext>,
+) -> Result<Value, String> {
+    // 0. Lower the REST args onto the request BEFORE any guard, so the egress /
     //    SSRF checks below run on the FINAL host (path params can appear before
     //    the host in a templated base, and query/body partitioning is settled here).
     let method_upper = method.to_ascii_uppercase();
@@ -975,13 +1079,11 @@ pub async fn run_http_tool(
     // Expand `core:` to this profile's loopback origin BEFORE the egress/SSRF
     // guards, so they screen the URL that is actually dialled.
     let url = resolve_core_url(url);
-    let (final_url, query_pairs, mut body, headers) = build_rest_request(
-        &url,
-        &args,
-        bodyless,
-        header_params,
-        &resolved_secret_headers,
-    )?;
+    // Secret headers are deliberately omitted from this first lowering pass. The
+    // URL, query, and body do not depend on them, and this lets the cheap egress /
+    // SSRF / gateway gates run before Core decrypts any user-managed value.
+    let (final_url, query_pairs, mut body, _) =
+        build_rest_request(&url, &args, bodyless, header_params, &[])?;
 
     // 0c. Apply the manifest's static `body_defaults` UNDER the model-provided body
     //     (model args win; nested objects merge key-by-key). This is a declarative,
@@ -1016,7 +1118,13 @@ pub async fn run_http_tool(
 
     // 2. Gateway governance: fail-closed budget + opt-in firewall/DLP scan.
     use crate::sidecar::gateway::{
-        check_exec_budget, check_exec_scan, report_exec_audit, ExecBudgetOutcome, ExecScanOutcome,
+        check_exec_budget, check_exec_scan, report_exec_audit_with_attribution,
+        ExecAuditAttribution, ExecBudgetOutcome, ExecScanOutcome,
+    };
+    let audit_attribution = ExecAuditAttribution {
+        agent_id: audit_agent_id.map(str::to_owned),
+        feature: Some("agent".to_owned()),
+        ..Default::default()
     };
     let backend = "tool_http";
     if let ExecBudgetOutcome::Deny(reason) = check_exec_budget(backend, "tool_http").await {
@@ -1029,18 +1137,54 @@ pub async fn run_http_tool(
     match check_exec_scan(backend, &scan_content, session_id, Some(agent_id)).await {
         ExecScanOutcome::Allow => {}
         ExecScanOutcome::Deny(reason) | ExecScanOutcome::ApprovalRequired(reason) => {
-            report_exec_audit(
+            report_exec_audit_with_attribution(
                 backend,
                 "tool_http",
                 0,
                 1,
                 session_id.map(str::to_owned),
                 Some(format!("scan denied: {reason}")),
+                audit_attribution.clone(),
             )
             .await;
             return Err(format!("gateway denied http egress: {reason}"));
         }
     }
+
+    // 2b. Resolve server-side SECRET headers only after the destination and
+    // governance gates pass. Each source (`env:` / `vault:` / `secret:`) resolves
+    // to a concrete value or "absent" (header omitted). Secret VALUES never enter
+    // the args map, so they never reach the path/query/body, model-visible schema,
+    // firewall/DLP scan, or audit trail.
+    //
+    // The `env:` arm is scoped to what the OWNING PLUGIN may read (`agent_id` is
+    // the owning plugin id at this seam — see `resolve_app_tool_backend`), so a
+    // disk manifest cannot name an unrelated credential var.
+    let mut resolved_secret_headers: Vec<(String, String)> = Vec::new();
+    for (name, source) in secret_headers {
+        if let Some(value) = resolve_secret_header_source_with_context(
+            name,
+            source,
+            agent_id,
+            profile_ids,
+            session_id,
+            secret_context,
+        )
+        .await?
+        {
+            resolved_secret_headers.push((name.clone(), value));
+        }
+    }
+    // Lower the same args a second time to attach the now-resolved headers. The
+    // first pass already established the final URL/query/body, so only this
+    // metadata-free header projection is used below.
+    let (_, _, _, headers) = build_rest_request(
+        &url,
+        &args,
+        bodyless,
+        header_params,
+        &resolved_secret_headers,
+    )?;
 
     // 3. Perform the request. Body is the tool args as JSON for methods that carry
     //    one; GET/HEAD send none. Response is `{ status, body }` (JSON if parseable).
@@ -1124,13 +1268,14 @@ pub async fn run_http_tool(
             Some(e.to_string()),
         ),
     };
-    report_exec_audit(
+    report_exec_audit_with_attribution(
         backend,
         "tool_http",
         started.elapsed().as_millis() as u64,
         exit_code,
         session_id.map(str::to_owned),
         audit_err,
+        audit_attribution,
     )
     .await;
     result
@@ -1367,6 +1512,154 @@ fn render_command_arg(template: &str, args: &Value) -> Result<String, String> {
     Ok(out)
 }
 
+/// Replace declared filesystem arguments with canonical paths inside the active
+/// workspace. The command backend remains argv-only, but argv separation alone
+/// does not stop a read-only binary from opening an arbitrary absolute path.
+/// Canonicalization happens after the grant check and before spawn, so a command
+/// tool gets neither a path outside its caller's workspace nor a symlink escape.
+fn prepare_workspace_path_args(
+    args: &mut Value,
+    path_args: &[String],
+    workspace_root: Option<&std::path::Path>,
+) -> Result<(), String> {
+    if path_args.is_empty() {
+        return Ok(());
+    }
+    let root = workspace_root.ok_or_else(|| {
+        "command tool: an active workspace is required for filesystem path arguments".to_owned()
+    })?;
+    let root = std::fs::canonicalize(root)
+        .map_err(|e| format!("command tool: workspace root is unavailable: {e}"))?;
+    if !root.is_dir() {
+        return Err("command tool: workspace root is not a directory".to_owned());
+    }
+    let object = args
+        .as_object_mut()
+        .ok_or_else(|| "command tool: filesystem path arguments require an object".to_owned())?;
+    for name in path_args {
+        let raw = object
+            .get(name)
+            .and_then(Value::as_str)
+            .ok_or_else(|| format!("command tool: missing filesystem path argument '{name}'"))?;
+        let resolved = resolve_workspace_path(&root, raw)?;
+        object.insert(name.clone(), Value::String(resolved));
+    }
+    Ok(())
+}
+
+/// Resolve one command-tool path against a canonical workspace root.
+/// Existing paths are required so the check can reject symlink components rather
+/// than checking a path that may later resolve somewhere else. The command still
+/// receives the canonical path, not the caller's spelling.
+fn resolve_workspace_path(workspace_root: &std::path::Path, raw: &str) -> Result<String, String> {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return Err("command tool: filesystem path must not be empty".to_owned());
+    }
+    if raw.len() > MAX_COMMAND_ARG_LEN {
+        return Err(format!(
+            "command tool: filesystem path exceeds {MAX_COMMAND_ARG_LEN} bytes"
+        ));
+    }
+    if raw.contains('\0') {
+        return Err("command tool: filesystem path contains a NUL byte".to_owned());
+    }
+
+    let requested = std::path::Path::new(raw);
+    let candidate = if requested.is_absolute() {
+        requested.to_owned()
+    } else {
+        workspace_root.join(requested)
+    };
+    let canonical = std::fs::canonicalize(&candidate)
+        .map_err(|_| "command tool: filesystem path could not be resolved".to_owned())?;
+    if !path_is_within(&canonical, workspace_root) {
+        return Err(
+            "command tool: filesystem path must stay inside the active workspace".to_owned(),
+        );
+    }
+    if path_has_symlink_component_below_root(&candidate, workspace_root) {
+        return Err("command tool: filesystem path may not contain symlinks".to_owned());
+    }
+    if is_protected_host_path(&canonical) {
+        return Err("command tool: protected host paths are not searchable".to_owned());
+    }
+    Ok(canonical.to_string_lossy().into_owned())
+}
+
+fn path_is_within(path: &std::path::Path, root: &std::path::Path) -> bool {
+    path == root || path.strip_prefix(root).is_ok()
+}
+
+/// Check workspace-relative spelling supplied to `canonicalize`, not only its
+/// resolved target. Parent directories outside the workspace may legitimately be
+/// symlinks (for example macOS's `/tmp`), so only components below the canonical
+/// workspace root are rejected.
+fn path_has_symlink_component_below_root(
+    path: &std::path::Path,
+    workspace_root: &std::path::Path,
+) -> bool {
+    let Ok(relative) = path.strip_prefix(workspace_root) else {
+        return false;
+    };
+    let mut current = workspace_root.to_owned();
+    for component in relative.components() {
+        current.push(component.as_os_str());
+        match std::fs::symlink_metadata(&current) {
+            Ok(metadata) if metadata.file_type().is_symlink() => return true,
+            Ok(_) => {}
+            Err(_) => break,
+        }
+    }
+    false
+}
+
+/// Ryu's own data and the conventional per-user credential directories are not
+/// valid workspace search targets, even when an operator accidentally selects a
+/// parent directory as the active workspace. Known Ryu credential filenames are
+/// denied at any depth as a second defense for copied or nested data directories.
+pub(crate) fn is_protected_host_path(path: &std::path::Path) -> bool {
+    let mut roots = vec![crate::paths::ryu_dir()];
+    if let Some(home) = dirs::home_dir() {
+        roots.extend([
+            home.join(".ssh"),
+            home.join(".gnupg"),
+            home.join(".aws"),
+            home.join(".azure"),
+            home.join(".codex"),
+            home.join(".pi"),
+            home.join(".config").join("gcloud"),
+        ]);
+    }
+    if roots
+        .into_iter()
+        .filter_map(|root| std::fs::canonicalize(root).ok())
+        .any(|root| path_is_within(path, &root))
+    {
+        return true;
+    }
+
+    let Some(file_name) = path.file_name().and_then(|value| value.to_str()) else {
+        return false;
+    };
+    matches!(
+        file_name.to_ascii_lowercase().as_str(),
+        "node-auth.token" | "core.token" | "gateway.token" | "pairing.token"
+    )
+}
+
+/// Reject workspace roots that would turn a narrowly selected project search
+/// into a host-wide search. The active root must be a real directory below the
+/// filesystem root and must not be the user's home or a protected host store.
+pub(crate) fn is_usable_workspace_root(path: &std::path::Path) -> bool {
+    if !path.is_dir() || path.parent().is_none() || is_protected_host_path(path) {
+        return false;
+    }
+    dirs::home_dir()
+        .and_then(|home| std::fs::canonicalize(home).ok())
+        .is_none_or(|home| path != home)
+}
+
 /// Build argv from a structured [`ArgSpec`] list (the `command_args` template
 /// grammar's superset). Each spec reads one call arg and expands to 0..N tokens:
 ///
@@ -1494,10 +1787,90 @@ fn expand_arg_specs(
 /// `grants` is the owning plugin's grant set; it must contain
 /// `tool:command:<bin>` (or the `*` wildcard). Env VALUES are deliberately
 /// excluded from the scan and audit content, mirroring how `http` excludes header
-/// values. `plugin_id` fills the audit principal (there is no separate agent id at
-/// the dispatch call site, mirroring `run_http_tool`).
+/// values. `plugin_id` remains the grant and secret namespace, while
+/// `audit_agent_id` preserves the actual agent that invoked the tool when the
+/// dispatcher has that context.
 #[allow(clippy::too_many_arguments)]
 pub async fn run_command_tool(
+    bin_key: &str,
+    arg_templates: &[String],
+    arg_specs: Option<&[crate::plugin_manifest::schema::ArgSpec]>,
+    env_map: &BTreeMap<String, String>,
+    cwd: Option<&str>,
+    timeout_secs: u64,
+    output: crate::plugin_manifest::schema::CommandOutput,
+    egress_url_arg: Option<&str>,
+    arg_bounds: &BTreeMap<String, crate::plugin_manifest::schema::ArgBounds>,
+    args: Value,
+    grants: &std::collections::HashSet<String>,
+    plugin_id: &str,
+    session_id: Option<&str>,
+) -> Result<Value, String> {
+    run_command_tool_with_agent(
+        bin_key,
+        arg_templates,
+        arg_specs,
+        env_map,
+        cwd,
+        timeout_secs,
+        output,
+        egress_url_arg,
+        arg_bounds,
+        args,
+        grants,
+        plugin_id,
+        session_id,
+        None,
+    )
+    .await
+}
+
+/// Variant of [`run_command_tool`] that preserves the calling agent id while
+/// keeping the owning plugin id as the grant/secret boundary.
+#[allow(clippy::too_many_arguments)]
+pub async fn run_command_tool_with_agent(
+    bin_key: &str,
+    arg_templates: &[String],
+    arg_specs: Option<&[crate::plugin_manifest::schema::ArgSpec]>,
+    env_map: &BTreeMap<String, String>,
+    cwd: Option<&str>,
+    timeout_secs: u64,
+    output: crate::plugin_manifest::schema::CommandOutput,
+    egress_url_arg: Option<&str>,
+    arg_bounds: &BTreeMap<String, crate::plugin_manifest::schema::ArgBounds>,
+    args: Value,
+    grants: &std::collections::HashSet<String>,
+    plugin_id: &str,
+    session_id: Option<&str>,
+    audit_agent_id: Option<&str>,
+) -> Result<Value, String> {
+    run_command_tool_with_agent_and_workspace(
+        bin_key,
+        arg_templates,
+        arg_specs,
+        env_map,
+        cwd,
+        timeout_secs,
+        output,
+        egress_url_arg,
+        arg_bounds,
+        args,
+        grants,
+        plugin_id,
+        session_id,
+        audit_agent_id,
+        None,
+        &[],
+    )
+    .await
+}
+
+/// Variant of [`run_command_tool_with_agent`] for command tools that declare
+/// caller-workspace path arguments. The workspace root is resolved by the MCP
+/// registry from the server-owned conversation context; passing it separately
+/// keeps this generic command runner independent of conversation storage.
+#[allow(clippy::too_many_arguments)]
+pub async fn run_command_tool_with_agent_and_workspace(
     bin_key: &str,
     arg_templates: &[String],
     arg_specs: Option<&[crate::plugin_manifest::schema::ArgSpec]>,
@@ -1511,6 +1884,9 @@ pub async fn run_command_tool(
     grants: &std::collections::HashSet<String>,
     plugin_id: &str,
     session_id: Option<&str>,
+    audit_agent_id: Option<&str>,
+    workspace_root: Option<&std::path::Path>,
+    workspace_path_args: &[String],
 ) -> Result<Value, String> {
     use crate::plugin_manifest::schema::CommandOutput;
     use tokio::io::AsyncReadExt;
@@ -1530,6 +1906,8 @@ pub async fn run_command_tool(
             "command tool: exec of '{bin_key}' is not granted (needs '{needed}')"
         ));
     }
+
+    prepare_workspace_path_args(&mut args, workspace_path_args, workspace_root)?;
 
     // 1b. EGRESS SCREEN (SSRF): when this command fetches a URL arg (a crawler /
     //     scraper), screen that arg's value BEFORE any spawn — scheme allowlist +
@@ -1621,7 +1999,15 @@ pub async fn run_command_tool(
 
     // 5. GATEWAY governance: fail-closed budget + opt-in firewall/DLP scan.
     use crate::sidecar::gateway::{
-        check_exec_budget, check_exec_scan, report_exec_audit, ExecBudgetOutcome, ExecScanOutcome,
+        check_exec_budget, check_exec_scan, report_exec_audit_with_attribution,
+        ExecAuditAttribution, ExecBudgetOutcome, ExecScanOutcome,
+    };
+    let audit_attribution = ExecAuditAttribution {
+        agent_id: audit_agent_id
+            .map(str::to_owned)
+            .or_else(|| Some(plugin_id.to_owned())),
+        feature: Some("agent".to_owned()),
+        ..Default::default()
     };
     let backend = "tool_command";
     if let ExecBudgetOutcome::Deny(reason) = check_exec_budget(backend, "tool_command").await {
@@ -1635,13 +2021,14 @@ pub async fn run_command_tool(
         // ApprovalRequired is a fail-closed DENY on a synchronous exec: there is no
         // place to park an interactive sign-off in a blocking tool call.
         ExecScanOutcome::Deny(reason) | ExecScanOutcome::ApprovalRequired(reason) => {
-            report_exec_audit(
+            report_exec_audit_with_attribution(
                 backend,
                 "tool_command",
                 0,
                 1,
                 session_id.map(str::to_owned),
                 Some(format!("scan denied: {reason}")),
+                audit_attribution.clone(),
             )
             .await;
             return Err(format!("gateway denied command exec: {reason}"));
@@ -1666,13 +2053,14 @@ pub async fn run_command_tool(
     let mut child = match cmd.spawn() {
         Ok(c) => c,
         Err(e) => {
-            report_exec_audit(
+            report_exec_audit_with_attribution(
                 backend,
                 "tool_command",
                 started.elapsed().as_millis() as u64,
                 1,
                 session_id.map(str::to_owned),
                 Some(e.to_string()),
+                audit_attribution.clone(),
             )
             .await;
             // OPERATIONAL failure → graceful degradation (audit still records the
@@ -1744,13 +2132,14 @@ pub async fn run_command_tool(
             let _ = child.wait().await;
             out_task.abort();
             err_task.abort();
-            report_exec_audit(
+            report_exec_audit_with_attribution(
                 backend,
                 "tool_command",
                 started.elapsed().as_millis() as u64,
                 124,
                 session_id.map(str::to_owned),
                 Some(format!("timeout after {timeout_secs}s")),
+                audit_attribution.clone(),
             )
             .await;
             // OPERATIONAL failure → graceful degradation (audit records exit 124
@@ -1764,13 +2153,14 @@ pub async fn run_command_tool(
     let stderr_bytes = err_task.await.unwrap_or_default();
 
     let exit_code = status.code().unwrap_or(-1);
-    report_exec_audit(
+    report_exec_audit_with_attribution(
         backend,
         "tool_command",
         started.elapsed().as_millis() as u64,
         exit_code,
         session_id.map(str::to_owned),
         None,
+        audit_attribution,
     )
     .await;
 
@@ -1860,7 +2250,13 @@ pub async fn resume_execution_opt(
 ) -> Option<ExecOutcome> {
     // Pre-resume gateway budget gate (fail-closed), mirroring `execute_code`.
     use crate::sidecar::gateway::{
-        check_exec_budget, check_exec_scan, report_exec_audit, ExecBudgetOutcome, ExecScanOutcome,
+        check_exec_budget, check_exec_scan, report_exec_audit_with_attribution,
+        ExecAuditAttribution, ExecBudgetOutcome, ExecScanOutcome,
+    };
+    let audit_attribution = ExecAuditAttribution {
+        agent_id: Some(agent_id.to_owned()),
+        feature: Some("agent".to_owned()),
+        ..Default::default()
     };
     let backend = CodeExecutor::default_backend().backend();
     if let ExecBudgetOutcome::Deny(reason) = check_exec_budget(backend, "tool_exec").await {
@@ -1878,13 +2274,14 @@ pub async fn resume_execution_opt(
     match check_exec_scan(backend, "tool_exec", None, Some(agent_id)).await {
         ExecScanOutcome::Allow => {}
         ExecScanOutcome::Deny(reason) => {
-            report_exec_audit(
+            report_exec_audit_with_attribution(
                 backend,
                 "tool_exec",
                 0,
                 1,
                 None,
                 Some(format!("scan denied (resume): {reason}")),
+                audit_attribution.clone(),
             )
             .await;
             return Some(ExecOutcome::error(format!(
@@ -1896,13 +2293,14 @@ pub async fn resume_execution_opt(
                 %reason,
                 "exec scan requires approval on resume but no in-process approval-await path exists; denying"
             );
-            report_exec_audit(
+            report_exec_audit_with_attribution(
                 backend,
                 "tool_exec",
                 0,
                 1,
                 None,
                 Some(format!("scan approval_required (resume, denied): {reason}")),
+                audit_attribution.clone(),
             )
             .await;
             return Some(ExecOutcome::error(format!(
@@ -1927,13 +2325,14 @@ pub async fn resume_execution_opt(
             } => (if *is_error { 1 } else { 0 }, error.clone()),
             ExecOutcome::Paused { .. } => (0, None),
         };
-        report_exec_audit(
+        report_exec_audit_with_attribution(
             backend,
             "tool_exec",
             started.elapsed().as_millis() as u64,
             exit_code,
             None,
             err,
+            audit_attribution,
         )
         .await;
     }
@@ -1982,7 +2381,12 @@ mod tests {
         }
         #[cfg(not(windows))]
         {
-            std::path::PathBuf::from(format!("/bin/{_name}"))
+            let path = std::env::var_os("PATH").and_then(|value| {
+                std::env::split_paths(&value)
+                    .map(|dir| dir.join(_name))
+                    .find(|candidate| candidate.is_file())
+            });
+            path.unwrap_or_else(|| std::path::PathBuf::from(format!("/bin/{_name}")))
         }
     }
 
@@ -2058,10 +2462,7 @@ mod tests {
             invalid_name.display(),
             dd.display()
         ));
-        assert_eq!(
-            map.get("echo"),
-            Some(&echo)
-        );
+        assert_eq!(map.get("echo"), Some(&echo));
         assert_eq!(map.get("sleep"), Some(&sleep));
         assert_eq!(map.get("dd"), Some(&dd));
         // Relative path, empty name, and malformed entries are dropped.
@@ -2092,6 +2493,163 @@ mod tests {
         assert_eq!(
             render_command_arg("--flag={q}", &serde_json::json!({ "q": "ok" })).unwrap(),
             "--flag=ok"
+        );
+    }
+
+    #[test]
+    fn workspace_path_args_allow_only_existing_non_symlink_workspace_paths() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("workspace");
+        let nested = root.join("src");
+        std::fs::create_dir_all(&nested).unwrap();
+        let file = nested.join("main.rs");
+        std::fs::write(&file, "fn main() {}\n").unwrap();
+
+        let mut args = serde_json::json!({ "path": "src/main.rs" });
+        prepare_workspace_path_args(&mut args, &["path".to_owned()], Some(&root)).unwrap();
+        assert_eq!(
+            args["path"].as_str(),
+            Some(
+                std::fs::canonicalize(&file)
+                    .unwrap()
+                    .to_string_lossy()
+                    .as_ref()
+            )
+        );
+
+        for path in ["../outside", "/tmp", "src/missing.rs"] {
+            let mut args = serde_json::json!({ "path": path });
+            let error = prepare_workspace_path_args(&mut args, &["path".to_owned()], Some(&root))
+                .expect_err("out-of-workspace or missing path must be denied");
+            assert!(
+                error.contains("workspace")
+                    || error.contains("resolved")
+                    || error.contains("symlink"),
+                "unexpected error for {path}: {error}"
+            );
+        }
+
+        #[cfg(unix)]
+        {
+            let outside = temp.path().join("outside.txt");
+            std::fs::write(&outside, "not in workspace\n").unwrap();
+            let link = root.join("link.txt");
+            std::os::unix::fs::symlink(&outside, &link).unwrap();
+            let mut args = serde_json::json!({ "path": "link.txt" });
+            let error = prepare_workspace_path_args(&mut args, &["path".to_owned()], Some(&root))
+                .expect_err("symlink path must be denied");
+            assert!(
+                error.contains("symlink") || error.contains("workspace"),
+                "unexpected error: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn protected_host_paths_are_denied_even_when_the_workspace_is_a_parent() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("workspace");
+        std::fs::create_dir_all(&root).unwrap();
+        let token = root.join("node-auth.token");
+        std::fs::write(&token, "not a real token").unwrap();
+
+        let mut args = serde_json::json!({ "path": "node-auth.token" });
+        let error = prepare_workspace_path_args(&mut args, &["path".to_owned()], Some(&root))
+            .expect_err("known Ryu credential filenames must be denied");
+        assert!(error.contains("protected"), "unexpected error: {error}");
+
+        if let Some(home) = dirs::home_dir() {
+            for directory in [".codex", ".pi"] {
+                if let Ok(path) = std::fs::canonicalize(home.join(directory)) {
+                    assert!(
+                        is_protected_host_path(&path),
+                        "agent credential directory {directory} must be protected"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn workspace_path_args_require_a_workspace_root() {
+        let mut args = serde_json::json!({ "path": "src/main.rs" });
+        let error = prepare_workspace_path_args(&mut args, &["path".to_owned()], None)
+            .expect_err("path-scoped commands must fail closed without a root");
+        assert!(
+            error.contains("active workspace"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn ripgrep_workspace_boundary_allows_in_root_and_denies_outside() {
+        let _lock = crate::sidecar::gateway::lock_gateway_env();
+        let _env = CmdEnvGuard::armed();
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("workspace");
+        std::fs::create_dir_all(&root).unwrap();
+        let inside = root.join("notes.txt");
+        let outside = temp.path().join("outside.txt");
+        std::fs::write(&inside, "RYU_WORKSPACE_SEARCH_PROOF\n").unwrap();
+        std::fs::write(&outside, "RYU_OUTSIDE_SEARCH_PROOF\n").unwrap();
+        std::env::set_var(ENV_COMMAND_TOOL_ALLOWLIST, test_allowlist_entry("rg"));
+
+        let templates = vec![
+            "--json".to_owned(),
+            "--color".to_owned(),
+            "never".to_owned(),
+            "--".to_owned(),
+            "{pattern}".to_owned(),
+            "{path}".to_owned(),
+        ];
+        let path_args = vec!["path".to_owned()];
+        let grants = grants(&["tool:command:rg"]);
+        let inside_result = run_command_tool_with_agent_and_workspace(
+            "rg",
+            &templates,
+            None,
+            &BTreeMap::new(),
+            None,
+            10,
+            CommandOutput::Stdout,
+            None,
+            &BTreeMap::new(),
+            serde_json::json!({ "pattern": "RYU_WORKSPACE_SEARCH_PROOF", "path": "notes.txt" }),
+            &grants,
+            "@ryu/ripgrep",
+            None,
+            None,
+            Some(&root),
+            &path_args,
+        )
+        .await
+        .expect("in-workspace ripgrep search runs");
+        let stdout = inside_result["stdout"].as_str().unwrap_or_default();
+        assert!(stdout.contains("RYU_WORKSPACE_SEARCH_PROOF"), "{stdout}");
+
+        let outside_error = run_command_tool_with_agent_and_workspace(
+            "rg",
+            &templates,
+            None,
+            &BTreeMap::new(),
+            None,
+            10,
+            CommandOutput::Stdout,
+            None,
+            &BTreeMap::new(),
+            serde_json::json!({ "pattern": "RYU_OUTSIDE_SEARCH_PROOF", "path": outside }),
+            &grants,
+            "@ryu/ripgrep",
+            None,
+            None,
+            Some(&root),
+            &path_args,
+        )
+        .await
+        .expect_err("outside-workspace ripgrep search must be denied");
+        assert!(
+            outside_error.contains("active workspace"),
+            "{outside_error}"
         );
     }
 
@@ -2352,18 +2910,9 @@ mod tests {
     impl Drop for CmdEnvGuard {
         fn drop(&mut self) {
             restore_env("RYU_GATEWAY_URL", self.previous_gateway_url.take());
-            restore_env(
-                "RYU_ALLOW_GATEWAY_FALLBACK",
-                self.previous_fallback.take(),
-            );
-            restore_env(
-                "RYU_EXEC_APPROVAL_MODE",
-                self.previous_exec_mode.take(),
-            );
-            restore_env(
-                ENV_COMMAND_TOOL_ALLOWLIST,
-                self.previous_allowlist.take(),
-            );
+            restore_env("RYU_ALLOW_GATEWAY_FALLBACK", self.previous_fallback.take());
+            restore_env("RYU_EXEC_APPROVAL_MODE", self.previous_exec_mode.take());
+            restore_env(ENV_COMMAND_TOOL_ALLOWLIST, self.previous_allowlist.take());
         }
     }
 
@@ -2382,7 +2931,7 @@ mod tests {
         // A value packed with shell metacharacters must arrive as ONE literal argv
         // element — proving there is no shell (this asserts literal argv, NOT scan
         // denial; the scan is disarmed in this test env).
-        let payload = "; rm -rf / $(whoami) `id` && echo pwned";
+        let payload = "; echo $(whoami) `id` && echo pwned";
         let (_script_dir, command_args) = test_command_args("echo", &["msg"]);
         let out = run_command_tool(
             "echo",
@@ -2566,6 +3115,14 @@ mod tests {
         // The gate's REFUSAL path has its own test
         // (`a_command_tools_child_env_obeys_the_same_namespace_gate_as_headers`).
         std::env::set_var("RYU_PLUGIN_COM_TEST_CMD_SRC", "injected-value");
+        assert_eq!(
+            std::env::var("RYU_PLUGIN_COM_TEST_CMD_SRC").as_deref(),
+            Ok("injected-value")
+        );
+        assert!(may_read_env_secret(
+            "com.test.cmd",
+            "RYU_PLUGIN_COM_TEST_CMD_SRC"
+        ));
         // A secret-shaped inherited var that must be scrubbed from the child.
         std::env::set_var("RYU_CMD_TEST_SECRET_TOKEN", "leak-me");
         let mut env_map = BTreeMap::new();
@@ -2590,6 +3147,11 @@ mod tests {
         )
         .await
         .expect("env runs");
+        assert_eq!(
+            out.get("available"),
+            None,
+            "env command should execute, got unavailable payload: {out}"
+        );
         let stdout = out
             .get("stdout")
             .and_then(|v| v.as_str())
@@ -2602,7 +3164,7 @@ mod tests {
             !stdout.contains("leak-me") && !stdout.contains("RYU_CMD_TEST_SECRET_TOKEN"),
             "secret-shaped inherited var must be scrubbed, got: {stdout}"
         );
-        std::env::remove_var("RYU_CMD_TEST_SRC");
+        std::env::remove_var("RYU_PLUGIN_COM_TEST_CMD_SRC");
         std::env::remove_var("RYU_CMD_TEST_SECRET_TOKEN");
     }
 

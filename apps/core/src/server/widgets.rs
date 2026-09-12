@@ -482,7 +482,7 @@ async fn send_exec_tool(
 ) -> Result<Value, (&'static str, StatusCode, String)> {
     let base = crate::sidecar::gateway::gateway_url();
     let endpoint = format!("{}/v1/exec/tool", base.trim_end_matches('/'));
-    let token = crate::sidecar::gateway::gateway_token();
+    let token = crate::sidecar::gateway::gateway_core_token();
 
     let mut payload = json!({
         "kind": "tool",
@@ -490,6 +490,14 @@ async fn send_exec_tool(
         "arguments": arguments,
         "agent_id": agent_id,
         "session_id": session_id,
+        // Core owns this value: the Gateway forwards it to Core's internal tool
+        // route as the host-conversation context used for tenancy and vault
+        // resolution. It is not derived from model tool arguments. The paired
+        // process-local proof below lets Core distinguish this forward from a
+        // direct node-token request.
+        "host_conversation_id": (!session_id.is_empty()).then_some(session_id),
+        "host_conversation_proof": (!session_id.is_empty())
+            .then(|| crate::server::host_conversation_proof(session_id)),
         "feature": feature,
     });
     if let Some((instance_id, origin_server)) = widget {
@@ -654,13 +662,18 @@ pub async fn widget_follow_up(
         };
         // A denied follow-up must remain visible in the Gateway audit trail,
         // including rate-limit, budget, and fail-closed Gateway errors.
-        crate::sidecar::gateway::report_exec_audit(
+        crate::sidecar::gateway::report_exec_audit_with_attribution(
             "widget-followup",
             "follow_up",
             0,
             1,
             Some(record.conversation_id.clone()),
             Some(reason.clone()),
+            crate::sidecar::gateway::ExecAuditAttribution {
+                agent_id: Some(record.agent_id.clone()),
+                feature: Some("widget".to_owned()),
+                ..Default::default()
+            },
         )
         .await;
         return err_reply(status, code, reason);
@@ -676,26 +689,36 @@ pub async fn widget_follow_up(
     .await;
     if let crate::sidecar::gateway::ExecScanOutcome::Deny(reason) = scan {
         // Best-effort audit of the denial.
-        crate::sidecar::gateway::report_exec_audit(
+        crate::sidecar::gateway::report_exec_audit_with_attribution(
             "widget-followup",
             "follow_up",
             0,
             1,
             Some(record.conversation_id.clone()),
             Some(reason.clone()),
+            crate::sidecar::gateway::ExecAuditAttribution {
+                agent_id: Some(record.agent_id.clone()),
+                feature: Some("widget".to_owned()),
+                ..Default::default()
+            },
         )
         .await;
         return err_reply(StatusCode::FORBIDDEN, "denied", reason);
     }
 
     // Audit the accepted follow-up (prompt length only, never the content).
-    crate::sidecar::gateway::report_exec_audit(
+    crate::sidecar::gateway::report_exec_audit_with_attribution(
         "widget-followup",
         "follow_up",
         0,
         0,
         Some(record.conversation_id.clone()),
         None,
+        crate::sidecar::gateway::ExecAuditAttribution {
+            agent_id: Some(record.agent_id.clone()),
+            feature: Some("widget".to_owned()),
+            ..Default::default()
+        },
     )
     .await;
 
@@ -1099,13 +1122,18 @@ async fn audit_asset(
     started: Instant,
     error: Option<String>,
 ) {
-    crate::sidecar::gateway::report_exec_audit(
+    crate::sidecar::gateway::report_exec_audit_with_attribution(
         "widget-asset",
         &format!("GET https://{host} ({bytes} bytes)"),
         started.elapsed().as_millis() as u64,
         i32::from(error.is_some()),
         Some(record.conversation_id.clone()),
         error,
+        crate::sidecar::gateway::ExecAuditAttribution {
+            agent_id: Some(record.agent_id.clone()),
+            feature: Some("widget".to_owned()),
+            ..Default::default()
+        },
     )
     .await;
 }

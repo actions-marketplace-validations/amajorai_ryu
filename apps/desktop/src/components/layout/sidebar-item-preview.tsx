@@ -76,7 +76,7 @@ export function SidebarItemPreview({
 				alignOffset={0}
 				anchor={getPreviewAnchor}
 				className={cn(
-					"w-80 max-w-[min(20rem,calc(100vw-2rem))] rounded-2xl border-border/70 bg-popover/95 p-4 text-sm shadow-xl backdrop-blur-xl",
+					"w-80 max-w-[min(20rem,calc(100vw-2rem))] p-4 text-sm",
 					className
 				)}
 				side={side}

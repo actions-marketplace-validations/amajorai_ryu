@@ -98,6 +98,12 @@ interface RegistryItem {
 // (`components/ui/theme-provider.tsx`, which every component imports). Skip it.
 const SKIP_ITEMS = new Set(["theme-provider"]);
 
+// Host compatibility hooks must survive registry refreshes.
+const HOST_OWNED_FILES = new Set([
+	resolve(ROOT_DIR, "hooks/use-animation.ts"),
+	resolve(ROOT_DIR, "components/ui/tool-call.tsx"),
+]);
+
 const HOOK_PATH = /(?:^|\/)hooks\/(.+)$/;
 const LIB_PATH = /(?:^|\/)lib\/(.+)$/;
 const REGISTRY_PREFIX = /^registry\/[^/]+\//;
@@ -171,6 +177,10 @@ async function vendorOne(urlOrName: string): Promise<void> {
 	for (const file of item.files ?? []) {
 		const rel = targetFor(file);
 		const dest = join(ROOT_DIR, rel);
+		if (HOST_OWNED_FILES.has(resolve(dest))) {
+			process.stdout.write(`kept host-owned ${rel}\n`);
+			continue;
+		}
 		await mkdir(dirname(dest), { recursive: true });
 		// termcn's sources target a richer OpenTUI prop surface than the installed
 		// @opentui/core (e.g. borderStyle "round"/"bold", text inverse/underline,

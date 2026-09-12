@@ -1,17 +1,26 @@
-import { resolveRnpNode } from "@ryuhq/protocol/continuity";
+import { completeComposioConnection } from "@ryuhq/core-client/composio";
+import {
+	normalizeRnpNodeUrl,
+	resolveRnpNode,
+} from "@ryuhq/protocol/continuity";
 import {
 	type DeepLinkIntent,
+	parseConnectCallbackDeepLink,
 	parseRyuDeepLink,
 } from "@ryuhq/protocol/deep-link";
+import { useQueryClient } from "@tanstack/react-query";
 import { getCurrent, onOpenUrl } from "@tauri-apps/plugin-deep-link";
 import { useCallback, useEffect, useState } from "react";
 import { sileo } from "sileo";
 import { ContinueOnNodeDialog } from "@/src/components/chat/ContinueOnNodeDialog.tsx";
 import { useTabsContext } from "@/src/contexts/TabsContext.tsx";
+import { request as coreRequest, toTarget } from "@/src/lib/api/client.ts";
 import { pageRoute } from "@/src/lib/page-routes.ts";
+import { isMainWindow } from "@/src/lib/window-routing.ts";
 import { useDeepLinkStore } from "@/src/store/useDeepLinkStore.ts";
 import { type Node, useNodeStore } from "@/src/store/useNodeStore.ts";
 import { useSettingsDialog } from "@/src/store/useSettingsDialog.ts";
+import { ConnectCallbackDialog } from "./ConnectCallbackDialog.tsx";
 import { DeepLinkConfirmDialog } from "./DeepLinkConfirmDialog.tsx";
 
 type OpenTab = ReturnType<typeof useTabsContext>["openTab"];
@@ -28,24 +37,6 @@ interface PendingHandoff {
 // copy is what keeps "reachable by deep link" and "openable in the side panel"
 // the same set. An unknown key is ignored here exactly as before — a malicious or
 // stale link can't navigate somewhere unexpected.
-
-// Only the main window handles deep links — tear-off ("tab-N") and companion
-// windows also render Layout, and registering the listener in each would
-// double-handle a single link.
-function isMainWindow(): boolean {
-	try {
-		const tauriWindow: Window & {
-			__TAURI_INTERNALS__?: {
-				metadata?: { currentWindow?: { label?: unknown } };
-			};
-		} = window;
-		const label =
-			tauriWindow.__TAURI_INTERNALS__?.metadata?.currentWindow?.label;
-		return typeof label !== "string" || label === "main";
-	} catch {
-		return true;
-	}
-}
 
 /**
  * Act on a navigation intent (page or chat) by opening the right tab. Returns
@@ -94,6 +85,10 @@ function navigateForIntent(intent: DeepLinkIntent, openTab: OpenTab): boolean {
  * `TabsProvider` so it can call `openTab`.
  */
 export function DeepLinkController() {
+	const queryClient = useQueryClient();
+	const [pendingCallback, setPendingCallback] = useState<{
+		sessionUri: string;
+	} | null>(null);
 	const { openTab } = useTabsContext();
 	const request = useDeepLinkStore((s) => s.request);
 	const nodes = useNodeStore((s) => s.nodes);
@@ -115,6 +110,11 @@ export function DeepLinkController() {
 
 		const handle = (urls: string[]) => {
 			for (const url of urls) {
+				const callback = parseConnectCallbackDeepLink(url);
+				if (callback) {
+					setPendingCallback((current) => current ?? callback);
+					continue;
+				}
 				const intent = parseRyuDeepLink(url);
 				if (!intent) {
 					continue;
@@ -145,6 +145,8 @@ export function DeepLinkController() {
 					openTab("/skills");
 				} else if (intent.kind === "app") {
 					openTab("/apps");
+				} else if (intent.kind === "bundle") {
+					openTab("/marketplace");
 				}
 				request(intent);
 			}
@@ -184,6 +186,29 @@ export function DeepLinkController() {
 	return (
 		<>
 			<DeepLinkConfirmDialog />
+			{pendingCallback ? (
+				<ConnectCallbackDialog
+					nodes={nodes}
+					onClose={() => setPendingCallback(null)}
+					onComplete={async (selected) => {
+						const node = useNodeStore
+							.getState()
+							.nodes.find((node) => node.name === selected.name);
+						const origin = normalizeRnpNodeUrl(selected.url);
+						if (!(node && origin) || normalizeRnpNodeUrl(node.url) !== origin) {
+							throw new Error("The selected node changed");
+						}
+						await completeComposioConnection(
+							toTarget(node),
+							pendingCallback.sessionUri,
+							coreRequest
+						);
+						await queryClient.invalidateQueries({
+							queryKey: ["composio", "connections", node.url],
+						});
+					}}
+				/>
+			) : null}
 			{pendingHandoff ? (
 				<ContinueOnNodeDialog
 					conversationId={pendingHandoff.intent.conversationId}

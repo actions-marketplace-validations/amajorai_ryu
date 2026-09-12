@@ -4,10 +4,10 @@
   "navLabel": "QA & Testing",
   "category": "Engineering & Product",
   "icon": "Bug",
-  "tagline": "Generate tests, hunt edge cases, and reproduce bugs with agents that run on a branch.",
+  "tagline": "Generate test plans and code, reproduce reported bugs, and review the resulting changes.",
   "heroEyebrow": "Ryu for QA & Testing",
-  "heroTitle": "An agent that tries to break it before users do.",
-  "heroSubtitle": "Turn a feature into a test plan, write the suite, and probe the edge cases an agent dreams up. Runs land on a git branch so new tests come back as a reviewable diff, and you keep code private and every call governed.",
+  "heroTitle": "Ryu for qa & testing",
+  "heroSubtitle": "Generate test plans and code, reproduce reported bugs, and review the resulting changes.",
   "visualKey": "RedTeamVisual",
   "intro": "QA is about imagining how something fails, then proving it. Ryu runs agents that enumerate edge cases, write the tests, and reproduce reported bugs on an isolated git worktree, so coverage lands as a clean diff you review. The code stays on your machine and every model call is logged.",
   "highlights": [

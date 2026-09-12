@@ -1,15 +1,21 @@
 import { Search01Icon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { ONBOARDING_CONTENT_DELAY_MS } from "@ryu/blocks/desktop/onboarding";
+import { SvglIcon, type SvglSpec } from "@ryu/blocks/web/svgl-icon.tsx";
 import { Button } from "@ryu/ui/components/button";
 import { Input } from "@ryu/ui/components/input";
 import { Logo as GhostOrb } from "@ryu/ui/components/logo";
 import { PageHeader } from "@ryu/ui/components/page-header";
 import { StaggerReveal } from "@ryu/ui/components/stagger-reveal";
 import { Switch } from "@ryu/ui/components/switch";
-import { AnimatePresence, motion } from "framer-motion";
+import { TextMorph } from "@ryu/ui/components/text-morph";
 import { type ReactNode, useEffect, useMemo, useState } from "react";
 import { AgentSelectionField } from "@/components/agent-elements/input/agent-selection-field.tsx";
+import { ConnectionPermissionDialog } from "@/src/components/marketplace/ConnectionPermissionDialog.tsx";
+import {
+	AgentSuggestionsStep,
+	type OnboardingConnectedApp,
+} from "@/src/components/onboarding/AgentSuggestionsStep.tsx";
 import { SettingsCard } from "@/src/components/settings/shared/settings-items.tsx";
 import type { NativeThread } from "@/src/lib/api/agent-threads.ts";
 import type { ApiTarget } from "@/src/lib/api/client.ts";
@@ -17,9 +23,14 @@ import type {
 	ComposioConnection,
 	ComposioToolkit,
 } from "@/src/lib/api/composio.ts";
-import type { ProfileJobStatus } from "@/src/lib/api/onboarding-profile.ts";
+import type {
+	NodeSetupKind,
+	OnboardingAgentSuggestion,
+	ProfileJobStatus,
+} from "@/src/lib/api/onboarding-profile.ts";
 import type { PiProvider } from "@/src/lib/api/pi-config.ts";
 import type { AgentSelection } from "@/src/lib/api/preferences.ts";
+import type { ConnectionAccessLevel } from "@/src/lib/connection-permissions.ts";
 import {
 	ProviderBrandLogo,
 	svglForProvider,
@@ -32,7 +43,8 @@ export type OnboardingSetupKind =
 	| "connections"
 	| "cloud-default"
 	| "imports"
-	| "profile";
+	| "profile"
+	| "agent-suggestions";
 
 export interface OnboardingOrganization {
 	id: string;
@@ -49,7 +61,106 @@ export interface OnboardingThreadGroup {
 	threads: NativeThread[];
 }
 
+const INTEGRATION_SVGL: readonly [string, SvglSpec][] = [
+	// SVGL's bundled Google mark is the closest local mark for Gmail and the
+	// Google Workspace family when Composio does not return a toolkit logo.
+	["gmail", "google"],
+	["googlemail", "google"],
+	["google-drive", "google"],
+	["googledrive", "google"],
+	["google-docs", "google"],
+	["googledocs", "google"],
+	["google-sheets", "google"],
+	["googlesheets", "google"],
+	["google-calendar", "google"],
+	["googlecalendar", "google"],
+	["notion", "notion"],
+	["slack", "slack"],
+	["github", { light: "github_light", dark: "github_dark" }],
+	["linear", "linear"],
+	["discord", "discord"],
+	["figma", "figma"],
+	["stripe", "stripe"],
+	["dropbox", "dropbox"],
+	["zoom", "zoom"],
+	["asana", "asana-logo"],
+	["cloudflare", "cloudflare"],
+	["vercel", "vercel"],
+];
+
+function svglForIntegration(haystack: string): SvglSpec | null {
+	const normalized = haystack.toLowerCase();
+	for (const [needle, spec] of INTEGRATION_SVGL) {
+		if (normalized.includes(needle)) {
+			return spec;
+		}
+	}
+	return null;
+}
+
+function ConnectedAppLogo({
+	name,
+	slug,
+	toolkit,
+}: {
+	name: string;
+	slug: string;
+	toolkit?: ComposioToolkit;
+}) {
+	const spec = svglForIntegration(`${slug} ${name}`);
+	if (spec) {
+		return <SvglIcon size={16} spec={spec} />;
+	}
+	if (toolkit?.logo) {
+		return (
+			// biome-ignore lint/performance/noImgElement: Composio supplies toolkit logos
+			<img alt="" className="size-4 object-contain" src={toolkit.logo} />
+		);
+	}
+	return (
+		<span className="flex size-4 items-center justify-center rounded bg-muted font-medium text-[9px]">
+			{name.slice(0, 1).toUpperCase()}
+		</span>
+	);
+}
+
+function connectedAppDetails(
+	connections: readonly ComposioConnection[],
+	toolkits: readonly ComposioToolkit[]
+): OnboardingConnectedApp[] {
+	const apps = new Map<string, OnboardingConnectedApp>();
+	for (const connection of connections) {
+		if (!connection.active) {
+			continue;
+		}
+		const slug = connection.toolkit.trim().toLowerCase();
+		if (!slug || apps.has(slug)) {
+			continue;
+		}
+		const toolkit = toolkits.find((item) => item.slug === connection.toolkit);
+		const fallback = connection.toolkit
+			.split(/[-_]+/)
+			.filter(Boolean)
+			.map((part) => part.slice(0, 1).toUpperCase() + part.slice(1))
+			.join(" ");
+		const name = toolkit?.name.trim() || fallback;
+		if (name) {
+			apps.set(slug, {
+				logo: <ConnectedAppLogo name={name} slug={slug} toolkit={toolkit} />,
+				name,
+				slug,
+			});
+		}
+	}
+	return [...apps.values()];
+}
+
 interface OnboardingSetupStepProps {
+	agentSuggestions: OnboardingAgentSuggestion[];
+	agentSuggestionsError: string | null;
+	agentSuggestionsReviewed: ReadonlySet<string>;
+	agentSuggestionsSelected: ReadonlySet<string>;
+	agentSuggestionsSubmitting: boolean;
 	allowedAgentIds: readonly string[];
 	allowedProviderIds?: readonly string[];
 	alreadyBuilt: boolean | null;
@@ -64,17 +175,25 @@ interface OnboardingSetupStepProps {
 	importing: boolean;
 	kind: OnboardingSetupKind;
 	localSelection: AgentSelection;
+	nodeSetupKind: NodeSetupKind | null;
 	onBackgroundProfile: () => void;
 	onCancelProfile: () => void;
 	onChooseOrganization: (organizationId: string) => void;
 	onCloudSelectionChange: (selection: AgentSelection) => void;
 	onConfigureProvider: (providerId: string, apiKey: string) => void;
-	onConnectToolkit: (toolkit: ComposioToolkit) => void;
+	onConnectToolkit: (
+		toolkit: ComposioToolkit,
+		accessLevel: ConnectionAccessLevel
+	) => Promise<void>;
 	onContinue: () => void;
+	onContinueBackgroundProfile: () => void;
+	onCreateAgentSuggestions: () => void;
 	onImportThreads: () => void;
 	onLocalSelectionChange: (selection: AgentSelection) => void;
+	onReviewAgentSuggestion: (id: string, reviewed: boolean) => void;
 	onSearchConnections: (query: string) => void;
 	onSkip: () => void;
+	onToggleAgentSuggestion: (id: string) => void;
 	onToggleAutoImport: (enabled: boolean) => void;
 	organizations: OnboardingOrganization[];
 	piProviders: PiProvider[];
@@ -348,7 +467,7 @@ function ProviderSetup({
 								</p>
 							</div>
 							{configured ? (
-								<span className="text-success text-xs">Ready</span>
+								<span className="text-status-success text-xs">Ready</span>
 							) : null}
 						</div>
 						{configured ? null : (
@@ -423,12 +542,18 @@ function ConnectionSetup({
 	connectionsCheckFailed: boolean;
 	connections: ComposioConnection[];
 	connectingToolkit: string | null;
-	onConnect: (toolkit: ComposioToolkit) => void;
+	onConnect: (
+		toolkit: ComposioToolkit,
+		accessLevel: ConnectionAccessLevel
+	) => Promise<void>;
 	onContinue: () => void;
 	onQuery: (query: string) => void;
 	query: string;
 	toolkits: ComposioToolkit[];
 }) {
+	const [pendingToolkit, setPendingToolkit] = useState<ComposioToolkit | null>(
+		null
+	);
 	const curated = useMemo(() => {
 		const preferred = ["gmail", "notion", "slack", "github"];
 		return preferred
@@ -475,7 +600,7 @@ function ConnectionSetup({
 							<p className="mt-1 text-muted-foreground text-xs">
 								Ryu found{" "}
 								{connections.filter((connection) => connection.active).length}{" "}
-								connected read-only source
+								connected source
 								{connections.filter((connection) => connection.active)
 									.length === 1
 									? ""
@@ -501,7 +626,7 @@ function ConnectionSetup({
 							<p className="font-medium text-sm">Connections are optional</p>
 							<p className="mt-1 text-muted-foreground text-sm">
 								Composio is not configured on this node yet. You can continue
-								now and add read-only sources later in Settings → Connections.
+								now and add connections later in Settings → Connections.
 							</p>
 						</SettingsCard>
 					) : (
@@ -530,13 +655,13 @@ function ConnectionSetup({
 												<p className="text-muted-foreground text-xs">
 													{connection?.active
 														? "Connected"
-														: "Read-only source"}
+														: "Choose an access level before connecting"}
 												</p>
 											</div>
 											<Button
 												disabled={connection?.active}
 												loading={connectingToolkit === toolkit.slug}
-												onClick={() => onConnect(toolkit)}
+												onClick={() => setPendingToolkit(toolkit)}
 												size="sm"
 											>
 												{connection?.active ? "Connected" : "Connect"}
@@ -558,6 +683,28 @@ function ConnectionSetup({
 					<ContinueRow onContinue={onContinue} />
 				</>
 			)}
+			<ConnectionPermissionDialog
+				connectionName={pendingToolkit?.name ?? "this integration"}
+				connectionType="Composio"
+				currentLevel={
+					pendingToolkit
+						? connectionMap.get(pendingToolkit.slug)?.accessLevel
+						: undefined
+				}
+				onConfirm={async (accessLevel) => {
+					if (!pendingToolkit) {
+						return;
+					}
+					await onConnect(pendingToolkit, accessLevel);
+					setPendingToolkit(null);
+				}}
+				onOpenChange={(open) => {
+					if (!open) {
+						setPendingToolkit(null);
+					}
+				}}
+				open={pendingToolkit !== null}
+			/>
 		</div>
 	);
 }
@@ -612,7 +759,9 @@ function ImportSetup({
 				<Switch checked={autoImport} onCheckedChange={onToggle} />
 			</div>
 			<ContinueRow
-				continueLabel={total > 0 ? "Import threads" : "Continue"}
+				continueLabel={
+					importing ? "Importing…" : total > 0 ? "Import threads" : "Continue"
+				}
 				disabled={importing}
 				onContinue={total > 0 ? onImport : onSkip}
 				onSkip={onSkip}
@@ -632,16 +781,20 @@ const PROFILE_LINES = [
 function ProfileSetup({
 	alreadyBuilt,
 	job,
+	nodeSetupKind,
 	startedAt,
 	onStart,
 	onSkip,
 	onBackground,
 	onCancel,
+	onContinueAfterBackground,
 }: {
 	alreadyBuilt: boolean | null;
 	job: ProfileJobStatus | null;
+	nodeSetupKind: NodeSetupKind | null;
 	onBackground: () => void;
 	onCancel: () => void;
+	onContinueAfterBackground: () => void;
 	onSkip: () => void;
 	onStart: () => void;
 	startedAt: number | null;
@@ -681,8 +834,12 @@ function ProfileSetup({
 			>
 				<p className="text-muted-foreground text-sm">
 					{alreadyBuilt
-						? "You already did this before. Ryu can rebuild the starting profile from your current connected sources and imported conversations."
-						: "Ryu can create a starting profile from your connected sources and imported conversations. It will only draft facts and recommendations for you to review."}
+						? nodeSetupKind === "team"
+							? "You already did this before. Ryu can rebuild shared company knowledge from your current connected sources and imported conversations."
+							: "You already did this before. Ryu can rebuild your private profile from your current connected sources and imported conversations."
+						: nodeSetupKind === "team"
+							? "Ryu can create shared company knowledge from your connected sources and imported conversations. It will only draft facts and recommendations for you to review."
+							: "Ryu can create a private starting profile from your connected sources and imported conversations. It will only draft facts and recommendations for you to review."}
 				</p>
 				{alreadyBuilt ? null : (
 					<div className="rounded-lg border border-warning/30 bg-warning/10 px-3 py-2 text-muted-foreground text-xs">
@@ -716,12 +873,22 @@ function ProfileSetup({
 		);
 	}
 	if (job.state === "completed") {
+		const suggestionCount = job.agentSuggestions.length;
 		return (
 			<SettingsCard className="flex flex-col gap-4">
-				<p className="font-medium text-sm">Your starting profile is ready</p>
+				<p className="font-medium text-sm">
+					{suggestionCount > 0
+						? `Your profile and ${suggestionCount} agent draft${suggestionCount === 1 ? "" : "s"} are ready`
+						: "Your starting profile is ready"}
+				</p>
 				<p className="text-muted-foreground text-xs">
-					Ryu wrote a user profile and a shared organization profile. You can
-					review the source-backed draft in the new chat.
+					{nodeSetupKind === "team"
+						? "Ryu wrote shared company knowledge. You can"
+						: "Ryu wrote a private profile. You can"}{" "}
+					review the source-backed draft in the new chat
+					{suggestionCount > 0
+						? " and choose which suggested agents to add."
+						: "."}
 				</p>
 				<ContinueRow continueLabel="Continue" onContinue={onSkip} />
 			</SettingsCard>
@@ -734,25 +901,18 @@ function ProfileSetup({
 				className="min-h-14 rounded-lg bg-muted/40 px-3 py-3 text-sm"
 				role="status"
 			>
-				<AnimatePresence mode="wait">
-					<motion.span
-						animate={{ opacity: 1, y: 0 }}
-						exit={{ opacity: 0, y: -5 }}
-						initial={{ opacity: 0, y: 5 }}
-						key={PROFILE_LINES[lineIndex]}
-					>
-						{PROFILE_LINES[lineIndex]}
-					</motion.span>
-				</AnimatePresence>
+				<TextMorph duration={320} numbers={false}>
+					{PROFILE_LINES[lineIndex]}
+				</TextMorph>
 			</div>
 			<p className="text-muted-foreground text-xs">
-				The connected content is read-only and treated as untrusted data.
-				Recommendations never change your agents or external accounts
-				automatically.
+				{job.materialized
+					? "Your profile chat is running in the background. Wait here to review agent drafts when it finishes, or continue setup now."
+					: "The connected content is read-only and treated as untrusted data. Recommendations never change your agents or external accounts automatically."}
 			</p>
 			<div className="flex items-center justify-between text-muted-foreground text-xs">
 				<span>{Math.floor(elapsed / 1000)}s elapsed</span>
-				{elapsed >= 20_000 ? (
+				{elapsed >= 20_000 && !job.materialized ? (
 					<Button onClick={onBackground} size="sm" variant="outline">
 						Run in background
 					</Button>
@@ -763,8 +923,8 @@ function ProfileSetup({
 					Skip and cancel
 				</Button>
 				{job.materialized ? (
-					<Button onClick={onBackground} size="sm" variant="mono">
-						Open profile chat later
+					<Button onClick={onContinueAfterBackground} size="sm" variant="mono">
+						Continue setup
 					</Button>
 				) : null}
 			</div>
@@ -882,16 +1042,47 @@ export function OnboardingSetupStep(props: OnboardingSetupStepProps) {
 			</Shell>
 		);
 	}
+	if (kind === "agent-suggestions") {
+		return (
+			<Shell
+				subtitle="Review each draft's prompt and tools, then confirm the helpers you want to add."
+				title="Suggested agents for your work"
+			>
+				<AgentSuggestionsStep
+					busy={props.agentSuggestionsSubmitting}
+					connectedApps={connectedAppDetails(props.connections, props.toolkits)}
+					error={props.agentSuggestionsError}
+					onCreate={props.onCreateAgentSuggestions}
+					onReview={props.onReviewAgentSuggestion}
+					onSkip={props.onSkip}
+					onToggle={props.onToggleAgentSuggestion}
+					reviewed={props.agentSuggestionsReviewed}
+					selected={props.agentSuggestionsSelected}
+					suggestions={props.agentSuggestions}
+				/>
+			</Shell>
+		);
+	}
 	return (
 		<Shell
-			subtitle="Give Ryu a useful starting point without changing your accounts or agents."
-			title="Build your initial profile"
+			subtitle={
+				props.nodeSetupKind === "team"
+					? "Build shared company knowledge from approved sources without changing external accounts or agents."
+					: "Build a private starting profile without changing your accounts or agents."
+			}
+			title={
+				props.nodeSetupKind === "team"
+					? "Build shared company knowledge"
+					: "Build your private profile"
+			}
 		>
 			<ProfileSetup
 				alreadyBuilt={props.alreadyBuilt}
 				job={props.profileJob}
+				nodeSetupKind={props.nodeSetupKind}
 				onBackground={props.onBackgroundProfile}
 				onCancel={props.onCancelProfile}
+				onContinueAfterBackground={props.onContinueBackgroundProfile}
 				onSkip={props.onSkip}
 				onStart={props.onContinue}
 				startedAt={props.profileStartedAt}

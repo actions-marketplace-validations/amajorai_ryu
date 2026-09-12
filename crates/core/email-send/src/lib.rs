@@ -21,11 +21,13 @@
 //! injects a resolver via [`set_password_resolver`] (backed by its `smtp_auth`
 //! BYO-key store), so this crate has ZERO dependency on `apps/core`.
 
+use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::RwLock;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use lettre::message::header::ContentType;
+use lettre::message::header::{HeaderName, HeaderValue};
 use lettre::message::{Attachment as LettreAttachment, Mailbox, MultiPart, SinglePart};
 use lettre::transport::smtp::authentication::Credentials;
 use lettre::{AsyncSmtpTransport, AsyncTransport, Message, Tokio1Executor};
@@ -148,6 +150,8 @@ pub struct OutboundEmail {
     /// RFC 5322 threading headers (agent-inbox replies).
     pub in_reply_to: Option<String>,
     pub references: Option<String>,
+    /// Validated custom RFC headers.
+    pub headers: BTreeMap<String, String>,
     pub attachments: Vec<Attachment>,
 }
 
@@ -356,6 +360,14 @@ pub async fn send_email(
     if let Some(references) = msg.references.as_ref() {
         builder = builder.references(references.clone());
     }
+    for (name, value) in &msg.headers {
+        let header_name = HeaderName::new_from_ascii(name.clone())
+            .map_err(|_| EmailError::Build(format!("invalid header name: {name}")))?;
+        if value.contains(['\r', '\n']) {
+            return Err(EmailError::Build(format!("invalid header value: {name}")));
+        }
+        builder = builder.raw_header(HeaderValue::new(header_name, value.clone()));
+    }
 
     let body = build_body(msg)?;
     let email = match body {
@@ -367,13 +379,16 @@ pub async fn send_email(
     let creds = Credentials::new(cfg.username.clone(), cfg.password.clone());
     let transport = if cfg.starttls {
         AsyncSmtpTransport::<Tokio1Executor>::starttls_relay(&cfg.host)
+            .map_err(|e| EmailError::Transport(e.to_string()))?
+            .port(cfg.port)
+            .credentials(creds)
+            .build()
     } else {
-        AsyncSmtpTransport::<Tokio1Executor>::relay(&cfg.host)
-    }
-    .map_err(|e| EmailError::Transport(e.to_string()))?
-    .port(cfg.port)
-    .credentials(creds)
-    .build();
+        AsyncSmtpTransport::<Tokio1Executor>::builder_dangerous(&cfg.host)
+            .port(cfg.port)
+            .credentials(creds)
+            .build()
+    };
 
     match tokio::time::timeout(SEND_TIMEOUT, transport.send(email)).await {
         Err(_) => Err(EmailError::Timeout),

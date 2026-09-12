@@ -4,7 +4,8 @@
 
 import { Loader } from "@ryu/ui/components/motion/loader";
 import { TextScramble } from "@ryu/ui/components/motion/text-scramble";
-import { EASE_OUT, SPRING_SWAP } from "@ryu/ui/lib/ease";
+import { TextMorph } from "@ryu/ui/components/text-morph";
+import { EASE_OUT, EASE_OUT_CSS, SPRING_SWAP } from "@ryu/ui/lib/ease";
 import {
 	TEXT_SHIMMER_CLASS_NAME,
 	TEXT_SHIMMER_KEYFRAMES,
@@ -108,25 +109,19 @@ function CascadePhrase({ phrase, reduce, shimmerDuration }: PhraseProps) {
 
 function SwapPhrase({ phrase, reduce, shimmerDuration }: PhraseProps) {
 	return (
-		<AnimatePresence initial={false}>
-			<motion.span
-				animate={reduce ? { opacity: 1 } : { opacity: 1, y: 0 }}
-				className={cn(
-					"col-start-1 row-start-1 inline-block justify-self-start whitespace-nowrap will-change-[opacity,transform]",
-					TEXT_SHIMMER_CLASS_NAME
-				)}
-				exit={reduce ? { opacity: 0 } : { opacity: 0, y: -3 }}
-				initial={reduce ? { opacity: 0 } : { opacity: 0, y: 3 }}
-				key={phrase}
-				style={textShimmerStyle(shimmerDuration)}
-				transition={{
-					duration: reduce ? 0.12 : 0.2,
-					ease: EASE_OUT,
-				}}
-			>
-				{phrase}…
-			</motion.span>
-		</AnimatePresence>
+		<TextMorph
+			className={cn(
+				"col-start-1 row-start-1 justify-self-start whitespace-nowrap",
+				TEXT_SHIMMER_CLASS_NAME
+			)}
+			disabled={reduce}
+			duration={320}
+			ease={EASE_OUT_CSS}
+			numbers={false}
+			style={textShimmerStyle(shimmerDuration)}
+		>
+			{phrase}…
+		</TextMorph>
 	);
 }
 

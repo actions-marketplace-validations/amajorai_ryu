@@ -15,12 +15,14 @@ pub mod models;
 pub mod multimodal;
 pub mod providers;
 pub mod sandbox;
+pub mod security_contact;
 pub mod tools;
 pub mod traffic;
+pub mod voice_calls;
 
 use axum::{
     http::HeaderValue,
-    response::Response,
+    response::{Redirect, Response},
     routing::{any, get, post},
     Router,
 };
@@ -44,6 +46,9 @@ async fn stamp_policy_alert(mut response: Response) -> Response {
 
 pub fn router(state: SharedState) -> Router {
     Router::new()
+        // The standalone service domain is a portal entry point for people;
+        // keep the API routes below available to programmatic callers.
+        .route("/", get(product_dashboard_redirect))
         // OpenAI-compatible chat endpoint
         .route("/v1/chat/completions", post(chat::chat_completions))
         // ACP subprocesses use this agent-scoped alias so the Gateway can bind
@@ -102,7 +107,7 @@ pub fn router(state: SharedState) -> Router {
         // Live request traffic (SSE). Admin-gated like /v1/audit; feeds the
         // desktop's live-traffic dashboard through Core's proxy.
         .route("/v1/traffic", get(traffic::live_traffic))
-        // Community savings — public, ungated anonymous aggregate (opt-in beacon
+        // Community savings — public, ungated anonymous aggregate (opt-out beacon
         // source). Mirrors /metrics registration; NO admin gate.
         .route("/v1/savings", get(metrics::community_savings))
         .route("/savings", get(metrics::community_savings))
@@ -190,13 +195,29 @@ pub fn router(state: SharedState) -> Router {
         )
         // Health / meta
         .route("/health", get(health::health))
+        .route("/.well-known/security.txt", get(security_contact::security_txt))
         .route("/v1/health", get(health::health))
+        .route("/v1/auth/status", get(health::auth_status))
+        .route("/v1/auth/readiness", get(health::readiness))
+        // Twilio PSTN voice bridge. These provider callbacks authenticate inside
+        // the handlers because they arrive from outside the normal Gateway API
+        // bearer-auth boundary.
+        .route("/voice/twilio/answer", post(voice_calls::twilio_answer))
+        .route("/voice/twilio/stream", get(voice_calls::twilio_stream))
         // Ok-path policy-alert header writer. Runs on every governed response;
         // a no-op unless a handler stashed a `PolicyAlert` on the response
         // extensions. The error-path header is written directly by
         // `GatewayError::into_response`, so this layer must stay conditional.
         .layer(axum::middleware::map_response(stamp_policy_alert))
         .with_state(state)
+}
+
+async fn product_dashboard_redirect() -> Redirect {
+    let target = std::env::var("RYU_PRODUCT_DASHBOARD_URL")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| "https://app.ryuhq.com/dashboard".to_owned());
+    Redirect::temporary(&target)
 }
 
 #[cfg(test)]
@@ -265,6 +286,35 @@ mod route_tests {
         assert!(
             route_accepts_get(&app, "/v1/traffic").await,
             "GET /v1/traffic must route to the SSE handler"
+        );
+    }
+
+    #[tokio::test]
+    async fn standalone_home_redirects_to_the_portal_dashboard() {
+        use axum::http::Request;
+        use tower::ServiceExt;
+
+        let state = std::sync::Arc::new(AppState::new_for_test_default());
+        let response = router(state)
+            .oneshot(
+                Request::builder()
+                    .uri("/")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            response.status(),
+            axum::http::StatusCode::TEMPORARY_REDIRECT
+        );
+        assert_eq!(
+            response
+                .headers()
+                .get(axum::http::header::LOCATION)
+                .unwrap(),
+            "https://app.ryuhq.com/dashboard"
         );
     }
 

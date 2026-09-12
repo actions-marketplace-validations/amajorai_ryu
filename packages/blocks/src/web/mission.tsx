@@ -1,5 +1,6 @@
 "use client";
 
+import { TextMorph } from "@ryu/ui/components/text-morph";
 import { useEffect, useState } from "react";
 import { landingSurfaceCardFlexXlClass } from "./landing-card-tones.ts";
 import { SectionTitle, sectionSubtitleClass } from "./sections.tsx";
@@ -52,7 +53,9 @@ function CollaborationViz() {
 						/>
 					</div>
 					<span className="rounded-full bg-muted/60 px-2 py-0.5 text-foreground/60 text-xs transition-all duration-300">
-						{tasks[step]}
+						<TextMorph duration={280} numbers={false}>
+							{tasks[step]}
+						</TextMorph>
 					</span>
 					<div className="relative flex w-full items-center">
 						<div className="h-px w-full bg-border" />
@@ -69,7 +72,7 @@ function CollaborationViz() {
 
 				<div className="flex flex-col items-center gap-1.5">
 					<div className="flex h-10 w-10 items-center justify-center rounded-full bg-foreground/10">
-						<span className="font-bold text-foreground/60 text-xs">AI</span>
+						<span className="font-medium text-foreground/60 text-xs">AI</span>
 					</div>
 					<span className="text-foreground/40 text-xs">Agent</span>
 				</div>
@@ -99,7 +102,7 @@ function InfraViz() {
 		<div className="flex flex-1 flex-col gap-3">
 			{/* User-facing layer */}
 			<div className="rounded-lg bg-foreground px-3 py-2 text-center">
-				<span className="font-semibold text-background text-xs tracking-wide">
+				<span className="font-medium text-background text-xs tracking-wide">
 					The work your firm does
 				</span>
 			</div>
@@ -188,7 +191,11 @@ function ScaleViz() {
 				))}
 			</div>
 
-			<p className="text-foreground/40 text-xs">{current.label}</p>
+			<p className="text-foreground/40 text-xs">
+				<TextMorph duration={280} numbers={false}>
+					{current.label}
+				</TextMorph>
+			</p>
 		</div>
 	);
 }
@@ -234,7 +241,7 @@ export default function Mission() {
 						<div className={landingSurfaceCardFlexXlClass} key={panel.title}>
 							{panel.viz}
 							<div>
-								<h3 className="mb-1 font-semibold text-foreground text-sm">
+								<h3 className="mb-1 font-medium text-foreground text-sm">
 									{panel.title}
 								</h3>
 								<p className="text-muted-foreground text-xs">

@@ -4,10 +4,10 @@
   "navLabel": "Growth",
   "category": "Sales & Marketing",
   "icon": "Rocket",
-  "tagline": "Run experiments end to end with workflows that test, measure, and iterate on a schedule.",
+  "tagline": "Prepare experiment variants and collect results from your connected analytics tools.",
   "heroEyebrow": "Ryu for Growth",
-  "heroTitle": "Ship more experiments, wait less for results.",
-  "heroSubtitle": "Chain the whole growth loop into a workflow: generate variants, launch them, pull the numbers, and write the readout, on a schedule or a trigger. Agents connect to your analytics and channels so an experiment runs itself while you decide what to scale.",
+  "heroTitle": "Ryu for growth",
+  "heroSubtitle": "Prepare experiment variants and collect results from your connected analytics tools.",
   "visualKey": "WorkflowsVisual",
   "intro": "Growth is throughput: more experiments, faster cycles, cleaner readouts. The bottleneck is rarely ideas, it's the manual glue between generating variants, launching them, and pulling results. Ryu turns that loop into a workflow that runs the repetitive parts automatically, so your team spends time on the calls that matter.",
   "highlights": [

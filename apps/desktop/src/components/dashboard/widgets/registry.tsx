@@ -5,13 +5,14 @@
 // all read from here instead of repeating the list. Adding a kind means: add its
 // schema in ./schema.ts, its body component, and one entry below.
 
-import type { ReactNode } from "react";
+import { Spinner } from "@ryu/ui/components/spinner.tsx";
+import { lazy, type ReactNode, Suspense } from "react";
 import type { z } from "zod";
 import type { Widget } from "@/src/lib/api/dashboard.ts";
 import { AgentFeedBody } from "./AgentFeedWidget.tsx";
 import { ChartBody } from "./ChartWidget.tsx";
 import { ListBody } from "./ListWidget.tsx";
-import { MapBody } from "./MapWidget.tsx";
+
 import { StatBody } from "./StatWidget.tsx";
 import {
 	chartConfigSchema,
@@ -25,6 +26,10 @@ import {
 } from "./schema.ts";
 import { TableBodyWidget } from "./TableWidget.tsx";
 import { TextBody } from "./TextWidget.tsx";
+
+const MapBody = lazy(() =>
+	import("./MapWidget.tsx").then((module) => ({ default: module.MapBody }))
+);
 
 /** Everything the app needs to know about a single widget kind. */
 export interface WidgetDefinition {
@@ -120,7 +125,15 @@ export const WIDGET_DEFINITIONS: readonly WidgetDefinition[] = [
 		defaultSize: { w: 6, h: 5 },
 		configSchema: mapConfigSchema,
 		render: ({ widget, value }) => (
-			<MapBody config={widget.config} value={value} />
+			<Suspense
+				fallback={
+					<div className="grid size-full place-items-center">
+						<Spinner />
+					</div>
+				}
+			>
+				<MapBody config={widget.config} value={value} />
+			</Suspense>
 		),
 	},
 	{

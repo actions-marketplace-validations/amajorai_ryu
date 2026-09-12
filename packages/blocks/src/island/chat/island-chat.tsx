@@ -97,10 +97,10 @@ export function IslandChatView({
 			) : null}
 
 			{offline ? (
-				<p className="relative z-10 text-neutral-400 text-xs">
+				<p className="relative z-10 text-muted-foreground text-xs">
 					Can't reach Ryu Core.{" "}
 					<button
-						className="text-neutral-200 underline underline-offset-2 hover:text-neutral-100"
+						className="text-foreground underline underline-offset-2 hover:text-foreground"
 						onClick={onRetry}
 						type="button"
 					>
@@ -110,7 +110,7 @@ export function IslandChatView({
 			) : null}
 
 			{error && !offline ? (
-				<p className="relative z-10 text-red-300 text-xs">{error}</p>
+				<p className="relative z-10 text-status-destructive text-xs">{error}</p>
 			) : null}
 
 			<div className="relative z-10 shrink-0">

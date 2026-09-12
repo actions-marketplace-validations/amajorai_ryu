@@ -43,13 +43,13 @@ export function RecordingPill({
 	if (error) {
 		return (
 			<div className="flex w-full items-center justify-center px-2 text-center">
-				<span className="text-red-300 text-xs">{error}</span>
+				<span className="text-status-destructive text-xs">{error}</span>
 			</div>
 		);
 	}
 	return (
 		<div className="flex w-full items-center justify-center gap-2 text-popover-foreground">
-			<span className="size-2 shrink-0 animate-pulse rounded-full bg-red-500" />
+			<span className="size-2 shrink-0 animate-pulse rounded-full bg-destructive" />
 			<Wave
 				className="h-4 w-16 text-popover-foreground"
 				levels={levels ?? DEMO_LEVELS}
@@ -62,7 +62,7 @@ export function RecordingPill({
 						{agentName}
 					</span>
 					{canCycle ? (
-						<kbd className="shrink-0 rounded bg-white/10 px-1 py-0.5 text-[10px] text-muted-foreground">
+						<kbd className="shrink-0 rounded bg-muted px-1 py-0.5 text-[10px] text-muted-foreground">
 							⇥
 						</kbd>
 					) : null}

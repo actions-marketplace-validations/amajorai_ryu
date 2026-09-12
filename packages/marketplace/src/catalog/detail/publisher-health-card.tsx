@@ -80,9 +80,9 @@ export function PublisherHealthCard({
 							className={cn(
 								"size-3.5",
 								signal.status === "good"
-									? "text-success"
+									? "text-status-success"
 									: signal.status === "warning"
-										? "text-warning"
+										? "text-status-warning"
 										: "text-muted-foreground"
 							)}
 							icon={signalIcon(signal)}

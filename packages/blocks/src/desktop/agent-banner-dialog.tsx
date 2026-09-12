@@ -43,6 +43,7 @@ import {
 	isBannerPresetId,
 } from "@ryu/ui/components/banner-presets";
 import { Button } from "@ryu/ui/components/button";
+import { ColorPickerPopover } from "@ryu/ui/components/color-picker";
 import {
 	Dialog,
 	DialogClose,
@@ -103,7 +104,7 @@ export interface AgentBannerPrefs {
 	preset?: string;
 }
 
-/** Hex (#rrggbb) → hue, so a native colour input can drive the wash. Only the
+/** Hex (#rrggbb) → hue, so the shared color picker can drive the wash. Only the
  *  hue is kept: saturation and lightness come from the style itself, which is
  *  what keeps a custom colour looking like part of the same system. */
 function hexToHue(hex: string): number {
@@ -420,31 +421,19 @@ export function AgentBannerDialog({
 							))}
 							{/* Custom colour: any hue, not just the six presets. Stored as a
 							    number, which both styles accept directly. */}
-							<label
-								className={cn(
-									"relative size-6 cursor-pointer overflow-hidden rounded-full border transition-transform hover:scale-110",
+							<ColorPickerPopover
+								onValueChange={(value) => onUpdate({ color: hexToHue(value) })}
+								swatches={Object.values(BANNER_SWATCHES)}
+								triggerAriaLabel="Custom banner colour"
+								triggerClassName={cn(
+									"size-6 rounded-full p-0",
 									customHue === null
 										? "border-border"
 										: "border-foreground ring-2 ring-primary"
 								)}
-								style={{
-									background:
-										customHue === null
-											? "conic-gradient(red,yellow,lime,cyan,blue,magenta,red)"
-											: hueToHex(customHue),
-								}}
-								title="Custom colour"
-							>
-								<input
-									aria-label="Custom banner colour"
-									className="absolute inset-0 cursor-pointer opacity-0"
-									onChange={(e) =>
-										onUpdate({ color: hexToHue(e.target.value) })
-									}
-									type="color"
-									value={customHue === null ? "#b497cf" : hueToHex(customHue)}
-								/>
-							</label>
+								triggerShowValue={false}
+								value={customHue === null ? "#b497cf" : hueToHex(customHue)}
+							/>
 						</div>
 					</div>
 

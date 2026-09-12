@@ -79,7 +79,7 @@ export function SuggestionChip({
 				<span className="font-medium text-sm leading-snug">
 					{suggestion.title}
 				</span>
-				<span className="shrink-0 rounded bg-info/15 px-1.5 py-0.5 font-mono text-info text-xs dark:text-info">
+				<span className="shrink-0 rounded bg-info/15 px-1.5 py-0.5 font-mono text-status-info text-xs dark:text-status-info">
 					suggestion
 				</span>
 			</div>
@@ -94,7 +94,7 @@ export function SuggestionChip({
 			{/* Action row */}
 			<div className="flex gap-2">
 				<button
-					className="flex-1 rounded-md bg-info/10 px-3 py-1.5 font-medium text-info text-xs transition-colors hover:bg-info/20 disabled:cursor-not-allowed disabled:opacity-50 dark:text-info"
+					className="flex-1 rounded-md bg-info/10 px-3 py-1.5 font-medium text-status-info text-xs transition-colors hover:bg-info/20 disabled:cursor-not-allowed disabled:opacity-50 dark:text-status-info"
 					disabled={isBusy}
 					onClick={() => {
 						sendFeedback("thumbs_up").catch(() => undefined);

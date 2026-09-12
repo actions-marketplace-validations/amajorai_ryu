@@ -96,7 +96,7 @@ function AuthorizedAppsListSection({
 					<Spinner className="size-5" />
 				</div>
 			) : error ? (
-				<p className="text-destructive text-sm">
+				<p className="text-sm text-status-destructive">
 					{errorMessage(error, "Failed to load authorized apps")}
 				</p>
 			) : (

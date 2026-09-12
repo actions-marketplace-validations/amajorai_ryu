@@ -11,8 +11,14 @@ import { TextSwap } from "@ryu/ui/components/text-swap";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import { sileo } from "sileo";
+import { useSkillDistributionFlow } from "@/src/components/skills/SkillDistributionProvider.tsx";
 import { useActiveNode } from "@/src/hooks/useActiveNode.ts";
 import type { ApiTarget } from "@/src/lib/api/client.ts";
+import {
+	fetchDetail,
+	type MarketplaceDetail,
+} from "@/src/lib/api/marketplace.ts";
+import { installMarketplaceBundle } from "@/src/lib/api/marketplace-bundles.ts";
 import {
 	fetchModelDetail,
 	installModelFile,
@@ -27,11 +33,7 @@ import {
 	installApp,
 	type PluginCatalogDetail,
 } from "@/src/lib/api/plugins.ts";
-import {
-	fetchSkillDetail,
-	installSkill,
-	type SkillDetail,
-} from "@/src/lib/api/skills.ts";
+import { fetchSkillDetail, type SkillDetail } from "@/src/lib/api/skills.ts";
 import { pickRecommendedQuant } from "@/src/lib/deep-link.ts";
 import { useDeepLinkStore } from "@/src/store/useDeepLinkStore.ts";
 import { useNodeStore } from "@/src/store/useNodeStore.ts";
@@ -169,6 +171,33 @@ function appBody(
 	};
 }
 
+/** The confirmation copy for a Marketplace bundle action. */
+function bundleBody(
+	intent: { id: string },
+	q: DetailQuery<MarketplaceDetail>,
+	run: () => void
+): DialogBody {
+	if (q.isLoading) {
+		return { title: "Loading bundle…", description: intent.id };
+	}
+	if (q.error || !q.data) {
+		return {
+			title: "Bundle not found",
+			description: `Could not load "${intent.id}".`,
+			error: true,
+		};
+	}
+	const required = q.data.bundleMembers.filter(
+		(member) => member.required
+	).length;
+	return {
+		title: `Install ${q.data.name}?`,
+		description: `Install ${q.data.bundleMembers.length} Marketplace items (${required} required) through their existing trusted installers. Packages remain disabled until you review their permissions.`,
+		confirm: "Install bundle",
+		onConfirm: run,
+	};
+}
+
 const HTTP_PREFIX = /^https?:\/\//;
 const TRAILING_SLASH = /\/$/;
 
@@ -206,6 +235,7 @@ function nodeBody(
 // nothing happens until the user confirms here. Installs go through Core's
 // verified, source-pinned download path — the link never picks the registry.
 export function DeepLinkConfirmDialog() {
+	const { installCatalogSkill } = useSkillDistributionFlow();
 	const pending = useDeepLinkStore((s) => s.pending);
 	const clear = useDeepLinkStore((s) => s.clear);
 	const qc = useQueryClient();
@@ -226,7 +256,8 @@ export function DeepLinkConfirmDialog() {
 	const hintedUrl =
 		intent?.kind === "model" ||
 		intent?.kind === "skill" ||
-		intent?.kind === "app"
+		intent?.kind === "app" ||
+		intent?.kind === "bundle"
 			? intent.node
 			: null;
 	const hintedNode = hintedUrl
@@ -254,6 +285,13 @@ export function DeepLinkConfirmDialog() {
 		queryKey: ["deeplink", "skill", target.url, pending?.nonce, skillId],
 		queryFn: () => fetchSkillDetail(target, skillId ?? ""),
 		enabled: open && skillId !== undefined,
+	});
+
+	const bundleId = intent?.kind === "bundle" ? intent.id : undefined;
+	const bundleDetail = useQuery({
+		queryKey: ["deeplink", "bundle", target.url, pending?.nonce, bundleId],
+		queryFn: () => fetchDetail("bundle", bundleId ?? ""),
+		enabled: open && bundleId !== undefined,
 	});
 
 	const appId = intent?.kind === "app" ? intent.id : undefined;
@@ -325,7 +363,10 @@ export function DeepLinkConfirmDialog() {
 		const { card } = skillDetail.data;
 		setBusy(true);
 		try {
-			await installSkill(target, intent.id);
+			const installed = await installCatalogSkill({ id: intent.id, target });
+			if (installed === null) {
+				return;
+			}
 			sileo.success({ title: `Installed ${card.name}` });
 			Promise.resolve(qc.invalidateQueries({ queryKey: ["skills"] })).catch(
 				() => undefined
@@ -356,6 +397,42 @@ export function DeepLinkConfirmDialog() {
 		} catch (e) {
 			sileo.error({
 				title: e instanceof Error ? e.message : "Install failed",
+			});
+		} finally {
+			setBusy(false);
+		}
+	}
+
+	async function runBundle() {
+		if (intent?.kind !== "bundle" || !bundleDetail.data) {
+			return;
+		}
+		setBusy(true);
+		try {
+			const result = await installMarketplaceBundle(
+				target,
+				intent.id,
+				bundleDetail.data.bundleMembers
+			);
+			const requiredFailures = result.failures.filter(
+				({ member }) => member.required
+			);
+			if (requiredFailures.length > 0) {
+				sileo.error({
+					title: "Bundle installed with required items missing",
+				});
+			} else {
+				sileo.success({
+					title: `Installed ${result.completed.length} bundle items`,
+				});
+			}
+			Promise.resolve(
+				qc.invalidateQueries({ queryKey: ["marketplace"] })
+			).catch(() => undefined);
+			clear();
+		} catch (e) {
+			sileo.error({
+				title: e instanceof Error ? e.message : "Bundle install failed",
 			});
 		} finally {
 			setBusy(false);
@@ -404,6 +481,8 @@ export function DeepLinkConfirmDialog() {
 		body = skillBody(intent, skillDetail, runSkill);
 	} else if (intent?.kind === "app") {
 		body = appBody(intent, appDetail, installedApp, runApp);
+	} else if (intent?.kind === "bundle") {
+		body = bundleBody(intent, bundleDetail, runBundle);
 	} else if (intent?.kind === "node") {
 		body = nodeBody(intent, existingNode !== undefined, runNode);
 	}
@@ -421,7 +500,8 @@ export function DeepLinkConfirmDialog() {
 				</DialogHeader>
 				{intent.kind === "model" ||
 				intent.kind === "skill" ||
-				intent.kind === "app" ? (
+				intent.kind === "app" ||
+				intent.kind === "bundle" ? (
 					<p className="text-muted-foreground text-xs">
 						Installing on{" "}
 						<span className="font-medium text-foreground">

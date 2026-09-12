@@ -107,7 +107,7 @@ export const FEATURES: FeatureDef[] = [
 		description: "Ryu-hosted models with an included monthly credit pool.",
 		icon: "server",
 		tier: "paid",
-		requiresPlan: ["pro", "max", "teams"],
+		requiresPlan: ["plus", "pro", "max", "teams", "teams-lite"],
 	},
 	{
 		key: "team_workspace",
@@ -115,7 +115,7 @@ export const FEATURES: FeatureDef[] = [
 		description: "Shared org workspace, seats, and pooled credits.",
 		icon: "users",
 		tier: "paid",
-		requiresPlan: ["teams"],
+		requiresPlan: ["teams", "teams-lite"],
 	},
 ];
 

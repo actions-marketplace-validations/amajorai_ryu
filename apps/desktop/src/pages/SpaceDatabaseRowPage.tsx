@@ -21,7 +21,7 @@ import { MarkdownEditor } from "@/src/components/editor/MarkdownEditor.tsx";
 import { useSpacesContext } from "@/src/contexts/SpacesContext.tsx";
 import {
 	useCurrentTabId,
-	useTabsContext,
+	useTabSelector,
 } from "@/src/contexts/TabsContext.tsx";
 import { useActiveNode } from "@/src/hooks/useActiveNode.ts";
 import {
@@ -191,7 +191,8 @@ export default function SpaceDatabaseRowPage({
 	rowId: string;
 }) {
 	const { getDocument, saveDocument, createPage } = useSpacesContext();
-	const { openTab, updateTabTitle } = useTabsContext();
+	const openTab = useTabSelector((state) => state.openTab);
+	const updateTabTitle = useTabSelector((state) => state.updateTabTitle);
 	const tabId = useCurrentTabId();
 	const node = useActiveNode();
 
@@ -470,7 +471,7 @@ export default function SpaceDatabaseRowPage({
 				{/* Title = the first column (the row's "Name"). */}
 				<Input
 					aria-label="Row title"
-					className="h-auto border-none bg-transparent px-0 font-semibold text-2xl shadow-none focus-visible:ring-0"
+					className="h-auto border-none bg-transparent px-0 font-medium text-2xl shadow-none focus-visible:ring-0"
 					disabled={readOnly || !titleColumnId}
 					onChange={(e) => {
 						if (titleColumnId) {

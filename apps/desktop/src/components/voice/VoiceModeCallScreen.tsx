@@ -1,3 +1,5 @@
+import { CallDisabled02Icon } from "@hugeicons/core-free-icons";
+import { HugeiconsIcon } from "@hugeicons/react";
 import {
 	Collapsible,
 	CollapsibleContent,
@@ -5,7 +7,7 @@ import {
 } from "@ryu/ui/components/collapsible.tsx";
 import { VoiceActivityBeam } from "@ryu/ui/components/voice-activity-beam.tsx";
 import { cn } from "@ryu/ui/lib/utils.ts";
-import { ChevronDown, Mic, MicOff, PhoneOff, Square, X } from "lucide-react";
+import { ChevronDown, Mic, MicOff, Square, X } from "lucide-react";
 import { useTheme } from "next-themes";
 import type { ReactNode } from "react";
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -13,6 +15,7 @@ import { widgetDefinition } from "@/src/components/dashboard/widgets/registry.ts
 import type { VoiceMode } from "@/src/hooks/useVoiceMode.ts";
 import { formatVoiceCallDuration, getVoiceCallInitials } from "./voice-call.ts";
 import { extractVoiceWidgets } from "./voice-widgets.ts";
+
 interface VoicePhaseMeta {
 	detail: string;
 }
@@ -143,7 +146,7 @@ export function VoiceModeCallScreen({
 					<div
 						aria-hidden="true"
 						className={cn(
-							"flex items-center justify-center rounded-full bg-primary/15 font-semibold text-primary ring-primary/5",
+							"flex items-center justify-center rounded-full bg-primary/15 font-medium text-primary ring-primary/5",
 							hasComposer ? "size-16 text-lg ring-6" : "size-20 text-xl ring-8"
 						)}
 					>
@@ -182,7 +185,7 @@ export function VoiceModeCallScreen({
 
 					{voice.error && (
 						<p
-							className="mt-2 text-center text-destructive text-sm"
+							className="mt-2 text-center text-sm text-status-destructive"
 							role="alert"
 						>
 							{voice.error}
@@ -266,7 +269,7 @@ export function VoiceModeCallScreen({
 												key={item.id}
 											>
 												{item.widget.title && (
-													<div className="mb-2 truncate font-semibold text-sm tracking-tight">
+													<div className="mb-2 truncate font-medium text-sm tracking-tight">
 														{item.widget.title}
 													</div>
 												)}
@@ -296,7 +299,7 @@ export function VoiceModeCallScreen({
 							"flex min-w-24 items-center justify-center gap-2 rounded-full px-4 font-medium text-sm transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
 							hasComposer ? "py-2" : "py-2.5",
 							voice.muted
-								? "bg-destructive/15 text-destructive hover:bg-destructive/20"
+								? "bg-destructive/15 text-status-destructive hover:bg-destructive/20"
 								: "bg-muted text-foreground hover:bg-muted/70"
 						)}
 						onClick={voice.toggleMute}
@@ -333,7 +336,11 @@ export function VoiceModeCallScreen({
 						onClick={voice.stop}
 						type="button"
 					>
-						<PhoneOff className="size-4" />
+						<HugeiconsIcon
+							aria-hidden="true"
+							className="size-4"
+							icon={CallDisabled02Icon}
+						/>
 						<span>End call</span>
 					</button>
 				</footer>

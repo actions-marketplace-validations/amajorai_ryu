@@ -213,6 +213,11 @@ export function addAccountViaDeviceAuth(
 				async (token) => {
 					try {
 						const account = await addAccount(token);
+						if (!account) {
+							throw new Error(
+								"The account session could not be verified. Try signing in again."
+							);
+						}
 						if (!cancelled) {
 							handlers.onAdded(account.userId);
 						}

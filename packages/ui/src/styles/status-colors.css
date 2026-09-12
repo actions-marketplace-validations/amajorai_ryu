@@ -1,0 +1,33 @@
+/* Status fills retain their theme hues. Text tones mix toward the local
+ * foreground in OKLab, increasing contrast without rotating the hue. */
+@theme inline {
+	--color-status-success: color-mix(
+		in oklab,
+		var(--success) 70%,
+		var(--foreground)
+	);
+	--color-status-warning: color-mix(
+		in oklab,
+		var(--warning) 65%,
+		var(--foreground)
+	);
+	--color-status-info: color-mix(in oklab, var(--info) 85%, var(--foreground));
+	--color-status-destructive: color-mix(
+		in oklab,
+		var(--destructive) 85%,
+		var(--foreground)
+	);
+}
+
+/* Plain-CSS Companion views use the same roles as Tailwind consumers. */
+:root,
+.dark {
+	--status-success: color-mix(in oklab, var(--success) 70%, var(--foreground));
+	--status-warning: color-mix(in oklab, var(--warning) 65%, var(--foreground));
+	--status-info: color-mix(in oklab, var(--info) 85%, var(--foreground));
+	--status-destructive: color-mix(
+		in oklab,
+		var(--destructive) 85%,
+		var(--foreground)
+	);
+}

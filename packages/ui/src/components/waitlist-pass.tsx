@@ -5,6 +5,7 @@ import { cn } from "../lib/utils.ts";
 import { EntityAvatar } from "./entity-avatar.tsx";
 import { Logo } from "./logo.tsx";
 import { PassCardShell } from "./pass-card-shell.tsx";
+import { PassQrBack } from "./pass-qr-back.tsx";
 
 /**
  * The membership pass a queued user sees on the waitlist screens (web
@@ -21,8 +22,8 @@ import { PassCardShell } from "./pass-card-shell.tsx";
  * touch-and-drag) to turn it by hand. All of it is suppressed under
  * `prefers-reduced-motion` — the pass is decoration, and decoration is the first
  * thing that should stop moving when a user asks for less of it. The pass is
- * two-sided: the front carries the member's details, the back only the Ryu
- * mark.
+ * two-sided: the front carries the member's details, and the back turns the
+ * member's invite link into a scan-ready share surface.
  *
  * The border is `metal-fx` (the same shader the onboarding "Use Ryu Cloud"
  * button wears), which paints an animated metallic ring around whatever it
@@ -98,6 +99,8 @@ export interface WaitlistPassProps {
 	 * be shown to other people. The waitlist screen still displays it.
 	 */
 	referralCount?: number;
+	/** Canonical referral link printed as the QR destination on the back. */
+	referralUrl?: string | null;
 	/**
 	 * Accepted but unused: the serial came off the card with the "early access"
 	 * header line. `formatPassSerial` is still exported for the share image, which
@@ -115,7 +118,7 @@ export interface WaitlistPassProps {
 
 /**
  * A stable, human-readable pass serial like "A1B2C3". No "RYU-" prefix: the
- * card already says Ryu on the line above it and again on its back.
+ * card already says Ryu on the line above it and again in the QR's center.
  */
 export const formatPassSerial = (seed: string | null | undefined): string => {
 	const compact = (seed ?? "").replace(NON_ALPHANUMERIC, "").toUpperCase();
@@ -283,6 +286,7 @@ export function WaitlistPass({
 	metalTheme = "auto",
 	name,
 	position,
+	referralUrl,
 	totalWaiting,
 	username,
 }: WaitlistPassProps) {
@@ -314,6 +318,14 @@ export function WaitlistPass({
 
 	return (
 		<PassCardShell
+			back={
+				<PassQrBack
+					caption="Scan to invite"
+					metalTheme={metalTheme}
+					seed={backdropSeed}
+					value={referralUrl}
+				/>
+			}
 			backdrop="warp"
 			className={className}
 			ditherSeed={backdropSeed}
@@ -366,7 +378,7 @@ export function WaitlistPass({
 						/>
 					) : null}
 					<AutoFitText
-						className="font-semibold leading-[1.02] tracking-tight"
+						className="font-medium leading-[1.02] tracking-tight"
 						maxPx={NAME_MAX_PX}
 						minPx={NAME_MIN_PX}
 					>

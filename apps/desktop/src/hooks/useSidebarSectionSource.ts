@@ -17,8 +17,9 @@ import {
 import { useQueries } from "@tanstack/react-query";
 import { useMemo } from "react";
 import { useActiveNode } from "@/src/hooks/useActiveNode.ts";
-import { apiUrl, makeHeaders, toTarget } from "@/src/lib/api/client.ts";
+import { apiUrl, requestHeaders, toTarget } from "@/src/lib/api/client.ts";
 import type { PluginSidebarSection } from "@/src/lib/api/plugins.ts";
+import { queryClient } from "@/src/lib/query-client.ts";
 
 export function sectionSourceRequest(
 	section: PluginSidebarSection
@@ -37,7 +38,7 @@ export interface SidebarSectionSourceData {
 	total: number | null;
 }
 
-function queryForSection(
+export function sidebarSectionQueryOptions(
 	section: PluginSidebarSection,
 	target: ReturnType<typeof toTarget>
 ) {
@@ -51,17 +52,19 @@ function queryForSection(
 			"contributed-section-source",
 			target.url,
 			target.token,
+			target.userJwt ?? null,
 			sourceRequest?.path ?? "",
 			sourceRequest?.method ?? "",
 		],
 		retry: false,
-		queryFn: async () => {
+		queryFn: async ({ signal }: { signal: AbortSignal }) => {
 			if (!sourceRequest) {
 				return null;
 			}
 			const response = await fetch(apiUrl(target, sourceRequest.path), {
 				method: sourceRequest.method,
-				headers: makeHeaders(target.token, target.userJwt),
+				signal,
+				headers: await requestHeaders(target),
 			});
 			return response.ok ? ((await response.json()) as unknown) : null;
 		},
@@ -75,9 +78,14 @@ export function useSidebarSectionSources(
 ): SidebarSectionSourceData[] {
 	const node = useActiveNode();
 	const target = toTarget(node);
-	const results = useQueries({
-		queries: sections.map((section) => queryForSection(section, target)),
-	});
+	const results = useQueries(
+		{
+			queries: sections.map((section) =>
+				sidebarSectionQueryOptions(section, target)
+			),
+		},
+		queryClient
+	);
 
 	return useMemo(
 		() =>

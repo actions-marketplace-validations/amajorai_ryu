@@ -68,13 +68,13 @@ const CHECK_LABELS: Record<CheckKind, string> = {
 
 function statusColor(status?: CheckStatus | null): string {
 	if (status === "ok") {
-		return "bg-emerald-500";
+		return "bg-success";
 	}
 	if (status === "triggered") {
-		return "bg-amber-500";
+		return "bg-warning";
 	}
 	if (status === "error") {
-		return "bg-red-500";
+		return "bg-destructive";
 	}
 	return "bg-muted-foreground/40";
 }
@@ -560,7 +560,7 @@ function MonitorDetail({
 		<div className="mx-auto max-w-2xl space-y-5">
 			<div className="flex items-start justify-between">
 				<div>
-					<h1 className="font-semibold text-lg">{monitor.name}</h1>
+					<h1 className="font-medium text-lg">{monitor.name}</h1>
 					<a
 						className="text-muted-foreground text-sm hover:underline"
 						href={monitor.url}
@@ -578,9 +578,14 @@ function MonitorDetail({
 					<Button onClick={onEdit} size="sm" variant="outline">
 						Edit
 					</Button>
-					<Button onClick={onDelete} size="sm" variant="ghost">
+					<Button
+						aria-label="Delete monitor"
+						onClick={onDelete}
+						size="icon-sm"
+						variant="ghost"
+					>
 						<HugeiconsIcon
-							className="size-4 text-destructive"
+							className="size-4 text-status-destructive"
 							icon={Delete02Icon}
 						/>
 					</Button>
@@ -715,7 +720,7 @@ export function MonitorsView({
 		<div className="flex h-full overflow-hidden">
 			<div className="flex w-64 shrink-0 flex-col border-r">
 				<div className="flex items-center justify-between border-b px-3 py-2">
-					<span className="font-semibold text-sm">Monitors</span>
+					<span className="font-medium text-sm">Monitors</span>
 					<Button onClick={onNew} size="sm" variant="ghost">
 						<HugeiconsIcon className="size-4" icon={Add01Icon} />
 					</Button>
@@ -751,7 +756,7 @@ export function MonitorsView({
 
 			<div className="scroll-fade flex-1 overflow-y-auto p-6">
 				{error ? (
-					<p className="mb-3 text-destructive text-sm">{error}</p>
+					<p className="mb-3 text-sm text-status-destructive">{error}</p>
 				) : null}
 				{editing ? (
 					<MonitorForm

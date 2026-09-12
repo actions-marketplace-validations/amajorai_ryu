@@ -14,10 +14,16 @@
 // Registered the ordinary way: `contributes.settings_tabs[].view` on the Spaces
 // manifest, bound to this component by plugin id in `EntitySettings`.
 
+import { NodeBackupSettings } from "./BackupSettings.tsx";
 import { EditorEmbeddingSettings } from "./EditorEmbeddingSettings.tsx";
 
 export function SpacesSettings() {
-	return <EditorEmbeddingSettings />;
+	return (
+		<div className="grid gap-6">
+			<EditorEmbeddingSettings />
+			<NodeBackupSettings />
+		</div>
+	);
 }
 
 export default SpacesSettings;

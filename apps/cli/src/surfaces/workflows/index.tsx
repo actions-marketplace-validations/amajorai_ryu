@@ -77,27 +77,45 @@ function WorkflowsSurface({ active, paneId }: SurfaceProps) {
 
 	// Guard against a stale list resolve clobbering fresh data after a node switch.
 	const reqRef = useRef(0);
+	const lifetimeRef = useRef(false);
+	const targetRef = useRef(target);
+	targetRef.current = target;
+	const listRef = useRef<AbortController | null>(null);
+	const pollRef = useRef<AbortController | null>(null);
+	const runEpoch = useRef(0);
+	const runTarget = useRef(target);
+	const listTarget = useRef<typeof target | null>(null);
 
 	const loadWorkflows = useCallback(() => {
+		if (!lifetimeRef.current || targetRef.current !== target) {
+			return;
+		}
+		listRef.current?.abort();
+		const controller = new AbortController();
+		listRef.current = controller;
 		const reqId = ++reqRef.current;
 		setLoading(true);
-		fetchWorkflows(target)
+		fetchWorkflows(target, controller.signal)
 			.then((next) => {
-				if (reqRef.current !== reqId) {
+				if (controller.signal.aborted || reqRef.current !== reqId) {
 					return;
 				}
+				listTarget.current = target;
 				setWorkflows(next);
 				setIndex((i) => (next.length === 0 ? 0 : Math.min(i, next.length - 1)));
 				setLoaded(true);
 			})
 			.catch(() => {
 				// Core not running or no workflows - leave the list as-is.
-				if (reqRef.current === reqId) {
+				if (!controller.signal.aborted && reqRef.current === reqId) {
 					setLoaded(true);
 				}
 			})
 			.finally(() => {
-				if (reqRef.current === reqId) {
+				if (listRef.current === controller) {
+					listRef.current = null;
+				}
+				if (!controller.signal.aborted && reqRef.current === reqId) {
 					setLoading(false);
 				}
 			});
@@ -105,30 +123,60 @@ function WorkflowsSurface({ active, paneId }: SurfaceProps) {
 
 	// Lazy first load on activation; reload on node switch (target identity changes).
 	useEffect(() => {
-		if (active) {
-			loadWorkflows();
+		if (!active) {
+			return;
 		}
-	}, [active, loadWorkflows]);
+		if (listTarget.current !== target) {
+			setWorkflows([]);
+			setLoaded(false);
+			setIndex(0);
+		}
+		lifetimeRef.current = true;
+		loadWorkflows();
+		return () => {
+			lifetimeRef.current = false;
+			reqRef.current++;
+			runEpoch.current++;
+			listRef.current?.abort();
+			pollRef.current?.abort();
+		};
+	}, [active, loadWorkflows, target]);
 
-	const selected = workflows[index];
+	const selected = listTarget.current === target ? workflows[index] : undefined;
 
 	const clearRun = useCallback(() => {
+		runEpoch.current++;
+		pollRef.current?.abort();
 		setConfirmPending(false);
 		setRun(null);
 		setRunError(null);
 		setRunLoading(false);
 	}, []);
 
+	useEffect(() => {
+		clearRun();
+	}, [target, clearRun]);
+
 	const triggerRun = useCallback(() => {
 		const wf = selected;
 		if (!wf) {
 			return;
 		}
+		const epoch = ++runEpoch.current;
+		runTarget.current = target;
+		pollRef.current?.abort();
 		setRun(null);
 		setRunError(null);
 		setRunLoading(true);
 		runWorkflow(target, wf.id, {})
 			.then((next: WorkflowRun) => {
+				if (
+					!lifetimeRef.current ||
+					targetRef.current !== target ||
+					epoch !== runEpoch.current
+				) {
+					return;
+				}
 				setRun({
 					runId: next.runId,
 					status: next.status,
@@ -137,6 +185,13 @@ function WorkflowsSurface({ active, paneId }: SurfaceProps) {
 				setRunLoading(false);
 			})
 			.catch((err: unknown) => {
+				if (
+					!lifetimeRef.current ||
+					targetRef.current !== target ||
+					epoch !== runEpoch.current
+				) {
+					return;
+				}
 				setRunError(errText(err));
 				setRunLoading(false);
 				notify(`workflow run failed: ${errText(err)}`, "error");
@@ -146,14 +201,33 @@ function WorkflowsSurface({ active, paneId }: SurfaceProps) {
 	// Poll the active run while it is still progressing. Keyed on the run id +
 	// status (primitives) so a poll that leaves the status unchanged does not
 	// resubscribe the interval.
-	const activeRunId = run && run.status === "running" ? run.runId : null;
+	const activeRunId =
+		run && runTarget.current === target && run.status === "running"
+			? run.runId
+			: null;
 	useEffect(() => {
 		if (!active || activeRunId === null) {
 			return;
 		}
+		const epoch = runEpoch.current;
+		let disposed = false;
+		let inFlight: AbortController | null = null;
 		const timer = setInterval(() => {
-			getWorkflowRun(target, activeRunId)
+			if (disposed || inFlight || epoch !== runEpoch.current) {
+				return;
+			}
+			const controller = new AbortController();
+			inFlight = controller;
+			pollRef.current = controller;
+			getWorkflowRun(target, activeRunId, controller.signal)
 				.then((next) => {
+					if (
+						disposed ||
+						controller.signal.aborted ||
+						epoch !== runEpoch.current
+					) {
+						return;
+					}
 					setRun({
 						runId: next.runId,
 						status: next.status,
@@ -161,10 +235,27 @@ function WorkflowsSurface({ active, paneId }: SurfaceProps) {
 					});
 				})
 				.catch((err: unknown) => {
-					setRunError(errText(err));
+					if (
+						!(disposed || controller.signal.aborted) &&
+						epoch === runEpoch.current
+					) {
+						setRunError(errText(err));
+					}
+				})
+				.finally(() => {
+					if (inFlight === controller) {
+						inFlight = null;
+					}
+					if (pollRef.current === controller) {
+						pollRef.current = null;
+					}
 				});
 		}, POLL_INTERVAL_MS);
-		return () => clearInterval(timer);
+		return () => {
+			disposed = true;
+			clearInterval(timer);
+			inFlight?.abort();
+		};
 	}, [active, activeRunId, target]);
 
 	const handleKey = (key: KeyEvent) => {

@@ -132,7 +132,9 @@ export function ListingHero({
 	iconId,
 	iconName,
 	iconPadding,
+	iconAppearance,
 	iconUrl,
+	iconUrlDark,
 	seedId,
 	banner,
 	dither,
@@ -212,8 +214,10 @@ export function ListingHero({
 	iconName?: string | null;
 	/** The listing's declared inset for its logo (manifest `iconPadding`). */
 	iconPadding?: string | null;
+	iconAppearance?: "bare" | "monochrome";
 	/** Raster logo URL — the manifest's `iconUrl`, straight through. */
 	iconUrl?: string | null;
+	iconUrlDark?: string | null;
 	/** Stable seed for the generative tile: ALWAYS the item's unique id, so the
 	 *  hero and the card tile the same app identically. */
 	seedId?: string | null;
@@ -260,10 +264,12 @@ export function ListingHero({
 					className="size-16 sm:size-20"
 					dither={dither}
 					fallback={icon}
+					iconAppearance={iconAppearance}
 					iconBackground={iconBackground}
 					iconId={iconId}
 					iconPadding={iconPadding}
 					iconUrl={iconUrl}
+					iconUrlDark={iconUrlDark}
 					name={iconName}
 					seedId={seedId}
 					size={34}
@@ -278,7 +284,7 @@ export function ListingHero({
 					    The CTA cluster shares this line and is `shrink-0`, so a long name
 					    truncates and the button the dialog exists for never does. */}
 					<div className="flex min-w-0 items-center gap-3">
-						<h2 className="flex min-w-0 flex-1 items-center gap-2 font-semibold text-white text-xl drop-shadow-md sm:text-2xl">
+						<h2 className="flex min-w-0 flex-1 items-center gap-2 font-medium text-white text-xl drop-shadow-md sm:text-2xl">
 							<span className="truncate">{name}</span>
 							{nameBadge}
 						</h2>
@@ -361,7 +367,7 @@ export function ListingStatStrip({ items }: { items: ListingStat[] }) {
 							    min-content width, so `truncate` on the row clipped nothing
 							    and a long value ("Desktop, Island, Mobile") ran straight past
 							    the dialog edge. */}
-							<span className="flex w-full min-w-0 items-center justify-center gap-1 font-semibold text-foreground text-sm">
+							<span className="flex w-full min-w-0 items-center justify-center gap-1 font-medium text-foreground text-sm">
 								{stat.icon ? (
 									<HugeiconsIcon
 										className="size-3.5 shrink-0"

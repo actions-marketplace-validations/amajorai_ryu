@@ -11,6 +11,14 @@ import {
 	buildAgentIntegrationSnippet,
 	buildGitHubActionsSnippet,
 } from "@ryu/blocks/desktop/agent-integration-snippets";
+import {
+	ScorecardBadge,
+	ScorecardPanel,
+} from "@ryu/marketplace/catalog/detail/scorecard-panel";
+import {
+	type AgentHealthInput,
+	runAgentScorecard,
+} from "@ryu/marketplace/catalog/scorecard";
 import { Badge } from "@ryu/ui/components/badge.tsx";
 import { Button } from "@ryu/ui/components/button.tsx";
 import { Checkbox } from "@ryu/ui/components/checkbox.tsx";
@@ -33,6 +41,8 @@ import { AgentEvalsView } from "@/src/components/agents/AgentEvalsView.tsx";
 import { AgentExecutionPolicyPanel } from "@/src/components/agents/AgentExecutionPolicyPanel.tsx";
 import { AgentImageField } from "@/src/components/agents/AgentImageField.tsx";
 import { AgentLanyardCard } from "@/src/components/agents/AgentLanyardCard.tsx";
+import { AgentPassportPanel } from "@/src/components/agents/AgentPassportPanel.tsx";
+import { AgentRoutinesPanel } from "@/src/components/agents/AgentRoutinesPanel.tsx";
 import { AgentRunHistoryView } from "@/src/components/agents/AgentRunHistoryView.tsx";
 import { AgentSetupComposer } from "@/src/components/agents/AgentSetupComposer.tsx";
 import { AgentSmartRouteOverride } from "@/src/components/agents/AgentSmartRouteOverride.tsx";
@@ -51,7 +61,7 @@ import {
 	SettingsSection,
 } from "@/src/components/settings/shared/settings-items.tsx";
 import { useEntitlementContext } from "@/src/contexts/entitlement-context.tsx";
-import { useTabsContext } from "@/src/contexts/TabsContext.tsx";
+import { useTabSelector } from "@/src/contexts/TabsContext.tsx";
 import { useTitleBar } from "@/src/contexts/TitleBarContext.tsx";
 import { useActiveNode } from "@/src/hooks/useActiveNode.ts";
 import { useAgents } from "@/src/hooks/useAgents.ts";
@@ -92,6 +102,7 @@ import {
 	fetchAgentTools,
 	updateAgentPosture,
 } from "@/src/lib/api/agents.ts";
+import { runCatalogScan } from "@/src/lib/api/catalog-scan.ts";
 import type { ApiTarget } from "@/src/lib/api/client.ts";
 import {
 	deleteTriggerSubscription,
@@ -387,6 +398,16 @@ function saveBlockedMessage(
 	return null;
 }
 
+// This is an advisory signal for the local scorecard, not an authorization
+// check. Core and Gateway remain the authorities that classify and enforce tool
+// effects; the editor only helps a person notice a broad or write-capable setup.
+const HIGH_IMPACT_TOOL_RE =
+	/(?:^|[._:-])(write|delete|remove|update|create|send|publish|execute|exec|run|post|patch|put)(?:$|[._:-])/i;
+
+function isHighImpactTool(toolName: string): boolean {
+	return HIGH_IMPACT_TOOL_RE.test(toolName);
+}
+
 // biome-ignore lint/complexity/noExcessiveCognitiveComplexity: legacy component
 export default function AgentEditPage({
 	agentIdProp,
@@ -398,7 +419,7 @@ export default function AgentEditPage({
 	const { agentId: routeAgentId } = useParams<{ agentId: string }>();
 	const agentId = agentIdProp ?? routeAgentId;
 	const navigate = useNavigate();
-	const { openTab } = useTabsContext();
+	const openTab = useTabSelector((state) => state.openTab);
 	const openAgentsCatalog = useCallback(() => {
 		openTab("/store/agents", { title: "Customize" });
 	}, [openTab]);
@@ -602,7 +623,7 @@ export default function AgentEditPage({
 
 	// ── Memory / Spaces slot state ───────────────────────────────────────────────
 	// `memorySpaceIds`: Space ids the agent may read (empty = none injected).
-	// `memoryReadLevels`: recallable memory levels (empty = all three levels).
+	// `memoryReadLevels`: recallable memory levels (empty = all personal levels).
 	// `memoryWriteEnabled`: may the agent record new memories.
 	const [availableSpaces, setAvailableSpaces] = useState<
 		{ id: string; name: string }[]
@@ -882,7 +903,7 @@ export default function AgentEditPage({
 			setSelectedComposio(new Set(existing.composioActions ?? []));
 			setSelectedIdentities(new Set(existing.identityProfileIds ?? []));
 			// Memory / Spaces slot round-trips from the record. Empty read_levels
-			// stays empty here (the "all three levels" default is applied by Core).
+			// stays empty here (the "all personal levels" default is applied by Core).
 			setMemorySpaceIds(new Set(existing.memory?.space_ids ?? []));
 			setMemoryReadLevels(new Set(existing.memory?.read_levels ?? []));
 			setMemoryWriteEnabled(existing.memory?.write_enabled ?? false);
@@ -994,7 +1015,7 @@ export default function AgentEditPage({
 		});
 	};
 
-	// ── Toggle a memory access level (user/node/project) ─────────────────────────
+	// ── Toggle a memory access level (agent/user/node/project/org) ───────────────
 	const toggleMemoryReadLevel = (level: string) => {
 		setMemoryReadLevels((prev) => {
 			const next = new Set(prev);
@@ -1085,7 +1106,7 @@ export default function AgentEditPage({
 			orchestrator,
 			canCreateAgents,
 			safetyProfile,
-			// Memory / Spaces slot. Empty read_levels means "all three levels"
+			// Memory / Spaces slot. Empty read_levels means "all personal levels"
 			// (Core's back-compat default), so we send the raw selection as-is.
 			memory: {
 				space_ids: Array.from(memorySpaceIds),
@@ -1385,7 +1406,7 @@ export default function AgentEditPage({
 	const titleBarTitle = useMemo(
 		() => (
 			<span className="flex min-w-0 items-center gap-2">
-				<span className="truncate font-semibold">
+				<span className="truncate font-medium">
 					{isNew ? "New agent" : name.trim() || "Edit agent"}
 				</span>
 				<Badge
@@ -1456,6 +1477,97 @@ export default function AgentEditPage({
 		weeklyTime
 	);
 	const selectedToolsList = Array.from(selectedTools);
+	const enabledSkillCount = availableSkills.filter(
+		(skill) => skill.enabled
+	).length;
+	const runtimeStatus: AgentHealthInput["runtime"]["status"] = chatModel
+		? selectedUninstalledAgent
+			? "unavailable"
+			: chatModel === ACP_CUSTOM_ENGINE
+				? acpCommand.trim()
+					? "custom"
+					: "missing"
+				: "ready"
+		: "missing";
+	const agentHealthInput = useMemo<AgentHealthInput>(
+		() => ({
+			access: {
+				composioActionCount: selectedComposio.size,
+				highImpactCount:
+					selectedToolsList.filter(isHighImpactTool).length +
+					selectedComposio.size +
+					selectedIdentities.size +
+					(memoryWriteEnabled ? 1 : 0),
+				identityProfileCount: selectedIdentities.size,
+			},
+			automation: {
+				scheduleEnabled,
+				triggerCount: triggerSubs.length,
+			},
+			description,
+			instructions: systemPrompt,
+			lifecycleStatus,
+			memoryWriteEnabled,
+			model: {
+				configured: Boolean(agentModel.trim()),
+				required: chatModel !== ACP_CUSTOM_ENGINE,
+			},
+			name,
+			runtime: {
+				label: modelLabel,
+				status: runtimeStatus,
+			},
+			safetyProfile,
+			skills: {
+				allSelected:
+					enabledSkillCount > 0 &&
+					selectedSkills.size === enabledSkillCount &&
+					availableSkills
+						.filter((skill) => skill.enabled)
+						.every((skill) => selectedSkills.has(skill.id)),
+				availableCount: enabledSkillCount,
+				loaded: !skillsLoading,
+				selectedCount: selectedSkills.size,
+			},
+			tools: {
+				allSelected:
+					availableTools.length > 0 &&
+					selectedTools.size === availableTools.length &&
+					availableTools.every((tool) => selectedTools.has(tool)),
+				availableCount: availableTools.length,
+				loaded: !toolsLoading,
+				selectedCount: selectedTools.size,
+			},
+		}),
+		[
+			agentModel,
+			availableSkills,
+			availableTools,
+			chatModel,
+			description,
+			enabledSkillCount,
+			lifecycleStatus,
+			memoryWriteEnabled,
+			modelLabel,
+			name,
+			runtimeStatus,
+			safetyProfile,
+			selectedComposio,
+			selectedIdentities,
+			selectedSkills,
+			selectedTools,
+			selectedToolsList,
+			scheduleEnabled,
+			skillsLoading,
+			systemPrompt,
+			toolsLoading,
+			triggerSubs.length,
+		]
+	);
+	const agentHealthScorecard = useMemo(
+		() => runAgentScorecard(agentHealthInput),
+		[agentHealthInput]
+	);
 
 	// Save stays disabled until an engine exists to run the agent. Explain the
 	// dead end on-screen instead of leaving the button silently greyed out.
@@ -1492,13 +1604,13 @@ export default function AgentEditPage({
 							variant="ghost"
 						>
 							<HugeiconsIcon className="size-4" icon={Rocket01Icon} />
-							Publish to marketplace
+							Publish agent template
 						</Button>
 					</div>
 				) : null}
 				{canPublish ? (
 					<PublishDialog
-						kindLabel="agent"
+						kindLabel="Agent Template"
 						onOpenChange={setPublishOpen}
 						open={publishOpen}
 					/>
@@ -1633,6 +1745,36 @@ export default function AgentEditPage({
 							</div>
 						) : null
 					}
+					healthBadge={<ScorecardBadge scorecard={agentHealthScorecard} />}
+					healthPanel={
+						<ScorecardPanel
+							agentScan={() =>
+								runCatalogScan(target, {
+									kind: "agent",
+									id: agentId || "draft",
+									name: name.trim() || "Untitled agent",
+									description,
+									metadata: { configuration: agentHealthInput },
+									scorecard: agentHealthScorecard,
+								})
+							}
+							dataTestId="agent-health-scorecard"
+							disclaimer={
+								<p className="text-muted-foreground text-xs leading-relaxed">
+									These checks update as you edit the agent. They inspect its
+									configuration only; they do not run the agent or replace Core
+									and Gateway authorization.
+								</p>
+							}
+							key={JSON.stringify([target.url, agentId, agentHealthInput])}
+							onOpenConversation={(conversationId) =>
+								openTab("/chat", { conversationId })
+							}
+							rulesetLabel="Agent ruleset"
+							scorecard={agentHealthScorecard}
+							title="Agent health"
+						/>
+					}
 					historyPanel={
 						isNew || !agentId ? null : <AgentRunHistoryView agentId={agentId} />
 					}
@@ -1711,6 +1853,15 @@ export default function AgentEditPage({
 					onTriggerSlugChange={setTriggerSlug}
 					onWeeklyDayChange={setWeeklyDay}
 					onWeeklyTimeChange={setWeeklyTime}
+					passportPanel={
+						isNew || !effectiveAgentId || !existing ? null : (
+							<AgentPassportPanel
+								agent={existing}
+								organizationId={activeNode.orgId ?? null}
+								target={target}
+							/>
+						)
+					}
 					personaDisplayName={personaDisplayName}
 					personalityProfile={personalityProfileId}
 					personalityProfiles={personalityProfileOptions}
@@ -1728,6 +1879,11 @@ export default function AgentEditPage({
 								value={systemPrompt}
 								version={existing?.version ?? "1.0.0"}
 							/>
+						)
+					}
+					routinesPanel={
+						isNew || !agentId ? null : (
+							<AgentRoutinesPanel agentId={agentId} disabled={isLocked} />
 						)
 					}
 					rules={rules}

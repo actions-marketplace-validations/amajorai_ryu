@@ -19,8 +19,10 @@
 //!
 //! The generic media proxy/gateway-forward helpers ([`proxy`],
 //! [`forward_to_gateway`], [`cloud_provider`], [`media_client`]) are `pub` so the
-//! sibling *video* data path (which stays in Core, out of this crate's image
-//! scope) reuses the same routing mechanics rather than duplicating them.
+//! sibling video data path reuses the same routing mechanics and the native
+//! async-job adapter in [`video`] rather than duplicating them.
+
+pub mod video;
 
 use std::future::Future;
 use std::pin::Pin;
@@ -55,9 +57,25 @@ pub trait ImageHost: Send + Sync {
 
 /// Cloud media providers routed through the Gateway (governed, metered) rather
 /// than the local stable-diffusion.cpp engine. A request selects one via a
-/// `"provider"` field in the body; anything else (or absent) uses the local
-/// engine, so the default local path is unchanged.
+/// `"provider"` field in the body. Absent or recognized local provider IDs use
+/// the local engine; dispatch rejects unsupported explicit IDs.
 pub const CLOUD_PROVIDERS: [&str; 3] = ["openrouter", "replicate", "fal"];
+
+/// Reject an explicit unknown provider instead of silently routing it locally.
+pub fn validate_media_provider(body: &Value) -> Result<(), &'static str> {
+    let provider = match body.get("provider") {
+        None | Some(Value::Null) => return Ok(()),
+        Some(Value::String(value)) => value.trim().to_lowercase(),
+        _ => return Err("media provider must be a string"),
+    };
+    if provider.is_empty()
+        || ["local", "sdcpp", "sd-server", "stable-diffusion.cpp"].contains(&provider.as_str())
+        || CLOUD_PROVIDERS.contains(&provider.as_str())
+    {
+        return Ok(());
+    }
+    Err("unsupported media provider; choose local, sdcpp, openrouter, replicate, or fal")
+}
 
 /// Returns the normalized cloud provider id when the body selects one, else
 /// `None` (⇒ the local sd-server path).
@@ -78,6 +96,18 @@ pub fn media_client() -> reqwest::Client {
         .expect("reqwest client")
 }
 
+fn take_request_id(body: &mut Value) -> Option<String> {
+    body.as_object_mut()
+        .and_then(|object| object.remove("request_id"))
+        .and_then(|value| value.as_str().map(str::to_owned))
+}
+
+fn take_project_id(body: &mut Value) -> Option<String> {
+    body.as_object_mut()
+        .and_then(|object| object.remove("project_id"))
+        .and_then(|value| value.as_str().map(str::to_owned))
+}
+
 /// Forward a media request to the Gateway, routing to `provider` via the
 /// per-request slot header for `modality` (image/video). The Gateway runs the
 /// full firewall/budget/metering pipeline and returns a normalized body.
@@ -86,16 +116,24 @@ pub async fn forward_to_gateway(
     modality: &str,
     endpoint: &str,
     provider: &str,
-    body: Value,
+    mut body: Value,
 ) -> MediaResponse {
     let base = host.gateway_url();
     let url = format!("{}{endpoint}", base.trim_end_matches('/'));
     let slot_header = format!("x-ryu-slot-{modality}-provider");
 
+    let request_id = take_request_id(&mut body);
+    let project_id = take_project_id(&mut body);
     let mut req = media_client()
         .post(&url)
         .header(slot_header, provider)
         .json(&body);
+    if let Some(request_id) = request_id {
+        req = req.header("x-ryu-request-id", request_id);
+    }
+    if let Some(project_id) = project_id {
+        req = req.header("x-ryu-project-id", project_id);
+    }
     if let Some(t) = host.gateway_token() {
         req = req.bearer_auth(t);
     }
@@ -165,6 +203,9 @@ pub async fn proxy(base_url: &str, endpoint: &str, body: Value) -> MediaResponse
 /// This is the reusable image-gen entry; Core's `POST /api/images/generate`
 /// handler is a thin wrapper over it, injecting [`ImageHost`].
 pub async fn generate(host: &impl ImageHost, mut body: Value) -> MediaResponse {
+    if let Err(error) = validate_media_provider(&body) {
+        return (400, json!({"error": error}));
+    }
     if body
         .get("prompt")
         .and_then(Value::as_str)
@@ -196,6 +237,7 @@ pub async fn generate(host: &impl ImageHost, mut body: Value) -> MediaResponse {
     if let Err(e) = host.start_local_engine().await {
         tracing::debug!("sdcpp lazy start skipped: {e:#}");
     }
+    take_request_id(&mut body);
     proxy(&host.sd_base_url(), "/v1/images/generations", body).await
 }
 
@@ -274,6 +316,53 @@ mod tests {
     fn cloud_provider_rejects_unknown_or_absent() {
         assert_eq!(cloud_provider(&json!({ "provider": "midjourney" })), None);
         assert_eq!(cloud_provider(&json!({ "prompt": "a cat" })), None);
+    }
+
+    #[test]
+    fn request_id_is_removed_from_media_body_and_returned_for_gateway_headers() {
+        let mut body = json!({
+            "prompt": "a cat",
+            "request_id": "generation-42"
+        });
+        assert_eq!(take_request_id(&mut body).as_deref(), Some("generation-42"));
+        assert!(body.get("request_id").is_none());
+    }
+
+    #[tokio::test]
+    async fn explicit_unknown_provider_is_not_routed_to_local_generation() {
+        let (code, body) = generate(
+            &FakeHost,
+            json!({"prompt":"a bicycle","provider":"unknown-vendor"}),
+        )
+        .await;
+        assert_eq!(code, 400);
+        assert!(body["error"]
+            .as_str()
+            .unwrap()
+            .contains("unsupported media provider"));
+        assert!(validate_media_provider(&json!({"provider":42})).is_err());
+        for provider in [
+            "",
+            "local",
+            "sdcpp",
+            "sd-server",
+            "stable-diffusion.cpp",
+            " Fal ",
+            "replicate",
+            "openrouter",
+        ] {
+            assert!(validate_media_provider(&json!({"provider":provider})).is_ok());
+        }
+    }
+
+    #[test]
+    fn project_id_is_removed_from_media_body_for_gateway_headers() {
+        let mut body = json!({
+            "prompt": "a test",
+            "project_id": "project-42"
+        });
+        assert_eq!(take_project_id(&mut body).as_deref(), Some("project-42"));
+        assert!(body.get("project_id").is_none());
     }
 
     #[tokio::test]

@@ -1,8 +1,15 @@
 "use client";
 
 import type React from "react";
-import { useCallback, useEffect, useId, useRef, useState } from "react";
-
+import {
+	lazy,
+	Suspense,
+	useCallback,
+	useEffect,
+	useId,
+	useRef,
+	useState,
+} from "react";
 import { cn } from "../lib/utils.ts";
 import {
 	blendExpressiveFrames,
@@ -16,23 +23,29 @@ import {
 	expressiveAnimationPreviewTime,
 	sampleExpressiveAnimation,
 } from "./expressive-animation.ts";
+import { LOGO_DEFAULT_COLORS, type LogoColors } from "./logo-colors.ts";
+
+const Logo3D = lazy(() => import("./logo-3d.tsx"));
 
 interface LogoProps {
 	/** Disable gaze, blinking, and random expression changes. */
 	animated?: boolean;
-	/** Expressive ghost animation. Random follows the full reference-style cycle. */
+	/** Expressive ghost animation, or random for the full reference-style cycle. */
 	animation?: ExpressiveAnimationSelection;
 	animationDuration?: number;
+	/** Material treatment for the 3D body. */
+	bodyStyle?: "solid" | "orb";
 	className?: string;
-	colors?: {
-		bg?: string;
-		c1?: string;
-		c2?: string;
-		c3?: string;
-	};
+	colors?: LogoColors;
+	/** Named expressive face, or random for a changing face. */
 	expression?: ExpressiveExpressionSelection;
+	/** Scale the expressive ghost's eyes without changing its body size. */
+	eyeScale?: number;
+	/** Hide the default variant's eyes when another face is layered over its fill. */
+	showEyes?: boolean;
 	size?: string;
 	variant?:
+		| "3d"
 		| "default"
 		| "filled"
 		| "outline"
@@ -40,7 +53,8 @@ interface LogoProps {
 		| "shimmer"
 		| "eyes"
 		| "expressive"
-		| "outline-static";
+		| "outline-static"
+		| "outline-muted";
 }
 
 // Corner-mask radius for the default variant's dotted overlay, widening with the
@@ -233,17 +247,20 @@ const OutlineStatic: React.FC<Pick<LogoProps, "size" | "className">> = ({
 
 interface ExpressiveDecorationLayerProps {
 	decorations: readonly ExpressiveAnimationDecoration[];
+	outlineOnly: boolean;
 	scaleFactor: number;
 }
 
 const ExpressiveDecorationLayer: React.FC<ExpressiveDecorationLayerProps> = ({
 	decorations,
+	outlineOnly,
 	scaleFactor,
 }) => (
 	<g>
 		{decorations.map((decoration, index) => {
-			const color =
-				"color" in decoration
+			const color = outlineOnly
+				? "currentColor"
+				: "color" in decoration
 					? (decoration.color ?? "currentColor")
 					: "currentColor";
 			const key = `${decoration.kind}-${index}`;
@@ -253,10 +270,13 @@ const ExpressiveDecorationLayer: React.FC<ExpressiveDecorationLayerProps> = ({
 						<circle
 							cx={decoration.x * scaleFactor}
 							cy={decoration.y * scaleFactor}
-							fill={color}
+							fill={outlineOnly ? "none" : color}
 							key={key}
 							opacity={decoration.opacity}
 							r={decoration.r * scaleFactor}
+							stroke={outlineOnly ? "currentColor" : undefined}
+							strokeWidth={outlineOnly ? 1 : undefined}
+							vectorEffect={outlineOnly ? "non-scaling-stroke" : undefined}
 						/>
 					);
 				case "ring":
@@ -272,8 +292,9 @@ const ExpressiveDecorationLayer: React.FC<ExpressiveDecorationLayerProps> = ({
 							stroke={color}
 							strokeDasharray={decoration.dash}
 							strokeLinecap="round"
-							strokeWidth={Math.max(0.7, 0.08 * scaleFactor)}
+							strokeWidth={outlineOnly ? 1 : Math.max(0.7, 0.08 * scaleFactor)}
 							transform={`rotate(${decoration.rotate} ${decoration.cx * scaleFactor} ${decoration.cy * scaleFactor})`}
+							vectorEffect={outlineOnly ? "non-scaling-stroke" : undefined}
 						/>
 					);
 				case "ray":
@@ -283,7 +304,8 @@ const ExpressiveDecorationLayer: React.FC<ExpressiveDecorationLayerProps> = ({
 							opacity={decoration.opacity}
 							stroke={color}
 							strokeLinecap="round"
-							strokeWidth={Math.max(0.8, 0.11 * scaleFactor)}
+							strokeWidth={outlineOnly ? 1 : Math.max(0.8, 0.11 * scaleFactor)}
+							vectorEffect={outlineOnly ? "non-scaling-stroke" : undefined}
 							x1={decoration.x1 * scaleFactor}
 							x2={decoration.x2 * scaleFactor}
 							y1={decoration.y1 * scaleFactor}
@@ -295,12 +317,13 @@ const ExpressiveDecorationLayer: React.FC<ExpressiveDecorationLayerProps> = ({
 						<circle
 							cx={decoration.x * scaleFactor}
 							cy={decoration.y * scaleFactor}
-							fill={color}
+							fill={outlineOnly ? "none" : color}
 							key={key}
 							opacity={decoration.opacity}
 							r={decoration.r * scaleFactor}
 							stroke="currentColor"
-							strokeWidth={Math.max(0.6, 0.08 * scaleFactor)}
+							strokeWidth={outlineOnly ? 1 : Math.max(0.6, 0.08 * scaleFactor)}
+							vectorEffect={outlineOnly ? "non-scaling-stroke" : undefined}
 						/>
 					);
 				case "exclamation":
@@ -311,14 +334,24 @@ const ExpressiveDecorationLayer: React.FC<ExpressiveDecorationLayerProps> = ({
 							transform={`translate(${decoration.x * scaleFactor} ${decoration.y * scaleFactor}) rotate(${decoration.rotate}) scale(${decoration.scale * scaleFactor})`}
 						>
 							<rect
-								fill="currentColor"
+								fill={outlineOnly ? "none" : "currentColor"}
 								height="3.7"
 								rx="0.42"
+								stroke={outlineOnly ? "currentColor" : undefined}
+								strokeWidth={outlineOnly ? 1 : undefined}
+								vectorEffect={outlineOnly ? "non-scaling-stroke" : undefined}
 								width="0.84"
 								x="-0.42"
 								y="-2.6"
 							/>
-							<circle cy="2.2" fill="currentColor" r="0.52" />
+							<circle
+								cy="2.2"
+								fill={outlineOnly ? "none" : "currentColor"}
+								r="0.52"
+								stroke={outlineOnly ? "currentColor" : undefined}
+								strokeWidth={outlineOnly ? 1 : undefined}
+								vectorEffect={outlineOnly ? "non-scaling-stroke" : undefined}
+							/>
 						</g>
 					);
 				case "comet":
@@ -333,19 +366,31 @@ const ExpressiveDecorationLayer: React.FC<ExpressiveDecorationLayerProps> = ({
 								fill="none"
 								stroke={color}
 								strokeLinecap="round"
-								strokeWidth="0.42"
+								strokeWidth={outlineOnly ? 1 : 0.42}
+								vectorEffect={outlineOnly ? "non-scaling-stroke" : undefined}
 							/>
-							<circle cx="0" cy="0" fill={color} r="0.62" />
+							<circle
+								cx="0"
+								cy="0"
+								fill={outlineOnly ? "none" : color}
+								r="0.62"
+								stroke={outlineOnly ? "currentColor" : undefined}
+								strokeWidth={outlineOnly ? 1 : undefined}
+								vectorEffect={outlineOnly ? "non-scaling-stroke" : undefined}
+							/>
 						</g>
 					);
 				case "play":
 					return (
 						<polygon
-							fill="currentColor"
+							fill={outlineOnly ? "none" : "currentColor"}
 							key={key}
 							opacity={decoration.opacity}
 							points="-1.6,-2.1 2.1,0 -1.6,2.1"
+							stroke={outlineOnly ? "currentColor" : undefined}
+							strokeWidth={outlineOnly ? 1 : undefined}
 							transform={`translate(${decoration.x * scaleFactor} ${decoration.y * scaleFactor}) rotate(${decoration.rotate}) scale(${decoration.scale * scaleFactor})`}
+							vectorEffect={outlineOnly ? "non-scaling-stroke" : undefined}
 						/>
 					);
 			}
@@ -356,12 +401,15 @@ const ExpressiveDecorationLayer: React.FC<ExpressiveDecorationLayerProps> = ({
 interface ExpressiveVariantProps {
 	animated: boolean;
 	animation: ExpressiveAnimationSelection;
+	bodyStrokeWidth: number;
 	className?: string;
 	expression: ExpressiveExpressionSelection;
 	eyePosition: { x: number; y: number };
+	eyeScale: number;
 	ghostPathD: string;
 	isBlinking: boolean;
 	orbRef: React.RefObject<HTMLDivElement | null>;
+	outlineOnly: boolean;
 	size: string;
 	sizeValue: number;
 }
@@ -375,13 +423,16 @@ const ExpressiveVariant: React.FC<ExpressiveVariantProps> = ({
 	animated,
 	animation,
 	className,
+	eyeScale,
 	expression,
 	eyePosition,
 	isBlinking,
 	orbRef,
 	ghostPathD,
+	outlineOnly,
 	size,
 	sizeValue,
+	bodyStrokeWidth,
 }) => {
 	const initialFrame = expressiveFrame(expression);
 	const transitionRef = useRef({
@@ -468,6 +519,7 @@ const ExpressiveVariant: React.FC<ExpressiveVariantProps> = ({
 	);
 	const frame = sampled.eyes;
 	const scaleFactor = sizeValue / 24;
+	const expressiveEyeScale = Math.max(0.1, eyeScale);
 	const centerX = 17 * scaleFactor + frame.gaze.x * scaleFactor;
 	const eyeGap = frame.gap * scaleFactor;
 	const gazePosition = sampled.followGaze ? eyePosition : { x: 0, y: 0 };
@@ -481,11 +533,13 @@ const ExpressiveVariant: React.FC<ExpressiveVariantProps> = ({
 		<div
 			className={cn(
 				"transition-[width,height] duration-300 ease-in-out",
+				outlineOnly && "text-muted-foreground",
 				className
 			)}
 			data-expressive-animation={sampled.animation}
 			data-expressive-animation-progress={sampled.progress.toFixed(3)}
 			data-expressive-expression={frame.id}
+			data-expressive-eye-scale={expressiveEyeScale}
 			ref={orbRef}
 			style={{
 				height: size,
@@ -502,6 +556,7 @@ const ExpressiveVariant: React.FC<ExpressiveVariantProps> = ({
 			>
 				<ExpressiveDecorationLayer
 					decorations={sampled.decorations}
+					outlineOnly={outlineOnly}
 					scaleFactor={scaleFactor}
 				/>
 				<g transform={bodyTransform}>
@@ -512,24 +567,75 @@ const ExpressiveVariant: React.FC<ExpressiveVariantProps> = ({
 						stroke="currentColor"
 						strokeLinecap="round"
 						strokeLinejoin="round"
-						strokeWidth="1.5"
+						strokeWidth={bodyStrokeWidth}
 						vectorEffect="non-scaling-stroke"
 					/>
 					<g opacity={sampled.eyeAlpha}>
 						{frame.eyes.map((eye, index) => {
-							const width = Math.max(eye.width * scaleFactor, 0.1);
+							const width = Math.max(
+								eye.width * scaleFactor * expressiveEyeScale,
+								0.1
+							);
 							const height = Math.max(
-								eye.height * scaleFactor * eye.open * openMultiplier,
+								eye.height *
+									scaleFactor *
+									expressiveEyeScale *
+									eye.open *
+									openMultiplier,
 								0.1
 							);
 							const cx = eyeCenters[index] ?? centerX;
+							const key = index === 0 ? "left" : "right";
+							const transform = `translate(${cx + gazePosition.x} ${eyeY}) rotate(${frame.gaze.roll + eye.tilt})`;
+							if (eye.shape === "x") {
+								const crossSize = Math.max(height, 1.4);
+								const crossStrokeWidth = Math.max(
+									Math.min(width * 0.2, 2.2),
+									1.25
+								);
+								return (
+									<g
+										data-expressive-eye-shape={eye.shape}
+										key={key}
+										transform={transform}
+									>
+										<line
+											stroke="currentColor"
+											strokeLinecap="round"
+											strokeWidth={crossStrokeWidth}
+											vectorEffect="non-scaling-stroke"
+											x1={-crossSize / 2}
+											x2={crossSize / 2}
+											y1={-crossSize / 2}
+											y2={crossSize / 2}
+										/>
+										<line
+											stroke="currentColor"
+											strokeLinecap="round"
+											strokeWidth={crossStrokeWidth}
+											vectorEffect="non-scaling-stroke"
+											x1={crossSize / 2}
+											x2={-crossSize / 2}
+											y1={-crossSize / 2}
+											y2={crossSize / 2}
+										/>
+									</g>
+								);
+							}
 							return (
 								<rect
+									data-expressive-eye-shape={eye.shape}
+									fill={outlineOnly ? "none" : "currentColor"}
 									height={height}
-									key={index === 0 ? "left" : "right"}
+									key={key}
 									opacity={sampled.eyeAlpha}
 									rx={Math.min(width, height) / 2}
+									stroke={outlineOnly ? "currentColor" : undefined}
+									strokeLinecap={outlineOnly ? "round" : undefined}
+									strokeLinejoin={outlineOnly ? "round" : undefined}
+									strokeWidth={outlineOnly ? 1 : undefined}
 									transform={`rotate(${frame.gaze.roll + eye.tilt} ${cx} ${eyeY})`}
+									vectorEffect={outlineOnly ? "non-scaling-stroke" : undefined}
 									width={width}
 									x={cx - width / 2 + gazePosition.x}
 									y={eyeY - height / 2}
@@ -543,15 +649,20 @@ const ExpressiveVariant: React.FC<ExpressiveVariantProps> = ({
 	);
 };
 
+const isExpressiveVariant = (variant: LogoProps["variant"]): boolean =>
+	variant === "expressive" || variant === "outline-muted";
+
 const AnimatedLogo: React.FC<LogoProps> = ({
 	variant = "default",
 	size = "192px",
 	className,
 	colors,
+	eyeScale = 1,
 	animationDuration = 20,
 	animation,
 	animated = true,
 	expression,
+	showEyes = true,
 }) => {
 	const [isBlinking, setIsBlinking] = useState(false);
 	const [eyePosition, setEyePosition] = useState({ x: 0, y: 0 });
@@ -572,14 +683,7 @@ const AnimatedLogo: React.FC<LogoProps> = ({
 				: expressionSelection
 	);
 
-	const defaultColors = {
-		bg: "oklch(95% 0.02 264)",
-		c1: "oklch(75% 0.18 300)", // violet-pink
-		c2: "oklch(70% 0.20 264)", // brand purple
-		c3: "oklch(78% 0.15 230)", // blue-purple
-	};
-
-	const finalColors = { ...defaultColors, ...colors };
+	const finalColors = { ...LOGO_DEFAULT_COLORS, ...colors };
 
 	const sizeValue = Number.parseInt(size.replace("px", ""), 10);
 
@@ -655,7 +759,7 @@ const AnimatedLogo: React.FC<LogoProps> = ({
 	}, [sizeValue]);
 
 	useEffect(() => {
-		if (variant !== "expressive") {
+		if (!isExpressiveVariant(variant)) {
 			return;
 		}
 		if (expressionSelection !== "random") {
@@ -667,8 +771,7 @@ const AnimatedLogo: React.FC<LogoProps> = ({
 
 	useEffect(() => {
 		if (
-			variant !== "expressive" ||
-			!animated ||
+			!(isExpressiveVariant(variant) && animated) ||
 			expressionSelection !== "random"
 		) {
 			return;
@@ -692,7 +795,7 @@ const AnimatedLogo: React.FC<LogoProps> = ({
 	}, [animated, expressionSelection, variant]);
 
 	useEffect(() => {
-		if (variant === "expressive" && !animated) {
+		if (isExpressiveVariant(variant) && !animated) {
 			return;
 		}
 		const blinkInterval = setInterval(
@@ -706,7 +809,7 @@ const AnimatedLogo: React.FC<LogoProps> = ({
 	}, [animated, variant]);
 
 	useEffect(() => {
-		if (variant === "expressive" && !animated) {
+		if (isExpressiveVariant(variant) && !animated) {
 			return;
 		}
 		const resetIdleTimer = () => {
@@ -752,7 +855,7 @@ const AnimatedLogo: React.FC<LogoProps> = ({
 	}, [animated, sizeValue, variant]);
 
 	useEffect(() => {
-		if (!isMouseIdle || (variant === "expressive" && !animated)) {
+		if (!isMouseIdle || (isExpressiveVariant(variant) && !animated)) {
 			return;
 		}
 
@@ -791,21 +894,27 @@ const AnimatedLogo: React.FC<LogoProps> = ({
 		);
 	}
 
-	// ── Expressive variant ──────────────────────────────────────────────────────
+	// ── Expressive variants ─────────────────────────────────────────────────────
 	// Ryu keeps its recognizable ghost body while the two eye shapes morph
 	// independently through named moods. A random selection advances on its own;
 	// a named selection stays on that expression while still blinking and tracking.
-	if (variant === "expressive") {
+	// `outline-muted` uses the same timeline, but keeps every mark muted and
+	// unfilled so it remains suitable for secondary chrome.
+	if (isExpressiveVariant(variant)) {
+		const outlineOnly = variant === "outline-muted";
 		return (
 			<ExpressiveVariant
 				animated={animated}
 				animation={animation ?? "random"}
+				bodyStrokeWidth={outlineOnly ? 1 : 1.5}
 				className={className}
 				expression={activeExpression}
 				eyePosition={eyePosition}
+				eyeScale={outlineOnly ? eyeScale * 1.5 : eyeScale}
 				ghostPathD={ghostPathD}
 				isBlinking={isBlinking}
 				orbRef={orbRef}
+				outlineOnly={outlineOnly}
 				size={size}
 				sizeValue={sizeValue}
 			/>
@@ -1334,64 +1443,81 @@ const AnimatedLogo: React.FC<LogoProps> = ({
         }
       `}</style>
 
-			<svg
-				aria-hidden="true"
-				className="pointer-events-none absolute inset-0 h-full w-full"
-				style={{ zIndex: 10 }}
-				viewBox={`0 0 ${sizeValue} ${sizeValue}`}
-			>
-				{isBlinking ? (
-					<>
-						<line
-							stroke="white"
-							strokeLinecap="round"
-							strokeWidth={blinkStrokeWidth}
-							x1={leftBlinkStart}
-							x2={leftBlinkEnd}
-							y1={eyeY}
-							y2={eyeY}
-						/>
-						<line
-							stroke="white"
-							strokeLinecap="round"
-							strokeWidth={blinkStrokeWidth}
-							x1={rightBlinkStart}
-							x2={rightBlinkEnd}
-							y1={eyeY}
-							y2={eyeY}
-						/>
-					</>
-				) : (
-					<>
-						<ellipse
-							cx={leftEyeX + eyePosition.x}
-							cy={eyeY + eyePosition.y}
-							fill="white"
-							rx={eyeWidth}
-							ry={eyeHeight}
-							stroke="white"
-							strokeWidth="0.3"
-						/>
-						<ellipse
-							cx={rightEyeX + eyePosition.x}
-							cy={eyeY + eyePosition.y}
-							fill="white"
-							rx={eyeWidth}
-							ry={eyeHeight}
-							stroke="white"
-							strokeWidth="0.3"
-						/>
-					</>
-				)}
-			</svg>
+			{showEyes ? (
+				<svg
+					aria-hidden="true"
+					className="pointer-events-none absolute inset-0 h-full w-full"
+					style={{ zIndex: 10 }}
+					viewBox={`0 0 ${sizeValue} ${sizeValue}`}
+				>
+					{isBlinking ? (
+						<>
+							<line
+								stroke="white"
+								strokeLinecap="round"
+								strokeWidth={blinkStrokeWidth}
+								x1={leftBlinkStart}
+								x2={leftBlinkEnd}
+								y1={eyeY}
+								y2={eyeY}
+							/>
+							<line
+								stroke="white"
+								strokeLinecap="round"
+								strokeWidth={blinkStrokeWidth}
+								x1={rightBlinkStart}
+								x2={rightBlinkEnd}
+								y1={eyeY}
+								y2={eyeY}
+							/>
+						</>
+					) : (
+						<>
+							<ellipse
+								cx={leftEyeX + eyePosition.x}
+								cy={eyeY + eyePosition.y}
+								fill="white"
+								rx={eyeWidth}
+								ry={eyeHeight}
+								stroke="white"
+								strokeWidth="0.3"
+							/>
+							<ellipse
+								cx={rightEyeX + eyePosition.x}
+								cy={eyeY + eyePosition.y}
+								fill="white"
+								rx={eyeWidth}
+								ry={eyeHeight}
+								stroke="white"
+								strokeWidth="0.3"
+							/>
+						</>
+					)}
+				</svg>
+			) : null}
 		</div>
 	);
 };
 
 // Thin dispatcher: the static outline is a hookless component so it installs no
-// blink interval and no global mousemove listener; every other variant is the
-// fully-interactive `AnimatedLogo`.
+// blink interval and no global mousemove listener; animated and expressive
+// variants stay inside the hook-owning `AnimatedLogo`.
 const Logo: React.FC<LogoProps> = (props) => {
+	if (props.variant === "3d") {
+		const fallback = (
+			<div
+				className={props.className}
+				style={{ width: props.size ?? "192px", height: props.size ?? "192px" }}
+			>
+				<OutlineStatic size="100%" />
+			</div>
+		);
+		return (
+			<Suspense fallback={fallback}>
+				<Logo3D {...props} fallback={fallback} />
+			</Suspense>
+		);
+	}
 	if (props.variant === "outline-static") {
 		return <OutlineStatic className={props.className} size={props.size} />;
 	}

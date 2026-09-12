@@ -118,9 +118,14 @@ mock.module("@/src/contexts/SpacesContext.tsx", () => ({
 	}),
 }));
 mock.module("@/src/contexts/TabsContext.tsx", () => ({
-	useTabsContext: () => ({ openTab }),
+	useTabSelector: (selector: (state: { openTab: typeof openTab }) => unknown) =>
+		selector({ openTab }),
 }));
 
+// This interaction suite exercises an already visible folder. Real observer and
+// scroll behavior is covered by the production Spaces browser test.
+const motion = await import("motion/react");
+mock.module("motion/react", () => ({ ...motion, useInView: () => true }));
 const { SpaceProjectFolder } = await import("./SpaceProjectFolder.tsx");
 
 const space: Space = {

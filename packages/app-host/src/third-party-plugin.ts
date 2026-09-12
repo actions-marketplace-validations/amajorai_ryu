@@ -25,6 +25,28 @@
 import { HORIZONTAL_WHEEL_SCROLL_SCRIPT } from "./horizontal-wheel-scroll-script.ts";
 import { handshakeAnnounceScript } from "./rpc.ts";
 
+const I18N_BRIDGE = `i18n: {
+  get: function () { return call("i18n.get", []); },
+  translate: function (a) { return call("i18n.translate", [a || {}]); },
+  subscribe: function (opts) {
+    opts = opts || {};
+    var h = callStream("i18n.subscribe", [{}], function (d) {
+      try {
+        if (opts.onChange) opts.onChange(JSON.parse(d));
+      } catch (e) {}
+    });
+    h.promise.catch(function () {});
+    return { dispose: h.cancel };
+  }
+}`;
+
+function indentGeneratedScript(value: string, prefix: string): string {
+	return value
+		.split("\n")
+		.map((line) => `${prefix}${line}`)
+		.join("\n");
+}
+
 /** Build a third-party plugin's sandboxed document.
  *
  *  @param nonce        Host-generated per-mount nonce (e.g. `crypto.randomUUID()`),
@@ -183,6 +205,10 @@ ${HORIZONTAL_WHEEL_SCROLL_SCRIPT}
       var plugin = {
         host: {
           capabilities: function () { return call("host.capabilities", []); },
+${indentGeneratedScript(I18N_BRIDGE, "          ")},
+          node: {
+            shareOrigins: function () { return call("node.shareOrigins", []); }
+          },
           native: {
             haptics: function (a) { return call("native.haptics", [a || {}]); },
             notifications: {
@@ -239,6 +265,13 @@ ${HORIZONTAL_WHEEL_SCROLL_SCRIPT}
             stop: function (args) { return call("background.stop", [args || {}]); }
           },
           // Durable per-app KV (needs storage:kv). Values are strings.
+          backups: {
+            destinations: function (args) { return call("backups.destinations", [args || {}]); },
+            create: function (args) { return call("backups.create", [args || {}]); },
+            list: function (args) { return call("backups.list", [args || {}]); },
+            get: function (args) { return call("backups.get", [args || {}]); },
+            restore: function (args) { return call("backups.restore", [args || {}]); },
+          },
           storage: {
             get: function (args) { return call("storage.get", [args || {}]); },
             set: function (args) { return call("storage.set", [args || {}]); },
@@ -291,6 +324,7 @@ ${HORIZONTAL_WHEEL_SCROLL_SCRIPT}
       var ryu = {
         host: {
           capabilities: function () { return call("host.capabilities", []); },
+${indentGeneratedScript(I18N_BRIDGE, "          ")},
           native: {
             haptics: function (a) { return call("native.haptics", [a || {}]); },
             notifications: {
@@ -301,7 +335,20 @@ ${HORIZONTAL_WHEEL_SCROLL_SCRIPT}
             }
           }
         },
+${indentGeneratedScript(I18N_BRIDGE, "        ")},
         listAgents: function () { return call("core.listAgents", []); },
+        // Agent Mail routes are host-authenticated; the frame receives no node
+        // token and the host validates the relative path before fetching.
+        mail: {
+          list: function () { return call("mail.list", []); },
+          messages: function (a) { return call("mail.messages", [a || {}]); },
+          create: function (a) { return call("mail.create", [a || {}]); },
+          delete: function (a) { return call("mail.delete", [a || {}]); },
+          rotateSecret: function (a) { return call("mail.rotateSecret", [a || {}]); },
+          send: function (a) { return call("mail.send", [a || {}]); },
+          inboundUrl: function (a) { return call("mail.inboundUrl", [a || {}]); },
+          request: function (a) { return call("mail.request", [a || {}]); }
+        },
         // Secret-free provider/model/agent/app/hook metadata for shared Ryu pickers.
         catalog: {
           snapshot: function () { return call("catalog.snapshot", []); },
@@ -329,6 +376,13 @@ ${HORIZONTAL_WHEEL_SCROLL_SCRIPT}
             }
             return h.promise;
           }
+        },
+        backups: {
+          destinations: function (args) { return call("backups.destinations", [args || {}]); },
+          create: function (args) { return call("backups.create", [args || {}]); },
+          list: function (args) { return call("backups.list", [args || {}]); },
+          get: function (args) { return call("backups.get", [args || {}]); },
+          restore: function (args) { return call("backups.restore", [args || {}]); },
         },
         storage: {
           get: function (args) { return call("storage.get", [args || {}]); },
@@ -363,6 +417,7 @@ ${HORIZONTAL_WHEEL_SCROLL_SCRIPT}
           image: function (args) { return call("media.image", [args || {}]); },
           video: function (args) { return call("media.video", [args || {}]); },
           tts: function (args) { return call("media.tts", [args || {}]); },
+          recording: function (args) { return call("media.recording", [args || {}]); },
           transcribe: function (args) { return call("media.transcribe", [args || {}]); }
         },
         // Read-only catalog reads (needs grant core:list_agents) — chat models + TTS engines.
@@ -391,7 +446,9 @@ ${HORIZONTAL_WHEEL_SCROLL_SCRIPT}
         // Asset picker: GIFs via the host (Core proxy needs the node token). Icons/
         // logos are fetched directly by the app under its per-app CSP allowlist.
         assets: {
-          searchGifs: function (a) { return call("assets.searchGifs", [a || {}]); }
+          searchGifs: function (a) { return call("assets.searchGifs", [a || {}]); },
+        searchImages: function (a) { return call("assets.searchImages", [a || {}]); },
+          searchImages: function (a) { return call("assets.searchImages", [a || {}]); }
         },
         // Fine-tune runs (needs grant finetune:runs). The @ryu/finetune app drives
         // training runs; Core owns the orchestration + durable job store. Live progress
@@ -451,6 +508,7 @@ ${HORIZONTAL_WHEEL_SCROLL_SCRIPT}
           mcp: function () { return call("workflows.mcp", []); },
           skills: function () { return call("workflows.skills", []); },
           schedules: function () { return call("workflows.schedules", []); },
+          notifyTargets: function () { return call("workflows.notifyTargets", []); },
           hookEvents: function () { return call("workflows.hookEvents", []); },
           composio: function (a) { return call("workflows.composio", [a || {}]); }
         },
@@ -570,6 +628,20 @@ ${HORIZONTAL_WHEEL_SCROLL_SCRIPT}
         // the sibling bridge below for the same reason.
         blueprint: {
           request: function (a) { return call("blueprint.request", [a || {}]); }
+        },
+        // Skill authoring + shared agent distribution (needs grant skills:crud).
+        // The host keeps its node token and owns the target picker; the frame sends
+        // only the installed skill id. Kept in manual lockstep with Path B below.
+        skills: {
+          getSource: function (a) { return call("skills.getSource", [a || {}]); },
+          create: function (a) { return call("skills.create", [a || {}]); },
+          update: function (a) { return call("skills.update", [a || {}]); },
+          listVersions: function (a) { return call("skills.listVersions", [a || {}]); },
+          versionSource: function (a) { return call("skills.versionSource", [a || {}]); },
+          snapshot: function (a) { return call("skills.snapshot", [a || {}]); },
+          restore: function (a) { return call("skills.restore", [a || {}]); },
+          distribute: function (a) { return call("skills.distribute", [a || {}]); },
+          setTitle: function (a) { return call("skills.setTitle", [a || {}]); }
         },
         // Shell primitives (needs grant shell:integrate). The generic shell-integration
         // lane a DECOUPLED companion uses: open an allowlisted shell tab, and subscribe
@@ -908,7 +980,26 @@ function htmlCompanionHeadFragment(
     // during first render queues into the outbox instead of throwing. Identical
     // surface to the Path A installWindowRyu().
     var ryu = {
+      host: {
+${indentGeneratedScript(I18N_BRIDGE, "        ")}
+      },
+      node: {
+        shareOrigins: function () { return call("node.shareOrigins", []); }
+      },
+${indentGeneratedScript(I18N_BRIDGE, "      ")},
       listAgents: function () { return call("core.listAgents", []); },
+      // Agent Mail routes are host-authenticated; the frame receives no node
+      // token and the host validates the relative path before fetching.
+      mail: {
+        list: function () { return call("mail.list", []); },
+        messages: function (a) { return call("mail.messages", [a || {}]); },
+        create: function (a) { return call("mail.create", [a || {}]); },
+        delete: function (a) { return call("mail.delete", [a || {}]); },
+        rotateSecret: function (a) { return call("mail.rotateSecret", [a || {}]); },
+        send: function (a) { return call("mail.send", [a || {}]); },
+        inboundUrl: function (a) { return call("mail.inboundUrl", [a || {}]); },
+        request: function (a) { return call("mail.request", [a || {}]); }
+      },
       // Secret-free provider/model/agent/app/hook metadata for shared Ryu pickers.
       catalog: {
         snapshot: function () { return call("catalog.snapshot", []); },
@@ -932,6 +1023,13 @@ function htmlCompanionHeadFragment(
           }
           return h.promise;
         }
+      },
+      backups: {
+        destinations: function (args) { return call("backups.destinations", [args || {}]); },
+        create: function (args) { return call("backups.create", [args || {}]); },
+        list: function (args) { return call("backups.list", [args || {}]); },
+        get: function (args) { return call("backups.get", [args || {}]); },
+        restore: function (args) { return call("backups.restore", [args || {}]); },
       },
       storage: {
         get: function (a) { return call("storage.get", [a || {}]); },
@@ -961,6 +1059,7 @@ function htmlCompanionHeadFragment(
         image: function (a) { return call("media.image", [a || {}]); },
         video: function (a) { return call("media.video", [a || {}]); },
         tts: function (a) { return call("media.tts", [a || {}]); },
+        recording: function (a) { return call("media.recording", [a || {}]); },
         transcribe: function (a) { return call("media.transcribe", [a || {}]); }
       },
       // Assistant bridge — see the sibling bridge above. Kept in step with it
@@ -1043,6 +1142,7 @@ function htmlCompanionHeadFragment(
         mcp: function () { return call("workflows.mcp", []); },
         skills: function () { return call("workflows.skills", []); },
         schedules: function () { return call("workflows.schedules", []); },
+        notifyTargets: function () { return call("workflows.notifyTargets", []); },
         hookEvents: function () { return call("workflows.hookEvents", []); },
         composio: function (a) { return call("workflows.composio", [a || {}]); }
       },
@@ -1097,6 +1197,7 @@ function htmlCompanionHeadFragment(
       // Shadow is machine-pinned). frame returns a data: URL (CSP img-src data: blob:);
       // openReview/openSettings are shell-navigation verbs.
       timeline: {
+        transcripts: function (a) { return call("timeline.transcripts", [a || {}]); },
         list: function (a) { return call("timeline.list", [a || {}]); },
         journal: function (a) { return call("timeline.journal", [a || {}]); },
         frame: function (a) { return call("timeline.frame", [a || {}]); },
@@ -1104,9 +1205,9 @@ function htmlCompanionHeadFragment(
         openSettings: function () { return call("timeline.openSettings", []); }
       },
       // Calendar (needs grant calendar:crud). The @ryu/calendar companion renders
-      // the scheduled-runs calendar and schedules an agent; the host calls Core's
+      // the scheduled-runs calendar and schedules an agent routine; the host calls Core's
       // /heartbeat/jobs + /workflows + /api/agents directly (the monitors pattern),
-      // plus the createScheduledAgentWorkflow composite.
+      // plus the createScheduledAgentWorkflow routine composite.
       calendar: {
         jobs: function () { return call("calendar.jobs", []); },
         workflows: function () { return call("calendar.workflows", []); },
@@ -1316,6 +1417,7 @@ function htmlCompanionHeadFragment(
         versionSource: function (a) { return call("skills.versionSource", [a || {}]); },
         snapshot: function (a) { return call("skills.snapshot", [a || {}]); },
         restore: function (a) { return call("skills.restore", [a || {}]); },
+        distribute: function (a) { return call("skills.distribute", [a || {}]); },
         setTitle: function (a) { return call("skills.setTitle", [a || {}]); }
       },
       // Shell primitives (needs grant shell:integrate). The generic shell-integration

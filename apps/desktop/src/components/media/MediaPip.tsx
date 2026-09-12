@@ -2,6 +2,11 @@ import { Cancel01Icon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { ImageLightbox } from "@ryu/blocks/desktop/agent-elements/image-lightbox";
 import { Button } from "@ryu/ui/components/button.tsx";
+import {
+	Dialog,
+	DialogContent,
+	DialogTitle,
+} from "@ryu/ui/components/dialog.tsx";
 import { cn } from "@ryu/ui/lib/utils.ts";
 import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
 import {
@@ -11,7 +16,6 @@ import {
 	useState,
 	useSyncExternalStore,
 } from "react";
-import { createPortal } from "react-dom";
 import { useAppSurface } from "@/src/contexts/app-surface-context.tsx";
 import {
 	clearMediaSource,
@@ -71,19 +75,6 @@ function LiveMediaLightbox({
 			setOrigin(originRef.current?.getBoundingClientRect() ?? null);
 		}
 	}, [open, originRef]);
-	useEffect(() => {
-		if (!open) {
-			return;
-		}
-		const onKeyDown = (event: KeyboardEvent) => {
-			if (event.key === "Escape") {
-				event.preventDefault();
-				onClose();
-			}
-		};
-		window.addEventListener("keydown", onKeyDown);
-		return () => window.removeEventListener("keydown", onKeyDown);
-	}, [onClose, open]);
 
 	if (!mounted || typeof document === "undefined") {
 		return null;
@@ -101,51 +92,58 @@ function LiveMediaLightbox({
 			}
 		: { opacity: 0, scale: 0.96 };
 
-	return createPortal(
-		<AnimatePresence>
-			{open && (
+	return (
+		<Dialog
+			onOpenChange={(next) => {
+				if (!next) {
+					onClose();
+				}
+			}}
+			open={open}
+		>
+			<DialogContent
+				aria-describedby={undefined}
+				className="z-[81] flex w-fit max-w-[calc(100vw-2rem)] items-center justify-center overflow-hidden bg-black p-0 sm:max-w-[calc(100vw-6rem)]"
+				data-media-lightbox="true"
+				data-media-lightbox-kind="recording"
+				finalFocus={originRef}
+				mobileFullPage
+				overlayClassName="z-[80]"
+				showCloseButton={false}
+			>
+				<DialogTitle className="sr-only">{source.title} fullscreen</DialogTitle>
 				<motion.div
-					aria-label={`${source.title} fullscreen`}
-					aria-modal="true"
-					className="fixed inset-0 z-[80] flex items-center justify-center bg-black/90 p-4 backdrop-blur-sm sm:p-12"
-					data-media-lightbox="true"
-					data-media-lightbox-kind="recording"
-					onClick={onClose}
-					role="dialog"
+					animate={{ opacity: 1, scale: 1, x: 0, y: 0 }}
+					className="relative flex max-h-full max-w-full items-center justify-center overflow-hidden"
+					initial={reduced ? false : initial}
+					transition={
+						reduced
+							? { duration: 0 }
+							: { damping: 28, stiffness: 190, type: "spring" }
+					}
 				>
-					<motion.div
-						animate={{ opacity: 1, scale: 1, x: 0, y: 0 }}
-						className="relative flex max-h-full max-w-full items-center justify-center overflow-hidden rounded-2xl border border-white/10 bg-black shadow-2xl"
-						initial={reduced ? false : initial}
-						onClick={(event) => event.stopPropagation()}
-						transition={
-							reduced
-								? { duration: 0 }
-								: { damping: 28, stiffness: 190, type: "spring" }
-						}
+					<video
+						aria-label={source.title}
+						autoPlay
+						className="max-h-[calc(100vh-2rem)] max-w-[calc(100vw-2rem)] object-contain sm:max-h-[calc(100vh-6rem)] sm:max-w-[calc(100vw-6rem)]"
+						controls
+						playsInline
+						poster={source.posterUrl}
+						src={source.videoUrl}
+					/>
+					<Button
+						aria-label="Close fullscreen media"
+						className="absolute top-3 right-3"
+						onClick={onClose}
+						size="icon"
+						type="button"
+						variant="secondary"
 					>
-						<video
-							aria-label={source.title}
-							autoPlay
-							className="max-h-[calc(100vh-2rem)] max-w-[calc(100vw-2rem)] object-contain sm:max-h-[calc(100vh-6rem)] sm:max-w-[calc(100vw-6rem)]"
-							controls
-							playsInline
-							poster={source.posterUrl}
-							src={source.videoUrl}
-						/>
-						<button
-							aria-label="Close fullscreen media"
-							className="absolute top-3 right-3 grid size-9 place-items-center rounded-full border border-white/10 bg-black/60 text-white/90 backdrop-blur-sm transition-colors hover:bg-black/80"
-							onClick={onClose}
-							type="button"
-						>
-							<HugeiconsIcon className="size-4" icon={Cancel01Icon} />
-						</button>
-					</motion.div>
+						<HugeiconsIcon className="size-4" icon={Cancel01Icon} />
+					</Button>
 				</motion.div>
-			)}
-		</AnimatePresence>,
-		document.body
+			</DialogContent>
+		</Dialog>
 	);
 }
 
@@ -239,7 +237,7 @@ export function MediaPipDock() {
 							<span className="truncate text-[11px]">
 								{sourceKindLabel(source)}
 							</span>
-							<span className="size-1.5 shrink-0 animate-pulse rounded-full bg-emerald-400" />
+							<span className="size-1.5 shrink-0 animate-pulse rounded-full bg-success" />
 						</div>
 					</button>
 					<div className="flex items-center gap-2 px-3 py-2.5">
@@ -267,7 +265,9 @@ export function MediaPipDock() {
 						) : null}
 					</div>
 					{pipError && (
-						<p className="px-3 pb-2 text-[10px] text-destructive">{pipError}</p>
+						<p className="px-3 pb-2 text-[10px] text-status-destructive">
+							{pipError}
+						</p>
 					)}
 				</motion.section>
 			</AnimatePresence>
@@ -402,7 +402,7 @@ export function MediaPipWindow() {
 				className="flex h-9 shrink-0 items-center gap-2 border-border/60 border-b bg-sidebar/90 px-3"
 				data-tauri-drag-region
 			>
-				<span className="size-1.5 animate-pulse rounded-full bg-emerald-500" />
+				<span className="size-1.5 animate-pulse rounded-full bg-success" />
 				<span className="min-w-0 flex-1 truncate font-medium text-xs">
 					{source?.title ?? "Live media"}
 				</span>

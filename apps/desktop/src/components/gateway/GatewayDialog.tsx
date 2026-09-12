@@ -102,6 +102,7 @@ import {
 } from "@/src/components/gateway/AgentSyncSections.tsx";
 import { ApiSection } from "@/src/components/gateway/ApiSection.tsx";
 import { AutoRetrySection } from "@/src/components/gateway/AutoRetrySection.tsx";
+import { BotRealmDefaultCard } from "@/src/components/gateway/BotRealmDefaultCard.tsx";
 import { BudgetChargeInclusionFields } from "@/src/components/gateway/BudgetRuleFields.tsx";
 import {
 	budgetUsdToMicroUsd,
@@ -115,6 +116,7 @@ import { GatewayPostureCard } from "@/src/components/gateway/GatewayPostureCard.
 import { GitSettingsSection } from "@/src/components/gateway/GitSettingsSection.tsx";
 import { HooksSection } from "@/src/components/gateway/HooksSection.tsx";
 import { McpSection } from "@/src/components/gateway/McpSection.tsx";
+import { NodeOnboardingSettings } from "@/src/components/gateway/NodeOnboardingSettings.tsx";
 import { ProviderControlCenter } from "@/src/components/gateway/ProviderControlCenter.tsx";
 import { UsageCostSection } from "@/src/components/gateway/UsageCostSection.tsx";
 import { WorkspaceSection } from "@/src/components/gateway/WorkspaceSection.tsx";
@@ -285,7 +287,7 @@ function MetricTile({ label, value }: { label: string; value: string }) {
 	return (
 		<div className="rounded-lg bg-muted/40 p-3">
 			<div className="text-muted-foreground text-xs">{label}</div>
-			<div className="mt-1 font-semibold text-lg tabular-nums">{value}</div>
+			<div className="mt-1 font-medium text-lg tabular-nums">{value}</div>
 		</div>
 	);
 }
@@ -452,12 +454,12 @@ function GatewayKeysCard({
 					</div>
 				) : null}
 				{reachable && !loading && loadError ? (
-					<p className="px-3 text-destructive text-sm">{loadError}</p>
+					<p className="px-3 text-sm text-status-destructive">{loadError}</p>
 				) : null}
 				{reachable && !(loading || loadError) ? (
 					<>
 						{requireAuth ? null : (
-							<div className="mx-3 flex items-start gap-2 rounded-md border border-warning bg-warning px-3 py-2 text-sm text-warning dark:border-warning dark:bg-warning dark:text-warning">
+							<div className="mx-3 flex items-start gap-2 rounded-md border border-warning bg-warning px-3 py-2 text-sm text-status-warning dark:border-warning dark:bg-warning dark:text-status-warning">
 								<HugeiconsIcon
 									className="mt-0.5 size-4 shrink-0"
 									icon={Shield01Icon}
@@ -719,7 +721,9 @@ function ProviderRow({
 				</div>
 			)}
 
-			{rowError ? <p className="text-destructive text-xs">{rowError}</p> : null}
+			{rowError ? (
+				<p className="text-status-destructive text-xs">{rowError}</p>
+			) : null}
 		</SettingsItem>
 	);
 }
@@ -967,7 +971,7 @@ function ComposioKeyCard({
 						</div>
 					)}
 					{rowError ? (
-						<p className="text-destructive text-xs">{rowError}</p>
+						<p className="text-status-destructive text-xs">{rowError}</p>
 					) : null}
 				</SettingsItem>
 			</SettingsGroup>
@@ -1165,7 +1169,7 @@ function MediaKeyCard({
 						</div>
 					)}
 					{rowError ? (
-						<p className="text-destructive text-xs">{rowError}</p>
+						<p className="text-status-destructive text-xs">{rowError}</p>
 					) : null}
 				</SettingsItem>
 			</SettingsGroup>
@@ -1524,7 +1528,9 @@ function BudgetRuleDialog({
 							{ALERT_TIER_TARGETS_NOTE}
 						</p>
 					</div>
-					{err ? <p className="text-destructive text-sm">{err}</p> : null}
+					{err ? (
+						<p className="text-sm text-status-destructive">{err}</p>
+					) : null}
 				</div>
 				<DialogFooter>
 					<Button
@@ -1686,7 +1692,9 @@ function ModelMappingDialog({
 							Rewrite the model name when forwarding to the provider.
 						</p>
 					</div>
-					{err ? <p className="text-destructive text-sm">{err}</p> : null}
+					{err ? (
+						<p className="text-sm text-status-destructive">{err}</p>
+					) : null}
 				</div>
 				<DialogFooter>
 					<Button
@@ -1898,7 +1906,9 @@ function ModalityMappingDialog({
 					<p className="text-muted-foreground text-xs">
 						{MODALITY_COPY[modality].note}
 					</p>
-					{err ? <p className="text-destructive text-sm">{err}</p> : null}
+					{err ? (
+						<p className="text-sm text-status-destructive">{err}</p>
+					) : null}
 				</div>
 				<DialogFooter>
 					<Button
@@ -1962,7 +1972,10 @@ function ModalityRowDescription({
 			{modalityProviderLabel(mapping.provider)}
 			{mapping.model ? ` → ${mapping.model}` : null}
 			{unavailable ? (
-				<span className="text-warning"> — not configured on this node</span>
+				<span className="text-status-warning">
+					{" "}
+					— not configured on this node
+				</span>
 			) : null}
 		</>
 	);
@@ -2002,7 +2015,7 @@ function ModalityRoutingRows({
 }) {
 	if (!served) {
 		return (
-			<p className="text-sm text-warning">
+			<p className="text-sm text-status-warning">
 				This gateway does not report its modality map, so it cannot be edited
 				here, and it cannot be preserved either: saving anything in this card
 				replaces the whole routing section, so a{" "}
@@ -2060,7 +2073,7 @@ function ModalityRoutingRows({
 									variant="ghost"
 								>
 									<HugeiconsIcon
-										className="size-3.5 text-destructive"
+										className="size-3.5 text-status-destructive"
 										icon={Delete01Icon}
 									/>
 									<span className="sr-only">
@@ -2490,7 +2503,7 @@ export function SmartRoutingCard({
 		>
 			<div className="flex flex-col gap-5 px-3">
 				{reachable && loadError ? (
-					<p className="text-destructive text-sm">{loadError}</p>
+					<p className="text-sm text-status-destructive">{loadError}</p>
 				) : null}
 				{reachable ? null : (
 					<p className="text-muted-foreground text-sm">
@@ -2499,7 +2512,7 @@ export function SmartRoutingCard({
 					</p>
 				)}
 				{served === false ? (
-					<p className="text-sm text-warning">
+					<p className="text-sm text-status-warning">
 						This gateway does not report its smart-routing config, so it cannot
 						be edited here, and it cannot be preserved either: saving anything
 						in this card replaces the whole routing section, so a{" "}
@@ -2621,7 +2634,7 @@ export function SmartRoutingCard({
 							</p>
 						) : null}
 						{classifierUnserved ? (
-							<p className="text-destructive text-xs">
+							<p className="text-status-destructive text-xs">
 								Smart routing is on with the local classify tier as its
 								classifier, but {classifierUnservedReason}, so the
 								classification call will fail and every request will quietly
@@ -2906,7 +2919,7 @@ export function SmartRoutingCard({
 												variant="ghost"
 											>
 												<HugeiconsIcon
-													className="size-3.5 text-destructive"
+													className="size-3.5 text-status-destructive"
 													icon={Delete01Icon}
 												/>
 												<span className="sr-only">Remove rule {idx + 1}</span>
@@ -2937,10 +2950,10 @@ export function SmartRoutingCard({
 				) : null}
 
 				{saveError ? (
-					<p className="text-destructive text-sm">{saveError}</p>
+					<p className="text-sm text-status-destructive">{saveError}</p>
 				) : null}
 				{saveOk ? (
-					<p className="text-sm text-success">
+					<p className="text-sm text-status-success">
 						Saved. New requests use the updated router.
 					</p>
 				) : null}
@@ -3180,7 +3193,7 @@ function RoutingCard({
 		>
 			<div className="flex flex-col gap-5 px-3">
 				{reachable && configError ? (
-					<p className="text-destructive text-sm">{configError}</p>
+					<p className="text-sm text-status-destructive">{configError}</p>
 				) : null}
 				{reachable ? null : (
 					<p className="text-muted-foreground text-sm">
@@ -3287,7 +3300,7 @@ function RoutingCard({
 												variant="ghost"
 											>
 												<HugeiconsIcon
-													className="size-3.5 text-destructive"
+													className="size-3.5 text-status-destructive"
 													icon={Delete01Icon}
 												/>
 												<span className="sr-only">
@@ -3382,7 +3395,7 @@ function RoutingCard({
 												variant="ghost"
 											>
 												<HugeiconsIcon
-													className="size-3.5 text-destructive"
+													className="size-3.5 text-status-destructive"
 													icon={Delete01Icon}
 												/>
 												<span className="sr-only">
@@ -3427,12 +3440,12 @@ function RoutingCard({
 						Save
 					</Button>
 					{saveOk ? (
-						<span className="text-sm text-success">
+						<span className="text-sm text-status-success">
 							Saved. Gateway will apply on next restart.
 						</span>
 					) : null}
 					{saveError ? (
-						<span className="text-destructive text-sm">{saveError}</span>
+						<span className="text-sm text-status-destructive">{saveError}</span>
 					) : null}
 				</div>
 			</div>
@@ -3703,7 +3716,7 @@ function BudgetsCard({
 				</div>
 			) : null}
 			{!loading && err ? (
-				<p className="px-3 text-destructive text-sm">{err}</p>
+				<p className="px-3 text-sm text-status-destructive">{err}</p>
 			) : null}
 			{loading || err ? null : (
 				<div className="flex flex-col gap-6">
@@ -3871,7 +3884,7 @@ function BudgetScopeSection({
 										variant="ghost"
 									>
 										<HugeiconsIcon
-											className="size-3.5 text-destructive"
+											className="size-3.5 text-status-destructive"
 											icon={Delete01Icon}
 										/>
 										<span className="sr-only">Remove budget for {id}</span>
@@ -4109,10 +4122,10 @@ function SessionBudgetEditor({
 					</p>
 				</div>
 				{saveError ? (
-					<p className="text-destructive text-sm">{saveError}</p>
+					<p className="text-sm text-status-destructive">{saveError}</p>
 				) : null}
 				{saveOk ? (
-					<p className="text-sm text-success">
+					<p className="text-sm text-status-success">
 						Saved. Changes take effect immediately.
 					</p>
 				) : null}
@@ -4786,7 +4799,7 @@ function CustomPatternsEditor({ ctx }: { ctx: ScopeCtx }) {
 									value={r.regex}
 								/>
 								{valid ? null : (
-									<p className="text-destructive text-xs">
+									<p className="text-status-destructive text-xs">
 										Invalid regex. Checked with the browser engine; the gateway
 										uses Rust regex syntax, which differs slightly.
 									</p>
@@ -4819,7 +4832,7 @@ function DlpCard({ ctx }: { ctx: ScopeCtx }) {
 		>
 			<div className="flex flex-col gap-3">
 				{isSanitize ? null : (
-					<p className="mx-3 rounded-md border border-warning bg-warning px-3 py-2 text-sm text-warning dark:border-warning dark:bg-warning dark:text-warning">
+					<p className="mx-3 rounded-md border border-warning bg-warning px-3 py-2 text-sm text-status-warning dark:border-warning dark:bg-warning dark:text-status-warning">
 						Redaction toggles apply only when the firewall policy is set to
 						Sanitize. Resolved policy for this scope:{" "}
 						{POLICY_LABELS[resolvedPolicy] ?? resolvedPolicy}.
@@ -5037,7 +5050,7 @@ function InspectorCard({
 								because a blank value would leave the local classifier stopped.
 							</p>
 							{unservedModel ? (
-								<p className="text-destructive text-xs">
+								<p className="text-status-destructive text-xs">
 									The inspector is on and pointed at the local classifier, but{" "}
 									{unservedReason}. The inspection call will fail, and the
 									inspector fails open, so it will allow every turn while still
@@ -5554,7 +5567,9 @@ function GuardrailsSection({
 						</p>
 					)}
 					{reachable && configError ? (
-						<p className="px-3 text-destructive text-sm">{configError}</p>
+						<p className="px-3 text-sm text-status-destructive">
+							{configError}
+						</p>
 					) : null}
 
 					<div className="flex flex-col gap-1.5 px-3">
@@ -5650,10 +5665,12 @@ function GuardrailsSection({
 							Save guardrails
 						</Button>
 						{saveOk ? (
-							<span className="text-sm text-success">Saved.</span>
+							<span className="text-sm text-status-success">Saved.</span>
 						) : null}
 						{saveError ? (
-							<span className="text-destructive text-sm">{saveError}</span>
+							<span className="text-sm text-status-destructive">
+								{saveError}
+							</span>
 						) : null}
 					</div>
 				</>
@@ -5681,47 +5698,59 @@ function CatalogScannerCard({
 	target: ApiTarget;
 	canConfigure: boolean;
 }) {
-	const [agentId, setAgentId] = useState("ryu");
+	const [agentId, setAgentId] = useState("");
 	const [loaded, setLoaded] = useState(false);
+	const [saving, setSaving] = useState(false);
 	const [status, setStatus] = useState<string | null>(null);
 
 	useEffect(() => {
 		let cancelled = false;
 		setLoaded(false);
-		getPreference(target, CATALOG_SCAN_AGENT_PREF).then((value) => {
-			if (cancelled) {
-				return;
-			}
-			setAgentId(value?.trim() || "ryu");
-			setLoaded(true);
-		});
+		getPreference(target, CATALOG_SCAN_AGENT_PREF)
+			.then((value) => {
+				if (cancelled) {
+					return;
+				}
+				setAgentId(value?.trim() || "");
+				setLoaded(true);
+			})
+			.catch(() => {
+				if (!cancelled) {
+					setStatus(
+						"Could not load the audit agent. Reopen settings to retry."
+					);
+				}
+			});
 		return () => {
 			cancelled = true;
 		};
 	}, [target]);
 
 	const updateAgent = async (next: string) => {
-		const trimmed = next.trim();
-		if (!trimmed) {
+		if (saving) {
 			return;
 		}
+		const trimmed = next.trim();
 		const previous = agentId;
+		setSaving(true);
 		setAgentId(trimmed);
 		setStatus(null);
-		const ok = await setPreference(target, CATALOG_SCAN_AGENT_PREF, trimmed);
-		if (ok) {
+		try {
+			await setPreference(target, CATALOG_SCAN_AGENT_PREF, trimmed);
 			setStatus("Saved for this node.");
-		} else {
+		} catch {
 			setAgentId(previous);
-			setStatus("Could not save the scanning agent.");
+			setStatus("Could not save the audit agent. Try again.");
+		} finally {
+			setSaving(false);
 		}
 	};
 
 	return (
 		<div data-testid="catalog-scanner-settings">
 			<SettingsSection
-				caption="Choose the registered agent that reviews Skills, Apps, and Plugins after their deterministic scorecard runs. The review is bounded and read-only: listing text is untrusted evidence, and the agent cannot install, edit, or change settings."
-				title="Catalog scanner"
+				caption="On-demand audits run the health audit skill with your default chat agent. Optionally choose a reviewer for Marketplace, agent health, and Doctor. Normal runtime permissions and approvals apply; static checks remain the default."
+				title="Health audit agent"
 			>
 				<div className="flex flex-col gap-3">
 					<SettingsGroup>
@@ -5730,21 +5759,29 @@ function CatalogScannerCard({
 								<AgentModelPickerField
 									ariaLabel="Catalog scanning agent"
 									className="min-w-[220px]"
-									disabled={!(canConfigure && loaded)}
+									disabled={!(canConfigure && loaded) || saving}
 									mode="agent"
 									onChange={(next) => {
 										void updateAgent(next);
 									}}
-									placeholder="Select a scanning agent"
+									placeholder="Use default agent"
 									target={target}
 									value={agentId}
 								/>
 							}
-							description="Used by every catalog Scan button and the Security Scanner catalog review."
+							description="Used by Audit with agent across all Health views. Leave unset to follow the default chat agent."
 							settingsId="catalog-scan-agent"
 							title="Scanning agent"
 						/>
 					</SettingsGroup>
+					<Button
+						disabled={!(canConfigure && loaded && agentId) || saving}
+						onClick={() => void updateAgent("")}
+						size="sm"
+						variant="ghost"
+					>
+						Use default agent
+					</Button>
 					{status ? (
 						<p className="px-3 text-muted-foreground text-sm">{status}</p>
 					) : null}
@@ -5780,6 +5817,23 @@ function formatTokens(input: number | null, output: number | null): string {
 	return `${formatNumber(i)} / ${formatNumber(o)}`;
 }
 
+function auditEventLabel(entry: AuditEntry): string {
+	switch (entry.event_type) {
+		case "model_call":
+			return "Model call";
+		case "exec_call":
+			return "Tool execution";
+		case "credential_read":
+			return "Credential read";
+		case "widget_follow_up":
+			return "Widget follow-up";
+		case "control_change":
+			return "Control change";
+		default:
+			return entry.event_type ?? "Activity";
+	}
+}
+
 function AuditTable({ entries }: { entries: AuditEntry[] }) {
 	return (
 		<div className="overflow-x-auto">
@@ -5787,12 +5841,11 @@ function AuditTable({ entries }: { entries: AuditEntry[] }) {
 				<thead>
 					<tr className="border-b text-left text-muted-foreground text-xs">
 						<th className="pr-3 pb-2 font-medium">Time</th>
-						<th className="pr-3 pb-2 font-medium">Provider</th>
-						<th className="pr-3 pb-2 font-medium">Model</th>
-						<th className="pr-3 pb-2 font-medium">Tokens (in/out)</th>
-						<th className="pr-3 pb-2 font-medium">Latency</th>
-						<th className="pr-3 pb-2 font-medium">Score</th>
-						<th className="pb-2 font-medium">Error</th>
+						<th className="pr-3 pb-2 font-medium">Event / target</th>
+						<th className="pr-3 pb-2 font-medium">Agent / caller</th>
+						<th className="pr-3 pb-2 font-medium">Trace IDs</th>
+						<th className="pr-3 pb-2 font-medium">Usage</th>
+						<th className="pb-2 font-medium">Result</th>
 					</tr>
 				</thead>
 				<tbody>
@@ -5813,49 +5866,52 @@ function AuditTable({ entries }: { entries: AuditEntry[] }) {
 									/>
 									<TooltipContent>{entry.timestamp}</TooltipContent>
 								</Tooltip>
-								<td className="py-2 pr-3 text-xs">{entry.provider ?? "—"}</td>
-								{entry.model ? (
-									<Tooltip>
-										<TooltipTrigger
-											render={
-												<td className="max-w-32 truncate py-2 pr-3 font-mono text-xs">
-													{entry.model}
-												</td>
-											}
-										/>
-										<TooltipContent>{entry.model}</TooltipContent>
-									</Tooltip>
-								) : (
-									<td className="max-w-32 truncate py-2 pr-3 font-mono text-xs">
-										—
-									</td>
-								)}
-								<td className="py-2 pr-3 font-mono text-xs tabular-nums">
-									{formatTokens(entry.input_tokens, entry.output_tokens)}
+								<td className="min-w-40 py-2 pr-3">
+									<Badge variant="outline">{auditEventLabel(entry)}</Badge>
+									<div className="mt-1 max-w-48 truncate font-mono text-xs">
+										{entry.command ?? entry.model ?? entry.provider ?? "—"}
+									</div>
+									<div className="text-[10px] text-muted-foreground">
+										{entry.provider ?? entry.backend ?? "Gateway"}
+									</div>
 								</td>
-								<td className="py-2 pr-3 font-mono text-xs tabular-nums">
-									{formatLatency(entry.latency_ms)}
+								<td className="min-w-40 py-2 pr-3 text-xs">
+									<div className="break-all font-mono">
+										agent {entry.agent_id ?? "—"}
+									</div>
+									<div className="mt-1 break-all text-muted-foreground">
+										{entry.user_name ?? entry.user_id ?? "system / gateway"}
+									</div>
 								</td>
-								<td className="py-2 pr-3 font-mono text-xs tabular-nums">
-									{entry.eval_score === null
-										? "—"
-										: `${Math.round(entry.eval_score * 100)}%`}
+								<td className="min-w-44 py-2 pr-3 font-mono text-[10px] text-muted-foreground">
+									<div className="break-all">request {entry.request_id}</div>
+									{entry.session_id ? (
+										<div className="mt-1 break-all">
+											session {entry.session_id}
+										</div>
+									) : null}
 								</td>
-								<td className="max-w-40 truncate py-2 text-xs">
+								<td className="min-w-32 py-2 pr-3 font-mono text-xs tabular-nums">
+									<div>
+										{formatTokens(entry.input_tokens, entry.output_tokens)}{" "}
+										tokens
+									</div>
+									<div className="mt-1 text-muted-foreground">
+										{formatLatency(entry.latency_ms)}
+										{entry.eval_score === null
+											? ""
+											: ` · ${Math.round(entry.eval_score * 100)}% score`}
+									</div>
+								</td>
+								<td className="max-w-48 py-2 text-xs">
+									<Badge variant={entry.error ? "destructive" : "secondary"}>
+										{entry.error ? "Failed" : "Recorded"}
+									</Badge>
 									{entry.error ? (
-										<Tooltip>
-											<TooltipTrigger
-												render={
-													<span className="text-destructive">
-														{entry.error}
-													</span>
-												}
-											/>
-											<TooltipContent>{entry.error}</TooltipContent>
-										</Tooltip>
-									) : (
-										<span className="text-muted-foreground">—</span>
-									)}
+										<div className="mt-1 max-w-48 break-words text-status-destructive">
+											{entry.error}
+										</div>
+									) : null}
 								</td>
 							</tr>
 						);
@@ -5905,7 +5961,7 @@ function AuditPanel({ target }: { target: ApiTarget }) {
 
 	return (
 		<SettingsSection
-			caption="Gateway request log: provider, model, token usage, latency, and eval score. API keys are always redacted. Newest first."
+			caption="Every governed model, tool, credential, widget, and control event. Agent IDs, caller IDs, request IDs, and session IDs make each row followable; API keys, prompts, and tool payloads are always redacted. Newest first."
 			headerAction={
 				<div className="flex items-center gap-3">
 					<div className="flex items-center gap-2">
@@ -6026,7 +6082,8 @@ function AuditBody({
 					</EmptyMedia>
 					<EmptyTitle>No audit entries yet</EmptyTitle>
 					<EmptyDescription>
-						Drive a chat turn through the gateway and refresh to see entries.
+						Run a model, tool, or control action through the gateway and refresh
+						to see its trace.
 					</EmptyDescription>
 				</EmptyHeader>
 				<EmptyContent>
@@ -6218,7 +6275,7 @@ function RunEvalsPanel({ target }: { target: ApiTarget }) {
 				</div>
 
 				{runError ? (
-					<p className="text-destructive text-sm">{runError}</p>
+					<p className="text-sm text-status-destructive">{runError}</p>
 				) : null}
 
 				{result ? (
@@ -6257,13 +6314,17 @@ const LOCAL_MODEL_IDLE_OPTIONS = [
 	{ value: "3600", label: "1 hour" },
 ];
 
-function DefaultsSection({ target }: { target: ApiTarget }) {
-	const [localSelection, setLocalSelection] = useState<AgentSelection>(
-		EMPTY_AGENT_SELECTION
-	);
-	const [cloudSelection, setCloudSelection] = useState<AgentSelection>(
-		EMPTY_AGENT_SELECTION
-	);
+function DefaultsSection({
+	canConfigure,
+	managed,
+	target,
+}: {
+	canConfigure: boolean;
+	managed: boolean;
+	target: ApiTarget;
+}) {
+	const [localSelection, setLocalSelection] = useState(EMPTY_AGENT_SELECTION);
+	const [cloudSelection, setCloudSelection] = useState(EMPTY_AGENT_SELECTION);
 	const [loaded, setLoaded] = useState(false);
 	const [idleSeconds, setIdleSeconds] = useState("300");
 	const [idleLoaded, setIdleLoaded] = useState(false);
@@ -6357,6 +6418,7 @@ function DefaultsSection({ target }: { target: ApiTarget }) {
 						<AgentSelectionField
 							allowedProviderIds={["local"]}
 							ariaLabel="Default local agent or model"
+							disabled={!canConfigure}
 							onChange={(next) => {
 								save("local", next).catch(() => undefined);
 							}}
@@ -6375,32 +6437,23 @@ function DefaultsSection({ target }: { target: ApiTarget }) {
 				</div>
 			</SettingsCard>
 
-			<SettingsCard className="space-y-4">
-				<div className="flex flex-col gap-1.5">
-					<Label className="text-muted-foreground text-xs">
-						Default cloud agent
-					</Label>
-					{loaded ? (
-						<AgentSelectionField
-							ariaLabel="Default cloud agent or model"
-							onChange={(next) => {
-								save("cloud", next).catch(() => undefined);
-							}}
-							placeholder="No cloud default — use local"
-							preserveRyuRoute
-							target={target}
-							value={cloudSelection}
-						/>
-					) : (
-						<Skeleton className="h-8 w-full" />
-					)}
-					<p className="text-muted-foreground text-xs">
-						Normal interactive chats use this lane when set. Paid onboarding
-						starts with Ryu on managed OpenRouter; free users can choose a
-						configured BYOK provider or leave this unset.
-					</p>
-				</div>
-			</SettingsCard>
+			<BotRealmDefaultCard
+				canConfigure={canConfigure}
+				loaded={loaded}
+				managed={managed}
+				onChange={(next) => {
+					save("cloud", next).catch(() => undefined);
+				}}
+				target={target}
+				value={cloudSelection}
+			/>
+
+			{canConfigure ? null : (
+				<p className="px-1 text-muted-foreground text-xs">
+					Only organization owners and admins can change the local or Bot realm
+					default.
+				</p>
+			)}
 
 			<SettingsCard className="space-y-4">
 				<div className="flex flex-col gap-1.5">
@@ -6569,9 +6622,10 @@ const GATEWAY_SECTIONS: {
 	{
 		value: "network",
 		label: "Network",
-		hint: "The mesh: join this node to a tailnet and reach other Ryu nodes.",
+		hint: "Connect this node with Tailscale, Headscale, or a short-lived Tailcat address.",
 		icon: Share08Icon,
-		keywords: "network mesh tailscale headscale tailnet vpn remote peers",
+		keywords:
+			"network mesh tailscale headscale tailcat tailnet vpn remote peers",
 	},
 	// Moved from the App Settings dialog (node-level Core infra, not apps).
 	{
@@ -6701,6 +6755,13 @@ const GATEWAY_SECTIONS: {
 		hint: "Start, stop, and check each part when something looks wrong.",
 		icon: Shield01Icon,
 		keywords: "health diagnostics preflight restart status logs",
+	},
+	{
+		value: "onboarding",
+		label: "Onboarding",
+		hint: "Choose personal or team context for this node, or run setup again.",
+		icon: SparklesIcon,
+		keywords: "onboarding setup personal team company context reset first run",
 	},
 	{
 		value: "danger",
@@ -6895,6 +6956,7 @@ const GATEWAY_NAV_GROUPS: { items: GatewaySection[]; title?: string }[] = [
 		// NOWHERE, with no type error and no warning, so the two lists move together.
 		items: [
 			"computer",
+			"onboarding",
 			"privacy",
 			"storage",
 			"encryption",
@@ -6948,6 +7010,7 @@ const SECTION_TINTS: Partial<Record<GatewaySection, SettingsTint>> = {
 	encryption: "indigo",
 	updates: "teal",
 	health: "green",
+	onboarding: "purple",
 	danger: "red",
 };
 
@@ -6979,7 +7042,7 @@ export function GatewayDialog({
 	onOpenChange: (open: boolean) => void;
 	open: boolean;
 }) {
-	const { status, loading, error, refresh } = useGatewayStatus();
+	const { status, loading, error, refresh } = useGatewayStatus(open);
 	const canConfigure = useGatewayConfigurable();
 	const getActiveNode = useActiveNodeGetter();
 	const [configProviders, setConfigProviders] =
@@ -7177,7 +7240,13 @@ export function GatewayDialog({
 					/>
 				) : null}
 				{section === "workspace" ? <WorkspaceSection /> : null}
-				{section === "defaults" ? <DefaultsSection target={target} /> : null}
+				{section === "defaults" ? (
+					<DefaultsSection
+						canConfigure={canConfigure}
+						managed={managed}
+						target={target}
+					/>
+				) : null}
 				{/* LLM Providers. Provider *selection* (which model/keys/routing the
 				    local Pi agent uses) is strictly Core — "what runs" — NOT account/org
 				    data, so it lives here on the node/infra Gateway surface, next to
@@ -7403,6 +7472,9 @@ export function GatewayDialog({
 						<PreflightPage embedded />
 					</>
 				) : null}
+				{section === "onboarding" ? (
+					<NodeOnboardingSettings canConfigure={canConfigure} target={target} />
+				) : null}
 				{section === "danger" ? <DangerZoneSettings /> : null}
 				{/* Dynamic node-scoped app/plugin settings (manifest-registered). */}
 				{activeEntity ? (
@@ -7421,7 +7493,7 @@ export function GatewayDialog({
 					content={
 						<div className="px-4 py-4 md:px-8 md:py-6" ref={contentRef}>
 							<div className="mb-6 flex flex-col gap-1">
-								<h2 className="font-semibold text-base">{activeLabel}</h2>
+								<h2 className="font-medium text-base">{activeLabel}</h2>
 								{/* One plain sentence saying what this pane is for. Cheap, and
 								    it removes most of the "what even is this tab" tax. */}
 								{activeHint ? (

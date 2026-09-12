@@ -1,3 +1,4 @@
+import { useConfirmDialog } from "@ryu/ui/hooks/use-confirm-dialog.tsx";
 // apps/desktop/src/components/store/ContributedStoreSection.tsx
 //
 // The generic renderer for an app-registered Store section
@@ -74,7 +75,7 @@ import { toast } from "@ryu/ui/components/sileo";
 import { Spinner } from "@ryu/ui/components/spinner";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useCallback, useMemo, useState } from "react";
-import { useTabsContext } from "@/src/contexts/TabsContext.tsx";
+import { useTabSelector } from "@/src/contexts/TabsContext.tsx";
 import { useDebouncedValue } from "@/src/hooks/use-debounced-value.ts";
 import { useActiveNode } from "@/src/hooks/useActiveNode.ts";
 import { useApps } from "@/src/hooks/useApps.ts";
@@ -248,7 +249,7 @@ function DetailPanel({
 						</Button>
 					) : null}
 					{error ? (
-						<span className="ml-auto flex items-center gap-1.5 text-destructive text-sm">
+						<span className="ml-auto flex items-center gap-1.5 text-sm text-status-destructive">
 							<HugeiconsIcon className="size-4 shrink-0" icon={Alert01Icon} />
 							{error}
 						</span>
@@ -472,6 +473,8 @@ export default function ContributedStoreSection({
 	initialQuery?: string;
 	tab: PluginStoreTab;
 }) {
+	const { confirm, confirmationDialog } = useConfirmDialog();
+
 	const [query, setQuery] = useState(initialQuery);
 	const debouncedQuery = useDebouncedValue(query, SEARCH_DEBOUNCE_MS);
 	const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -485,7 +488,7 @@ export default function ContributedStoreSection({
 
 	const node = useActiveNode();
 	const queryClient = useQueryClient();
-	const { openTab } = useTabsContext();
+	const openTab = useTabSelector((state) => state.openTab);
 	const spec = tab.spec;
 	const catalog = useContributedStoreCatalog(tab, tab.app_enabled);
 
@@ -529,7 +532,7 @@ export default function ContributedStoreSection({
 			}
 			// The declarative confirm gate, same as PluginViewPage's: a spec-declared
 			// prompt before a destructive action.
-			if (action.confirm && !window.confirm(action.confirm)) {
+			if (action.confirm && !(await confirm(action.confirm))) {
 				return;
 			}
 			const target = toTarget(node);
@@ -551,7 +554,7 @@ export default function ContributedStoreSection({
 				queryKey: ["store-tab-catalog", tab.plugin, tab.id],
 			});
 		},
-		[node, queryClient, tab.plugin, tab.id]
+		[node, queryClient, tab.plugin, tab.id, confirm]
 	);
 
 	const handleInstall = useCallback(
@@ -622,18 +625,27 @@ export default function ContributedStoreSection({
 
 	if (!tab.app_enabled) {
 		return (
-			<AppOffState
-				onEnabled={() => {
-					queryClient.invalidateQueries({ queryKey: ["plugin-contributions"] });
-				}}
-				tab={tab}
-			/>
+			<>
+				{confirmationDialog}
+				{
+					<AppOffState
+						onEnabled={() => {
+							queryClient.invalidateQueries({
+								queryKey: ["plugin-contributions"],
+							});
+						}}
+						tab={tab}
+					/>
+				}
+			</>
 		);
 	}
 
 	if (!spec?.source) {
 		return (
 			<Empty className="h-full p-6">
+				{confirmationDialog}
+
 				<EmptyHeader>
 					<EmptyMedia variant="icon">
 						<TabIcon icon={tab.icon} />
@@ -659,56 +671,63 @@ export default function ContributedStoreSection({
 	const total = groups.reduce((n, g) => n + g.items.length, 0);
 
 	return (
-		<StoreCatalogLayout
-			detail={
-				<DetailPanel
-					busy={pendingId === selected?.id}
-					error={errorId === selected?.id ? installError : null}
-					installed={selected ? isInstalled(selected) : false}
-					item={selected}
-					onInstall={() => {
-						if (selected) {
-							handleInstall(selected);
-						}
+		<>
+			{confirmationDialog}
+			{
+				<StoreCatalogLayout
+					detail={
+						<DetailPanel
+							busy={pendingId === selected?.id}
+							error={errorId === selected?.id ? installError : null}
+							installed={selected ? isInstalled(selected) : false}
+							item={selected}
+							onInstall={() => {
+								if (selected) {
+									handleInstall(selected);
+								}
+							}}
+							runAction={(action, item) => {
+								runAction(action, item).catch((e: unknown) => {
+									toast.error(`${action.label} failed`, {
+										description: e instanceof Error ? e.message : String(e),
+									});
+								});
+							}}
+							tab={tab}
+						/>
+					}
+					detailTitle={selected?.title ?? tab.title}
+					hasSelection={selected != null}
+					list={
+						<CatalogList
+							error={
+								catalog.error instanceof Error ? catalog.error.message : null
+							}
+							groups={groups}
+							isInstalled={isInstalled}
+							loading={catalog.isLoading}
+							onClearSearch={() => setQuery("")}
+							onInstall={handleInstall}
+							onRetry={() => {
+								void catalog.refetch();
+							}}
+							onSelect={setSelectedId}
+							pendingId={pendingId}
+							selectedId={selectedId}
+							spec={spec}
+							tab={tab}
+							total={total}
+						/>
+					}
+					onCloseDetail={() => setSelectedId(null)}
+					search={{
+						value: query,
+						onChange: setQuery,
+						placeholder: spec.searchPlaceholder ?? `Search ${tab.title}…`,
 					}}
-					runAction={(action, item) => {
-						runAction(action, item).catch((e: unknown) => {
-							toast.error(`${action.label} failed`, {
-								description: e instanceof Error ? e.message : String(e),
-							});
-						});
-					}}
-					tab={tab}
 				/>
 			}
-			detailTitle={selected?.title ?? tab.title}
-			hasSelection={selected != null}
-			list={
-				<CatalogList
-					error={catalog.error instanceof Error ? catalog.error.message : null}
-					groups={groups}
-					isInstalled={isInstalled}
-					loading={catalog.isLoading}
-					onClearSearch={() => setQuery("")}
-					onInstall={handleInstall}
-					onRetry={() => {
-						void catalog.refetch();
-					}}
-					onSelect={setSelectedId}
-					pendingId={pendingId}
-					selectedId={selectedId}
-					spec={spec}
-					tab={tab}
-					total={total}
-				/>
-			}
-			onCloseDetail={() => setSelectedId(null)}
-			search={{
-				value: query,
-				onChange: setQuery,
-				placeholder: spec.searchPlaceholder ?? `Search ${tab.title}…`,
-			}}
-		/>
+		</>
 	);
 }
 

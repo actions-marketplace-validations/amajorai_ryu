@@ -10,36 +10,16 @@
 
 import { focusManager, QueryClient } from "@tanstack/react-query";
 
-// TanStack v5's focus manager listens for `visibilitychange` and NOTHING else
-// (v4's window `focus` listener was dropped). In a browser tab that is enough —
-// switching tabs hides the document. In a desktop window it is not: cmd-tabbing
-// from Ryu to a terminal leaves the window visible, so `document.visibilityState`
-// never changes and TanStack never considers the app re-focused.
-//
-// That is exactly the trip a user makes to run git by hand, so a refetch-on-focus
-// that only fires on visibility would miss every out-of-app commit — the whole
-// reason `useGitStatus` opts into it. Bind real window focus as well.
-//
-// Deliberately one-directional: focus/visible mark the app focused, but nothing
-// here marks it UNfocused. A missed "unfocused" only costs a little polling; a
-// missed "focused" (if a webview turned out not to emit one) would silently
-// suspend every interval, which is the failure this file exists to avoid.
+import { observeQueryFocus } from "./query-focus.ts";
+
+// Native window blur/focus and browser visibility both matter: without the
+// false transition, every interval continues polling in the background and
+// returning to a stale query cannot reliably trigger a fresh focus event.
 focusManager.setEventListener((handleFocus) => {
 	if (typeof window === "undefined") {
 		return;
 	}
-	const onFocus = () => handleFocus(true);
-	const onVisibility = () => {
-		if (document.visibilityState === "visible") {
-			handleFocus(true);
-		}
-	};
-	window.addEventListener("focus", onFocus, false);
-	window.addEventListener("visibilitychange", onVisibility, false);
-	return () => {
-		window.removeEventListener("focus", onFocus);
-		window.removeEventListener("visibilitychange", onVisibility);
-	};
+	return observeQueryFocus(handleFocus);
 });
 
 export const queryClient = new QueryClient({

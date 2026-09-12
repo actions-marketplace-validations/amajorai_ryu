@@ -1887,9 +1887,8 @@ mod tests {
         fn dispatch_tool_result<'a>(
             &'a self,
             ctx: crate::plugin_host::HookContext,
-        ) -> std::pin::Pin<
-            Box<dyn std::future::Future<Output = Option<Value>> + Send + 'a>,
-        > {
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<Value>> + Send + 'a>>
+        {
             Box::pin(async move {
                 (ctx.tool_name.as_deref() == Some("app.echo")
                     && ctx.tool_input.as_ref().and_then(|value| value.get("hook"))
@@ -2044,6 +2043,7 @@ mod tests {
         struct GatewayEnv {
             fallback: Option<std::ffi::OsString>,
             approval_mode: Option<std::ffi::OsString>,
+            gateway_url: Option<std::ffi::OsString>,
         }
         impl Drop for GatewayEnv {
             fn drop(&mut self) {
@@ -2056,6 +2056,10 @@ mod tests {
                         Some(value) => std::env::set_var("RYU_EXEC_APPROVAL_MODE", value),
                         None => std::env::remove_var("RYU_EXEC_APPROVAL_MODE"),
                     }
+                    match self.gateway_url.take() {
+                        Some(value) => std::env::set_var("RYU_GATEWAY_URL", value),
+                        None => std::env::remove_var("RYU_GATEWAY_URL"),
+                    }
                 }
             }
         }
@@ -2064,10 +2068,15 @@ mod tests {
         let _gateway_env = GatewayEnv {
             fallback: std::env::var_os("RYU_ALLOW_GATEWAY_FALLBACK"),
             approval_mode: std::env::var_os("RYU_EXEC_APPROVAL_MODE"),
+            gateway_url: std::env::var_os("RYU_GATEWAY_URL"),
         };
         unsafe {
             std::env::set_var("RYU_ALLOW_GATEWAY_FALLBACK", "1");
             std::env::set_var("RYU_EXEC_APPROVAL_MODE", "off");
+            // Keep the live-boundary test hermetic. A developer machine may have
+            // a real Gateway at the profile default, but this fixture is testing
+            // the explicit local fallback path, not Gateway authentication.
+            std::env::set_var("RYU_GATEWAY_URL", "http://127.0.0.1:1");
         }
 
         let calls = Arc::new(AtomicUsize::new(0));
@@ -2375,11 +2384,9 @@ mod tests {
             )
             .await
             .unwrap_err();
-        assert!(
-            auth_blocked
-                .to_string()
-                .contains("tool execution did not complete")
-        );
+        assert!(auth_blocked
+            .to_string()
+            .contains("tool execution did not complete"));
         let auth_receipt = store
             .get_receipt(auth_submission_id)
             .await

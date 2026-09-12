@@ -123,9 +123,13 @@ async function get<T>(path: string): Promise<T> {
 }
 
 async function post<T>(path: string, body: unknown): Promise<T> {
+	const headers = authHeaders();
+	if (path.startsWith("/billing/checkout")) {
+		headers["Idempotency-Key"] = crypto.randomUUID();
+	}
 	const resp = await fetch(`${BASE}${path}`, {
 		method: "POST",
-		headers: authHeaders(),
+		headers,
 		body: JSON.stringify(body),
 	});
 	if (!resp.ok) {
@@ -170,21 +174,26 @@ export function fetchSubscriptionStatus(): Promise<SubscriptionStatus> {
 
 /** Member-seat state for the active organization. Polar owns billedSeats. */
 export interface TeamsSeatStatus {
+	allocatedSeats: number;
+	availableSeats: number | null;
 	billedSeats: number | null;
 	bonusExpiresAt: string | null;
 	bonusSeats: number;
+	canInvite: boolean;
 	includedCreditPoolMicroUsd: number | null;
 	includedSeats: number | null;
+	invitationBlockedReason: string | null;
 	memberCount: number;
 	minRequired: number;
 	minSeats: number;
 	organizationId: string;
 	overAllocated: boolean;
+	pendingInvitations: number;
 	pendingSeatReservations: number;
 	plan: string | null;
 }
 
-export type OrganizationPlanId = "teams" | "business";
+export type OrganizationPlanId = "teams" | "teams-lite" | "business";
 
 export interface OrganizationPlanCheckout {
 	monthlyPriceMicroUsd: number;
@@ -246,6 +255,8 @@ export function checkoutTeamsOnboarding(
 export function updateTeamsSeats(seats: number): Promise<{
 	memberCount: number;
 	pendingSeatCount: number;
+	prorationBehavior: "invoice";
+	prorationLabel: string;
 	seats: number;
 }> {
 	return post("/billing/seats", { seats });
@@ -311,9 +322,26 @@ export function openBillingPortalUrl(): Promise<{ url: string }> {
 
 /** The pooled org wallet. */
 export interface WalletView {
+	balanceBreakdownAvailable?: boolean;
 	balanceMicroUsd: number;
 	currency: string;
 	id: string;
+	providerAllocations?: CreditProviderAllocation[];
+	source?: "local" | "polar";
+	/** Remaining included plan credit for the current billing period. */
+	subscriptionBalanceMicroUsd: number | null;
+	/** Remaining purchased credit; this balance rolls over. */
+	topupBalanceMicroUsd: number | null;
+	/** Polar aggregate meter balance available for any provider. */
+	unrestrictedBalanceMicroUsd?: number;
+}
+
+export interface CreditProviderAllocation {
+	expiresAt: string | null;
+	isFreeProvider: boolean;
+	label: string;
+	poolId: string;
+	remainingMicroUsd: number;
 }
 
 export function fetchWallet(): Promise<{ wallet: WalletView }> {

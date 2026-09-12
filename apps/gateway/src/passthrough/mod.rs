@@ -79,7 +79,7 @@ use crate::{audit::AuditRecord, firewall::FirewallBackend, state::SharedState};
 pub(crate) use ryu_gw_passthrough::WireFormat;
 use ryu_gw_passthrough::{
     build_upstream_url, drain_complete_events, is_messages_path, is_responses_path,
-    redact_request_body, redact_sse_event, PassthroughFirewall,
+    is_safe_upstream_path, redact_request_body, redact_sse_event, PassthroughFirewall,
 };
 
 impl PassthroughFirewall for dyn FirewallBackend + '_ {
@@ -121,6 +121,18 @@ const STRIPPED_REQUEST_HEADERS: &[&str] = &[
     "accept-encoding",
     "transfer-encoding",
 ];
+
+// Provider credentials and prompt bodies must never follow an upstream redirect.
+fn passthrough_http_client() -> &'static reqwest::Client {
+    static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+    CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .timeout(std::time::Duration::from_secs(60))
+            .build()
+            .expect("failed to build passthrough HTTP client")
+    })
+}
 
 fn anthropic_upstream() -> String {
     std::env::var("RYU_PASSTHROUGH_ANTHROPIC_UPSTREAM")
@@ -225,6 +237,10 @@ async fn forward(
         return (StatusCode::FORBIDDEN, "passthrough proxy is loopback-only").into_response();
     }
 
+    if !is_safe_upstream_path(&path) {
+        return (StatusCode::BAD_REQUEST, "invalid passthrough path").into_response();
+    }
+
     let started = std::time::Instant::now();
     let url = build_upstream_url(upstream_base, &path, raw_query.0.as_deref());
 
@@ -238,6 +254,21 @@ async fn forward(
     // ── Request-side DLP: redact the outbound body when the firewall is on ─────
     // Only the prompt-carrying endpoint is scanned; other sub-paths (token
     // counting, etc.) are proxied untouched.
+    let scan_inbound = state.with_firewall(|fw| fw.config().enabled && fw.config().scan_inbound);
+    if redact_body
+        && scan_inbound
+        && headers.get_all("content-encoding").iter().any(|value| {
+            value
+                .to_str()
+                .map_or(true, |value| !value.eq_ignore_ascii_case("identity"))
+        })
+    {
+        return (
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            "compressed passthrough prompts cannot be inspected",
+        )
+            .into_response();
+    }
     let mut model = "unknown".to_string();
     let forward_body: Bytes = if redact_body {
         match serde_json::from_slice::<Value>(&body) {
@@ -260,7 +291,13 @@ async fn forward(
                     body
                 }
             }
-            // Non-JSON or unparseable body: forward as-is (fail open).
+            Err(_) if scan_inbound => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    "passthrough prompt must be valid JSON",
+                )
+                    .into_response();
+            }
             Err(_) => body,
         }
     } else {
@@ -268,7 +305,9 @@ async fn forward(
     };
 
     // ── Forward upstream with the caller's OWN credentials unchanged ───────────
-    let mut req = state.http.request(method.clone(), &url).body(forward_body);
+    let mut req = passthrough_http_client()
+        .request(method.clone(), &url)
+        .body(forward_body);
     let mut req_headers = reqwest::header::HeaderMap::new();
     for (name, value) in &headers {
         if STRIPPED_REQUEST_HEADERS.contains(&name.as_str()) {
@@ -589,6 +628,68 @@ mod tests {
     // calls `redact_request_body`); import them test-locally to avoid an unused
     // import in the non-test build.
     use ryu_gw_passthrough::{redact_anthropic_body, redact_responses_body};
+
+    #[tokio::test]
+    async fn credential_client_does_not_follow_redirects() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let app = axum::Router::new()
+            .route(
+                "/start",
+                axum::routing::post(|| async {
+                    axum::response::Redirect::temporary("/credential-sink")
+                }),
+            )
+            .route(
+                "/credential-sink",
+                axum::routing::post(|| async { "leaked" }),
+            );
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let response = passthrough_http_client()
+            .post(format!("http://{address}/start"))
+            .header("x-api-key", "test-secret")
+            .body("private prompt")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::TEMPORARY_REDIRECT);
+        assert_eq!(response.url().path(), "/start");
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn inbound_scanning_refuses_uninspectable_prompts_before_forwarding() {
+        let mut state = crate::state::AppState::new_for_test_default();
+        state.firewall = crate::firewall::FirewallRegistry::new(FirewallConfig {
+            enabled: true,
+            scan_inbound: true,
+            ..FirewallConfig::default()
+        });
+        let state = std::sync::Arc::new(state);
+        for (encoding, body, expected) in [
+            (None, "not-json", StatusCode::BAD_REQUEST),
+            (Some("gzip"), "{}", StatusCode::UNSUPPORTED_MEDIA_TYPE),
+        ] {
+            let mut headers = HeaderMap::new();
+            if let Some(encoding) = encoding {
+                headers.insert("content-encoding", encoding.parse().unwrap());
+            }
+            let response = forward(
+                WireFormat::Anthropic,
+                "http://127.0.0.1:1",
+                true,
+                state.clone(),
+                "127.0.0.1:10000".parse().unwrap(),
+                "v1/messages".into(),
+                Method::POST,
+                headers,
+                axum::extract::RawQuery(None),
+                Bytes::from(body),
+            )
+            .await;
+            assert_eq!(response.status(), expected);
+        }
+    }
 
     fn enabled_scanner() -> FirewallScanner {
         FirewallScanner::new(FirewallConfig {

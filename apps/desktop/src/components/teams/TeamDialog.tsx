@@ -299,7 +299,9 @@ export function TeamDialog({
 								</p>
 							</div>
 						) : null}
-						{error ? <p className="text-destructive text-sm">{error}</p> : null}
+						{error ? (
+							<p className="text-sm text-status-destructive">{error}</p>
+						) : null}
 					</div>
 					<DialogFooter>
 						<Button onClick={onClose} type="button" variant="ghost">

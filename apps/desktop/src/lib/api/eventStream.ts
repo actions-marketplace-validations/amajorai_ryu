@@ -21,7 +21,8 @@ export type EventChannel =
 	| "quests"
 	| "monitors"
 	| "approvals"
-	| "downloads";
+	| "downloads"
+	| "navigation";
 
 /** A per-channel subscriber. `data` is the parsed JSON of that channel's event. */
 type ChannelHandler = (data: unknown) => void;
@@ -39,21 +40,23 @@ interface MuxConnection {
 	subscribers: Map<EventChannel, Set<ChannelHandler>>;
 }
 
-/** Shared connections keyed by node base URL (one socket per host). */
+/** One shared connection per node URL and explicit credential scope. */
 const connections = new Map<string, MuxConnection>();
 
-/** Pause that rejects early when the connection is torn down. */
+/** Pause until retry, releasing its listener on timeout or teardown. */
 function delay(ms: number, signal: AbortSignal): Promise<void> {
 	return new Promise((resolve) => {
-		const timer = setTimeout(resolve, ms);
-		signal.addEventListener(
-			"abort",
-			() => {
-				clearTimeout(timer);
-				resolve();
-			},
-			{ once: true }
-		);
+		if (signal.aborted) {
+			resolve();
+			return;
+		}
+		const finish = () => {
+			clearTimeout(timer);
+			signal.removeEventListener("abort", finish);
+			resolve();
+		};
+		const timer = setTimeout(finish, ms);
+		signal.addEventListener("abort", finish, { once: true });
 	});
 }
 
@@ -90,29 +93,45 @@ function dispatchFrame(mux: MuxConnection, frame: string): void {
 
 /** Read the unified stream until it ends, dispatching frames as they arrive. */
 async function pump(target: ApiTarget, mux: MuxConnection): Promise<void> {
-	const resp = await authenticatedFetch(target, "/api/events/all", {
-		method: "GET",
-		headers: { Accept: "text/event-stream" },
-		signal: mux.controller.signal,
-	});
-	if (!(resp.ok && resp.body)) {
-		throw new Error(`event stream failed: ${resp.status}`);
+	const controller = new AbortController();
+	const abort = () => controller.abort();
+	if (mux.controller.signal.aborted) {
+		return;
 	}
-	const reader = resp.body.getReader();
-	const decoder = new TextDecoder();
-	let buffer = "";
-	for (;;) {
-		const { done, value } = await reader.read();
-		if (done) {
-			break;
+	mux.controller.signal.addEventListener("abort", abort, { once: true });
+	try {
+		const resp = await authenticatedFetch(target, "/api/events/all", {
+			method: "GET",
+			headers: { Accept: "text/event-stream" },
+			signal: controller.signal,
+		});
+		if (!(resp.ok && resp.body)) {
+			throw new Error(`event stream failed: ${resp.status}`);
 		}
-		buffer += decoder.decode(value, { stream: true });
-		let sep = buffer.indexOf(FRAME_SEP);
-		while (sep !== -1) {
-			dispatchFrame(mux, buffer.slice(0, sep));
-			buffer = buffer.slice(sep + FRAME_SEP.length);
-			sep = buffer.indexOf(FRAME_SEP);
+		const reader = resp.body.getReader();
+		const decoder = new TextDecoder();
+		let buffer = "";
+		try {
+			for (;;) {
+				const { done, value } = await reader.read();
+				if (done) {
+					break;
+				}
+				buffer += decoder.decode(value, { stream: true });
+				let sep = buffer.indexOf(FRAME_SEP);
+				while (sep !== -1) {
+					dispatchFrame(mux, buffer.slice(0, sep));
+					buffer = buffer.slice(sep + FRAME_SEP.length);
+					sep = buffer.indexOf(FRAME_SEP);
+				}
+			}
+		} finally {
+			await reader.cancel().catch(() => undefined);
+			reader.releaseLock();
 		}
+	} finally {
+		controller.abort();
+		mux.controller.signal.removeEventListener("abort", abort);
 	}
 }
 
@@ -147,7 +166,11 @@ export function subscribeChannel(
 	channel: EventChannel,
 	handler: ChannelHandler
 ): () => void {
-	const key = target.url;
+	const key = JSON.stringify([
+		target.url,
+		target.token,
+		target.userJwt ?? null,
+	]);
 	let mux = connections.get(key);
 	if (!mux) {
 		mux = {
@@ -201,6 +224,9 @@ export function streamChannel<T>(
 	onEvent: (event: T) => void,
 	signal?: AbortSignal
 ): Promise<void> {
+	if (signal?.aborted) {
+		return Promise.resolve();
+	}
 	const unsubscribe = subscribeChannel(target, channel, (data) => {
 		onEvent(data as T);
 	});

@@ -24,6 +24,7 @@ pub mod catalog;
 pub mod graph;
 pub mod isolation;
 pub mod lifecycle;
+pub mod runtime;
 pub mod seed;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -785,6 +786,15 @@ impl PluginStore {
         Ok(code.flatten())
     }
 
+    /// Read UI presence for the contributions projection without loading bundle blobs.
+    /// This is metadata only: callers must still apply enabled/Safe Mode gates.
+    pub async fn ids_with_ui_code(&self) -> Result<std::collections::HashSet<String>> {
+        let conn = self.conn.lock().await;
+        let mut statement = conn.prepare("SELECT id FROM apps WHERE ui_code IS NOT NULL")?;
+        let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
+        Ok(rows.collect::<rusqlite::Result<std::collections::HashSet<_>>>()?)
+    }
+
     /// Whether the plugin has a stored UI bundle (cheap presence check for the
     /// contributions payload's `has_ui` flag — avoids loading the whole blob).
     pub async fn has_ui_code(&self, id: &str) -> Result<bool> {
@@ -1294,6 +1304,27 @@ mod tests {
         let conn = Connection::open_in_memory().unwrap();
         PluginStore::migrate(&conn).unwrap();
         PluginStore::migrate(&conn).unwrap();
+    }
+
+    #[tokio::test]
+    async fn bulk_ui_presence_matches_single_reads_without_enabling_apps() {
+        let s = store();
+        for id in ["com.test.with-ui", "com.test.empty-ui", "com.test.no-ui"] {
+            s.insert(id, "1.0.0").await.unwrap();
+        }
+        s.set_ui_code("com.test.with-ui", Some(&"x".repeat(1024 * 1024)))
+            .await
+            .unwrap();
+        s.set_ui_code("com.test.empty-ui", Some("")).await.unwrap();
+        let ids = s.ids_with_ui_code().await.unwrap();
+        assert_eq!(ids.len(), 2);
+        for id in ["com.test.with-ui", "com.test.empty-ui", "com.test.no-ui"] {
+            assert_eq!(ids.contains(id), s.has_ui_code(id).await.unwrap());
+            assert!(!s.get(id).await.unwrap().unwrap().enabled);
+        }
+        s.set_ui_code("com.test.with-ui", None).await.unwrap();
+        s.remove("com.test.empty-ui").await.unwrap();
+        assert!(s.ids_with_ui_code().await.unwrap().is_empty());
     }
 
     #[tokio::test]

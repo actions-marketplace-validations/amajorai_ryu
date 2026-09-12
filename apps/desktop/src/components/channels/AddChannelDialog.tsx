@@ -692,7 +692,7 @@ export function AddChannelDialog({
 						</div>
 
 						{formError ? (
-							<p className="text-destructive text-sm">{formError}</p>
+							<p className="text-sm text-status-destructive">{formError}</p>
 						) : null}
 					</div>
 				</ScrollFadeEffect>

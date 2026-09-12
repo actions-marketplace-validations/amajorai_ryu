@@ -19,10 +19,11 @@
 mod consult;
 mod elicitation;
 mod governed;
+pub(crate) mod passport;
 
-pub use consult::{consult_for_tool_call, ConsultOutcome};
+pub use consult::{consult_for_tool_call, consult_for_tool_call_with_agent, ConsultOutcome};
 pub use elicitation::{needs_connection, to_envelope};
-pub use governed::{read_credential, IDENTITY_READ_SCOPE};
+pub use governed::{read_credential, read_credential_with_agent, IDENTITY_READ_SCOPE};
 
 // The `crate::identity::{health,source}::…` module paths used across Core
 // (main, scheduler, elicitation), re-exported unchanged.
@@ -35,8 +36,9 @@ pub use ryu_vault::{health, source};
 // modules and API parity, not for this file.
 #[allow(unused_imports)]
 pub use ryu_vault::{
-    global, is_known_source, known_source_ids, set_global, ConnectionRecord, ConnectionStatus,
-    CredentialBackend, CredentialSource, CredentialSourceRegistry, FlowStatus, HealthEngine,
-    HealthEvent, IdentityStore, LoginFlow, LoginKind, ManualImport, McpOAuthConnectionRecord,
-    McpOAuthConnectionStatus, Profile, SealedState, SecretState, DEFAULT_SOURCE_ENV,
+    global, is_known_source, known_source_ids, set_global, ConnectionAccessLevel, ConnectionAction,
+    ConnectionRecord, ConnectionStatus, CredentialBackend, CredentialSource,
+    CredentialSourceRegistry, FlowStatus, HealthEngine, HealthEvent, IdentityStore, LoginFlow,
+    LoginKind, ManualImport, McpOAuthConnectionRecord, McpOAuthConnectionStatus, Profile,
+    SealedState, SecretState, DEFAULT_SOURCE_ENV,
 };

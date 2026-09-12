@@ -26,6 +26,7 @@ import type {
 	CatalogImplementationSummary,
 	CatalogLayer,
 	CatalogSurfaceSupport,
+	DesignSystemEvidence,
 } from "@ryu/marketplace/catalog/types";
 import {
 	type ApiTarget,
@@ -127,6 +128,8 @@ interface AppManifestWire {
 	tagline?: string | null;
 	/** Host surfaces the plugin runs on. Absent/empty = EVERY surface. */
 	targets?: Surface[];
+	/** Core-derived provenance tier. Never infer this from the manifest id. */
+	tier?: AppTier | null;
 	version: string;
 	windows_first: boolean;
 }
@@ -141,6 +144,21 @@ interface AppRecordWire {
 }
 
 // ── Client types (camelCase, used by React) ───────────────────────────────────
+
+/** Server-derived plugin provenance. The id namespace is not a trust signal. */
+export type AppTier = "core" | "community";
+
+/** First-party UI is admitted only when Core explicitly derives the Core tier. */
+export function isCoreAppTier(
+	tier: AppTier | null | undefined
+): tier is "core" {
+	return tier === "core";
+}
+
+/** Parse Core's provenance field without ever treating an unknown value as Core. */
+export function appTierFromWire(value: unknown): AppTier | null {
+	return value === "core" || value === "community" ? value : null;
+}
 
 export interface RunnableEntry {
 	config: unknown;
@@ -263,6 +281,8 @@ export interface AppInfo extends AppPresentation {
 	surfaceSupport: CatalogSurfaceSupport[];
 	/** Host surfaces this plugin runs on. **Empty = every surface**, never "none". */
 	targets: Surface[];
+	/** Core-derived provenance. Missing/unknown values are not first-party. */
+	tier: AppTier | null;
 	version: string;
 	windowsFirst: boolean;
 }
@@ -361,6 +381,20 @@ export interface AppUninstallResult {
 	notice?: string;
 	removed: string;
 	success: boolean;
+}
+
+export type AppLifecycleAction =
+	| "install"
+	| "enable"
+	| "disable"
+	| "uninstall"
+	| "update";
+
+export interface AppLifecyclePreview {
+	action: AppLifecycleAction;
+	dryRun: true;
+	success: boolean;
+	[key: string]: unknown;
 }
 
 // ── Error shape returned by lifecycle endpoints ───────────────────────────────
@@ -480,6 +514,7 @@ function toAppInfo(w: AppManifestWire): AppInfo {
 	return {
 		approvedGrants: w.approved_grants ?? [],
 		builtIn: w.built_in ?? false,
+		tier: appTierFromWire(w.tier),
 		category: w.category ?? null,
 		companion: w.companion
 			? {
@@ -646,6 +681,59 @@ export async function fetchAppLifecycleCapabilities(
 		target,
 		"/api/plugins/lifecycle-capabilities"
 	);
+}
+
+/** Validate and plan an app/plugin lifecycle change without changing Core,
+ *
+ *  The plan is deliberately not returned as an AppRecord: a dry run is a
+ *  projection, never proof that the requested state was persisted. */
+export async function previewAppLifecycle(
+	target: ApiTarget,
+	id: string,
+	action: AppLifecycleAction,
+	options: {
+		cascade?: boolean;
+		channel?: string;
+		force?: boolean;
+		skipUserJwt?: boolean;
+		version?: string;
+	} = {}
+): Promise<AppLifecyclePreview> {
+	const encodedId = encodeURIComponent(id);
+	const query = new URLSearchParams();
+	const queryAction = action === "disable" || action === "uninstall";
+	if (queryAction) {
+		query.set("dryRun", "true");
+		if (options.cascade) {
+			query.set("cascade", "true");
+		}
+		if (options.force) {
+			query.set("force", "true");
+		}
+	}
+	const queryString = query.toString();
+	const suffix = queryString ? `?${queryString}` : "";
+	const path = `/api/plugins/${encodedId}/${action}${suffix}`;
+	const body =
+		action === "update"
+			? {
+					channel: options.channel,
+					dryRun: true,
+					force: options.force ?? false,
+					version: options.version,
+				}
+			: { dryRun: true };
+	const resp = await authenticatedFetch(target, path, {
+		method: "POST",
+		headers: makeHeaders(target.token, target.userJwt),
+		body: queryAction ? undefined : JSON.stringify(body),
+		skipUserJwt: options.skipUserJwt,
+	});
+	if (!resp.ok) {
+		const err = await parseLifecycleError(resp, path);
+		throw Object.assign(new Error(err.message), err);
+	}
+	return (await resp.json()) as AppLifecyclePreview;
 }
 
 /** Run the read-only Core loader/lifecycle doctor for installed apps/plugins. */
@@ -1219,10 +1307,12 @@ function toPluginCompanion(w: PluginCompanionWire): PluginCompanion {
 }
 
 export async function getPluginContributions(
-	target: ApiTarget
+	target: ApiTarget,
+	signal?: AbortSignal
 ): Promise<PluginContributions> {
 	const resp = await authenticatedFetch(target, "/api/plugins/contributions", {
 		method: "GET",
+		signal,
 		headers: {
 			...makeHeaders(target.token, target.userJwt),
 			...identityHeaders(),
@@ -1274,12 +1364,17 @@ export async function getPluginContributions(
  */
 export async function fetchPluginUiBundle(
 	target: ApiTarget,
-	id: string
+	id: string,
+	signal?: AbortSignal
 ): Promise<string | null> {
 	const resp = await authenticatedFetch(
 		target,
 		`/api/plugins/${encodeURIComponent(id)}/ui-bundle`,
-		{ method: "GET", headers: makeHeaders(target.token, target.userJwt) }
+		{
+			method: "GET",
+			headers: makeHeaders(target.token, target.userJwt),
+			signal,
+		}
 	);
 	if (resp.status === 404) {
 		return null;
@@ -2146,6 +2241,7 @@ export interface PluginCatalogDetail {
 		url?: string | null;
 		domain?: string | null;
 	};
+	designSystem?: DesignSystemEvidence | null;
 	domain?: string | null;
 	downloads?: number | null;
 	examplePrompts?: string[];
@@ -2485,6 +2581,38 @@ export async function installSidecar(
 	if (!resp.ok) {
 		throw new Error(`/api/setup/${name}/install failed: ${resp.status}`);
 	}
+}
+
+export interface SidecarLifecyclePreview {
+	action: "install" | "uninstall";
+	dryRun: true;
+	name: string;
+	success: boolean;
+	[key: string]: unknown;
+}
+
+export function previewSidecarInstall(
+	target: ApiTarget,
+	name: string
+): Promise<SidecarLifecyclePreview> {
+	return request<SidecarLifecyclePreview>(
+		target,
+		`/api/setup/${encodeURIComponent(name)}/install?dryRun=true`,
+		{ method: "POST" }
+	);
+}
+
+export function previewSidecarUninstall(
+	target: ApiTarget,
+	name: string,
+	withData = false
+): Promise<SidecarLifecyclePreview> {
+	const route = withData ? "uninstall-with-data" : "uninstall";
+	return request<SidecarLifecyclePreview>(
+		target,
+		`/api/setup/${encodeURIComponent(name)}/${route}?dryRun=true`,
+		{ method: "POST" }
+	);
 }
 
 /** `POST /api/sidecar/:name/start` — start a sidecar process. */

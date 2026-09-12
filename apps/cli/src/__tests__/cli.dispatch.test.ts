@@ -55,7 +55,7 @@ const sampleApp: AppInfo = {
 /** A cli-only app contributing `ryu mail <cmd>` subcommands. */
 const mailApp: AppInfo = {
 	...sampleApp,
-	id: "mail",
+	id: "mail-contributor",
 	name: "Mail",
 	commands: [
 		{
@@ -334,6 +334,30 @@ test("add <id>: routes to installApp with the id and exits 0", async () => {
 	expect(cap.out()).toContain("Installed whiteboard");
 });
 
+test("add --dry-run previews without calling the live install route", async () => {
+	const cap = makeIo();
+	let captured: { action: string; id: string } | null = null;
+	const code = await runCli(["add", "whiteboard", "--dry-run", "--json"], {
+		io: cap.io,
+		api: stubApi({
+			previewAppLifecycle: (_target, id, action) => {
+				captured = { action, id };
+				return Promise.resolve({
+					action,
+					dryRun: true,
+					success: true,
+					wouldInstall: true,
+				});
+			},
+		}),
+	});
+	expect(code).toBe(0);
+	const observed = captured as { action: string; id: string } | null;
+	expect(observed?.action ?? "").toBe("install");
+	expect(observed?.id ?? "").toBe("whiteboard");
+	expect(JSON.parse(cap.out()).dryRun).toBe(true);
+});
+
 test("install alias resolves to the same handler as add", async () => {
 	const cap = makeIo();
 	let installed = "";
@@ -553,7 +577,7 @@ test("app command routes to execAppCommand with the right plugin id + route", as
 	let capturedId = "";
 	let capturedMethod = "";
 	let capturedPath = "";
-	const code = await runCli(["mail", "status"], {
+	const code = await runCli(["mail-contributor", "status"], {
 		io: cap.io,
 		api: stubApi({
 			fetchApps: () => Promise.resolve([mailApp]),
@@ -566,7 +590,7 @@ test("app command routes to execAppCommand with the right plugin id + route", as
 		}),
 	});
 	expect(code).toBe(0);
-	expect(capturedId).toBe("mail");
+	expect(capturedId).toBe("mail-contributor");
 	expect(capturedPath).toBe("/status");
 	expect(capturedMethod).toBe("GET");
 	expect(cap.out()).toContain("ok");
@@ -576,7 +600,7 @@ test("app command routes to execAppCommand with the right plugin id + route", as
 test("app command passes trailing args through to the sidecar", async () => {
 	const cap = makeIo();
 	let receivedArgs: string[] = [];
-	await runCli(["mail", "send", "a@b.com", "hi"], {
+	await runCli(["mail-contributor", "send", "a@b.com", "hi"], {
 		io: cap.io,
 		api: stubApi({
 			fetchApps: () => Promise.resolve([mailApp]),
@@ -605,19 +629,19 @@ test("an app id never shadows a built-in command", async () => {
 
 test("`ryu <app>` with no subcommand lists the app's commands", async () => {
 	const cap = makeIo();
-	const code = await runCli(["mail"], {
+	const code = await runCli(["mail-contributor"], {
 		io: cap.io,
 		api: stubApi({ fetchApps: () => Promise.resolve([mailApp]) }),
 	});
 	expect(code).toBe(0);
 	expect(cap.out()).toContain("status");
 	expect(cap.out()).toContain("Show inbox status");
-	expect(cap.out()).toContain("ryu mail send");
+	expect(cap.out()).toContain("ryu mail-contributor send");
 });
 
 test("unknown subcommand for a known app is a usage error listing options", async () => {
 	const cap = makeIo();
-	const code = await runCli(["mail", "bogus"], {
+	const code = await runCli(["mail-contributor", "bogus"], {
 		io: cap.io,
 		api: stubApi({ fetchApps: () => Promise.resolve([mailApp]) }),
 	});
@@ -630,7 +654,7 @@ test("unknown subcommand for a known app is a usage error listing options", asyn
 test("a disabled app does not contribute commands (falls through to unknown)", async () => {
 	const cap = makeIo();
 	const disabled: AppInfo = { ...mailApp, enabled: false };
-	const code = await runCli(["mail", "status"], {
+	const code = await runCli(["mail-contributor", "status"], {
 		io: cap.io,
 		api: stubApi({ fetchApps: () => Promise.resolve([disabled]) }),
 	});
@@ -650,7 +674,7 @@ test("an unknown app id still exits 2 with the classic message", async () => {
 
 test("a non-2xx status from the sidecar maps to exit 1 with the body on stderr", async () => {
 	const cap = makeIo();
-	const code = await runCli(["mail", "status"], {
+	const code = await runCli(["mail-contributor", "status"], {
 		io: cap.io,
 		api: stubApi({
 			fetchApps: () => Promise.resolve([mailApp]),
@@ -659,4 +683,32 @@ test("a non-2xx status from the sidecar maps to exit 1 with the body on stderr",
 	});
 	expect(code).toBe(1);
 	expect(cap.err()).toContain("boom");
+});
+
+test("built-in mail sends resource requests with JSON bodies", async () => {
+	const cap = makeIo();
+	let called: { body?: unknown; method?: string; path?: string } = {};
+	const code = await runCli(
+		[
+			"mail",
+			"send",
+			"inbox-1",
+			'{"to":["person@example.com"],"subject":"Hi","text":"Body"}',
+		],
+		{
+			io: cap.io,
+			api: stubApi({
+				call: (_target, path, options) => {
+					called = { body: options?.body, method: options?.method, path };
+					return Promise.resolve({ message: { id: "sent-1" } });
+				},
+			}),
+		}
+	);
+	expect(code).toBe(0);
+	expect(called).toEqual({
+		body: { to: ["person@example.com"], subject: "Hi", text: "Body" },
+		method: "POST",
+		path: "/api/mail/inboxes/inbox-1/send",
+	});
 });

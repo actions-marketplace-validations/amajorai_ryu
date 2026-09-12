@@ -172,12 +172,12 @@ const COMPACT_SEGMENT_LIMIT = 3;
 /** Threshold colors for the filled portion: calm → amber → red as it fills. */
 function fillClass(usedPercent: number): string {
 	if (usedPercent >= 90) {
-		return "bg-red-500";
+		return "bg-destructive";
 	}
 	if (usedPercent >= 70) {
-		return "bg-amber-500";
+		return "bg-warning";
 	}
-	return "bg-emerald-500";
+	return "bg-success";
 }
 
 /** Same threshold hue as the fill, dimmed to /20 for the unfilled track — barely
@@ -185,35 +185,35 @@ function fillClass(usedPercent: number): string {
  *  bleeding into the empty space. */
 function trackClass(usedPercent: number): string {
 	if (usedPercent >= 90) {
-		return "bg-red-500/20";
+		return "bg-destructive/20";
 	}
 	if (usedPercent >= 70) {
-		return "bg-amber-500/20";
+		return "bg-warning/20";
 	}
-	return "bg-emerald-500/20";
+	return "bg-success/20";
 }
 
 /** Ring equivalent of `fillClass`: the same calm → amber → red danger hue, but as
  *  an SVG stroke color for the circular meter. */
 function fillStrokeClass(usedPercent: number): string {
 	if (usedPercent >= 90) {
-		return "stroke-red-500";
+		return "stroke-destructive";
 	}
 	if (usedPercent >= 70) {
-		return "stroke-amber-500";
+		return "stroke-warning";
 	}
-	return "stroke-emerald-500";
+	return "stroke-success";
 }
 
 /** Ring equivalent of `trackClass`: the dimmed unfilled track as an SVG stroke. */
 function trackStrokeClass(usedPercent: number): string {
 	if (usedPercent >= 90) {
-		return "stroke-red-500/20";
+		return "stroke-destructive/20";
 	}
 	if (usedPercent >= 70) {
-		return "stroke-amber-500/20";
+		return "stroke-warning/20";
 	}
-	return "stroke-emerald-500/20";
+	return "stroke-success/20";
 }
 
 // Geometry for the circular meter, shared by every ring so the dasharray math is
@@ -351,10 +351,10 @@ function paceStatus(usageWindow: UsageWindow): string | null {
 function paceDotClass(usageWindow: UsageWindow): string {
 	const status = paceStatus(usageWindow);
 	if (status?.includes("deficit")) {
-		return "bg-red-500";
+		return "bg-destructive";
 	}
 	if (status?.includes("reserve")) {
-		return "bg-emerald-500";
+		return "bg-success";
 	}
 	return "bg-muted-foreground/40";
 }
@@ -894,10 +894,10 @@ function worstWindow(windows: UsageWindow[]): UsageWindow | null {
 /** Text-colour counterpart of `fillClass`, for the picker badge's bare number. */
 function usageTextClass(usedPercent: number): string {
 	if (usedPercent >= 90) {
-		return "text-red-500";
+		return "text-status-destructive";
 	}
 	if (usedPercent >= 70) {
-		return "text-amber-500";
+		return "text-status-warning";
 	}
 	return "text-muted-foreground/70";
 }

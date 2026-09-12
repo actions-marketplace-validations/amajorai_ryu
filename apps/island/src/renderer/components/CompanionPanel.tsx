@@ -102,7 +102,7 @@ export function CompanionPanel() {
 				{activeCompanion ? (
 					// Fill the height-bounded expanded panel (like IslandChat does) so the
 					// host's `h-full` iframe has real bounds instead of collapsing to 0.
-					<div className="h-full w-full overflow-hidden rounded-lg border border-white/10">
+					<div className="h-full w-full overflow-hidden rounded-lg border border-border">
 						<IslandPluginHost companion={activeCompanion} />
 					</div>
 				) : activeView ? (
@@ -134,8 +134,8 @@ function TabButton({
 			aria-pressed={active}
 			className={`shrink-0 rounded-full border px-2.5 py-0.5 font-medium text-[11px] transition-colors ${
 				active
-					? "border-indigo-400/40 bg-indigo-500/20 text-indigo-200"
-					: "border-white/10 text-neutral-400 hover:bg-white/10 hover:text-neutral-200"
+					? "border-primary/40 bg-primary/20 text-primary"
+					: "border-border text-muted-foreground hover:bg-muted hover:text-foreground"
 			}`}
 			onClick={onSelect}
 			type="button"

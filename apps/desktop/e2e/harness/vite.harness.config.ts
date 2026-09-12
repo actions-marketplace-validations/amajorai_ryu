@@ -94,6 +94,10 @@ export default defineConfig({
 					harnessDir,
 					"agent-setup-composer-proof.html"
 				),
+				agentRoutinesProof: path.resolve(
+					harnessDir,
+					"agent-routines-proof.html"
+				),
 				answerNowProof: path.resolve(harnessDir, "answer-now-proof.html"),
 				agentMessage: path.resolve(harnessDir, "agent-message-story.html"),
 				agentConversationBranchProof: path.resolve(
@@ -140,6 +144,7 @@ export default defineConfig({
 				),
 				newTabMenuProof: path.resolve(harnessDir, "new-tab-menu-proof.html"),
 				chatRecovery: path.resolve(harnessDir, "chat-recovery-story.html"),
+				chatSearch: path.resolve(harnessDir, "chat-search-story.html"),
 				reconnectRetryProof: path.resolve(
 					harnessDir,
 					"reconnect-retry-proof.html"
@@ -151,6 +156,14 @@ export default defineConfig({
 				onboardingChoose: path.resolve(
 					harnessDir,
 					"onboarding-choose-story.html"
+				),
+				nodePersonalization: path.resolve(
+					harnessDir,
+					"node-personalization-story.html"
+				),
+				nodeOnboardingSettings: path.resolve(
+					harnessDir,
+					"node-onboarding-settings-story.html"
 				),
 				onboardingDefaultsProfile: path.resolve(
 					harnessDir,
@@ -201,6 +214,7 @@ export default defineConfig({
 				),
 				tabSearchProof: path.resolve(harnessDir, "tab-search-proof.html"),
 				tabDropdownProof: path.resolve(harnessDir, "tab-dropdown-proof.html"),
+				tabMemoryProof: path.resolve(harnessDir, "tab-memory-proof.html"),
 				floatingTabsProof: path.resolve(harnessDir, "floating-tabs-proof.html"),
 				reorderIndicatorProof: path.resolve(
 					harnessDir,
@@ -237,6 +251,10 @@ export default defineConfig({
 					harnessDir,
 					"org-billing-context-proof.html"
 				),
+				polarCreditBalanceProof: path.resolve(
+					harnessDir,
+					"polar-credit-balance-proof.html"
+				),
 				buttonLabelOverflow: path.resolve(
 					harnessDir,
 					"button-label-overflow-proof.html"
@@ -269,6 +287,10 @@ export default defineConfig({
 					"appearance-context-menu-proof.html"
 				),
 				markdownTable: path.resolve(harnessDir, "markdown-table-story.html"),
+				chatRichContentProof: path.resolve(
+					harnessDir,
+					"chat-rich-content-proof.html"
+				),
 				chatTypingIndicatorProof: path.resolve(
 					harnessDir,
 					"chat-typing-indicator-proof.html"

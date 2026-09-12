@@ -58,8 +58,8 @@ export function ContextPill({
 				<span
 					className={`relative flex size-2 shrink-0 ${wrap ? "mt-1.5" : ""}`}
 				>
-					<span className="absolute inline-flex size-full animate-ping rounded-full bg-sky-400 opacity-70" />
-					<span className="relative inline-flex size-2 rounded-full bg-sky-400" />
+					<span className="absolute inline-flex size-full animate-ping rounded-full bg-info opacity-70" />
+					<span className="relative inline-flex size-2 rounded-full bg-info" />
 				</span>
 				<span
 					className={`font-medium text-sm ${wrap ? "min-w-0 break-words" : "max-w-[150px] truncate"}`}

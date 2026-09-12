@@ -7,25 +7,54 @@ import {
 	ContextMenuContent,
 	ContextMenuTrigger,
 } from "@ryu/ui/components/context-menu.tsx";
-import {
-	EditorKit,
-	type MyEditor,
-} from "@ryu/ui/components/editor/editor-kit.tsx";
-import { EditorStatic } from "@ryu/ui/components/editor/ui/editor-static.tsx";
 import { ProjectFolder } from "@ryu/ui/components/project-folder.tsx";
 import { Skeleton } from "@ryu/ui/components/skeleton.tsx";
-import { Plate, usePlateEditor } from "platejs/react";
+import { useInView } from "motion/react";
 import type { ReactNode } from "react";
-import { useEffect, useState } from "react";
+import { lazy, Suspense, useEffect, useRef, useState } from "react";
 import { useSpacesContext } from "@/src/contexts/SpacesContext.tsx";
-import { useTabsContext } from "@/src/contexts/TabsContext.tsx";
+import { useTabSelector } from "@/src/contexts/TabsContext.tsx";
 import type {
 	Space,
 	SpaceDocument,
 	SpaceDocumentContent,
 } from "@/src/lib/api/spaces.ts";
 
-const previewCache = new Map<string, SpaceDocumentContent>();
+const PagePreview = lazy(() =>
+	import("./SpaceDocumentPreview.tsx").then((module) => ({
+		default: module.PagePreview,
+	}))
+);
+
+const previewCaches = new WeakMap<object, Map<string, SpaceDocumentContent>>();
+const MAX_PREVIEWS = 100;
+const MAX_PREVIEW_SOURCE_BYTES = 4 * 1024 * 1024;
+
+/** useSpaces keeps this reader stable only within one URL/token/user-JWT scope. */
+export function spaceDocumentPreviewCacheFor(
+	reader: object
+): Map<string, SpaceDocumentContent> {
+	let cache = previewCaches.get(reader);
+	if (!cache) {
+		cache = new Map();
+		previewCaches.set(reader, cache);
+	}
+	return cache;
+}
+
+export function readSpaceDocumentPreview(
+	cache: Map<string, SpaceDocumentContent>,
+	spaceId: string,
+	document: SpaceDocument
+): SpaceDocumentContent | undefined {
+	const key = previewCacheKey(spaceId, document);
+	const content = cache.get(key);
+	if (content) {
+		cache.delete(key);
+		cache.set(key, content);
+	}
+	return content;
+}
 
 type DocumentListState =
 	| { status: "error" }
@@ -35,15 +64,6 @@ type PreviewState =
 	| { status: "error" }
 	| { status: "loading" }
 	| { content: SpaceDocumentContent; status: "ready" };
-type EditorKitPlugin = (typeof EditorKit)[number];
-type MarkdownEditorPlugin = EditorKitPlugin & {
-	api: { markdown: MyEditor["api"]["markdown"] };
-	key: "markdown";
-};
-
-const markdownPlugin = EditorKit.find(
-	(plugin): plugin is MarkdownEditorPlugin => plugin.key === "markdown"
-);
 const editableDocumentRawKinds = new Set(["", "page", "database"]);
 
 function previewCacheKey(spaceId: string, document: SpaceDocument): string {
@@ -67,7 +87,24 @@ export function storeSpaceDocumentPreview(
 			cache.delete(cachedKey);
 		}
 	}
+	cache.delete(key);
+	// Oversized content can still render in the current view without being retained.
+	if (content.source.length * 2 > MAX_PREVIEW_SOURCE_BYTES) {
+		return;
+	}
 	cache.set(key, content);
+	let sourceBytes = 0;
+	for (const value of cache.values()) {
+		sourceBytes += value.source.length * 2;
+	}
+	while (cache.size > MAX_PREVIEWS || sourceBytes > MAX_PREVIEW_SOURCE_BYTES) {
+		const oldest = cache.entries().next().value;
+		if (!oldest) {
+			break;
+		}
+		sourceBytes -= oldest[1].source.length * 2;
+		cache.delete(oldest[0]);
+	}
 }
 
 function isPreviewableDocument(document: SpaceDocument): boolean {
@@ -89,24 +126,6 @@ export function spaceDocumentPath(
 ): string {
 	const segment = document.kind === "database" ? "db" : "doc";
 	return `/spaces/${spaceId}/${segment}/${document.id}`;
-}
-
-function PagePreview({ source }: { source: string }) {
-	const editor = usePlateEditor({
-		plugins: EditorKit,
-		value: (currentEditor) =>
-			currentEditor.getApi(markdownPlugin).markdown.deserialize(source || ""),
-	});
-
-	return (
-		<Plate editor={editor}>
-			<EditorStatic
-				className="pointer-events-none max-h-44 overflow-hidden px-4 py-3 text-sm [&_.slate-p]:my-0 [&_.slate-p]:leading-5"
-				editor={editor}
-				variant="none"
-			/>
-		</Plate>
-	);
 }
 
 function databaseCounts(
@@ -195,7 +214,11 @@ function DocumentPreview({
 	if (document.kind === "database") {
 		return <DatabasePreview source={state.content.source} />;
 	}
-	return <PagePreview source={state.content.source} />;
+	return (
+		<Suspense fallback={<LoadingPreview document={document} />}>
+			<PagePreview source={state.content.source} />
+		</Suspense>
+	);
 }
 
 export function SpaceProjectFolder({
@@ -216,7 +239,16 @@ export function SpaceProjectFolder({
 		getDocument,
 		listDocuments,
 	} = useSpacesContext();
-	const { openTab } = useTabsContext();
+	const folderRef = useRef<HTMLDivElement>(null);
+	const nearViewport = useInView(folderRef, {
+		once: true,
+		margin: "200px",
+		initial: typeof IntersectionObserver === "undefined",
+	});
+	const [opened, setOpened] = useState(false);
+	const shouldLoad = nearViewport || opened;
+	const previewCache = spaceDocumentPreviewCacheFor(getDocument);
+	const openTab = useTabSelector((state) => state.openTab);
 	const documentRevision = documentRevisions.get(space.id) ?? 0;
 	const [documentList, setDocumentList] = useState<DocumentListState>({
 		status: "loading",
@@ -227,6 +259,9 @@ export function SpaceProjectFolder({
 	);
 
 	useEffect(() => {
+		if (!shouldLoad) {
+			return;
+		}
 		let cancelled = false;
 
 		const load = async () => {
@@ -250,7 +285,11 @@ export function SpaceProjectFolder({
 			const initialStates = new Map<string, PreviewState>();
 			const uncachedDocuments: SpaceDocument[] = [];
 			for (const document of previewDocuments) {
-				const cached = previewCache.get(previewCacheKey(space.id, document));
+				const cached = readSpaceDocumentPreview(
+					previewCache,
+					space.id,
+					document
+				);
 				if (cached) {
 					initialStates.set(document.id, {
 						content: cached,
@@ -292,7 +331,15 @@ export function SpaceProjectFolder({
 		return () => {
 			cancelled = true;
 		};
-	}, [documentRevision, getDocument, listDocuments, loadAttempt, space.id]);
+	}, [
+		shouldLoad,
+		documentRevision,
+		getDocument,
+		listDocuments,
+		loadAttempt,
+		space.id,
+		previewCache,
+	]);
 
 	const documents =
 		documentList.status === "ready" ? documentList.documents : [];
@@ -331,7 +378,7 @@ export function SpaceProjectFolder({
 	}));
 
 	const folder = (
-		<div className="group relative w-fit">
+		<div className="group relative w-fit" ref={folderRef}>
 			<ProjectFolder
 				count={documents.length}
 				description={space.description ?? "Pages and databases in this Space."}
@@ -391,6 +438,11 @@ export function SpaceProjectFolder({
 					);
 				}}
 				itemLabel="document"
+				onOpenChange={(open) => {
+					if (open) {
+						setOpened(true);
+					}
+				}}
 				previews={previews}
 				title={space.name}
 			/>

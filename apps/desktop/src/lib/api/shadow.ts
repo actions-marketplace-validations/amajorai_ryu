@@ -12,7 +12,16 @@
 // If Shadow (or the local Core) is not running, calls resolve to `null` so
 // callers can degrade gracefully rather than crash.
 
+import {
+	fetchSpeechHistory,
+	type SpeechHistoryInput,
+} from "@ryuhq/core-client/shadow";
 import { DEFAULT_CORE_URL } from "@/lib/core-url.ts";
+
+/** Speech is always from this physical computer, independently of the selected node. */
+export function getSpeechHistory(input: SpeechHistoryInput) {
+	return fetchSpeechHistory({ url: DEFAULT_CORE_URL, token: null }, input);
+}
 
 /** The context snapshot Shadow exposes at GET /context/current. */
 export interface ShadowContext {

@@ -5,10 +5,10 @@
   "category": "Language & Content",
   "icon": "FileEdit",
   "visualKey": "SkillsVisual",
-  "tagline": "Catch errors and enforce your style guide without the copy ever leaving your control.",
+  "tagline": "Check a draft against your style guide and review each suggested change.",
   "heroEyebrow": "Ryu for Editing & Proofreading",
-  "heroTitle": "A second pair of eyes that knows your style guide",
-  "heroSubtitle": "Ryu checks grammar, consistency, and style against your own rules, explains each suggested change, and keeps unpublished manuscripts private so you can edit faster with full control.",
+  "heroTitle": "Ryu for editing & proofreading",
+  "heroSubtitle": "Check a draft against your style guide and review each suggested change.",
   "intro": "Proofreading is detail work where consistency matters as much as correctness, and a generic checker does not know your house style. Ryu grounds its review on your style guide and term preferences, surfaces grammar, consistency, and tone issues with an explanation for each, and never silently rewrites. An editor accepts or rejects every change, and unpublished work stays private.",
   "highlights": [
     {

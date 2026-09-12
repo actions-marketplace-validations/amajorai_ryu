@@ -51,6 +51,11 @@ const GRANT_META: Record<string, GrantMeta> = {
 		description:
 			"Protect the data it stores so it cannot be read off this device's disk. It cannot read other apps' data or reach the encryption key.",
 	},
+	"backups:app": {
+		label: "Back up its own data",
+		description:
+			"Save and restore this app's encrypted snapshots using a backup destination you approve. It cannot access other apps' backups or storage credentials.",
+	},
 	// Common coarse OS-style grants (kept from the prior InstalledSection map).
 	fs: {
 		label: "Access your files",

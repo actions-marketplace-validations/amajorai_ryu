@@ -89,50 +89,59 @@ function chatResponse(): Response {
 
 function startFixture(managed: boolean): Fixture {
 	const requests: FixtureRequest[] = [];
-	const baseUrl = `http://fixture-${managed ? "managed" : "self-hosted"}.test`;
-	const fetchImpl: FetchLike = async (input, init) => {
-		const request = new Request(String(input), init);
-		const url = new URL(request.url);
-		const bodyText = await request.text();
-		const headers: Record<string, string> = {};
-		request.headers.forEach((value, key) => {
-			headers[key] = value;
-		});
-		requests.push({
-			body: bodyText.length > 0 ? JSON.parse(bodyText) : null,
-			headers,
-			method: request.method,
-			path: url.pathname,
-		});
+	const server = Bun.serve({
+		hostname: "127.0.0.1",
+		port: 0,
+		fetch: async (request) => {
+			const url = new URL(request.url);
+			const bodyText = await request.text();
+			const headers: Record<string, string> = {};
+			request.headers.forEach((value, key) => {
+				headers[key] = value;
+			});
+			requests.push({
+				body: bodyText.length > 0 ? JSON.parse(bodyText) : null,
+				headers,
+				method: request.method,
+				path: url.pathname,
+			});
 
-		if (url.pathname === "/api/health") {
-			return jsonResponse({
-				capabilities: ["chat", "tools"],
-				channel: "stable",
-				status: "ok",
-				version: "fixture-1.0.0",
-			});
-		}
-		if (url.pathname === "/api/system/info") {
-			return jsonResponse({
-				hostname: "fixture-node",
-				managed,
-				org_id: managed ? "org-fixture" : null,
-			});
-		}
-		if (url.pathname === "/api/chat/stream") {
-			return chatResponse();
-		}
-		if (url.pathname === "/api/mcp/tools/call") {
-			return jsonResponse({
-				ok: true,
-				output: { checked: true, source: "fixture-tool" },
-			});
-		}
-		return jsonResponse({ error: "not found" }, 404);
+			if (url.pathname === "/api/health") {
+				return jsonResponse({
+					capabilities: ["chat", "tools"],
+					channel: "stable",
+					status: "ok",
+					version: "fixture-1.0.0",
+				});
+			}
+			if (url.pathname === "/api/system/info") {
+				return jsonResponse({
+					hostname: "fixture-node",
+					managed,
+					org_id: managed ? "org-fixture" : null,
+				});
+			}
+			if (url.pathname === "/api/chat/stream") {
+				return chatResponse();
+			}
+			if (url.pathname === "/api/mcp/tools/call") {
+				return jsonResponse({
+					ok: true,
+					output: { checked: true, source: "fixture-tool" },
+				});
+			}
+			return jsonResponse({ error: "not found" }, 404);
+		},
+	});
+
+	return {
+		baseUrl: server.url.origin,
+		fetchImpl: fetch,
+		requests,
+		stop: () => {
+			server.stop(true);
+		},
 	};
-
-	return { baseUrl, fetchImpl, requests, stop: () => undefined };
 }
 
 async function runBundle(
@@ -199,6 +208,13 @@ describe("bundled GitHub Action integration fixture", () => {
 		const run = await runBundle(
 			{
 				agent: "release-agent",
+				"conversation-id": "conversation-42",
+				cwd: "/workspace/project",
+				"enable-long-term": "true",
+				inference: '{"temperature":0}',
+				persist: "true",
+				"plugin-flags": '{"com.ryu.audit":false}',
+				"worktree-isolation": "true",
 				"managed-node-token": "fixture-token",
 				"managed-node-url": fixture.baseUrl,
 				operation: "run",
@@ -217,7 +233,7 @@ describe("bundled GitHub Action integration fixture", () => {
 			expect(run.outputs["node-managed"]).toBe("true");
 			expect(run.outputs["node-version"]).toBe("fixture-1.0.0");
 			expect(run.outputs["run-id"]).toBe("run-fixture");
-			expect(run.outputs["conversation-id"]).toMatch(/^[0-9a-f-]{36}$/);
+			expect(run.outputs["conversation-id"]).toBe("conversation-42");
 			expect(run.env.RYU_CORE_URL).toBe(fixture.baseUrl);
 			expect(run.env.RYU_NODE_URL).toBe(fixture.baseUrl);
 			expect(run.env.RYU_CORE_TOKEN).toBe("fixture-token");
@@ -234,13 +250,20 @@ describe("bundled GitHub Action integration fixture", () => {
 			);
 			expect(chat?.headers.authorization).toBe("Bearer fixture-token");
 			expect(chat?.headers.accept).toBe("text/event-stream");
-			expect(chat?.body).toMatchObject({
+			expect(chat?.method).toBe("POST");
+			expect(chat?.body).toEqual({
 				agent_id: "release-agent",
-				enable_long_term: false,
-				persist: false,
+				conversation_id: "conversation-42",
+				cwd: "/workspace/project",
+				enable_long_term: true,
+				inference: { temperature: 0 },
+				persist: true,
+				plugin_flags: { "com.ryu.audit": false },
+				worktree_isolation: true,
 				messages: [
 					{
 						content: [{ text: "Verify the release candidate.", type: "text" }],
+						role: "user",
 					},
 				],
 			});
@@ -282,6 +305,7 @@ describe("bundled GitHub Action integration fixture", () => {
 				operation: "tool",
 				"tool-arguments": '{"tag":"v1"}',
 				tool: "github.create_release",
+				"user-id": "ci-user",
 				target: "managed",
 			},
 			managed
@@ -296,10 +320,14 @@ describe("bundled GitHub Action integration fixture", () => {
 			const call = managed.requests.find(
 				(request) => request.path === "/api/mcp/tools/call"
 			);
+			expect(call?.method).toBe("POST");
+			expect(call?.headers.accept).toBe("application/json");
+			expect(call?.headers.authorization).toBe("Bearer fixture-token");
 			expect(call?.body).toEqual({
 				agent_id: "release-agent",
 				arguments: { tag: "v1" },
 				tool: "github.create_release",
+				user_id: "ci-user",
 			});
 		} finally {
 			await cleanup(tool);

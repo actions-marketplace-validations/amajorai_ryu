@@ -1,3 +1,4 @@
+import { ryuOrganizationClient } from "@ryu/auth/organization-client";
 import { configureSettingsApi } from "@ryu/settings";
 import {
 	anonymousClient,
@@ -402,10 +403,13 @@ export const authClient = createAuthClient({
 		},
 	},
 	plugins: [
+		// Retained for deleting legacy guest sessions; sign-in is disabled by the
+		// shared waitlist policy.
 		anonymousClient(),
 		twoFactorClient(),
 		magicLinkClient(),
 		usernameClient(),
+		ryuOrganizationClient,
 		inferAdditionalFields({
 			user: {
 				avatarId: { type: "string", required: false },
@@ -419,3 +423,6 @@ export const authClient = createAuthClient({
 });
 
 export const { useSession, signIn, signOut, signUp } = authClient;
+
+/** Network clients read the bearer from the owning vault, not UI account data. */
+export { getTokenSync as getActiveToken };

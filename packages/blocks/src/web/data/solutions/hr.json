@@ -4,10 +4,10 @@
   "navLabel": "Human Resources",
   "category": "People & Operations",
   "icon": "Users",
-  "tagline": "Answer policy questions, draft sensitive documents, and handle people data without exposing it.",
+  "tagline": "Answer questions from your handbook and prepare onboarding documents for review.",
   "heroEyebrow": "Ryu for Human Resources",
-  "heroTitle": "An HR partner that keeps people data private.",
-  "heroSubtitle": "Answer policy questions from your real handbook, draft offers and reviews, and prep onboarding without pasting employee data into a public chatbot. Run locally for the sensitive work, and let the Gateway redact and log everything else.",
+  "heroTitle": "Ryu for human resources",
+  "heroSubtitle": "Answer questions from your handbook and prepare onboarding documents for review.",
   "visualKey": "AgentsVisual",
   "intro": "HR handles the most sensitive data in the company: salaries, performance, health, complaints. That rules out generic AI tools that train on your input. Ryu runs a capable agent on your own machine, grounds it on your actual policies, and uses the Gateway to redact and audit every call, so you get help without putting people data at risk.",
   "highlights": [

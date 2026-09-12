@@ -216,7 +216,7 @@ export function ImportThreadsDialog({
 				</Select>
 
 				{error && (
-					<p className="rounded-md bg-destructive/10 px-3 py-2 text-destructive text-sm">
+					<p className="rounded-md bg-destructive/10 px-3 py-2 text-sm text-status-destructive">
 						{error}
 					</p>
 				)}

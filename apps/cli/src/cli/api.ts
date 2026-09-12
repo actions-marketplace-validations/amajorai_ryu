@@ -19,6 +19,7 @@ import {
 	fetchAppsCatalog,
 	installApp,
 	isSafeCommandPath,
+	previewAppLifecycle,
 	uninstallApp,
 } from "@ryuhq/core-client/plugins";
 import { streamChat } from "../core/chatStream.ts";
@@ -127,6 +128,7 @@ export const realCoreApi: CoreApi = {
 	fetchApps,
 	fetchAppsCatalog,
 	installApp,
+	previewAppLifecycle,
 	streamChat,
 	uninstallApp,
 };

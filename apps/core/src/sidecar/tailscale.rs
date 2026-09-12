@@ -16,7 +16,7 @@
 //! `tailscaled` pair already on PATH always wins — Ryu never shadows a client the
 //! user installed. Only when there is no such pair does [`downloader`] install a
 //! Ryu-managed one under the profile's `bin/` (pinned upstream archive on Linux,
-//! Homebrew on macOS; Windows has no automatic leg — see that module's doc).
+//! Ryu release assets on clean macOS/Windows, with Homebrew as a macOS fallback).
 //! `required_platforms("tailscale")` is unconstrained and stays that way: adoption
 //! works everywhere, and the per-platform difference lives in the downloader.
 //!
@@ -79,18 +79,20 @@ const ENV_HOSTNAME: &str = "RYU_MESH_HOSTNAME";
 const ENV_TAILSCALED_BIN: &str = "RYU_TAILSCALED_BIN";
 /// Env overriding the `tailscale` CLI binary (otherwise resolved on PATH).
 const ENV_TAILSCALE_BIN: &str = "RYU_TAILSCALE_BIN";
-/// Env overriding the tunnel backend (`headscale` | `tailscale`), outranking the
+/// Env overriding the tunnel backend (`headscale` | `tailscale` | `tailcat`), outranking the
 /// `mesh-backend` pref exactly as the other mesh envs outrank their prefs.
 const ENV_BACKEND: &str = "RYU_MESH_BACKEND";
 
-/// Which control plane this node enrolls against. Self-hosted by default: Ryu's
-/// whole point is that the hard, private thing is the normal thing.
+/// Which private-network backend this node uses. Tailcat is the fresh-install
+/// default because it needs no account, control server, or persistent tailnet.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MeshBackend {
     /// Self-hosted Headscale — `tailscale up --login-server=<url>`.
     Headscale,
     /// Tailscale's SaaS coordination server — no `--login-server` at all.
     Tailscale,
+    /// Tailcat's short-lived point-to-point server — no control plane or login.
+    Tailcat,
 }
 
 impl MeshBackend {
@@ -98,12 +100,21 @@ impl MeshBackend {
         match self {
             Self::Headscale => "headscale",
             Self::Tailscale => "tailscale",
+            Self::Tailcat => "tailcat",
+        }
+    }
+
+    /// The sidecar that owns this backend's process lifecycle.
+    pub fn sidecar_name(self) -> &'static str {
+        match self {
+            Self::Headscale | Self::Tailscale => "tailscale",
+            Self::Tailcat => crate::sidecar::tailcat::SIDECAR_NAME,
         }
     }
 }
 
-/// The default when nothing has ever been chosen: self-hosted.
-pub const DEFAULT_MESH_BACKEND: MeshBackend = MeshBackend::Headscale;
+/// The default when nothing has ever been chosen: a short-lived Tailcat link.
+pub const DEFAULT_MESH_BACKEND: MeshBackend = MeshBackend::Tailcat;
 
 /// Resolve the tunnel backend from the env override and the stored pref.
 ///
@@ -114,7 +125,20 @@ pub fn parse_backend(raw: Option<&str>) -> MeshBackend {
     match raw.map(|s| s.trim().to_ascii_lowercase()).as_deref() {
         Some("tailscale") => MeshBackend::Tailscale,
         Some("headscale") => MeshBackend::Headscale,
+        Some("tailcat") => MeshBackend::Tailcat,
         _ => DEFAULT_MESH_BACKEND,
+    }
+}
+
+/// Parse only an explicitly supplied backend choice. Unlike [`parse_backend`],
+/// this returns `None` for an unknown value so an HTTP config request cannot
+/// silently turn a typo into a different network backend.
+pub fn parse_backend_choice(raw: &str) -> Option<MeshBackend> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "tailscale" => Some(MeshBackend::Tailscale),
+        "headscale" => Some(MeshBackend::Headscale),
+        "tailcat" => Some(MeshBackend::Tailcat),
+        _ => None,
     }
 }
 
@@ -129,16 +153,46 @@ pub async fn mesh_backend() -> (MeshBackend, bool) {
     if let Some(raw) = env_bin(ENV_BACKEND) {
         return (parse_backend(Some(&raw)), true);
     }
-    let pref = match crate::server::preferences::PreferencesStore::open_default() {
-        Ok(store) => store
-            .get(crate::mesh_host::MESH_BACKEND_PREF_KEY)
-            .await
-            .ok()
-            .flatten()
-            .filter(|s| !s.trim().is_empty()),
-        Err(_) => None,
-    };
-    (parse_backend(pref.as_deref()), pref.is_some())
+    let (backend_pref, login_server_pref) =
+        match crate::server::preferences::PreferencesStore::open_default() {
+            Ok(store) => (
+                store
+                    .get(crate::mesh_host::MESH_BACKEND_PREF_KEY)
+                    .await
+                    .ok()
+                    .flatten()
+                    .filter(|s| !s.trim().is_empty()),
+                store
+                    .get("mesh-login-server")
+                    .await
+                    .ok()
+                    .flatten()
+                    .filter(|s| !s.trim().is_empty()),
+            ),
+            Err(_) => (None, None),
+        };
+    if let Some(pref) = backend_pref {
+        return (parse_backend(Some(&pref)), true);
+    }
+
+    // Tailcat is the new default for an untouched node. Preserve the old
+    // implicit Tailscale/Headscale behavior for nodes that already carry the
+    // old control-server preference or a Tailscale state/authkey file; only a
+    // genuinely fresh node should switch to Tailcat without an explicit pick.
+    let legacy_login_server = env_bin(ENV_LOGIN_SERVER)
+        .filter(|value| !value.trim().is_empty())
+        .or(login_server_pref);
+    if legacy_login_server.is_some() || state_path().is_file() || authkey_path().is_file() {
+        return (
+            if legacy_login_server.is_some() {
+                MeshBackend::Headscale
+            } else {
+                MeshBackend::Tailscale
+            },
+            false,
+        );
+    }
+    (DEFAULT_MESH_BACKEND, false)
 }
 
 /// The SOCKS5 listen address for the userspace proxy (env override → default).
@@ -278,8 +332,9 @@ pub(crate) struct MeshPair {
 /// The verdict when no complete pair could be resolved.
 ///
 /// Structured rather than a bare string because the desktop needs to branch on it:
-/// `can_install` true means "offer to install it", false means "tell them how to
-/// install it themselves". A dead-end toast was the previous behaviour.
+/// `can_install` true means "start the managed install", false means "tell them
+/// how to provide an operator-managed client". A dead-end toast was the previous
+/// behaviour.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct MissingMesh {
     pub missing: Vec<String>,
@@ -300,9 +355,7 @@ impl std::fmt::Display for MissingMesh {
         if self.can_install {
             write!(
                 f,
-                "Ryu can install a managed copy for this node — retry with the install \
-                 action, or install the official client yourself \
-                 (https://tailscale.com/download)."
+                "Ryu is installing a managed client copy for this node automatically."
             )
         } else {
             write!(
@@ -669,6 +722,12 @@ impl Sidecar for TailscaleManager {
                 );
             }
 
+            if crate::sidecar::tailscale::mesh_backend().await.0 == MeshBackend::Tailcat {
+                anyhow::bail!(
+                    "Tailcat is the selected network backend; use the Tailcat sidecar instead"
+                );
+            }
+
             // Resolved BEFORE anything else so a machine without a complete client
             // pair gets one clear sentence instead of an OS errno from deep in the
             // spawn path. Pure — `start()` runs at boot from `start_all()`, so it
@@ -781,11 +840,11 @@ impl Sidecar for TailscaleManager {
                 // with the sentence that fixes it, rather than quietly becoming the
                 // other backend.
                 //
-                // The one exception is the migration case, and it is deliberate: a
-                // node that has NEVER chosen a backend and has no URL is exactly the
-                // pre-existing SaaS-with-authkey setup, which
-                // [`DEFAULT_MESH_BACKEND`] would otherwise break on upgrade. It
-                // keeps working, loudly.
+                // A legacy node with no backend preference is resolved by
+                // mesh_backend() before this branch: an old Headscale URL or
+                // Tailscale state/authkey keeps its previous control plane. A
+                // genuinely fresh node resolves to Tailcat and never reaches
+                // this Tailscale-only enrollment path.
                 let (backend, explicit) = mesh_backend().await;
                 match (backend, login_server) {
                     (MeshBackend::Headscale, Some(login)) => {
@@ -810,6 +869,11 @@ impl Sidecar for TailscaleManager {
                     // stale Headscale URL here would send the node to the wrong
                     // control plane, so the URL is ignored on purpose.
                     (MeshBackend::Tailscale, _) => {}
+                    (MeshBackend::Tailcat, _) => {
+                        anyhow::bail!(
+                            "Tailcat is the selected network backend; use the Tailcat sidecar"
+                        );
+                    }
                 }
                 // Register under a sanitized whole-hostname label rather than
                 // letting Tailscale take the first one (see `mesh_hostname`).
@@ -1156,7 +1220,11 @@ mod tests {
         // ("No such file or directory") is what this replaced.
         let text = missing.to_string();
         assert!(text.contains(&exe_name(DAEMON_BIN)), "got: {text}");
-        assert!(text.contains("tailscale.com/download"), "got: {text}");
+        assert!(
+            text.contains("tailscale.com/download")
+                || text.contains("Ryu is installing a managed client copy"),
+            "got: {text}"
+        );
     }
 
     #[test]
@@ -1200,20 +1268,21 @@ mod tests {
     }
 
     #[test]
-    fn unset_and_junk_backends_default_to_headscale() {
-        // The DEFAULT is the claim worth pinning: self-hosted unless someone says
-        // otherwise. The desktop's `parseMeshBackend` mirrors this exactly, so a
+    fn unset_and_junk_backends_default_to_tailcat() {
+        // The DEFAULT is the claim worth pinning: a fresh node needs no account
+        // or control server. The desktop parser mirrors this exactly, so a
         // change here without one there makes the picker disagree with the daemon
         // about what an unconfigured node will do.
-        assert_eq!(parse_backend(None), MeshBackend::Headscale);
-        assert_eq!(parse_backend(Some("")), MeshBackend::Headscale);
-        assert_eq!(parse_backend(Some("   ")), MeshBackend::Headscale);
+        assert_eq!(parse_backend(None), MeshBackend::Tailcat);
+        assert_eq!(parse_backend(Some("")), MeshBackend::Tailcat);
+        assert_eq!(parse_backend(Some("   ")), MeshBackend::Tailcat);
         // A typo must not strand a node off its tailnet — it falls back, it does
         // not error.
-        assert_eq!(parse_backend(Some("headscaleee")), MeshBackend::Headscale);
-        // Both real values round-trip, case- and whitespace-insensitively.
+        assert_eq!(parse_backend(Some("headscaleee")), MeshBackend::Tailcat);
+        // All real values round-trip, case- and whitespace-insensitively.
         assert_eq!(parse_backend(Some(" Headscale ")), MeshBackend::Headscale);
         assert_eq!(parse_backend(Some("TAILSCALE")), MeshBackend::Tailscale);
+        assert_eq!(parse_backend(Some("TAILCAT")), MeshBackend::Tailcat);
         assert_eq!(
             parse_backend(Some(MeshBackend::Tailscale.as_str())),
             MeshBackend::Tailscale
@@ -1222,6 +1291,27 @@ mod tests {
             parse_backend(Some(MeshBackend::Headscale.as_str())),
             MeshBackend::Headscale
         );
-        assert_eq!(DEFAULT_MESH_BACKEND, MeshBackend::Headscale);
+        assert_eq!(DEFAULT_MESH_BACKEND, MeshBackend::Tailcat);
+    }
+
+    #[test]
+    fn explicit_backend_choices_reject_unknown_values() {
+        assert_eq!(
+            parse_backend_choice("headscale"),
+            Some(MeshBackend::Headscale)
+        );
+        assert_eq!(
+            parse_backend_choice(" TAILSCALE "),
+            Some(MeshBackend::Tailscale)
+        );
+        assert_eq!(parse_backend_choice("tailcat"), Some(MeshBackend::Tailcat));
+        assert_eq!(parse_backend_choice("tailscalee"), None);
+    }
+
+    #[test]
+    fn backend_sidecar_names_keep_tailscale_and_tailcat_separate() {
+        assert_eq!(MeshBackend::Headscale.sidecar_name(), "tailscale");
+        assert_eq!(MeshBackend::Tailscale.sidecar_name(), "tailscale");
+        assert_eq!(MeshBackend::Tailcat.sidecar_name(), "tailcat");
     }
 }

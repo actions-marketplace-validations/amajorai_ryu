@@ -5,7 +5,9 @@ import type {
 } from "@/src/lib/api/spaces.ts";
 import {
 	eligibleSpaceDocuments,
+	readSpaceDocumentPreview,
 	spaceDocumentPath,
+	spaceDocumentPreviewCacheFor,
 	storeSpaceDocumentPreview,
 } from "./SpaceProjectFolder.tsx";
 
@@ -112,4 +114,68 @@ describe("SpaceProjectFolder", () => {
 		expect([...cache.keys()]).toEqual(["space-1:page:2"]);
 		expect(cache.get("space-1:page:2")?.source).toBe("new");
 	});
+});
+
+test("preview caches follow their reader scope and refresh recency", () => {
+	const ownerA = {};
+	const a = spaceDocumentPreviewCacheFor(ownerA);
+	const b = spaceDocumentPreviewCacheFor({});
+	expect(spaceDocumentPreviewCacheFor(ownerA)).toBe(a);
+	storeSpaceDocumentPreview(
+		a,
+		"space-1",
+		pageDocument("shared"),
+		contentFixture("private")
+	);
+	expect(
+		readSpaceDocumentPreview(b, "space-1", pageDocument("shared"))
+	).toBeUndefined();
+	for (let i = 0; i < 99; i++) {
+		storeSpaceDocumentPreview(
+			a,
+			"space-1",
+			pageDocument(String(i)),
+			contentFixture(String(i))
+		);
+	}
+	readSpaceDocumentPreview(a, "space-1", pageDocument("shared"));
+	storeSpaceDocumentPreview(
+		a,
+		"space-1",
+		pageDocument("new"),
+		contentFixture("new")
+	);
+	expect(a.size).toBe(100);
+	expect(
+		readSpaceDocumentPreview(a, "space-1", pageDocument("0"))
+	).toBeUndefined();
+	expect(
+		readSpaceDocumentPreview(a, "space-1", pageDocument("shared"))?.source
+	).toBe("private");
+});
+
+test("preview source retention is bounded even for large documents", () => {
+	const cache = new Map<string, SpaceDocumentContent>();
+	const large = "x".repeat(1024 * 1024);
+	for (let i = 0; i < 3; i++) {
+		storeSpaceDocumentPreview(
+			cache,
+			"space-1",
+			pageDocument(String(i)),
+			contentFixture(large)
+		);
+	}
+	expect(cache.size).toBe(2);
+	expect(
+		readSpaceDocumentPreview(cache, "space-1", pageDocument("0"))
+	).toBeUndefined();
+	storeSpaceDocumentPreview(
+		cache,
+		"space-1",
+		pageDocument("huge"),
+		contentFixture(large.repeat(3))
+	);
+	expect(
+		readSpaceDocumentPreview(cache, "space-1", pageDocument("huge"))
+	).toBeUndefined();
 });

@@ -49,7 +49,7 @@ import { Textarea } from "@ryu/ui/components/textarea";
 import { cn } from "@ryu/ui/lib/utils";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useMemo, useState } from "react";
-import { useTabsContext } from "@/src/contexts/TabsContext.tsx";
+import { useTabSelector } from "@/src/contexts/TabsContext.tsx";
 import { useActiveNode } from "@/src/hooks/useActiveNode.ts";
 import { useAgents } from "@/src/hooks/useAgents.ts";
 import { toTarget } from "@/src/lib/api/client.ts";
@@ -257,7 +257,7 @@ function DraftCard({
 				</Button>
 			</div>
 			{draft.error && (
-				<p className="mt-2 text-destructive text-xs">{draft.error}</p>
+				<p className="mt-2 text-status-destructive text-xs">{draft.error}</p>
 			)}
 		</div>
 	);
@@ -332,7 +332,7 @@ function SettingsPanel({
 
 export default function DraftsPage() {
 	const node = useActiveNode();
-	const { openTab } = useTabsContext();
+	const openTab = useTabSelector((state) => state.openTab);
 	const target = toTarget(node);
 	const queryClient = useQueryClient();
 	const [composing, setComposing] = useState("");
@@ -406,7 +406,7 @@ export default function DraftsPage() {
 			<header className="flex shrink-0 items-center gap-2 border-b px-4 py-3">
 				<HugeiconsIcon className="size-5" icon={FileEditIcon} />
 				<div>
-					<h1 className="font-semibold text-base">Drafts</h1>
+					<h1 className="font-medium text-base">Drafts</h1>
 					<p className="text-muted-foreground text-xs">
 						Messages you have not sent, and what each one is waiting for.
 					</p>

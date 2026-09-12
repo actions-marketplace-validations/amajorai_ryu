@@ -11,6 +11,7 @@
 
 import { Add01Icon, Message01Icon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
+import { Button, ButtonLabel } from "@ryu/ui/components/button.tsx";
 import {
 	DropdownMenu,
 	DropdownMenuContent,
@@ -47,29 +48,31 @@ export function MergedThreadPicker({
 		<DropdownMenu>
 			<DropdownMenuTrigger
 				render={
-					<button
+					<Button
 						aria-label="Choose which thread to send to"
-						className="flex h-7 min-w-0 max-w-[12rem] items-center gap-1.5 rounded-lg px-2 text-muted-foreground text-xs transition-colors hover:bg-muted hover:text-foreground"
+						className="min-w-0 max-w-48 text-muted-foreground"
+						size="xs"
 						// A native title rather than a Tooltip wrapper: a Base UI tooltip
 						// trigger wrapping a menu trigger fights over the same child render
 						// slot, and the hint is not worth that risk.
 						title={`Sending to "${label}". Every thread with this agent is shown above; pick which one this message joins.`}
 						type="button"
+						variant="ghost"
 					>
 						<HugeiconsIcon className="size-3.5 shrink-0" icon={Message01Icon} />
-						<span className="truncate">{label}</span>
-					</button>
+						<ButtonLabel className="truncate">{label}</ButtonLabel>
+					</Button>
 				}
 			/>
 			<DropdownMenuContent
 				align="start"
 				className="max-h-80 w-64 overflow-auto"
 			>
-				<DropdownMenuLabel>Send to thread</DropdownMenuLabel>
 				<DropdownMenuRadioGroup
 					onValueChange={onSelectThread}
 					value={activeConversationId ?? ""}
 				>
+					<DropdownMenuLabel>Send to thread</DropdownMenuLabel>
 					{threads.map((thread) => (
 						<DropdownMenuRadioItem key={thread.id} value={thread.id}>
 							<span className="truncate">{thread.title}</span>

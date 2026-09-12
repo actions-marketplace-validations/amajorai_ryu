@@ -26,9 +26,11 @@ pub async fn get_metrics(State(state): State<SharedState>) -> Json<Value> {
 /// Public, ungated community-savings aggregate (mirrors `/metrics` registration
 /// but exposes ONLY safe totals — no per-provider maps, no quota, no keys).
 /// Core's community-stats beacon reads this to fan out anonymous savings to the
-/// control plane. Opt-in on the Core side; the gateway endpoint itself is public.
+/// control plane. Opt-out on the Core side; the gateway endpoint itself is public.
 pub async fn community_savings(State(state): State<SharedState>) -> Json<Value> {
     let m = &state.metrics;
+    let requests = m.total_requests.load(Ordering::Relaxed);
+    let malicious_calls_blocked = m.firewall_blocked.load(Ordering::Relaxed);
     let hits = m.cache_hits.load(Ordering::Relaxed);
     let misses = m.cache_misses.load(Ordering::Relaxed);
     let total_cache = hits + misses;
@@ -39,7 +41,13 @@ pub async fn community_savings(State(state): State<SharedState>) -> Json<Value> 
     };
 
     Json(json!({
-        "requests":      m.total_requests.load(Ordering::Relaxed),
+        "requests":      requests,
+        // Every request admitted to the Gateway pipeline is inspected by its
+        // configured rate-limit, routing, and policy stages.
+        "api_calls_protected": requests,
+        // This counter covers firewall, policy, and evaluator blocks. It is
+        // intentionally a safe aggregate with no rule names or request content.
+        "malicious_calls_blocked": malicious_calls_blocked,
         "input_tokens":  m.total_input_tokens.load(Ordering::Relaxed),
         "output_tokens": m.total_output_tokens.load(Ordering::Relaxed),
         "tokens_saved":  m.compression_tokens_saved.load(Ordering::Relaxed),
@@ -81,6 +89,8 @@ mod tests {
         let Json(body) = community_savings(State(state)).await;
         // Fresh state: zero requests, zero cache traffic ⇒ rate defaults to 0.0.
         assert_eq!(body["requests"], 0);
+        assert_eq!(body["api_calls_protected"], 0);
+        assert_eq!(body["malicious_calls_blocked"], 0);
         assert_eq!(body["cache_hit_rate"], 0.0);
         // Must NOT leak per-provider maps / quota / keys.
         assert!(body.get("provider_quota").is_none());

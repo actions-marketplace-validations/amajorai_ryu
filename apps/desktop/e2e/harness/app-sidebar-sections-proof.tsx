@@ -4,13 +4,17 @@
 // contributions; only the Core reads are stubbed so this page stays hermetic.
 
 import type { SidebarSectionSpec } from "@ryu/app-host/views";
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { Button } from "@ryu/ui/components/button.tsx";
+import { QueryClientProvider } from "@tanstack/react-query";
+import { useState } from "react";
 import { createRoot } from "react-dom/client";
 import { DynamicSidebarSection } from "../../src/components/layout/AppSidebar.tsx";
 import {
 	TabsContext,
 	type TabsContextValue,
 } from "../../src/contexts/TabsContext.tsx";
+import { useSidebarSectionSources } from "../../src/hooks/useSidebarSectionSource.ts";
+import { queryClient } from "../../src/lib/query-client.ts";
 import "../../src/index.css";
 
 const APP_SECTIONS: Array<{
@@ -96,6 +100,26 @@ const APP_SECTIONS: Array<{
 		},
 	},
 	{
+		id: "campaigns",
+		icon: "microscope",
+		plugin: "com.ryu.research",
+		title: "Campaigns",
+		spec: {
+			source: {
+				http: { method: "GET", path: "/api/research/campaigns" },
+				items: "campaigns",
+				map: {
+					accessory: "attemptCount",
+					id: "id",
+					subtitle: "status",
+					title: "name",
+				},
+			},
+			itemTarget: "/plugin/app__research-companion",
+			context: { campaignId: "id" },
+		},
+	},
+	{
 		id: "inboxes",
 		icon: "mail-01",
 		plugin: "com.ryu.mail",
@@ -167,6 +191,16 @@ const PAYLOADS: Record<string, unknown> = {
 			{ chunks: 4, id: "context-1", name: "Q3 contracts", total_chars: 12_000 },
 		],
 	},
+	"/api/research/campaigns": {
+		campaigns: [
+			{
+				attemptCount: 3,
+				id: "campaign-1",
+				name: "Search campaign",
+				status: "active",
+			},
+		],
+	},
 	"/workflows": {
 		workflows: [
 			{
@@ -178,10 +212,17 @@ const PAYLOADS: Record<string, unknown> = {
 	},
 };
 
-function recordOpenTab(path: string): string {
+function recordOpenTab(
+	path: string,
+	options?: { mountContext?: Record<string, unknown> }
+): string {
 	const opened = document.getElementById("opened");
 	if (opened) {
 		opened.textContent = path;
+	}
+	const context = document.getElementById("opened-context");
+	if (context) {
+		context.textContent = JSON.stringify(options?.mountContext ?? null);
 	}
 	return "proof-tab";
 }
@@ -209,12 +250,25 @@ const noopMenu = {
 	onSetSort: () => undefined,
 };
 
+const measurePolling = new URLSearchParams(location.search).has("polling");
+if (measurePolling && APP_SECTIONS[0].spec.source) {
+	APP_SECTIONS[0].spec.source.refreshMs = 1000;
+}
+const sourceReadTimes: number[] = [];
 const realFetch = globalThis.fetch.bind(globalThis);
 globalThis.fetch = ((input: RequestInfo | URL, init?: RequestInit) => {
 	const url = typeof input === "string" ? input : input.toString();
 	const path = new URL(url, location.href).pathname;
 	const payload = PAYLOADS[path];
 	if (payload) {
+		if (path === "/api/blueprint/plans") {
+			sourceReadTimes.push(performance.now());
+			document.documentElement.dataset.sourceReadTimes =
+				JSON.stringify(sourceReadTimes);
+		}
+		document.documentElement.dataset.sectionReads = String(
+			Number(document.documentElement.dataset.sectionReads ?? 0) + 1
+		);
 		return Promise.resolve(
 			new Response(JSON.stringify(payload), {
 				headers: { "content-type": "application/json" },
@@ -225,28 +279,40 @@ globalThis.fetch = ((input: RequestInfo | URL, init?: RequestInit) => {
 	return realFetch(input as RequestInfo, init);
 }) as typeof fetch;
 
-const queryClient = new QueryClient({
-	defaultOptions: { queries: { retry: false } },
-});
+function SharedReader() {
+	useSidebarSectionSources(
+		APP_SECTIONS.map((section) => ({
+			...section,
+			approved_grants: ["ui:declarative-http"],
+			http_policy: "core",
+		}))
+	);
+	return null;
+}
 
 function Story() {
+	const [shared, setShared] = useState(!measurePolling);
 	return (
 		<QueryClientProvider client={queryClient}>
 			<TabsContext.Provider value={tabs}>
+				{shared && <SharedReader />}
 				<main
 					style={{
 						background: "#0b0d12",
 						color: "#e6e9f0",
-						fontFamily: "ui-sans-serif, system-ui, sans-serif",
+						fontFamily: "var(--font-sans)",
 						minHeight: "100vh",
 						padding: "24px 32px",
 					}}
 				>
+					{measurePolling && (
+						<Button onClick={() => setShared(true)}>Mount shared reader</Button>
+					)}
 					<h1 style={{ fontSize: 18, margin: "0 0 6px" }}>
 						App-contributed sidebar sections
 					</h1>
 					<p style={{ color: "#8a91a3", fontSize: 13, margin: "0 0 18px" }}>
-						Six app-owned record pickers rendered by one desktop primitive.
+						Seven app-owned record pickers rendered by one desktop primitive.
 					</p>
 					<div
 						style={{
@@ -259,7 +325,11 @@ function Story() {
 						{APP_SECTIONS.map((section) => (
 							<DynamicSidebarSection
 								collapsed={false}
-								contribution={section}
+								contribution={{
+									...section,
+									approved_grants: ["ui:declarative-http"],
+									http_policy: "core",
+								}}
 								dnd={noopDnd}
 								key={`${section.plugin}:${section.id}`}
 								menu={noopMenu}
@@ -270,6 +340,7 @@ function Story() {
 						))}
 					</div>
 					<pre id="opened" style={{ color: "#8a91a3", fontSize: 12 }} />
+					<pre id="opened-context" style={{ color: "#8a91a3", fontSize: 12 }} />
 				</main>
 			</TabsContext.Provider>
 		</QueryClientProvider>

@@ -1,9 +1,86 @@
 {
   "methods": [
     {
+      "capability": "identity.read",
+      "grant": "identity:read",
+      "method": "identity.current",
+      "streaming": false,
+      "tsHost": false
+    },
+    {
+      "capability": "security.check",
+      "grant": "security:check",
+      "method": "security.check",
+      "streaming": false,
+      "tsHost": false
+    },
+    {
+      "capability": "backups.app",
+      "grant": "backups:app",
+      "method": "backups.destinations",
+      "streaming": false,
+      "tsHost": true
+    },
+    {
+      "capability": "backups.app",
+      "grant": "backups:app",
+      "method": "backups.create",
+      "streaming": false,
+      "tsHost": true
+    },
+    {
+      "capability": "backups.app",
+      "grant": "backups:app",
+      "method": "backups.list",
+      "streaming": false,
+      "tsHost": true
+    },
+    {
+      "capability": "backups.app",
+      "grant": "backups:app",
+      "method": "backups.get",
+      "streaming": false,
+      "tsHost": true
+    },
+    {
+      "capability": "backups.app",
+      "grant": "backups:app",
+      "method": "backups.restore",
+      "streaming": false,
+      "tsHost": true
+    },
+    {
       "capability": "host.capabilities",
       "grant": null,
       "method": "host.capabilities",
+      "streaming": false,
+      "tsHost": true
+    },
+    {
+      "capability": "i18n",
+      "grant": null,
+      "method": "i18n.get",
+      "streaming": false,
+      "tsHost": true
+    },
+    {
+      "capability": "i18n",
+      "grant": null,
+      "method": "i18n.translate",
+      "streaming": false,
+      "tsHost": true
+    },
+    {
+      "capability": "i18n",
+      "grant": null,
+      "method": "i18n.subscribe",
+      "streaming": true,
+      "tsHost": true
+    },
+    {
+      "capability": "node.shareOrigins",
+      "grant": null,
+      "method": "node.shareOrigins",
       "streaming": false,
       "tsHost": true
     },
@@ -123,6 +200,41 @@
       "capability": "app.http",
       "grant": "app:http",
       "method": "app.request",
+      "streaming": false,
+      "tsHost": true
+    },
+    {
+      "capability": "app.realtime",
+      "grant": "app:realtime",
+      "method": "realtime.connect",
+      "streaming": false,
+      "tsHost": true
+    },
+    {
+      "capability": "app.realtime",
+      "grant": "app:realtime",
+      "method": "realtime.publish",
+      "streaming": false,
+      "tsHost": true
+    },
+    {
+      "capability": "app.realtime",
+      "grant": "app:realtime",
+      "method": "realtime.presence",
+      "streaming": false,
+      "tsHost": true
+    },
+    {
+      "capability": "app.realtime",
+      "grant": "app:realtime",
+      "method": "realtime.subscribe",
+      "streaming": true,
+      "tsHost": true
+    },
+    {
+      "capability": "app.realtime",
+      "grant": "app:realtime",
+      "method": "realtime.close",
       "streaming": false,
       "tsHost": true
     },
@@ -323,6 +435,20 @@
       "tsHost": false
     },
     {
+      "capability": "gateway.budgetSpend",
+      "grant": "usage:read",
+      "method": "gateway.budgetSpend",
+      "streaming": false,
+      "tsHost": false
+    },
+    {
+      "capability": "gateway.audit",
+      "grant": "usage:read",
+      "method": "gateway.audit",
+      "streaming": false,
+      "tsHost": false
+    },
+    {
       "capability": "learning.recordFeedback",
       "grant": "learning:crud",
       "method": "learning.recordFeedback",
@@ -435,6 +561,13 @@
       "tsHost": true
     },
     {
+      "capability": "media.recording",
+      "grant": "media:record",
+      "method": "media.recording",
+      "streaming": false,
+      "tsHost": true
+    },
+    {
       "capability": "core.listAgents",
       "grant": "core:list_agents",
       "method": "registry.engineModels",
@@ -459,6 +592,13 @@
       "capability": "core.listAgents",
       "grant": "core:list_agents",
       "method": "assets.searchGifs",
+      "streaming": false,
+      "tsHost": true
+    },
+    {
+      "capability": "core.listAgents",
+      "grant": "core:list_agents",
+      "method": "assets.searchImages",
       "streaming": false,
       "tsHost": true
     },
@@ -717,6 +857,13 @@
     {
       "capability": "workflows.catalogs",
       "grant": "workflows:catalogs",
+      "method": "workflows.notifyTargets",
+      "streaming": false,
+      "tsHost": true
+    },
+    {
+      "capability": "workflows.catalogs",
+      "grant": "workflows:catalogs",
       "method": "workflows.composio",
       "streaming": false,
       "tsHost": true
@@ -932,6 +1079,13 @@
       "tsHost": true
     },
     {
+      "capability": "timeline.speech",
+      "grant": "timeline:speech",
+      "method": "timeline.transcripts",
+      "streaming": false,
+      "tsHost": true
+    },
+    {
       "capability": "timeline.read",
       "grant": "timeline:read",
       "method": "timeline.frame",
@@ -998,6 +1152,13 @@
       "capability": "mail.crud",
       "grant": "mail:crud",
       "method": "mail.inboundUrl",
+      "streaming": false,
+      "tsHost": true
+    },
+    {
+      "capability": "mail.crud",
+      "grant": "mail:crud",
+      "method": "mail.request",
       "streaming": false,
       "tsHost": true
     },
@@ -1340,6 +1501,13 @@
     {
       "capability": "skills.crud",
       "grant": "skills:crud",
+      "method": "skills.distribute",
+      "streaming": false,
+      "tsHost": true
+    },
+    {
+      "capability": "skills.crud",
+      "grant": "skills:crud",
       "method": "skills.setTitle",
       "streaming": false,
       "tsHost": true
@@ -1394,5 +1562,5 @@
       "tsHost": false
     }
   ],
-  "version": "1.8.0"
+  "version": "1.15.0"
 }

@@ -214,7 +214,7 @@ export const Input = forwardRef<HTMLInputElement, InputProps>(function Input(
 					<motion.p
 						animate={{ opacity: 1, y: 0, filter: "blur(0px)" }}
 						className={cn(
-							"px-1 text-destructive text-xs",
+							"px-1 text-status-destructive text-xs",
 							classNames?.errorMessage
 						)}
 						exit={

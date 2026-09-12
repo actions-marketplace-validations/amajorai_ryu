@@ -231,19 +231,6 @@ export function triggerTooltip(
 	}
 }
 
-/** Find the schedule job Core mints for a workflow (deterministic id prefix,
- * matching the workflows-app `TriggerConfig`'s `ScheduleStatus`). */
-export function scheduleJobFor(
-	workflowId: string,
-	jobs: ScheduledJob[]
-): ScheduledJob | null {
-	if (!workflowId) {
-		return null;
-	}
-	const prefix = `wf-sched-${workflowId}-`;
-	return jobs.find((j) => j.id.startsWith(prefix)) ?? null;
-}
-
 // ── Presentational pieces ───────────────────────────────────────────────────
 
 /**

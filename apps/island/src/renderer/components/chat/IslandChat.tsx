@@ -14,6 +14,7 @@ import {
 	InputBar,
 	type InputBarProps,
 } from "@ryu/blocks/desktop/agent-elements/input-bar";
+import { useI18n } from "@ryu/i18n/react";
 import type { KeyboardEvent } from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useIslandComposerContext } from "../../context/island-composer-context.tsx";
@@ -57,6 +58,13 @@ export function IslandChat() {
 	const clearAttachments = useIslandState((store) => store.clearAttachments);
 	const attachAndOpen = useIslandState((store) => store.attachAndOpen);
 	const [reachability, setReachability] = useState<Reachability>("checking");
+	const { availablePacks, selectPack, selectedPackId, t } = useI18n();
+	const commandPaletteLabel = t(
+		"island.open-command-palette",
+		undefined,
+		"Open command palette"
+	);
+	const minimizeLabel = t("island.minimize", undefined, "Minimize");
 
 	// The island is a short composer bar until a conversation exists, then it grows
 	// to the full panel height.
@@ -142,22 +150,41 @@ export function IslandChat() {
 	return (
 		<div className="flex h-full w-full flex-col gap-2">
 			<header className="relative z-20 flex shrink-0 items-center justify-between px-1 pt-1">
-				<span className="font-medium text-neutral-100 text-sm">New chat</span>
+				<div className="flex min-w-0 items-center gap-2">
+					<span className="font-medium text-foreground text-sm">
+						{t("chat.new")}
+					</span>
+					<select
+						aria-label={t("language.current")}
+						className="max-w-32 truncate rounded-full border border-border bg-card px-1.5 py-0.5 text-[10px] text-muted-foreground outline-none"
+						onChange={(event) => selectPack(event.target.value || null)}
+						value={selectedPackId ?? ""}
+					>
+						<option value="">{t("common.english")}</option>
+						{availablePacks
+							.filter((pack) => pack.enabled !== false)
+							.map((pack) => (
+								<option key={pack.id} value={pack.id}>
+									{pack.name}
+								</option>
+							))}
+					</select>
+				</div>
 				<div className="flex items-center gap-0.5">
 					<button
-						aria-label="Open command palette"
-						className="flex size-7 items-center justify-center rounded-full text-neutral-400 transition-colors hover:bg-white/10 hover:text-neutral-100"
+						aria-label={commandPaletteLabel}
+						className="flex size-7 items-center justify-center rounded-full text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
 						onClick={openCommand}
-						title="Open command palette"
+						title={commandPaletteLabel}
 						type="button"
 					>
 						<CommandIcon size={15} />
 					</button>
 					<button
-						aria-label="Minimize Ryu"
-						className="flex size-7 items-center justify-center rounded-full text-neutral-400 transition-colors hover:bg-white/10 hover:text-neutral-100"
+						aria-label={t("island.minimize-ryu", undefined, "Minimize Ryu")}
+						className="flex size-7 items-center justify-center rounded-full text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
 						onClick={toggleCollapse}
-						title="Minimize"
+						title={minimizeLabel}
 						type="button"
 					>
 						<span aria-hidden="true" className="text-lg leading-none">
@@ -167,14 +194,14 @@ export function IslandChat() {
 				</div>
 			</header>
 			{notes.length > 0 ? (
-				<div className="relative z-20 shrink-0 rounded-lg border border-amber-400/30 bg-amber-500/10 px-2.5 py-1.5">
+				<div className="relative z-20 shrink-0 rounded-lg border border-warning/30 bg-warning/10 px-2.5 py-1.5">
 					<div className="flex items-start justify-between gap-2">
-						<span className="font-semibold text-[10px] text-amber-300/90 uppercase tracking-wide">
-							Note
+						<span className="font-medium text-[10px] text-status-warning/90 uppercase tracking-wide">
+							{t("island.note", undefined, "Note")}
 						</span>
 						<button
-							aria-label="Dismiss notes"
-							className="shrink-0 text-amber-200/70 hover:text-amber-100"
+							aria-label={t("island.dismiss-notes", undefined, "Dismiss notes")}
+							className="shrink-0 text-status-warning/70 hover:text-status-warning"
 							onClick={clearNotes}
 							type="button"
 						>
@@ -194,7 +221,7 @@ export function IslandChat() {
 					</div>
 					{notes.map((note, index) => (
 						<p
-							className="mt-0.5 text-amber-100/90 text-xs leading-snug"
+							className="mt-0.5 text-status-warning/90 text-xs leading-snug"
 							// biome-ignore lint/suspicious/noArrayIndexKey: notes are append-only, ephemeral, and never reordered
 							key={index}
 						>
@@ -205,14 +232,14 @@ export function IslandChat() {
 			) : null}
 			<div className="flex min-h-0 flex-1 flex-col">
 				{offline ? (
-					<p className="relative z-10 shrink-0 text-neutral-400 text-xs">
-						Can't reach Ryu Core.{" "}
+					<p className="relative z-10 shrink-0 text-muted-foreground text-xs">
+						{t("island.core-unreachable", undefined, "Can't reach Ryu Core.")}{" "}
 						<button
-							className="text-neutral-200 underline underline-offset-2 hover:text-neutral-100"
+							className="text-foreground underline underline-offset-2 hover:text-foreground"
 							onClick={probe}
 							type="button"
 						>
-							Retry
+							{t("common.retry")}
 						</button>
 					</p>
 				) : null}

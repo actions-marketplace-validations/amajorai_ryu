@@ -1,6 +1,5 @@
 import { isDitherColor } from "@ryu/ui/components/dither-kit/palette";
-import { isExpressiveExpressionSelection } from "@ryu/ui/components/expressive.ts";
-import { isExpressiveAnimationSelection } from "@ryu/ui/components/expressive-animation.ts";
+import { parseGhostAvatar } from "@ryu/ui/components/ghost-avatar.ts";
 import type { GlyphDitherValue, GlyphValue } from "@ryu/ui/components/glyph.ts";
 import { create } from "zustand";
 import { listDirectory } from "@/src/lib/api/workspace.ts";
@@ -144,17 +143,9 @@ function normalizeProjectIcon(raw: unknown): ProjectIcon | null {
 	) {
 		return { kind: "dicebear", style: r.style, seed: r.seed };
 	}
-	if (
-		r.kind === "expressive" &&
-		isExpressiveExpressionSelection(r.expression)
-	) {
-		return {
-			kind: "expressive",
-			expression: r.expression,
-			...(isExpressiveAnimationSelection(r.animation)
-				? { animation: r.animation }
-				: {}),
-		};
+	if (r.kind === "expressive") {
+		const ghost = parseGhostAvatar(r);
+		return ghost ? { ...ghost, kind: "expressive" } : null;
 	}
 	if (r.kind === "dither" && dither) {
 		return { kind: "dither", dither };

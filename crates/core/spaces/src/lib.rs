@@ -44,6 +44,8 @@ mod history;
 #[cfg(test)]
 mod version_history_tests;
 
+pub mod backup;
+
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -1389,12 +1391,16 @@ fn seed_entities_above_floor(
 /// The alias / display text is ignored for resolution; only the target title
 /// matters. Duplicate (title, kind) pairs within one document are collapsed.
 fn extract_doc_links(source: &str) -> Vec<ParsedLink> {
-    // Built once per call (called once per document save, never in a hot loop).
-    let raw_re = regex::Regex::new(r"\[\[\s*(@)?\s*([^\[\]|]+?)\s*(?:\|[^\[\]]*)?\]\]")
-        .expect("static wikilink regex is valid");
+    // Reuse compiled patterns across document saves and bulk imports.
+    static RAW_RE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+        regex::Regex::new(r"\[\[\s*(@)?\s*([^\[\]|]+?)\s*(?:\|[^\[\]]*)?\]\]")
+            .expect("static wikilink regex is valid")
+    });
     // `[text](<wikilink:Title>)` or `[text](mention:Title)` — angle brackets optional.
-    let link_re = regex::Regex::new(r"\]\(\s*<?\s*(wikilink|mention):([^)>]+?)\s*>?\s*\)")
-        .expect("static doc-link regex is valid");
+    static LINK_RE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+        regex::Regex::new(r"\]\(\s*<?\s*(wikilink|mention):([^)>]+?)\s*>?\s*\)")
+            .expect("static doc-link regex is valid")
+    });
 
     let mut seen: std::collections::HashSet<(String, &'static str)> =
         std::collections::HashSet::new();
@@ -1408,7 +1414,7 @@ fn extract_doc_links(source: &str) -> Vec<ParsedLink> {
         }
     };
 
-    for caps in raw_re.captures_iter(source) {
+    for caps in RAW_RE.captures_iter(source) {
         let kind = if caps.get(1).is_some() {
             "mention"
         } else {
@@ -1419,7 +1425,7 @@ fn extract_doc_links(source: &str) -> Vec<ParsedLink> {
             push(title, kind, &mut out);
         }
     }
-    for caps in link_re.captures_iter(source) {
+    for caps in LINK_RE.captures_iter(source) {
         let kind = if &caps[1] == "mention" {
             "mention"
         } else {
@@ -9204,6 +9210,29 @@ mod tests {
     }
 
     // ── Wiki page-links: extraction, backlinks, graph, link-expansion ───────────
+
+    #[test]
+    fn performance_doc_link_patterns_are_reused() {
+        let source = "[[Design]] [[Design|Alias]] [[@Ada]] [Doc](<wikilink:Two%20Words>)";
+        let expected = extract_doc_links(source);
+        let start = std::time::Instant::now();
+        for _ in 0..100 {
+            // Original path compiled these same two patterns on every save.
+            std::hint::black_box(
+                regex::Regex::new(r"\[\[\s*(@)?\s*([^\[\]|]+?)\s*(?:\|[^\[\]]*)?\]\]").unwrap(),
+            );
+            std::hint::black_box(
+                regex::Regex::new(r"\]\(\s*<?\s*(wikilink|mention):([^)>]+?)\s*>?\s*\)").unwrap(),
+            );
+        }
+        let compilation = start.elapsed();
+        let start = std::time::Instant::now();
+        for _ in 0..100 {
+            assert_eq!(extract_doc_links(source), expected);
+        }
+        let reused_extraction = start.elapsed();
+        eprintln!("100 saves: removed regex compilation={compilation:?}, warm full extraction={reused_extraction:?}");
+    }
 
     #[test]
     fn extract_doc_links_parses_wiki_and_mention() {

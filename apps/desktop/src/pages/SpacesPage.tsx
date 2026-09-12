@@ -11,9 +11,10 @@ import {
 } from "@ryu/blocks/desktop/spaces.tsx";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { AppDisabledNotice } from "@/src/components/AppDisabledNotice.tsx";
+import { BackupSettings } from "@/src/components/settings/BackupSettings.tsx";
 import { SpaceImportsPanel } from "@/src/components/spaces/SpaceImportsPanel.tsx";
 import { useSpacesContext } from "@/src/contexts/SpacesContext.tsx";
-import { useTabsContext } from "@/src/contexts/TabsContext.tsx";
+import { useTabSelector } from "@/src/contexts/TabsContext.tsx";
 import { useActiveNode } from "@/src/hooks/useActiveNode.ts";
 import { toTarget } from "@/src/lib/api/client.ts";
 import { pluginHostInvoke } from "@/src/lib/api/plugins.ts";
@@ -63,7 +64,7 @@ export default function SpacesPage({
 		createDatabase,
 		setRetrievalMode,
 	} = useSpacesContext();
-	const { openTab } = useTabsContext();
+	const openTab = useTabSelector((state) => state.openTab);
 	// Only the whiteboard create reaches the node directly (through the plugin host);
 	// documents, ingest and search all go through `useSpacesContext`, which owns the
 	// target. No `nodeUrl`/`nodeToken` split is needed here now that nothing in this
@@ -451,6 +452,13 @@ export default function SpacesPage({
 
 	const detail: SpacesDetailProps | null = selected
 		? {
+				backupPanel: (
+					<BackupSettings
+						key={`${node.url}:${selected.id}`}
+						spaceId={selected.id}
+						target={toTarget(node)}
+					/>
+				),
 				space: {
 					id: selected.id,
 					name: selected.name,

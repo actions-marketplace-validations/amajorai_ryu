@@ -8,12 +8,13 @@
 //
 // The app has two data-fetching worlds that don't share a refresh path:
 //   1. TanStack Query hooks — reached with `queryClient.invalidateQueries()`.
-//   2. Manual useState/useEffect hooks (useAgents, useMcp, useSpaces, …) that own
+//   2. Manual useState/useEffect hooks that own
 //      a local `reload()` the query client can't see — they subscribe to a window
 //      CustomEvent instead.
 // `triggerGlobalRefresh()` fans out to both at once.
 
 import { useEffect } from "react";
+import { AGENT_LIST_KEY } from "@/src/lib/agent-list-query.ts";
 import { queryClient } from "@/src/lib/query-client.ts";
 
 /** Window event that manual `reload()` hooks listen for via {@link useCoreRefresh}. */
@@ -58,6 +59,10 @@ export function useCoreRefresh(reload: () => void): void {
  * on purpose: a Store click must not refetch the whole app.
  */
 export function triggerAgentsRefresh(): void {
+	// Store mutations supersede even an unfinished first read.
+	void queryClient
+		.cancelQueries({ queryKey: [AGENT_LIST_KEY] })
+		.then(() => queryClient.invalidateQueries({ queryKey: [AGENT_LIST_KEY] }));
 	window.dispatchEvent(new CustomEvent(AGENTS_REFRESH_EVENT));
 }
 

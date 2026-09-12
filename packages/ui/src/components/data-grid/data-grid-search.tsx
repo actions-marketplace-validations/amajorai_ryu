@@ -1,5 +1,6 @@
 "use client";
 
+import { useLocalizedText } from "@ryu/i18n/react";
 import { Button } from "@ryu/ui/components/button.tsx";
 import { Input } from "@ryu/ui/components/input.tsx";
 import { useAsRef } from "@ryu/ui/hooks/use-as-ref.ts";
@@ -87,6 +88,10 @@ function DataGridSearchImpl({
 	onNavigateToNextMatch,
 	onNavigateToPrevMatch,
 }: DataGridSearchProps) {
+	const localizedNoResults = useLocalizedText("No results", { literal: true });
+	const localizedTypeToSearch = useLocalizedText("Type to search", {
+		literal: true,
+	});
 	const propsRef = useAsRef({
 		onSearchOpenChange,
 		onSearchQueryChange,
@@ -246,9 +251,9 @@ function DataGridSearchImpl({
 						{matchIndex + 1} of {searchMatches.length}
 					</span>
 				) : hasQuery ? (
-					<span>No results</span>
+					<span>{localizedNoResults}</span>
 				) : (
-					<span>Type to search</span>
+					<span>{localizedTypeToSearch}</span>
 				)}
 			</div>
 		</div>

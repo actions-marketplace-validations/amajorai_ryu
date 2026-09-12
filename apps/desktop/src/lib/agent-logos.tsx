@@ -1,7 +1,12 @@
+import type { AvatarConversationState } from "@ryu/ui/components/avatar-conversation.tsx";
 import type { GradientDirection } from "@ryu/ui/components/dither-kit/gradient";
 import { isDitherColor } from "@ryu/ui/components/dither-kit/palette";
 import type { ExpressiveExpressionSelection } from "@ryu/ui/components/expressive.ts";
 import type { ExpressiveAnimationSelection } from "@ryu/ui/components/expressive-animation.ts";
+import {
+	type GhostAvatarAppearance,
+	parseGhostAvatar,
+} from "@ryu/ui/components/ghost-avatar.ts";
 import type { GlyphDitherValue, GlyphValue } from "@ryu/ui/components/glyph.ts";
 import { GlyphDisplay } from "@ryu/ui/components/glyph-display.tsx";
 import { Logo as RyuLogo } from "@ryu/ui/components/logo";
@@ -277,7 +282,7 @@ export interface AvatarDicebearSpec {
 }
 
 /** An expressive Ryu ghost selection as stored on `persona.expressive`. */
-export interface AvatarExpressiveSpec {
+export interface AvatarExpressiveSpec extends GhostAvatarAppearance {
 	animation?: ExpressiveAnimationSelection | null;
 	expression?: ExpressiveExpressionSelection | null;
 }
@@ -299,14 +304,9 @@ export function personaToGlyph(persona: {
 	if (persona.avatarUrl) {
 		return { kind: "avatar", dataUrl: persona.avatarUrl };
 	}
-	if (persona.expressive?.expression) {
-		return {
-			kind: "expressive",
-			...(persona.expressive.animation
-				? { animation: persona.expressive.animation }
-				: {}),
-			expression: persona.expressive.expression,
-		};
+	const expressive = parseGhostAvatar(persona.expressive);
+	if (expressive) {
+		return { ...expressive, kind: "expressive" };
 	}
 	const ditherLayer: GlyphDitherValue | undefined =
 		persona.dither && isDitherColor(persona.dither.from)
@@ -364,6 +364,7 @@ export function AgentAvatar({
 	engine,
 	className,
 	thinking = false,
+	conversationState,
 	size,
 }: {
 	avatarUrl?: string | null;
@@ -378,6 +379,7 @@ export function AgentAvatar({
 	iconColor?: string | null;
 	/** Force the expressive ghost into its orbit animation for a live thinking row. */
 	thinking?: boolean;
+	conversationState?: AvatarConversationState;
 	size?: string;
 }) {
 	const parsed = size ? Number.parseInt(size, 10) : Number.NaN;
@@ -398,6 +400,7 @@ export function AgentAvatar({
 			<GlyphDisplay
 				alt="agent avatar"
 				className={cn(className, "rounded-[inherit] object-cover")}
+				conversationState={conversationState}
 				size={px}
 				thinking={thinking}
 				value={resolvedGlyph}

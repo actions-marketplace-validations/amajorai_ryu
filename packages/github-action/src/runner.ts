@@ -22,15 +22,11 @@ export interface RunnerOptions {
 	workingDirectory?: string;
 }
 
-function json(value: unknown): string {
-	return JSON.stringify(value);
-}
-
 function outputText(value: unknown): string {
 	if (typeof value === "string") {
 		return value;
 	}
-	return json(value);
+	return JSON.stringify(value);
 }
 
 function setNodeOutputs(runtime: ActionRuntime, node: NodeSnapshot): void {
@@ -38,8 +34,8 @@ function setNodeOutputs(runtime: ActionRuntime, node: NodeSnapshot): void {
 	runtime.setOutput("node-managed", String(node.info.managed));
 	runtime.setOutput("node-version", node.health.version ?? "");
 	runtime.setOutput("node-channel", node.health.channel ?? "");
-	runtime.setOutput("health-json", json(node.health));
-	runtime.setOutput("node-info-json", json(node.info));
+	runtime.setOutput("health-json", JSON.stringify(node.health));
+	runtime.setOutput("node-info-json", JSON.stringify(node.info));
 }
 
 function buildChatRequest(
@@ -157,10 +153,10 @@ function exportNodeEnvironment(
 
 function setResultOutputs(runtime: ActionRuntime, result: ActionResult): void {
 	runtime.setOutput("response", result.text);
-	runtime.setOutput("result-json", json(result.result));
+	runtime.setOutput("result-json", JSON.stringify(result.result));
 	runtime.setOutput("conversation-id", result.conversationId ?? "");
 	runtime.setOutput("run-id", result.runId ?? "");
-	runtime.setOutput("tool-calls", json(result.toolEvents));
+	runtime.setOutput("tool-calls", JSON.stringify(result.toolEvents));
 }
 
 export async function executeAction(
@@ -245,15 +241,4 @@ export async function executeAction(
 	setResultOutputs(runtime, result);
 	await writeSummary(inputs, node, result, environment);
 	return result;
-}
-
-export function buildChatRequestForTest(
-	inputs: ActionInputs,
-	conversationId: string
-): ChatRequest {
-	return buildChatRequest(inputs, conversationId);
-}
-
-export function buildToolRequestForTest(inputs: ActionInputs): ToolRequest {
-	return buildToolRequest(inputs);
 }

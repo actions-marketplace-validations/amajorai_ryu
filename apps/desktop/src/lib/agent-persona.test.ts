@@ -35,3 +35,24 @@ describe("agent expressive avatar persona mapping", () => {
 		});
 	});
 });
+
+test("configured conversation ghost round-trips through agent persona fields", () => {
+	const glyph = {
+		kind: "expressive" as const,
+		expression: "random" as const,
+		animation: "random" as const,
+		variant: "3d" as const,
+		bodyStyle: "orb" as const,
+		behavior: "conversation" as const,
+		colors: { bg: "#ffffff", c1: "#ff6688" },
+		animated: true,
+		eyeScale: 1.25,
+		animationDuration: 12,
+	};
+	const fields = glyphToPersonaFields(glyph);
+	expect(
+		personaToGlyphValue({ ...fields, display_name: null, tone: null })
+	).toEqual(glyph);
+	expect(fields.avatar_url).toBeNull();
+	expect(fields.icon).toBeNull();
+});

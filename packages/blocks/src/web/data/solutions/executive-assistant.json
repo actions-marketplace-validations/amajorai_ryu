@@ -4,10 +4,10 @@
   "navLabel": "Executive Assistant",
   "category": "People & Operations",
   "icon": "CalendarClock",
-  "tagline": "Triage the inbox, manage the calendar, and prep the day from a command bar that's a keystroke away.",
+  "tagline": "Prepare meeting notes, sort email, and propose calendar changes for review.",
   "heroEyebrow": "Ryu for Executive Assistant",
-  "heroTitle": "The whole day, handled from one keystroke.",
-  "heroSubtitle": "Summon a command bar anywhere to triage email, juggle the calendar, draft replies, and prep the next meeting. Agents connect to the inbox and calendar to actually do the work, and the Gateway keeps the executive's private data redacted and on the record.",
+  "heroTitle": "Ryu for executive assistant",
+  "heroSubtitle": "Prepare meeting notes, sort email, and propose calendar changes for review.",
   "visualKey": "CommandBarVisual",
   "intro": "An executive assistant lives in the gaps between tools: inbox, calendar, travel, a dozen quick asks a day. Switching apps is the tax. Ryu puts a command bar a hotkey away on the desktop, connected to the inbox and calendar, so you triage, draft, and schedule in place without breaking flow, and sensitive details stay governed.",
   "highlights": [

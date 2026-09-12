@@ -1,6 +1,10 @@
 import type { ReactNode } from "react";
-import { createContext, useContext, useEffect, useState } from "react";
-import { useIsActiveTab, useTabsContext } from "./TabsContext.tsx";
+import { createContext, useContext, useEffect, useMemo, useState } from "react";
+import {
+	useCurrentTabId,
+	useIsActiveTab,
+	useTabSelector,
+} from "./TabsContext.tsx";
 
 interface TitleBarState {
 	actions: ReactNode;
@@ -14,14 +18,24 @@ interface TitleBarContextValue extends TitleBarState {
 
 const TitleBarContext = createContext<TitleBarContextValue | null>(null);
 
+const TitleBarSettersContext = createContext<Pick<
+	TitleBarContextValue,
+	"setTitle" | "setActions"
+> | null>(null);
+
 export function TitleBarProvider({ children }: { children: ReactNode }) {
 	const [title, setTitle] = useState<ReactNode>(null);
 	const [actions, setActions] = useState<ReactNode>(null);
 
+	const setters = useMemo(() => ({ setTitle, setActions }), []);
 	return (
-		<TitleBarContext.Provider value={{ title, actions, setTitle, setActions }}>
-			{children}
-		</TitleBarContext.Provider>
+		<TitleBarSettersContext.Provider value={setters}>
+			<TitleBarContext.Provider
+				value={{ title, actions, setTitle, setActions }}
+			>
+				{children}
+			</TitleBarContext.Provider>
+		</TitleBarSettersContext.Provider>
 	);
 }
 
@@ -40,9 +54,17 @@ export function useTitleBarContext() {
  * tab strip label.
  */
 export function useTitleBar(title: ReactNode, actions?: ReactNode) {
-	const { setTitle, setActions } = useTitleBarContext();
+	const setters = useContext(TitleBarSettersContext);
+	if (!setters) {
+		throw new Error("useTitleBar must be used inside TitleBarProvider");
+	}
+	const { setTitle, setActions } = setters;
 	const isActive = useIsActiveTab();
-	const { activeTabId, updateTabTitle } = useTabsContext();
+	const currentTabId = useCurrentTabId();
+	const activeTabId = useTabSelector(
+		(state) => currentTabId ?? (isActive ? state.activeTabId : undefined)
+	);
+	const updateTabTitle = useTabSelector((state) => state.updateTabTitle);
 
 	useEffect(() => {
 		if (!isActive) {

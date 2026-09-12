@@ -12,8 +12,11 @@
 import { describe, expect, test } from "bun:test";
 import {
 	type Capability,
+	CodedRpcError,
+	dispatchRpc,
 	GRANT_CAPABILITY,
 	HOST_API_VERSION,
+	type HostServices,
 	METHOD_CAPABILITY,
 	STREAMING_METHODS,
 } from "./rpc.ts";
@@ -30,11 +33,25 @@ test("registers targeted Inbox notifications as a separate capability", () => {
 //    the JSON — their whole job is to be an INDEPENDENT copy. ──────────────────
 
 const OLD_METHOD_CAPABILITY: Record<string, Capability> = {
+	"backups.destinations": "backups.app",
+	"backups.create": "backups.app",
+	"backups.list": "backups.app",
+	"backups.get": "backups.app",
+	"backups.restore": "backups.app",
 	"host.capabilities": "host.capabilities",
+	"i18n.get": "i18n",
+	"i18n.translate": "i18n",
+	"i18n.subscribe": "i18n",
+	"node.shareOrigins": "node.shareOrigins",
 	"native.haptics": "native.haptics",
 	"native.notifications.create": "native.notifications",
 	"native.liveActivities.update": "native.liveActivities",
 	"app.request": "app.http",
+	"realtime.connect": "app.realtime",
+	"realtime.publish": "app.realtime",
+	"realtime.presence": "app.realtime",
+	"realtime.subscribe": "app.realtime",
+	"realtime.close": "app.realtime",
 	"core.listAgents": "core.listAgents",
 	"catalog.snapshot": "core.listAgents",
 	"catalog.models": "core.listAgents",
@@ -83,10 +100,12 @@ const OLD_METHOD_CAPABILITY: Record<string, Capability> = {
 	"media.video": "media.generate",
 	"media.tts": "media.generate",
 	"media.transcribe": "media.transcribe",
+	"media.recording": "media.recording",
 	"registry.engineModels": "core.listAgents",
 	"registry.ttsEngines": "core.listAgents",
 	"registry.agents": "core.listAgents",
 	"assets.searchGifs": "core.listAgents",
+	"assets.searchImages": "core.listAgents",
 	"finetune.capability": "finetune.runs",
 	"finetune.start": "finetune.runs",
 	"finetune.list": "finetune.runs",
@@ -123,6 +142,7 @@ const OLD_METHOD_CAPABILITY: Record<string, Capability> = {
 	"workflows.mcp": "workflows.catalogs",
 	"workflows.skills": "workflows.catalogs",
 	"workflows.schedules": "workflows.catalogs",
+	"workflows.notifyTargets": "workflows.catalogs",
 	"workflows.composio": "workflows.catalogs",
 	"workflows.hookEvents": "workflows.catalogs",
 	"ghost.recordStart": "ghost.record",
@@ -153,6 +173,7 @@ const OLD_METHOD_CAPABILITY: Record<string, Capability> = {
 	"background.list": "background.control",
 	"background.stop": "background.control",
 	"timeline.list": "timeline.read",
+	"timeline.transcripts": "timeline.speech",
 	"timeline.journal": "timeline.read",
 	"timeline.frame": "timeline.read",
 	"timeline.openReview": "timeline.read",
@@ -164,6 +185,7 @@ const OLD_METHOD_CAPABILITY: Record<string, Capability> = {
 	"mail.rotateSecret": "mail.crud",
 	"mail.send": "mail.crud",
 	"mail.inboundUrl": "mail.crud",
+	"mail.request": "mail.crud",
 	"calendar.jobs": "calendar.crud",
 	"calendar.workflows": "calendar.crud",
 	"calendar.agents": "calendar.crud",
@@ -229,6 +251,7 @@ const OLD_METHOD_CAPABILITY: Record<string, Capability> = {
 	"skills.versionSource": "skills.crud",
 	"skills.snapshot": "skills.crud",
 	"skills.restore": "skills.crud",
+	"skills.distribute": "skills.crud",
 	"skills.setTitle": "skills.crud",
 	"shell.openTab": "shell.integrate",
 	"shell.themeSubscribe": "shell.integrate",
@@ -250,10 +273,12 @@ const OLD_METHOD_CAPABILITY: Record<string, Capability> = {
 };
 
 const OLD_GRANT_CAPABILITY: Record<string, Capability> = {
+	"backups:app": "backups.app",
 	"native:haptics": "native.haptics",
 	"native:notifications": "native.notifications",
 	"native:live_activities": "native.liveActivities",
 	"app:http": "app.http",
+	"app:realtime": "app.realtime",
 	"core:list_agents": "core.listAgents",
 	"chat.sendFollowUp": "chat.broadcast",
 	"ui:render": "ui.render",
@@ -267,6 +292,7 @@ const OLD_GRANT_CAPABILITY: Record<string, Capability> = {
 	"spaces:docs": "spaces.docs",
 	"media:generate": "media.generate",
 	"media:transcribe": "media.transcribe",
+	"media:record": "media.recording",
 	"finetune:runs": "finetune.runs",
 	"monitors:crud": "monitors.crud",
 	"workflows:crud": "workflows.crud",
@@ -279,6 +305,7 @@ const OLD_GRANT_CAPABILITY: Record<string, Capability> = {
 	"activity:read": "activity.read",
 	"background:control": "background.control",
 	"timeline:read": "timeline.read",
+	"timeline:speech": "timeline.speech",
 	"mail:crud": "mail.crud",
 	"calendar:crud": "calendar.crud",
 	"warmup:crud": "warmup.crud",
@@ -302,11 +329,13 @@ const OLD_GRANT_CAPABILITY: Record<string, Capability> = {
 const OLD_STREAMING_METHODS: readonly string[] = [
 	"agent.run.stream",
 	"finetune.stream",
+	"i18n.subscribe",
 	"shell.themeSubscribe",
 	"shell.prefsSubscribe",
 	"shell.registerCommand",
 	"shell.registerTabIcon",
 	"shell.eventsSubscribe",
+	"realtime.subscribe",
 ];
 
 /** Pure comparison (no assertions): the sorted key lists plus the list of keys
@@ -365,5 +394,118 @@ describe("rpc tables derive from the blessed host-API contract (lockstep)", () =
 	test("the contract version is a non-empty semver-shaped string", () => {
 		expect(typeof HOST_API_VERSION).toBe("string");
 		expect(HOST_API_VERSION).toMatch(/^\d+\.\d+\.\d+/);
+	});
+});
+
+describe("skills.distribute RPC", () => {
+	const granted = new Set<Capability>(["skills.crud"]);
+
+	test("forwards an existing skill id to the host service", async () => {
+		const received: string[] = [];
+		const services: HostServices = {
+			listAgents: () => Promise.resolve([]),
+			registerRoute: () => Promise.resolve(null),
+			skillsDistribute: ({ id }) => {
+				received.push(id);
+				return Promise.resolve();
+			},
+		};
+
+		await expect(
+			dispatchRpc("skills.distribute", [{ id: "skill-42" }], granted, services)
+		).resolves.toBeNull();
+		expect(received).toEqual(["skill-42"]);
+	});
+
+	for (const input of [{}, { id: 42 }]) {
+		test(`rejects ${JSON.stringify(input)} before it reaches the host service`, async () => {
+			let called = false;
+			const services: HostServices = {
+				listAgents: () => Promise.resolve([]),
+				registerRoute: () => Promise.resolve(null),
+				skillsDistribute: () => {
+					called = true;
+					return Promise.resolve();
+				},
+			};
+
+			const error = await dispatchRpc(
+				"skills.distribute",
+				[input],
+				granted,
+				services
+			).catch((reason: unknown) => reason);
+
+			expect(error).toBeInstanceOf(CodedRpcError);
+			expect((error as CodedRpcError).code).toBe("invalid_args");
+			expect(called).toBe(false);
+		});
+	}
+});
+
+describe("i18n RPC", () => {
+	const granted = new Set<Capability>();
+
+	test("translates with the host runtime and an explicit fallback", async () => {
+		const received: unknown[] = [];
+		const services: HostServices = {
+			i18nTranslate: (input) => {
+				received.push(input);
+				return "localized";
+			},
+			listAgents: () => Promise.resolve([]),
+			registerRoute: () => Promise.resolve(null),
+		};
+
+		await expect(
+			dispatchRpc(
+				"i18n.translate",
+				[
+					{
+						defaultMessage: "Hello {name}",
+						id: "example.greeting",
+						values: { name: "Ryu" },
+					},
+				],
+				granted,
+				services
+			)
+		).resolves.toBe("localized");
+		expect(received).toEqual([
+			{
+				defaultMessage: "Hello {name}",
+				id: "example.greeting",
+				values: { name: "Ryu" },
+			},
+		]);
+	});
+
+	test("rejects non-primitive interpolation values before the host runs", async () => {
+		let called = false;
+		const services: HostServices = {
+			i18nTranslate: () => {
+				called = true;
+				return "should not run";
+			},
+			listAgents: () => Promise.resolve([]),
+			registerRoute: () => Promise.resolve(null),
+		};
+
+		const error = await dispatchRpc(
+			"i18n.translate",
+			[
+				{
+					defaultMessage: "Hello",
+					id: "example.greeting",
+					values: { name: { secret: "no" } },
+				},
+			],
+			granted,
+			services
+		).catch((reason: unknown) => reason);
+
+		expect(error).toBeInstanceOf(CodedRpcError);
+		expect((error as CodedRpcError).code).toBe("invalid_args");
+		expect(called).toBe(false);
 	});
 });

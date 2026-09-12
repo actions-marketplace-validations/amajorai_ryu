@@ -4,10 +4,10 @@
   "navLabel": "IT Support",
   "category": "Engineering & Product",
   "icon": "LifeBuoy",
-  "tagline": "Resolve tickets, draft runbooks, and answer staff with agents wired to your systems.",
+  "tagline": "Find answers in your runbooks and draft support replies using connected tools.",
   "heroEyebrow": "Ryu for IT Support",
-  "heroTitle": "A help desk that answers in seconds.",
-  "heroSubtitle": "Connect your ticketing, identity, and knowledge base through MCP so an agent can diagnose an issue, draft the reply, and walk through the fix. Ground it in your own runbooks, keep employee data governed by the Gateway, and run sensitive lookups on a local model.",
+  "heroTitle": "Ryu for it support",
+  "heroSubtitle": "Find answers in your runbooks and draft support replies using connected tools.",
   "visualKey": "McpVisual",
   "intro": "IT support is a firehose of repeat questions and time-sensitive tickets. Ryu connects agents to your help desk, directory, and documentation through MCP, so they answer from your real systems and procedures. Sensitive employee data stays governed and logged by the Gateway, and routine lookups can run entirely on your machine.",
   "highlights": [

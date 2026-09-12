@@ -29,7 +29,7 @@ import {
 import { useSpacesContext } from "@/src/contexts/SpacesContext.tsx";
 import {
 	useCurrentTabId,
-	useTabsContext,
+	useTabSelector,
 } from "@/src/contexts/TabsContext.tsx";
 import { useActiveNode } from "@/src/hooks/useActiveNode.ts";
 import { useAssistantPageContext } from "@/src/hooks/useAssistantPageContext.ts";
@@ -94,7 +94,11 @@ export default function SpaceDocEditorPage({
 	documentId: string;
 }) {
 	const { getDocument, saveDocument, setDocumentIcon } = useSpacesContext();
-	const { updateTabTitle, updateTabsIconWhere, openTab } = useTabsContext();
+	const updateTabTitle = useTabSelector((state) => state.updateTabTitle);
+	const updateTabsIconWhere = useTabSelector(
+		(state) => state.updateTabsIconWhere
+	);
+	const openTab = useTabSelector((state) => state.openTab);
 	const tabId = useCurrentTabId();
 	const node = useActiveNode();
 	const nodeUrl = node.url;

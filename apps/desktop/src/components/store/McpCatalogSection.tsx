@@ -298,7 +298,7 @@ function McpServerList({
 	}
 	if (error) {
 		return (
-			<div className="p-4 text-destructive text-sm">
+			<div className="p-4 text-sm text-status-destructive">
 				Couldn't load MCP servers: {error}
 			</div>
 		);
@@ -386,7 +386,7 @@ function McpCardAction({
 			<div className="flex items-center gap-0.5">
 				<Button disabled size="sm" variant="secondary">
 					<HugeiconsIcon
-						className="size-3.5 text-success"
+						className="size-3.5 text-status-success"
 						icon={CheckmarkCircle02Icon}
 					/>
 					Added
@@ -445,7 +445,7 @@ function McpDetailPanel({
 	}
 	if (error) {
 		return (
-			<div className="p-4 text-destructive text-sm">
+			<div className="p-4 text-sm text-status-destructive">
 				Couldn't load this server: {error}
 			</div>
 		);
@@ -488,7 +488,7 @@ function McpDetailPanel({
 					{card.installed ? (
 						<Badge className="gap-1" variant="secondary">
 							<HugeiconsIcon
-								className="size-3.5 text-success"
+								className="size-3.5 text-status-success"
 								icon={CheckmarkCircle02Icon}
 							/>
 							Added

@@ -4,10 +4,10 @@
   "navLabel": "Finance",
   "category": "Finance & Risk",
   "icon": "Landmark",
-  "tagline": "Build models, analyze performance, and prep board decks with agents that keep financials on your machine.",
+  "tagline": "Prepare forecasts and draft reports from the financial records you provide.",
   "heroEyebrow": "Ryu for Finance",
-  "heroTitle": "An AI analyst that never leaks the model.",
-  "heroSubtitle": "Pull actuals, build forecasts, and draft board narratives with agents that run on your own machine. Sensitive financials never leave your device unless you say so, and every model call is governed, logged, and auditable.",
+  "heroTitle": "Ryu for finance",
+  "heroSubtitle": "Prepare forecasts and draft reports from the financial records you provide.",
   "visualKey": "GatewayVisual",
   "intro": "Finance teams sit on the most sensitive numbers in the company: forecasts, margins, and deal terms that can't be handed to a public chatbot. Ryu runs capable agents locally, connects into your spreadsheets and systems to pull real figures, and records every call, so FP&A moves faster without the data ever leaving your control.",
   "highlights": [

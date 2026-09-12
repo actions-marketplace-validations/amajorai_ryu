@@ -455,7 +455,7 @@ export function ProjectSettingsDialog({
 								) : null}
 							</Label>
 							{loadError ? (
-								<p className="text-destructive text-sm">{loadError}</p>
+								<p className="text-sm text-status-destructive">{loadError}</p>
 							) : null}
 							{markdown === null ? (
 								<div className="flex min-h-48 items-center justify-center rounded-md border">
@@ -625,7 +625,7 @@ export function ProjectSettingsDialog({
 
 					<DialogFooter className="shrink-0 justify-between border-t px-6 py-4">
 						<Button
-							className="text-destructive hover:text-destructive"
+							className="text-status-destructive hover:text-status-destructive"
 							disabled={saving}
 							onClick={() => {
 								removeProject(project?.id ?? projectRoot);

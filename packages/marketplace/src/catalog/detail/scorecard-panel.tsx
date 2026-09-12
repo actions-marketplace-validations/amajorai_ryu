@@ -1,7 +1,7 @@
 // packages/marketplace/src/catalog/detail/scorecard-panel.tsx
 //
-// The Health tab and its header badge — the rendered form of the automated trust
-// scan in `../scorecard.ts`.
+// The Health tab and its header badge — the rendered form of a deterministic
+// scorecard in `../scorecard.ts`.
 //
 // The design intent is that a reader can disagree with the grade. So the panel
 // never shows a bare score: every check is listed with its verdict AND the
@@ -20,10 +20,8 @@ import {
 import type { IconSvgElement } from "@hugeicons/react";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { Badge } from "@ryu/ui/components/badge.tsx";
-import { Button } from "@ryu/ui/components/button.tsx";
 import { cn } from "@ryu/ui/lib/utils.ts";
 import type { ReactNode } from "react";
-import { useState } from "react";
 import type { CatalogScanResult } from "../host.tsx";
 import {
 	CATEGORY_DESCRIPTIONS,
@@ -33,6 +31,7 @@ import {
 	type ScorecardCheck,
 	type ScorecardGrade,
 } from "../scorecard.ts";
+import { AgentAuditPanel } from "./agent-audit-panel.tsx";
 
 /** Per-status presentation. Kept as one table so the badge, the rows, and the
  *  category headers can never drift into disagreeing about what a status looks
@@ -42,12 +41,12 @@ const STATUS_STYLE: Record<
 	{ className: string; icon: IconSvgElement; label: string }
 > = {
 	fail: {
-		className: "text-destructive",
+		className: "text-status-destructive",
 		icon: Alert01Icon,
 		label: "Failed",
 	},
 	pass: {
-		className: "text-emerald-600 dark:text-emerald-500",
+		className: "text-status-success",
 		icon: CheckmarkCircle02Icon,
 		label: "Passed",
 	},
@@ -57,7 +56,7 @@ const STATUS_STYLE: Record<
 		label: "Not checkable",
 	},
 	warn: {
-		className: "text-amber-600 dark:text-amber-500",
+		className: "text-status-warning",
 		icon: CircleIcon,
 		label: "Worth knowing",
 	},
@@ -65,11 +64,11 @@ const STATUS_STYLE: Record<
 
 /** Grade → badge treatment. A/B read as fine, C/D as caution, F as a stop sign. */
 const GRADE_STYLE: Record<ScorecardGrade, string> = {
-	A: "border-emerald-500/40 text-emerald-600 dark:text-emerald-500",
-	B: "border-emerald-500/40 text-emerald-600 dark:text-emerald-500",
-	C: "border-amber-500/40 text-amber-600 dark:text-amber-500",
-	D: "border-amber-500/40 text-amber-600 dark:text-amber-500",
-	F: "border-destructive/40 text-destructive",
+	A: "border-success/40 text-status-success",
+	B: "border-success/40 text-status-success",
+	C: "border-warning/40 text-status-warning",
+	D: "border-warning/40 text-status-warning",
+	F: "border-destructive/40 text-status-destructive",
 };
 
 /**
@@ -93,7 +92,7 @@ export function ScorecardBadge({
 	const content = (
 		<>
 			<HugeiconsIcon className="size-3.5" icon={ShieldKeyIcon} />
-			<span className="font-semibold">{scorecard.grade}</span>
+			<span className="font-medium">{scorecard.grade}</span>
 			<span className="text-muted-foreground">{scorecard.score}/100</span>
 		</>
 	);
@@ -151,45 +150,34 @@ function CheckRow({ check }: { check: ScorecardCheck }) {
 /** The Health tab: the score, then every check grouped by family. */
 export function ScorecardPanel({
 	agentScan,
+	onOpenConversation,
+	disclaimer,
+	dataTestId,
 	developerDoctor,
 	developerCommand,
 	scorecard,
+	rulesetLabel = "Catalog ruleset",
+	title = "Automated checks",
 }: {
 	agentScan?: () => Promise<CatalogScanResult>;
+	onOpenConversation?: (id: string) => void;
+	disclaimer?: ReactNode;
+	dataTestId?: string;
 	developerCommand?: string;
 	developerDoctor?: ReactNode;
+	rulesetLabel?: string;
 	scorecard: Scorecard;
+	title?: string;
 }) {
 	const unknownCount = scorecard.checks.length - scorecard.evaluated;
-	const [scanError, setScanError] = useState<string | null>(null);
-	const [scanResult, setScanResult] = useState<CatalogScanResult | null>(null);
-	const [scanning, setScanning] = useState(false);
-
-	const runAgentScan = async () => {
-		if (!agentScan || scanning) {
-			return;
-		}
-		setScanError(null);
-		setScanning(true);
-		try {
-			setScanResult(await agentScan());
-		} catch (error) {
-			setScanResult(null);
-			setScanError(
-				error instanceof Error ? error.message : "The agent scan failed."
-			);
-		} finally {
-			setScanning(false);
-		}
-	};
 
 	return (
-		<div className="flex flex-col gap-6">
+		<div className="flex flex-col gap-6" data-testid={dataTestId}>
 			<section className="flex items-start gap-4 rounded-lg bg-muted p-4">
 				<div className="flex flex-col items-center gap-0.5">
 					<span
 						className={cn(
-							"font-semibold text-3xl leading-none",
+							"font-medium text-3xl leading-none",
 							scorecard.grade ? GRADE_STYLE[scorecard.grade] : ""
 						)}
 					>
@@ -201,21 +189,7 @@ export function ScorecardPanel({
 				</div>
 				<div className="min-w-0 flex-1">
 					<div className="flex flex-wrap items-center justify-between gap-2">
-						<h3 className="font-medium text-sm">Automated checks</h3>
-						{agentScan ? (
-							<Button
-								data-testid="catalog-scan-button"
-								disabled={scanning}
-								loading={scanning}
-								onClick={() => {
-									void runAgentScan();
-								}}
-								size="sm"
-								variant="outline"
-							>
-								{scanning ? "Scanning…" : "Scan with agent"}
-							</Button>
-						) : null}
+						<h3 className="font-medium text-sm">{title}</h3>
 					</div>
 					<p className="text-muted-foreground text-sm leading-relaxed">
 						{scorecard.summary}
@@ -231,43 +205,17 @@ export function ScorecardPanel({
 						className="mt-1 text-[11px] text-muted-foreground"
 						data-scorecard-ruleset={scorecard.rulesetVersion}
 					>
-						Catalog ruleset {scorecard.rulesetVersion}
+						{rulesetLabel} {scorecard.rulesetVersion}
 					</p>
 				</div>
 			</section>
 
-			{scanError ? (
-				<section
-					className="rounded-lg border border-destructive/30 bg-destructive/5 p-4 text-destructive text-sm"
-					data-testid="catalog-scan-error"
-				>
-					Agent scan failed: {scanError}
-				</section>
-			) : null}
-			{scanResult ? (
-				<section
-					className="flex flex-col gap-2 rounded-lg border border-primary/25 bg-primary/5 p-4"
-					data-testid="catalog-scan-result"
-				>
-					<div className="flex flex-wrap items-center justify-between gap-2">
-						<h3 className="font-medium text-sm">Agent review</h3>
-						<Badge
-							variant={
-								scanResult.status === "complete" ? "secondary" : "outline"
-							}
-						>
-							{scanResult.status === "complete" ? "Complete" : "Partial"}
-						</Badge>
-					</div>
-					<p className="text-muted-foreground text-xs">
-						Reviewed by{" "}
-						<span className="font-medium">{scanResult.agentId}</span>. The
-						deterministic score above remains the source of the grade.
-					</p>
-					<p className="whitespace-pre-wrap text-sm leading-relaxed">
-						{scanResult.report || "The agent returned no narrative report."}
-					</p>
-				</section>
+			{agentScan ? (
+				<AgentAuditPanel
+					key={JSON.stringify(scorecard)}
+					onOpenConversation={onOpenConversation}
+					runAudit={agentScan}
+				/>
 			) : null}
 
 			{scorecard.categories.map((category) => {
@@ -275,7 +223,11 @@ export function ScorecardPanel({
 					(c) => c.category === category.category
 				);
 				return (
-					<section className="flex flex-col gap-2" key={category.category}>
+					<section
+						className="flex flex-col gap-2"
+						data-scorecard-category={category.category}
+						key={category.category}
+					>
 						<div className="flex items-baseline justify-between gap-3">
 							<h3 className="font-medium text-sm">
 								{CATEGORY_LABELS[category.category]}
@@ -321,12 +273,14 @@ export function ScorecardPanel({
 					</section>
 				) : null)}
 
-			<p className="text-muted-foreground text-xs leading-relaxed">
-				These checks are automated and read only what the listing publishes.
-				They are a starting point for judgement, not a security audit — a
-				passing grade is not a guarantee, and a failing one is not proof of bad
-				intent.
-			</p>
+			{disclaimer ?? (
+				<p className="text-muted-foreground text-xs leading-relaxed">
+					These checks are automated and read only what the listing publishes.
+					They are a starting point for judgement, not a security audit — a
+					passing grade is not a guarantee, and a failing one is not proof of
+					bad intent.
+				</p>
+			)}
 		</div>
 	);
 }

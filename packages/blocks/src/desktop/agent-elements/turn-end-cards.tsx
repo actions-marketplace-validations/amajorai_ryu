@@ -41,10 +41,14 @@ function EditStats({ file }: { file: EditedFile }) {
 	return (
 		<span className="flex shrink-0 items-center gap-1 font-mono text-xs tabular-nums">
 			{file.insertions > 0 ? (
-				<span className="text-emerald-500">+{countLabel(file.insertions)}</span>
+				<span className="text-status-success">
+					+{countLabel(file.insertions)}
+				</span>
 			) : null}
 			{file.deletions > 0 ? (
-				<span className="text-rose-500">-{countLabel(file.deletions)}</span>
+				<span className="text-status-destructive">
+					-{countLabel(file.deletions)}
+				</span>
 			) : null}
 		</span>
 	);
@@ -115,7 +119,7 @@ function UndoFileEditsDialog({
 					</AlertDialogDescription>
 				</AlertDialogHeader>
 				{error ? (
-					<p className="text-destructive text-sm" role="alert">
+					<p className="text-sm text-status-destructive" role="alert">
 						{error}
 					</p>
 				) : null}
@@ -266,10 +270,10 @@ function FileEditsCard({
 							Edited {fileName(firstFile.path)}
 						</h3>
 						<div className="mt-1 flex items-center gap-1 font-mono text-xs tabular-nums">
-							<span className="text-emerald-500">
+							<span className="text-status-success">
 								+{countLabel(firstFile.insertions)}
 							</span>
-							<span className="text-rose-500">
+							<span className="text-status-destructive">
 								-{countLabel(firstFile.deletions)}
 							</span>
 						</div>
@@ -298,10 +302,10 @@ function FileEditsCard({
 							{card.files.length === 1 ? "file" : "files"}
 						</h3>
 						<div className="mt-1 flex items-center gap-2 font-mono text-sm tabular-nums">
-							<span className="text-emerald-500">
+							<span className="text-status-success">
 								+{countLabel(totalInsertions)}
 							</span>
-							<span className="text-rose-500">
+							<span className="text-status-destructive">
 								-{countLabel(totalDeletions)}
 							</span>
 						</div>

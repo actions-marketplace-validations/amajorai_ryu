@@ -65,6 +65,14 @@ export interface CatalogAffordanceTarget {
 	realm: CatalogRealm;
 }
 
+/** Public identity of the organization that published a Marketplace listing. */
+export interface CatalogPublisherTarget {
+	id: string;
+	logo: string | null;
+	name: string;
+	slug: string | null;
+}
+
 /** Props for the host-provided install button. The host encapsulates the live
  *  download-progress lookup (keyed by {@link progress}) so the shared sections
  *  never import the desktop downloads store. */
@@ -99,7 +107,7 @@ export interface CatalogNode {
 }
 
 /** The catalog realms that can be reviewed by the configured agent. */
-export type CatalogScanKind = "app" | "plugin" | "skill";
+export type CatalogScanKind = "app" | "plugin" | "skill" | "agent" | "gateway";
 
 export interface CatalogScanFile {
 	contents?: string | null;
@@ -117,11 +125,28 @@ export interface CatalogScanInput {
 	metadata?: Record<string, unknown>;
 	name: string;
 	readme?: string | null;
-	scorecard: Scorecard;
+	scorecard: Scorecard | null;
+}
+
+export interface AgentAuditAssessment {
+	confidence: "low" | "medium" | "high";
+	evidence: string[];
+	limitations: string[];
+	recommendations: {
+		priority: "high" | "medium" | "low";
+		action: string;
+		reason: string;
+	}[];
+	score: number | null;
+	summary: string;
 }
 
 export interface CatalogScanResult {
 	agentId: string;
+	assessment?: AgentAuditAssessment | null;
+	auditedAt?: string;
+	conversationId?: string;
+	model?: string;
 	report: string;
 	status: "complete" | "partial";
 }
@@ -230,6 +255,10 @@ export interface CatalogHost {
 	 *  Omitted ⇒ treated as `true`, so a host with no notion of app enablement keeps
 	 *  its old behaviour and only `navigate` gates authoring. */
 	canAuthorSkills?: boolean;
+	/** Offer an already-installed skill to locally detected agent clients. Omitted
+	 *  on read-only hosts, which hides the action rather than suggesting a local
+	 *  distribution flow a browser cannot complete. */
+	distributeSkill?: (skillId: string) => Promise<void>;
 	/** On-demand llmfit hardware fit + tok/s estimate for one repo. */
 	estimateLlmfit: (
 		node: CatalogNode,
@@ -290,14 +319,17 @@ export interface CatalogHost {
 	/** Deep-link to an in-app route (desktop: open a tab). Its presence gates the
 	 *  authoring UI (New/Edit skill) — a read-only surface (web) omits it. */
 	navigate?: (path: string) => void;
+	/** Run the configured, read-only agent review for one catalog item. Web omits
+	 *  this because it has no Core node to execute against, so the Scan button is
+	 *  absent there rather than pretending a browser-only review ran. */
+	openAuditConversation?: (id: string) => void;
 	/** Open an external URL (Tauri shell on desktop, navigation on web). */
 	openExternal: (url: string) => Promise<void> | void;
 	/** Read-only primary affordance, rendered where the install button would be
 	 *  when {@link install} is null (web: an "Open in Ryu" button). */
 	renderAffordance?: (target: CatalogAffordanceTarget) => ReactNode;
-	/** Run the configured, read-only agent review for one catalog item. Web omits
-	 *  this because it has no Core node to execute against, so the Scan button is
-	 *  absent there rather than pretending a browser-only review ran. */
+	/** Optional host-rendered publisher identity/follow action for hosted cards. */
+	renderPublisher?: (target: CatalogPublisherTarget) => ReactNode;
 	runCatalogScan?: (input: CatalogScanInput) => Promise<CatalogScanResult>;
 	/** Active Core node identity (url + token). Read-only surfaces return a stub;
 	 *  the model detail's node-coupled extras (llmfit, fine-tunes, active-model) are

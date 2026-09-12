@@ -219,6 +219,11 @@ export interface ChatSlots {
 		onOpenFile?: (path: string) => void;
 		onOpenLink?: (url: string) => void;
 		onOpenMention?: (item: MentionItem) => void;
+		onAnnotateImage?: (image: {
+			filename?: string;
+			id: string;
+			url: string;
+		}) => void;
 		previewResolvers?: LinkPreviewResolvers;
 	}>;
 	/** Renders a live app widget for `data-tool-widget-available` parts. Supplied
@@ -324,6 +329,12 @@ export interface AgentChatProps {
 	assistantTitle?: string;
 	attachments?: {
 		onAttach?: () => void;
+		onSketch?: () => void;
+		onAnnotateImage?: (image: {
+			filename?: string;
+			id: string;
+			url: string;
+		}) => void;
 		images?: {
 			id: string;
 			filename: string;
@@ -436,6 +447,12 @@ export interface AgentChatProps {
 	messages: UIMessage[];
 	/** Submit a value from an agent-rendered UI as a new chat message. */
 	onAgentUiSubmit?: AgentUiSubmit;
+	/** Open Drawesome annotation for an image shown in the transcript. */
+	onAnnotateImage?: (image: {
+		filename?: string;
+		id: string;
+		url: string;
+	}) => void;
 	/** Branch ("fork into new chat") from a message; receives the message id to
 	 * branch from. When omitted, no branch button is shown. */
 	onBranch?: (messageId: string) => void;
@@ -539,6 +556,8 @@ export interface AgentChatProps {
 	/** Pending quote shown inside the composer, above the textarea. The surface
 	 * prepends it to the outgoing message on send. */
 	quote?: string | null;
+	/** Message id currently selected by the desktop chat-local search. */
+	searchActiveMessageId?: string;
 	/** Pre-fills the composer once when it transitions to a non-empty value (e.g.
 	 * a `ryu://chat/new?prompt=…` deep link). Never sends — the user reviews and
 	 * submits. Subsequent user edits are not clobbered. */

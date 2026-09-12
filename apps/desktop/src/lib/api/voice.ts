@@ -1,8 +1,12 @@
+import {
+	parseTranscriptionDetail,
+	type TranscriptionDetail,
+} from "@ryuhq/core-client/voice";
 // apps/desktop/src/lib/api/voice.ts
 //
 // Typed client for Core's Voice Recognition data path (`POST /api/voice/transcribe`).
-// Core proxies the uploaded audio to the whisper.cpp voice sidecar's `/inference`
-// endpoint and returns `{ text }`. The whisper-server build decodes WAV, so the
+// Core proxies the uploaded audio to the selected local/cloud STT runtime and
+// returns `{ text }`. The whisper/audio.cpp builds decode WAV, so the
 // recorder uploads 16 kHz mono PCM WAV (see hooks/useVoiceRecorder.ts) rather
 // than the browser's default webm/opus.
 //
@@ -12,16 +16,21 @@
 
 import { type ApiTarget, authenticatedFetch } from "./client.ts";
 
-/** Transcribe a recorded audio blob via Core's whisper proxy. Returns the text. */
-export async function transcribeAudio(
+/** Transcribe a recorded audio blob via Core's selected STT runtime. */
+async function transcriptionResponse(
 	target: ApiTarget,
 	audio: Blob,
-	filename = "recording.wav"
-): Promise<string> {
+	filename = "recording.wav",
+	engine?: string
+): Promise<unknown> {
 	const form = new FormData();
 	form.append("file", audio, filename);
+	const selectedEngine = engine?.trim();
+	const path = selectedEngine
+		? `/api/voice/transcribe?engine=${encodeURIComponent(selectedEngine)}`
+		: "/api/voice/transcribe";
 
-	const resp = await authenticatedFetch(target, "/api/voice/transcribe", {
+	const resp = await authenticatedFetch(target, path, {
 		method: "POST",
 		headers: { "Content-Type": null },
 		body: form,
@@ -40,8 +49,32 @@ export async function transcribeAudio(
 		throw new Error(detail);
 	}
 
-	const body = (await resp.json()) as { text?: string };
-	return (body.text ?? "").trim();
+	return await resp.json();
+}
+
+export async function transcribeAudioDetailed(
+	target: ApiTarget,
+	audio: Blob,
+	filename = "recording.wav",
+	engine?: string
+): Promise<TranscriptionDetail> {
+	return parseTranscriptionDetail(
+		await transcriptionResponse(target, audio, filename, engine)
+	);
+}
+export async function transcribeAudio(
+	target: ApiTarget,
+	audio: Blob,
+	filename = "recording.wav",
+	engine?: string
+): Promise<string> {
+	const result = await transcriptionResponse(target, audio, filename, engine);
+	return result &&
+		typeof result === "object" &&
+		"text" in result &&
+		typeof result.text === "string"
+		? result.text.trim()
+		: "";
 }
 
 /** S1-mini styling controls exposed by the Speech Processing layer. */
@@ -153,7 +186,7 @@ export async function processSpeechText(
 }
 
 /** One selectable Audio engine, as Core's `/api/voice/tts-engines`
- * returns it (built-in OuteTTS + whatever the Ryu Audio sidecar registry serves). */
+ * returns it (built-in OuteTTS, native audio.cpp, and RyuTTS entries). */
 export interface TtsEngine {
 	default_voice: string;
 	description: string;
@@ -168,8 +201,8 @@ export interface TtsEngine {
 	voices: string[];
 }
 
-/** List the Audio engines available on this node (nothing hardcoded — Core mirrors
- * the sidecar registry). Always includes the built-in `outetts`. */
+/** List the Audio engines available on this node. Core owns the built-in/native
+ * rows and mirrors any additional RyuTTS engines. */
 export async function listTtsEngines(target: ApiTarget): Promise<TtsEngine[]> {
 	const resp = await authenticatedFetch(target, "/api/voice/tts-engines");
 	if (!resp.ok) {
@@ -240,6 +273,8 @@ export interface SpeakOptions {
 	language?: string;
 	/** Reference wav path/URL for cloning-capable engines. */
 	referenceAudio?: string;
+	/** Correlates this narration with an app-owned Gateway audit request. */
+	requestId?: string;
 	/** Speaking-rate multiplier where supported. */
 	speed?: number;
 	/** Voice id (engine-specific); defaults to the engine's default voice. */
@@ -247,8 +282,8 @@ export interface SpeakOptions {
 }
 
 /** Synthesize speech via Core's `/api/voice/speak`, returning a playable WAV blob.
- * The engine is whatever the caller selects — Core routes built-ins to OuteTTS and
- * everything else to the universal Ryu Audio sidecar. */
+ * The engine is whatever the caller selects — Core routes it to the matching
+ * built-in, native audio.cpp, cloud, or RyuTTS runtime. */
 export async function speakText(
 	target: ApiTarget,
 	text: string,
@@ -258,6 +293,7 @@ export async function speakText(
 		method: "POST",
 		body: JSON.stringify({
 			text,
+			request_id: options.requestId,
 			engine: options.engine,
 			voice: options.voice,
 			speed: options.speed,

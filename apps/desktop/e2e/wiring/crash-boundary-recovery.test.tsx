@@ -174,7 +174,7 @@ describe("CrashBoundary self-recovery", () => {
 
 		// Straight after the crash the user must NOT be looking at a dead end.
 		expect(text()).toContain("Recovering");
-		expect(text()).not.toContain("Something went wrong");
+		expect(text()).not.toContain("Something broke");
 
 		await unmount();
 	});
@@ -189,7 +189,7 @@ describe("CrashBoundary self-recovery", () => {
 
 		expect(mountCount).toBeGreaterThan(mountsAtCrash);
 		expect(text()).toContain("alive");
-		expect(text()).not.toContain("Something went wrong");
+		expect(text()).not.toContain("Something broke");
 
 		await unmount();
 	});
@@ -210,9 +210,16 @@ describe("CrashBoundary self-recovery", () => {
 	it("gives up after the budget and renders the terminal UI", async () => {
 		await mountBoundary();
 		// Never stops throwing — the render-loop shape this feature is bounded for.
-		await waitForText("Something went wrong", FULL_BUDGET_MS);
+		await waitForText("Something broke", FULL_BUDGET_MS);
 
-		expect(text()).toContain("Something went wrong");
+		expect(text()).toContain("Something broke");
+		expect(text()).toContain("Try again or reload.");
+		expect(
+			container?.querySelector('[data-expressive-expression="dead"]')
+		).toBeDefined();
+		expect(
+			container?.querySelectorAll('[data-expressive-eye-shape="x"]')
+		).toHaveLength(2);
 		// Exactly MAX_AUTO_RETRIES retries were attempted, then one terminal report.
 		const errors = reports.filter((r) => r.kind === "error");
 		expect(errors).toHaveLength(MAX_AUTO_RETRIES + 1);
@@ -223,7 +230,7 @@ describe("CrashBoundary self-recovery", () => {
 
 	it("keeps the manual retry and the report affordance on the terminal screen", async () => {
 		await mountBoundary();
-		await waitForText("Something went wrong", FULL_BUDGET_MS);
+		await waitForText("Something broke", FULL_BUDGET_MS);
 
 		expect(text()).toContain("Try again");
 		expect(text()).toContain("Reload");
@@ -320,7 +327,7 @@ describe("CrashBoundary self-recovery", () => {
 				)
 			);
 		});
-		await waitForText("Something went wrong", FULL_BUDGET_MS);
+		await waitForText("Something broke", FULL_BUDGET_MS);
 
 		// Moving to another conversation is a different bug: the crash clears and
 		// the next one starts its own budget at attempt 1.

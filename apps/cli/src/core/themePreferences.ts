@@ -105,22 +105,16 @@ export function loadThemePreference(value: unknown): ThemePreference {
 }
 
 /** Plural spelling for callers that treat the pair as a preferences record. */
-export function loadThemePreferences(value: unknown): ThemePreferences {
-	return loadThemePreference(value);
-}
+export const loadThemePreferences = loadThemePreference;
 
 /**
  * Return a fresh, validated object ready for a config adapter to persist.
  * This function intentionally performs no I/O; invalid input is replaced with
  * the same safe defaults used while loading.
  */
-export function saveThemePreference(value: unknown): ThemePreference {
-	return loadThemePreference(value);
-}
+export const saveThemePreference = loadThemePreference;
 
-export function saveThemePreferences(value: unknown): ThemePreferences {
-	return saveThemePreference(value);
-}
+export const saveThemePreferences = saveThemePreference;
 
 export function serializeThemePreference(value: unknown): string {
 	return JSON.stringify(saveThemePreference(value));
@@ -142,9 +136,4 @@ export function resolveThemePreference(
 	return preset?.[colorScheme] ?? THEME_CATALOG.ryu.dark ?? ryuTheme;
 }
 
-export function resolveTheme(
-	value: unknown,
-	systemColorScheme: unknown = DEFAULT_SYSTEM_COLOR_SCHEME
-): Theme {
-	return resolveThemePreference(value, systemColorScheme);
-}
+export const resolveTheme = resolveThemePreference;

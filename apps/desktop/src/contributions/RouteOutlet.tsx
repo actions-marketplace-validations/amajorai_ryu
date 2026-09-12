@@ -9,6 +9,7 @@
 // `docs/desktop-extension-host-spec.md`.
 
 import { Button } from "@ryu/ui/components/button.tsx";
+import { useCallback, useLayoutEffect, useMemo, useRef } from "react";
 import type { Tab } from "@/src/contexts/TabsContext.tsx";
 import {
 	contributionRegistry,
@@ -24,7 +25,20 @@ export function RouteOutlet({
 	tab: Tab;
 	onClose: () => void;
 }) {
+	const closeRef = useRef(onClose);
+	useLayoutEffect(() => {
+		closeRef.current = onClose;
+	}, [onClose]);
+	const close = useCallback(() => closeRef.current(), []);
 	const botProduct = useProductMode() === "bot";
+	const render =
+		botProduct && !isBotRoutePath(tab.path)
+			? undefined
+			: contributionRegistry.resolve(tab.path);
+	const content = useMemo(
+		() => render?.(tab as RouteTab, { onClose: close }) ?? null,
+		[render, tab, close]
+	);
 	if (botProduct && !isBotRoutePath(tab.path)) {
 		return (
 			<div className="flex size-full items-center justify-center p-6">
@@ -43,12 +57,11 @@ export function RouteOutlet({
 			</div>
 		);
 	}
-	const render = contributionRegistry.resolve(tab.path);
 	if (!render) {
 		// Mirrors the old chain's `return null` for an unknown path.
 		return null;
 	}
 	// `Tab` is structurally a superset of `RouteTab`; the render-fns only read the
 	// `RouteTab` subset (path + the initial* params a pattern/exact route needs).
-	return <>{render(tab as RouteTab, { onClose })}</>;
+	return <>{content}</>;
 }

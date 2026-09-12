@@ -1,0 +1,9 @@
+@import "@ryu/ui/globals.css";
+@source "../../../web/src/components/watch-dashboard.tsx";
+@source "../../../web/src/components/user-notification-settings.tsx";
+@source "./watch-proof.tsx";
+@theme inline {
+	--font-sans: "Inter Variable", sans-serif;
+	--font-heading: "Geist Variable", sans-serif;
+	--font-mono: "Geist Mono Variable", monospace;
+}

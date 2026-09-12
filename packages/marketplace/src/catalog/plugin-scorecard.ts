@@ -1,5 +1,9 @@
 // Plugin-specific marketplace scorecard rules.
 
+import {
+	type DesignSystemSurface,
+	designSystemChecks,
+} from "./design-system-scorecard.ts";
 import type {
 	CheckStatus,
 	Scorecard,
@@ -21,6 +25,33 @@ const MIN_DESCRIPTION_CHARS = 40;
 const MIN_README_CHARS = 400;
 const WELL_ADOPTED_STARS = 25;
 const SOME_ADOPTION_STARS = 5;
+
+function designSystemSurface(
+	entry: CatalogEntry | null,
+	detail: PluginCatalogDetail | null
+): DesignSystemSurface {
+	const api = detail?.apiSurface;
+	const hasCompanion =
+		entry?.type === "app" ||
+		entry?.kinds.includes("companion") === true ||
+		detail?.runnables?.some((runnable) => runnable.kind === "companion") ===
+			true ||
+		api?.runnables?.some((runnable) => runnable.kind === "companion") === true;
+	if (hasCompanion) {
+		return "companion";
+	}
+	const hasHostSurface =
+		(api?.views?.length ?? 0) > 0 ||
+		(api?.settingsTabs?.length ?? 0) > 0 ||
+		(api?.composerControls?.length ?? 0) > 0;
+	if (hasHostSurface) {
+		return "host";
+	}
+	if (api) {
+		return "none";
+	}
+	return "unknown";
+}
 
 /** Semver with an optional `v` prefix and optional pre-release/build metadata. */
 const SEMVER_RE = /^v?\d+\.\d+\.\d+(?:-[\w.-]+)?(?:\+[\w.-]+)?$/;
@@ -754,6 +785,10 @@ export function runScorecard(
 		...maintenanceChecks(entry, detail, now),
 		...hygieneChecks(entry, detail),
 		...errorChecks(entry, detail),
+		...designSystemChecks({
+			evidence: detail?.designSystem,
+			surface: designSystemSurface(entry, detail),
+		}),
 	];
-	return buildScorecard(checks, "marketplace-plugin-1");
+	return buildScorecard(checks, "marketplace-plugin-2");
 }

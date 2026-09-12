@@ -19,8 +19,10 @@ pub mod channel_tool;
 pub mod client;
 pub mod composio;
 pub mod delegate;
+mod discovery;
 pub mod notify_tool;
 pub mod orchestrator;
+pub mod routines_tool;
 pub mod sandbox;
 pub mod search_conversations;
 pub mod skills_tool;
@@ -28,6 +30,7 @@ pub mod spaces_tool;
 pub mod threads;
 pub mod ui_tool;
 pub mod web_fetch;
+pub mod workspace_tool;
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
@@ -81,6 +84,20 @@ pub enum ToolPrincipal {
     /// openai-compat tool-exec callback — or a host conversation that is itself
     /// untenanted). **FAIL CLOSED**: never fall back to "see everything".
     Unresolved,
+}
+
+/// Whether a registry tool is valid during the onboarding profile read job.
+/// Profile scope is represented as optional fields so ordinary calls remain
+/// unchanged; once either ceiling is present, only conversation search and
+/// explicitly selected Composio actions may reach the dispatch core.
+pub(crate) fn profile_scope_allows_registry_tool(
+    tool_id: &str,
+    has_composio_scope: bool,
+    has_conversation_scope: bool,
+) -> bool {
+    !(has_composio_scope || has_conversation_scope)
+        || tool_id == "search_conversations.search"
+        || (has_composio_scope && tool_id.starts_with("composio."))
 }
 
 impl ToolPrincipal {
@@ -684,6 +701,8 @@ async fn oauth_target(
     cfg: &McpServerConfig,
     owner_user_id: &str,
     profile_id: &str,
+    action: crate::identity::ConnectionAction,
+    risk_approved: bool,
     force_refresh: bool,
     session_id: Option<String>,
 ) -> Result<McpTarget> {
@@ -713,6 +732,8 @@ async fn oauth_target(
             cfg.auth
                 .as_ref()
                 .and_then(crate::plugin_manifest::McpServerAuthDecl::client_id),
+            action,
+            risk_approved,
             force_refresh,
             session_id,
         )
@@ -731,6 +752,26 @@ async fn oauth_elicitation(
     profile_id: &str,
     challenge: Option<String>,
 ) -> Result<Value> {
+    let access_level = match crate::identity::global() {
+        Some(store) => {
+            store
+                .get_connection_access_level(
+                    owner_user_id,
+                    crate::connection_policy::MCP_PROVIDER,
+                    &crate::connection_policy::mcp_connection_key(
+                        profile_id,
+                        cfg.owner_plugin_id
+                            .as_deref()
+                            .context("OAuth MCP server has no owning plugin")?,
+                        cfg.owner_server_name
+                            .as_deref()
+                            .context("OAuth MCP server has no owning manifest key")?,
+                    ),
+                )
+                .await?
+        }
+        None => crate::identity::ConnectionAccessLevel::default(),
+    };
     let started = crate::mcp_oauth::global()
         .start_connect(crate::mcp_oauth::ConnectSpec {
             owner_user_id: owner_user_id.to_owned(),
@@ -753,6 +794,7 @@ async fn oauth_elicitation(
                 .context("OAuth MCP server has no auth declaration")?,
             callback_mode: crate::mcp_oauth::CallbackMode::Auto,
             static_headers: cfg.headers.clone(),
+            access_level,
             challenge,
         })
         .await?;
@@ -2076,8 +2118,8 @@ pub(crate) fn approval_gate_applies(tool_id: &str) -> bool {
 /// Reading `approved_grants` turns both `tool:*` families back into *approved*
 /// capabilities — the Gateway's default allowlist admits exactly
 /// `tool:http-egress:api.exa.ai`, `tool:http-egress:127.0.0.1`,
-/// `tool:command:spider` and `tool:command:rtk`, and `tool` is a reserved namespace
-/// there so nothing else can be owner-scope self-approved.
+/// `tool:command:spider`, `tool:command:rtk`, and `tool:command:rg`, and `tool` is
+/// a reserved namespace there so nothing else can be owner-scope self-approved.
 ///
 /// Core-tier keeps reading the manifest because a Core-tier manifest IS trusted
 /// input (compiled-in fixtures; the loader parses built-ins first and
@@ -2302,6 +2344,84 @@ pub(crate) struct ActionDescriptor {
     pub registered_id: String,
 }
 
+fn has_vault_secret_reference(value: &str) -> bool {
+    value
+        .split_whitespace()
+        .any(|word| word.strip_prefix("secret:").is_some())
+}
+
+async fn resolve_mcp_secret_map(
+    store: &crate::plugin_secrets::PluginSecretStore,
+    values: &BTreeMap<String, String>,
+    context: &crate::plugin_secrets::SecretResolutionContext,
+) -> Result<BTreeMap<String, String>> {
+    let mut resolved = BTreeMap::new();
+    for (key, value) in values {
+        if !has_vault_secret_reference(value) {
+            resolved.insert(key.clone(), value.clone());
+            continue;
+        }
+        // An unavailable or unauthorized reference is omitted. Passing the
+        // literal `secret:NAME` to an upstream MCP server would turn a missing
+        // authorization into a credential-looking string and is never safe.
+        if let Some(value) = store.resolve_vault_template(value, context).await? {
+            resolved.insert(key.clone(), value);
+        }
+    }
+    Ok(resolved)
+}
+
+#[cfg(test)]
+mod vault_reference_tests {
+    use super::{resolve_mcp_secret_map, McpServerConfig};
+    use crate::plugin_secrets::{PluginSecretStore, SecretResolutionContext, SecretScope};
+    use std::collections::BTreeMap;
+
+    #[tokio::test]
+    async fn mcp_secret_references_resolve_server_side_and_missing_values_drop() {
+        let store = PluginSecretStore::in_memory().unwrap();
+        store
+            .set_vault_secret(
+                SecretScope::Node,
+                "node-1",
+                None,
+                "GITHUB_TOKEN",
+                "ghs-server-side",
+            )
+            .await
+            .unwrap();
+        let context = SecretResolutionContext::node_only("node-1", vec!["github".to_owned()]);
+        let values = BTreeMap::from([
+            (
+                "Authorization".to_owned(),
+                "Bearer secret:GITHUB_TOKEN".to_owned(),
+            ),
+            ("X-Missing".to_owned(), "secret:NO_SUCH_TOKEN".to_owned()),
+            ("X-Static".to_owned(), "static".to_owned()),
+        ]);
+        let resolved = resolve_mcp_secret_map(&store, &values, &context)
+            .await
+            .unwrap();
+        assert_eq!(
+            resolved.get("Authorization").map(String::as_str),
+            Some("Bearer ghs-server-side")
+        );
+        assert!(!resolved.contains_key("X-Missing"));
+        assert_eq!(resolved.get("X-Static").map(String::as_str), Some("static"));
+
+        // A config clone is the only carrier into client::connect; no value is
+        // written back to the original MCP configuration.
+        let original = McpServerConfig {
+            headers: values,
+            ..McpServerConfig::default()
+        };
+        assert_eq!(
+            original.headers.get("Authorization").map(String::as_str),
+            Some("Bearer secret:GITHUB_TOKEN")
+        );
+    }
+}
+
 /// The config-driven MCP server registry. Cheap to clone-share via `Arc`.
 ///
 /// Interior mutability: `servers` uses `RwLock` (reads dominate) so the
@@ -2503,6 +2623,139 @@ impl McpRegistry {
     pub fn with_spaces(mut self, spaces: crate::server::spaces::SpaceStore) -> Self {
         self.spaces = Some(spaces);
         self
+    }
+
+    /// Build the secret-resolution context for one tool dispatch from the
+    /// current registered node and the server-derived owning conversation.
+    /// `user_id` is intentionally never taken from the legacy client-supplied
+    /// Composio selector; on a bound node it comes only from conversation
+    /// tenancy metadata.
+    async fn secret_resolution_context(
+        &self,
+        host_conversation_id: Option<&str>,
+        mcp_ids: Vec<String>,
+    ) -> crate::plugin_secrets::SecretResolutionContext {
+        let node = crate::sidecar::control_plane::registered_node();
+        let node_id = node
+            .as_ref()
+            .map(|registered| registered.node_id.clone())
+            .unwrap_or_else(crate::server::agent_sync::local_node_id);
+        let mut org_id = node.as_ref().map(|registered| registered.org.id.clone());
+        let mut team_id = node
+            .as_ref()
+            .and_then(|registered| registered.team_id.clone());
+        let mut user_id = None;
+
+        if let (Some(conversations), Some(conversation_id)) = (
+            self.conversations.as_ref(),
+            host_conversation_id.filter(|id| !id.is_empty()),
+        ) {
+            if let Ok(Some(meta)) = conversations.get_access_meta(conversation_id).await {
+                user_id = meta.owner_user_id;
+                team_id = meta.team_id.or(team_id);
+                // An unbound local node deliberately has no organization
+                // context, even if an old conversation row still carries one.
+                if node.is_some() {
+                    org_id = meta.org_id.or(org_id);
+                }
+            }
+        }
+
+        // A truly unbound node has one trusted local operator behind its node
+        // bearer. Give that operator a stable pseudo-user so user-scoped local
+        // secrets work even before a conversation row exists. Bound nodes never
+        // use this fallback: shared scopes require a real conversation owner.
+        if node.is_none() && user_id.is_none() {
+            user_id = Some("local".to_owned());
+        }
+
+        crate::plugin_secrets::SecretResolutionContext {
+            user_id,
+            org_id,
+            team_id,
+            node_id,
+            mcp_ids,
+        }
+    }
+
+    /// Resolve the active workspace for a command tool from the server-owned
+    /// conversation metadata. A command tool may not infer a workspace from a
+    /// caller-provided absolute path. On an unbound local node, the Core process
+    /// directory is the only available local workspace fallback; bound nodes
+    /// require a conversation whose run metadata names an existing workspace.
+    async fn command_workspace_root(&self, host_conversation_id: Option<&str>) -> Option<PathBuf> {
+        if let (Some(store), Some(conversation_id)) = (
+            self.conversations.as_ref(),
+            host_conversation_id.filter(|id| !id.is_empty()),
+        ) {
+            if let Ok(Some(summary)) = store.get_run_summary(conversation_id).await {
+                for raw in [
+                    summary.worktree_path.as_deref(),
+                    summary.folder_path.as_deref(),
+                ]
+                .into_iter()
+                .flatten()
+                {
+                    if let Ok(path) = std::fs::canonicalize(raw) {
+                        if crate::tool_exec::is_usable_workspace_root(&path) {
+                            return Some(path);
+                        }
+                    }
+                }
+            }
+        }
+
+        if crate::sidecar::control_plane::registered_org().is_none()
+            && host_conversation_id.is_none()
+        {
+            return std::env::current_dir()
+                .ok()
+                .and_then(|path| std::fs::canonicalize(path).ok())
+                .filter(|path| crate::tool_exec::is_usable_workspace_root(path));
+        }
+        None
+    }
+
+    /// Whether a resolved app command is a local workspace reader. The HTTP
+    /// ingress uses this to require the distinct `files:read` capability without
+    /// forcing remote MCP or credential tools to request a filesystem grant.
+    pub(crate) async fn command_tool_requires_files_read(&self, tool_id: &str) -> bool {
+        self.resolve_app_tool_backend(tool_id)
+            .await
+            .is_some_and(|resolved| {
+                matches!(
+                    resolved.backend,
+                    crate::plugin_manifest::schema::ToolBackend::Command {
+                        workspace_path_args,
+                        ..
+                    } if !workspace_path_args.is_empty()
+                )
+            })
+    }
+
+    /// Resolve `secret:NAME` references in a user MCP server's headers/env
+    /// immediately before a call. Unresolved references are omitted rather
+    /// than sent upstream as literal text. Static values remain unchanged.
+    async fn resolve_mcp_secret_config(
+        &self,
+        cfg: &McpServerConfig,
+        context: &crate::plugin_secrets::SecretResolutionContext,
+    ) -> Result<McpServerConfig> {
+        let Some(store) = crate::plugin_secrets::global() else {
+            let mut unresolved = cfg.clone();
+            unresolved
+                .headers
+                .retain(|_, value| !has_vault_secret_reference(value));
+            unresolved
+                .env
+                .retain(|_, value| !has_vault_secret_reference(value));
+            return Ok(unresolved);
+        };
+
+        let mut resolved = cfg.clone();
+        resolved.headers = resolve_mcp_secret_map(store, &cfg.headers, context).await?;
+        resolved.env = resolve_mcp_secret_map(store, &cfg.env, context).await?;
+        Ok(resolved)
     }
 
     /// Wire the skill registry into the registry. Must be called after
@@ -2822,6 +3075,8 @@ impl McpRegistry {
             || name == orchestrator::SERVER_NAME
             || name == skills_tool::SERVER_NAME
             || name == ui_tool::SERVER_NAME
+            || name == workspace_tool::SERVER_NAME
+            || name == routines_tool::SERVER_NAME
             || name == crate::safe_actions::SERVER_NAME
             // The capability facade's reserved names (`web`, `browser`, `computer`,
             // `memory`). Reserved unconditionally, not only while a provider is
@@ -3033,6 +3288,32 @@ impl McpRegistry {
                 available: Some(true),
                 ..Default::default()
             },
+            ServerSummary {
+                name: workspace_tool::SERVER_NAME.to_owned(),
+                command: "(built-in)".to_owned(),
+                args: vec![],
+                description: Some(
+                    "Built-in workspace actions: open safe Ryu pages in normal tabs or the \
+                     chat workspace panel, and open the embedded Browser panel."
+                        .to_owned(),
+                ),
+                enabled: true,
+                available: Some(true),
+                ..Default::default()
+            },
+            ServerSummary {
+                name: routines_tool::SERVER_NAME.to_owned(),
+                command: "(built-in)".to_owned(),
+                args: vec![],
+                description: Some(
+                    "Built-in routines: list, create, edit, delete, and run persistent \
+                     agent schedules with optional chat destinations."
+                        .to_owned(),
+                ),
+                enabled: true,
+                available: Some(true),
+                ..Default::default()
+            },
         ];
         // Capability facade servers (the swappable layers). Listed unconditionally,
         // because the names are reserved whether or not a provider is currently
@@ -3134,6 +3415,22 @@ impl McpRegistry {
             .or_else(|| Self::split_tool_id(id))
     }
 
+    /// Whether a tool uses an account-backed connection and therefore needs the
+    /// connection-level approval ceiling before a non-read action can proceed.
+    fn is_connection_backed_tool(&self, tool_id: &str) -> bool {
+        if tool_id.starts_with("composio.") {
+            return true;
+        }
+        let Some((server, _)) = self.split_registered_tool_id(tool_id) else {
+            return false;
+        };
+        self.servers
+            .read()
+            .expect("mcp servers RwLock poisoned")
+            .get(server)
+            .is_some_and(|config| config.auth.is_some())
+    }
+
     /// List tools for one enabled server, using the cache when warm.
     ///
     /// The config is extracted under a short read lock, then the lock is dropped
@@ -3150,6 +3447,20 @@ impl McpRegistry {
         if !cfg.enabled {
             return Ok(vec![]);
         }
+        // A stdio server may need its configured environment or a remote MCP
+        // endpoint may authenticate its `tools/list` request. Resolve the same
+        // server-side references used by call dispatch before discovery too.
+        // Discovery has no host conversation, so a shared node intentionally
+        // offers only node-local references here; user/team/org values are
+        // still resolved for the chat call itself when its owner is known.
+        let mut mcp_ids = vec![name.to_owned()];
+        if let Some(plugin_id) = cfg.owner_plugin_id.clone() {
+            mcp_ids.push(plugin_id);
+        }
+        let secret_context = self.secret_resolution_context(None, mcp_ids).await;
+        let cfg = self
+            .resolve_mcp_secret_config(&cfg, &secret_context)
+            .await?;
         let cmd = if cfg.auth.is_some() {
             if crate::sidecar::control_plane::registered_org().is_some() {
                 bail!(
@@ -3157,7 +3468,16 @@ impl McpRegistry {
                 );
             }
             let profile = oauth_profile_for("local", &cfg, &[]).await?;
-            oauth_target(&cfg, "local", &profile, false, None).await?
+            oauth_target(
+                &cfg,
+                "local",
+                &profile,
+                crate::identity::ConnectionAction::Read,
+                false,
+                false,
+                None,
+            )
+            .await?
         } else {
             cfg.to_target()?
         };
@@ -3626,6 +3946,12 @@ impl McpRegistry {
         // Built-in generative-UI tool — render a rich UI inline in chat from a
         // json-render spec. Always listed; client-rendered (Core dispatch is a no-op).
         all.extend(ui_tool::tools());
+        // Built-in workspace shell actions — safe page-key navigation and the
+        // embedded Browser panel bridge. The desktop consumes their event bus.
+        all.extend(workspace_tool::tools());
+        // Built-in routines — persisted cron/interval CRUD and run-now. The
+        // normal MCP approval/lifecycle gate surrounds their mutations.
+        all.extend(routines_tool::tools());
         // Include self-build tools (U57) — always listed, dispatch fails gracefully
         // if the self_build context was not wired (test / CLI contexts).
         all.extend(crate::runnable::self_build::tools());
@@ -3642,8 +3968,14 @@ impl McpRegistry {
         // Core-owned typed plan boundary. These tools are the only direct tool
         // surface exposed to agents using the `verified_plan_only` posture.
         all.extend(crate::safe_actions::tools());
-        for name in &names {
-            match self.tools_for_server(name).await {
+        for (name, result) in
+            discovery::collect(
+                names,
+                |name| async move { self.tools_for_server(&name).await },
+            )
+            .await
+        {
+            match result {
                 Ok(tools) => all.extend(tools),
                 Err(e) => tracing::warn!("MCP server '{name}' tools/list failed: {e}"),
             }
@@ -3728,6 +4060,9 @@ impl McpRegistry {
     ///     agent allow a whole server with one entry. The `*` entry is the
     ///     explicit all-tools marker used by newly-created agents.
     pub async fn tools_for_agent(&self, allowlist: Option<&[String]>) -> Vec<RegistryTool> {
+        if allowlist.is_some_and(|entries| entries.is_empty()) {
+            return Vec::new();
+        }
         let all = self.list_all_tools().await;
         match allowlist {
             None => all,
@@ -3975,7 +4310,6 @@ impl McpRegistry {
     /// runs on behalf of (the ACP bridge's `permission_scope_id`). It is lowered to a
     /// [`ToolPrincipal`] at dispatch time and is the ONLY authorization principal on
     /// the agent plane — never `user_id`, which is client-supplied and spoofable.
-    #[allow(clippy::too_many_arguments)]
     pub async fn call_tool_with_identity(
         &self,
         agent_id: Option<&str>,
@@ -3987,8 +4321,53 @@ impl McpRegistry {
         session_id: Option<String>,
         host_conversation_id: Option<&str>,
     ) -> Result<Value> {
+        self.call_tool_with_identity_scoped(
+            agent_id,
+            tool_id,
+            arguments,
+            allowlist,
+            user_id,
+            profile_ids,
+            session_id,
+            host_conversation_id,
+            None,
+            None,
+        )
+        .await
+    }
+
+    /// Governed tool dispatch with optional onboarding source scopes. `None`
+    /// preserves ordinary agent behavior; `Some` narrows Composio accounts and
+    /// conversation search to the server-validated profile selection.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn call_tool_with_identity_scoped(
+        &self,
+        agent_id: Option<&str>,
+        tool_id: &str,
+        arguments: Value,
+        allowlist: Option<&[String]>,
+        user_id: Option<&str>,
+        profile_ids: &[String],
+        session_id: Option<String>,
+        host_conversation_id: Option<&str>,
+        composio_connection_scope: Option<&[crate::sidecar::adapters::ComposioConnectionBinding]>,
+        conversation_scope: Option<&[String]>,
+    ) -> Result<Value> {
         let normalized_tool_id = self.canonical_tool_id_for_registry(tool_id);
         let tool_id = normalized_tool_id.as_str();
+        // Profile bootstrap is a scoped read job, not a general agent turn. Keep
+        // its source ceiling at the registry chokepoint so prompt injection cannot
+        // switch to another MCP server, PTC, delegation, or a Core API tool that
+        // would bypass the selected Composio accounts/imported chats.
+        if !profile_scope_allows_registry_tool(
+            tool_id,
+            composio_connection_scope.is_some(),
+            conversation_scope.is_some(),
+        ) {
+            return Err(anyhow!(
+                "profile bootstrap may access only selected connected sources and imported conversations"
+            ));
+        }
         let normalized_allowlist = allowlist.map(|list| {
             list.iter()
                 .map(|entry| self.canonical_tool_id_for_registry(entry))
@@ -4021,6 +4400,11 @@ impl McpRegistry {
         // their manifest metadata is just as authoritative as an `app.` id's.
         let (gate_id, action_needs_approval) = self.approval_target_for_tool(tool_id).await;
         let (annotations, http_method) = self.tool_effect_metadata(&gate_id).await;
+        let connection_action = crate::connection_policy::action_for_tool(
+            &gate_id,
+            annotations.as_ref(),
+            http_method.as_deref(),
+        );
         let effect = agent_record
             .as_ref()
             .map(|record| {
@@ -4048,6 +4432,21 @@ impl McpRegistry {
             // Reuse Layer A's existing approval queue for the agent-scoped
             // posture. This composes with global smart/manual policy rather than
             // replacing it, and approval re-dispatch still enters no_gate below.
+            agent_approval_tools.push(gate_id.clone());
+        }
+        // A connection's default RiskBased level must use the same human review
+        // path as every other consequential action. Force Layer A for known
+        // connected-account writes/deletes so an innocuous provider verb such as
+        // `update` cannot slip past the global name heuristic. The connection
+        // ceiling still decides whether the approved call is allowed at dispatch.
+        if self.is_connection_backed_tool(&gate_id)
+            && !matches!(connection_action, crate::identity::ConnectionAction::Read)
+            && !matches!(
+                connection_action,
+                crate::identity::ConnectionAction::Unknown
+            )
+            && !agent_approval_tools.iter().any(|id| id == &gate_id)
+        {
             agent_approval_tools.push(gate_id.clone());
         }
         // An approval is a promise that approving makes the action happen. A
@@ -4094,6 +4493,8 @@ impl McpRegistry {
                 profile_ids,
                 session_id.clone(),
                 host_conversation_id,
+                composio_connection_scope,
+                conversation_scope,
             )
             .await
             {
@@ -4104,7 +4505,7 @@ impl McpRegistry {
             }
         }
 
-        self.call_tool_with_identity_after_approval(
+        self.call_tool_with_identity_after_approval_scoped(
             agent_id,
             tool_id,
             arguments,
@@ -4113,6 +4514,8 @@ impl McpRegistry {
             profile_ids,
             session_id,
             host_conversation_id,
+            composio_connection_scope,
+            conversation_scope,
         )
         .await
     }
@@ -4122,7 +4525,6 @@ impl McpRegistry {
     /// engine use this entry so they skip only the duplicate human-approval gate;
     /// they still run pre-tool firewalls, result redaction, and post-tool audit
     /// hooks exactly like a direct governed call.
-    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn call_tool_with_identity_after_approval(
         &self,
         agent_id: Option<&str>,
@@ -4133,6 +4535,35 @@ impl McpRegistry {
         profile_ids: &[String],
         session_id: Option<String>,
         host_conversation_id: Option<&str>,
+    ) -> Result<Value> {
+        self.call_tool_with_identity_after_approval_scoped(
+            agent_id,
+            tool_id,
+            arguments,
+            allowlist,
+            user_id,
+            profile_ids,
+            session_id,
+            host_conversation_id,
+            None,
+            None,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn call_tool_with_identity_after_approval_scoped(
+        &self,
+        agent_id: Option<&str>,
+        tool_id: &str,
+        arguments: Value,
+        allowlist: Option<&[String]>,
+        user_id: Option<&str>,
+        profile_ids: &[String],
+        session_id: Option<String>,
+        host_conversation_id: Option<&str>,
+        composio_connection_scope: Option<&[crate::sidecar::adapters::ComposioConnectionBinding]>,
+        conversation_scope: Option<&[String]>,
     ) -> Result<Value> {
         let normalized_tool_id = self.canonical_tool_id_for_registry(tool_id);
         let tool_id = normalized_tool_id.as_str();
@@ -4161,7 +4592,7 @@ impl McpRegistry {
         let hook_session_id = session_id.clone();
 
         let result = self
-            .call_tool_with_identity_no_gate(
+            .call_tool_with_identity_no_gate_scoped(
                 agent_id,
                 tool_id,
                 arguments,
@@ -4170,6 +4601,8 @@ impl McpRegistry {
                 profile_ids,
                 session_id,
                 host_conversation_id,
+                composio_connection_scope,
+                conversation_scope,
             )
             .await;
 
@@ -4210,7 +4643,6 @@ impl McpRegistry {
     /// `skills` provider. `None` for the agent-less callers (workflows, monitors,
     /// recipes, capability adapters, the approval engine), which degrade to the
     /// unscoped behaviour they had before.
-    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn call_tool_with_identity_no_gate(
         &self,
         agent_id: Option<&str>,
@@ -4222,6 +4654,35 @@ impl McpRegistry {
         session_id: Option<String>,
         host_conversation_id: Option<&str>,
     ) -> Result<Value> {
+        self.call_tool_with_identity_no_gate_scoped(
+            agent_id,
+            tool_id,
+            arguments,
+            allowlist,
+            user_id,
+            profile_ids,
+            session_id,
+            host_conversation_id,
+            None,
+            None,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn call_tool_with_identity_no_gate_scoped(
+        &self,
+        agent_id: Option<&str>,
+        tool_id: &str,
+        arguments: Value,
+        allowlist: Option<&[String]>,
+        user_id: Option<&str>,
+        profile_ids: &[String],
+        session_id: Option<String>,
+        host_conversation_id: Option<&str>,
+        composio_connection_scope: Option<&[crate::sidecar::adapters::ComposioConnectionBinding]>,
+        conversation_scope: Option<&[String]>,
+    ) -> Result<Value> {
         let normalized_tool_id = self.canonical_tool_id_for_registry(tool_id);
         let tool_id = normalized_tool_id.as_str();
         let normalized_allowlist = allowlist.map(|list| {
@@ -4230,6 +4691,24 @@ impl McpRegistry {
                 .collect::<Vec<_>>()
         });
         let allowlist = normalized_allowlist.as_deref();
+        let (tool_annotations, tool_http_method) = self.tool_effect_metadata(tool_id).await;
+        let connection_action = crate::connection_policy::action_for_tool(
+            tool_id,
+            tool_annotations.as_ref(),
+            tool_http_method.as_deref(),
+        );
+
+        // A filesystem-shaped delete tool is a second way for an agent to
+        // remove a path without producing a shell command. Keep this check in
+        // the no-gate dispatch core so an approved re-dispatch, an app alias,
+        // and an agent-less internal caller cannot bypass the default-deny
+        // safety policy. A normal approval or `approval-mode=off` is not enough
+        // to authorize permanent filesystem deletion; this policy has no opt-out.
+        if ryu_deletion_guard::is_filesystem_delete_tool(tool_id) {
+            return Err(anyhow!(
+                "permanent filesystem deletion blocked by Ryu; use the host Trash or Recycle Bin command instead"
+            ));
+        }
 
         // Approved agent calls retain the lifecycle/read-only gate here so an
         // internal caller cannot bypass it by selecting the ungated entry
@@ -4250,13 +4729,28 @@ impl McpRegistry {
                 crate::safe_actions::authorize_verified_dispatch(agent_id, tool_id, &arguments)
                     .await?;
             }
-            let (annotations, http_method) = self.tool_effect_metadata(tool_id).await;
             crate::agent_execution::ensure_tool_allowed_for_record_with_metadata(
                 &record,
                 tool_id,
-                annotations.as_ref(),
-                http_method.as_deref(),
+                tool_annotations.as_ref(),
+                tool_http_method.as_deref(),
             )?;
+        }
+
+        // Passport consumes the bound identity in its own process. This branch
+        // precedes local vault consultation so remote mode never decrypts a
+        // second local copy or silently falls back after a service failure.
+        if tool_id == web_fetch::GET_TOOL_ID && !profile_ids.is_empty() {
+            if let Ok(base) = std::env::var("RYU_PASSPORT_URL") {
+                if let Some(list) = allowlist {
+                    let candidate = RegistryTool::candidate(tool_id, web_fetch::SERVER_NAME, "get");
+                    if !tool_allowed(&candidate, list) {
+                        return Err(anyhow!("tool '{tool_id}' is not in this agent's allowlist"));
+                    }
+                }
+                let agent = agent_id.ok_or_else(|| anyhow!("Passport requires a calling agent"))?;
+                return crate::identity::passport::fetch(&base, agent, profile_ids, &arguments, session_id.clone()).await;
+            }
         }
 
         // Identity Vault consult (epic #517): for a bound agent, a tool call
@@ -4269,11 +4763,12 @@ impl McpRegistry {
         // returns the decrypted credential here so the tool can act AS the user;
         // it is threaded out-of-band to the tool (never into `arguments`, never to
         // the model). For every other tool this is `None`.
-        let injected_credential = match crate::identity::consult_for_tool_call(
+        let injected_credential = match crate::identity::consult_for_tool_call_with_agent(
             profile_ids,
             tool_id,
             &arguments,
             session_id.clone(),
+            agent_id,
         )
         .await
         {
@@ -4292,7 +4787,80 @@ impl McpRegistry {
                 }
             }
             let slug = tool_id.strip_prefix("composio.").unwrap_or(tool_id);
-            let output = composio::dispatch(&self.http, slug, arguments, user_id).await?;
+            let (owner, composio_entity) = match self.conversations.as_ref() {
+                Some(store) => {
+                    let principal = ToolPrincipal::resolve(store, host_conversation_id).await;
+                    match principal {
+                        ToolPrincipal::Unrestricted => {
+                            ("local".to_owned(), user_id.map(str::to_owned))
+                        }
+                        ToolPrincipal::Owned { user_id, .. } => (user_id.clone(), Some(user_id)),
+                        ToolPrincipal::Unresolved => {
+                            return Err(anyhow!(
+                                "a verified user identity is required for Composio on a shared node"
+                            ));
+                        }
+                    }
+                }
+                None if crate::sidecar::control_plane::registered_org().is_none() => {
+                    ("local".to_owned(), user_id.map(str::to_owned))
+                }
+                None => {
+                    return Err(anyhow!(
+                        "a verified user identity is required for Composio on a shared node"
+                    ));
+                }
+            };
+            let access_level = if let Some(store) = crate::identity::global() {
+                store
+                    .get_connection_access_level(
+                        &owner,
+                        crate::connection_policy::COMPOSIO_PROVIDER,
+                        &crate::connection_policy::composio_connection_key(
+                            crate::connection_policy::composio_toolkit_for_action(tool_id)
+                                .as_deref()
+                                .unwrap_or("unknown"),
+                        ),
+                    )
+                    .await?
+            } else {
+                crate::identity::ConnectionAccessLevel::default()
+            };
+            if !access_level.allows_with_approval(connection_action, agent_id.is_some()) {
+                return Err(anyhow!(crate::connection_policy::denied_message(
+                    "Composio",
+                    &crate::connection_policy::composio_toolkit_for_action(tool_id)
+                        .unwrap_or_else(|| "unknown".to_owned()),
+                    access_level,
+                    connection_action,
+                )));
+            }
+            let selected_connection_id = match composio_connection_scope {
+                None => None,
+                Some(scope) => {
+                    let toolkit = crate::connection_policy::composio_toolkit_for_action(tool_id)
+                        .ok_or_else(|| anyhow!("Composio action '{tool_id}' has no toolkit"))?;
+                    Some(
+                        scope
+                            .iter()
+                            .find(|binding| binding.toolkit.eq_ignore_ascii_case(&toolkit))
+                            .map(|binding| binding.id.as_str())
+                            .ok_or_else(|| {
+                                anyhow!(
+                                    "Composio action '{tool_id}' is outside the selected source scope"
+                                )
+                            })?,
+                    )
+                }
+            };
+            let output = composio::dispatch_with_connection(
+                &self.http,
+                slug,
+                arguments,
+                composio_entity.as_deref(),
+                selected_connection_id,
+            )
+            .await?;
             // Native ACP sessions execute Composio inside this in-process MCP
             // bridge, so the Gateway's OpenAI tool loop never sees the call.
             // A non-empty session id is the bridge marker; the HTTP Gateway
@@ -4445,7 +5013,13 @@ impl McpRegistry {
             // principal must be the OWNING PLUGIN and why the loopback egress grant
             // is unioned in rather than demanded from 40 manifests.
             let plan = crate::ext_api::call_plan(&route, &grants);
-            return crate::tool_exec::run_http_tool(
+            let secret_context = self
+                .secret_resolution_context(
+                    host_conversation_id,
+                    vec![route.plugin_id.clone(), server.to_owned()],
+                )
+                .await;
+            return crate::tool_exec::run_http_tool_with_secret_context(
                 &route.url,
                 &route.method,
                 arguments,
@@ -4468,6 +5042,8 @@ impl McpRegistry {
                 profile_ids,
                 &plan.principal,
                 session_id.as_deref(),
+                agent_id,
+                Some(&secret_context),
             )
             .await
             .map_err(|e| anyhow!(e));
@@ -4673,7 +5249,13 @@ impl McpRegistry {
                         // manifest knobs, not exa-specific code.
                         let url =
                             url_for_calling_agent(&url, caller_agent_query.as_deref(), agent_id)?;
-                        return crate::tool_exec::run_http_tool(
+                        let secret_context = self
+                            .secret_resolution_context(
+                                host_conversation_id,
+                                vec![resolved.plugin_id.clone(), server.to_owned()],
+                            )
+                            .await;
+                        return crate::tool_exec::run_http_tool_with_secret_context(
                             &url,
                             &method,
                             arguments,
@@ -4686,6 +5268,8 @@ impl McpRegistry {
                             profile_ids,
                             &resolved.plugin_id,
                             session_id.as_deref(),
+                            agent_id,
+                            Some(&secret_context),
                         )
                         .await
                         .map_err(|e| anyhow!(e));
@@ -4700,13 +5284,19 @@ impl McpRegistry {
                         egress_url_arg,
                         arg_specs,
                         arg_bounds,
+                        workspace_path_args,
                     } => {
                         // Exec an allowlisted local CLI through the governed path.
                         // The bin grant + allowlist are checked first (deterministic)
                         // inside `run_command_tool`. The approval gate (if any) has
                         // already classified under the outer `app.` id (gate_id's
                         // `_ => tool_id` arm), so no per-target re-gate is needed.
-                        return crate::tool_exec::run_command_tool(
+                        let workspace_root = if workspace_path_args.is_empty() {
+                            None
+                        } else {
+                            self.command_workspace_root(host_conversation_id).await
+                        };
+                        return crate::tool_exec::run_command_tool_with_agent_and_workspace(
                             &bin,
                             &args,
                             arg_specs.as_deref(),
@@ -4720,6 +5310,9 @@ impl McpRegistry {
                             &resolved.grants,
                             &resolved.plugin_id,
                             session_id.as_deref(),
+                            agent_id,
+                            workspace_root.as_deref(),
+                            &workspace_path_args,
                         )
                         .await
                         .map_err(|e| anyhow!(e));
@@ -4766,7 +5359,7 @@ impl McpRegistry {
                     return Err(anyhow!("tool '{tool_id}' is not in this agent's allowlist"));
                 }
             }
-            return sandbox::dispatch(tool, arguments).await;
+            return sandbox::dispatch_with_context(tool, arguments, agent_id, session_id).await;
         }
 
         // Built-in desktop-notification provider (#456): dispatched in-process,
@@ -4841,6 +5434,55 @@ impl McpRegistry {
             return ui_tool::dispatch(tool, arguments).await;
         }
 
+        // Built-in workspace shell actions. They publish a server-derived,
+        // user-scoped navigation request; the connected Desktop consumes it and
+        // applies the same page-key allowlist as the workspace dock.
+        if server == workspace_tool::SERVER_NAME {
+            if let Some(list) = allowlist {
+                let candidate = RegistryTool::candidate(tool_id, server, tool);
+                if !tool_allowed(&candidate, list) {
+                    return Err(anyhow!("tool '{tool_id}' is not in this agent's allowlist"));
+                }
+            }
+            let principal = match self.conversations.as_ref() {
+                Some(store) => ToolPrincipal::resolve(store, host_conversation_id).await,
+                None if crate::sidecar::control_plane::registered_org().is_none() => {
+                    ToolPrincipal::Unrestricted
+                }
+                None => ToolPrincipal::Unresolved,
+            };
+            return workspace_tool::dispatch(tool, arguments, &principal).await;
+        }
+
+        // Built-in routine CRUD. The routine tool receives the same
+        // server-derived principal and host conversation scope as Spaces and
+        // conversation tools; model-supplied user ids never become authority.
+        if server == routines_tool::SERVER_NAME {
+            if let Some(list) = allowlist {
+                let candidate = RegistryTool::candidate(tool_id, server, tool);
+                if !tool_allowed(&candidate, list) {
+                    return Err(anyhow!("tool '{tool_id}' is not in this agent's allowlist"));
+                }
+            }
+            let principal = match self.conversations.as_ref() {
+                Some(store) => ToolPrincipal::resolve(store, host_conversation_id).await,
+                None if crate::sidecar::control_plane::registered_org().is_none() => {
+                    ToolPrincipal::Unrestricted
+                }
+                None => ToolPrincipal::Unresolved,
+            };
+            return routines_tool::dispatch(
+                tool,
+                arguments,
+                &principal,
+                self.agent_store.as_ref(),
+                self.conversations.as_ref(),
+                agent_id,
+                host_conversation_id,
+            )
+            .await;
+        }
+
         // Built-in send-to-channel provider (#456): posts to a Slack/Discord
         // incoming-webhook URL over HTTP.
         if server == channel_tool::SERVER_NAME {
@@ -4886,7 +5528,14 @@ impl McpRegistry {
                     "count": 0
                 }));
             }
-            return search_conversations::dispatch(tool, arguments, store, &principal).await;
+            return search_conversations::dispatch_scoped(
+                tool,
+                arguments,
+                store,
+                &principal,
+                conversation_scope,
+            )
+            .await;
         }
 
         // Built-in agent-level control. The bridge supplies the calling agent and
@@ -5246,6 +5895,17 @@ impl McpRegistry {
             }
         }
 
+        let mut mcp_ids = vec![server.to_owned()];
+        if let Some(plugin_id) = cfg.owner_plugin_id.clone() {
+            mcp_ids.push(plugin_id);
+        }
+        let secret_context = self
+            .secret_resolution_context(host_conversation_id, mcp_ids)
+            .await;
+        let cfg = self
+            .resolve_mcp_secret_config(&cfg, &secret_context)
+            .await?;
+
         if cfg.auth.is_none() {
             return match client::call_tool(&cfg.to_target()?, tool, arguments).await {
                 Ok(result) => Ok(normalize_mpp_result(result, server, tool)),
@@ -5265,8 +5925,16 @@ impl McpRegistry {
         };
         let owner_user_id = oauth_owner_from_principal(&principal)?;
         let profile_id = oauth_profile_for(&owner_user_id, &cfg, profile_ids).await?;
-        let cmd = match oauth_target(&cfg, &owner_user_id, &profile_id, false, session_id.clone())
-            .await
+        let cmd = match oauth_target(
+            &cfg,
+            &owner_user_id,
+            &profile_id,
+            connection_action,
+            agent_id.is_some(),
+            false,
+            session_id.clone(),
+        )
+        .await
         {
             Ok(target) => target,
             Err(error) if oauth_requires_connect(&error) => {
@@ -5280,17 +5948,23 @@ impl McpRegistry {
                 Ok(mpp_payment_required(&error, server, tool).expect("checked above"))
             }
             Err(error) if oauth_http_failure(&error, reqwest::StatusCode::UNAUTHORIZED) => {
-                let refreshed =
-                    match oauth_target(&cfg, &owner_user_id, &profile_id, true, session_id.clone())
-                        .await
-                    {
-                        Ok(target) => target,
-                        Err(refresh_error) if oauth_requires_connect(&refresh_error) => {
-                            return oauth_elicitation(&cfg, &owner_user_id, &profile_id, None)
-                                .await;
-                        }
-                        Err(refresh_error) => return Err(refresh_error),
-                    };
+                let refreshed = match oauth_target(
+                    &cfg,
+                    &owner_user_id,
+                    &profile_id,
+                    connection_action,
+                    agent_id.is_some(),
+                    true,
+                    session_id.clone(),
+                )
+                .await
+                {
+                    Ok(target) => target,
+                    Err(refresh_error) if oauth_requires_connect(&refresh_error) => {
+                        return oauth_elicitation(&cfg, &owner_user_id, &profile_id, None).await;
+                    }
+                    Err(refresh_error) => return Err(refresh_error),
+                };
                 match client::call_tool(&refreshed, tool, arguments).await {
                     Ok(result) => Ok(normalize_mpp_result(result, server, tool)),
                     Err(retry_error)
@@ -6326,8 +7000,184 @@ mod tests {
         MCP_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner())
     }
 
+    struct RestoreDiscoveryAllowHosts(Option<std::ffi::OsString>);
+    impl Drop for RestoreDiscoveryAllowHosts {
+        fn drop(&mut self) {
+            match &self.0 {
+                Some(value) => std::env::set_var("RYU_AGENT_EGRESS_ALLOW_HOSTS", value),
+                None => std::env::remove_var("RYU_AGENT_EGRESS_ALLOW_HOSTS"),
+            }
+        }
+    }
+
+    fn allow_discovery_test_host(address: std::net::SocketAddr) -> RestoreDiscoveryAllowHosts {
+        let restore = RestoreDiscoveryAllowHosts(std::env::var_os("RYU_AGENT_EGRESS_ALLOW_HOSTS"));
+        let mut allowed = restore.0.clone().unwrap_or_default();
+        if !allowed.is_empty() {
+            allowed.push(",");
+        }
+        allowed.push(address.to_string());
+        std::env::set_var("RYU_AGENT_EGRESS_ALLOW_HOSTS", allowed);
+        restore
+    }
+
+    #[tokio::test]
+    async fn http_discovery_runs_concurrently_and_keeps_healthy_servers() {
+        use std::sync::atomic::AtomicUsize;
+        let _env_lock = lock_mcp_env();
+        let active = Arc::new(AtomicUsize::new(0));
+        let peak = Arc::new(AtomicUsize::new(0));
+        let gate = Arc::new(tokio::sync::Semaphore::new(0));
+        let (started, mut starts) = tokio::sync::mpsc::unbounded_channel();
+        let app = {
+            let active = active.clone();
+            let peak = peak.clone();
+            let gate = gate.clone();
+            axum::Router::new().route(
+                "/:server",
+                axum::routing::post(move |axum::extract::Path(name): axum::extract::Path<String>, axum::Json(body): axum::Json<Value>| {
+                    let active = active.clone();
+                    let peak = peak.clone();
+                    let gate = gate.clone();
+                    let started = started.clone();
+                    async move {
+                        if body["method"] != "tools/list" {
+                            return axum::Json(json!({"jsonrpc":"2.0","id":body["id"],"result":{}}));
+                        }
+                        peak.fetch_max(active.fetch_add(1, Ordering::SeqCst) + 1, Ordering::SeqCst);
+                        started.send(name.clone()).unwrap();
+                        gate.acquire().await.unwrap().forget();
+                        active.fetch_sub(1, Ordering::SeqCst);
+                        if name == "fixture-5" {
+                            axum::Json(json!({"jsonrpc":"2.0","id":body["id"],"error":{"code":-32000,"message":"unavailable"}}))
+                        } else {
+                            axum::Json(json!({"jsonrpc":"2.0","id":body["id"],"result":{"tools":[{"name":"probe","description":name,"inputSchema":{"type":"object"}}]}}))
+                        }
+                    }
+                }),
+            )
+        };
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let _allow_host = allow_discovery_test_host(address);
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let registry = Arc::new(McpRegistry::empty());
+        for index in 0..6 {
+            let name = format!("fixture-{index}");
+            registry.servers.write().unwrap().insert(
+                name.clone(),
+                McpServerConfig {
+                    enabled: true,
+                    transport: Some("streamable-http".to_owned()),
+                    url: Some(format!("http://{address}/{name}")),
+                    ..Default::default()
+                },
+            );
+        }
+        let discovery = {
+            let registry = registry.clone();
+            tokio::spawn(async move { registry.list_all_tools().await })
+        };
+        for _ in 0..4 {
+            tokio::time::timeout(std::time::Duration::from_secs(3), starts.recv())
+                .await
+                .unwrap()
+                .unwrap();
+        }
+        assert!(starts.try_recv().is_err());
+        gate.add_permits(6);
+        let tools = tokio::time::timeout(std::time::Duration::from_secs(3), discovery)
+            .await
+            .unwrap()
+            .unwrap();
+        let mut ids: Vec<_> = tools
+            .into_iter()
+            .filter(|tool| tool.server.starts_with("fixture-"))
+            .map(|tool| tool.id)
+            .collect();
+        ids.sort();
+        assert_eq!(
+            ids,
+            (0..5)
+                .map(|index| format!("fixture-{index}.probe"))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(peak.load(Ordering::SeqCst), 4);
+        assert_eq!(active.load(Ordering::SeqCst), 0);
+        server.abort();
+        let _ = server.await;
+    }
+
+    #[tokio::test]
+    async fn empty_allowlist_skips_server_discovery() {
+        let _env_lock = lock_mcp_env();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("local stalled MCP endpoint");
+        let _allow_host = allow_discovery_test_host(listener.local_addr().unwrap());
+        let registry = McpRegistry::empty();
+        registry.servers.write().unwrap().insert(
+            "stalled".to_owned(),
+            McpServerConfig {
+                enabled: true,
+                transport: Some("streamable-http".to_owned()),
+                url: Some(format!("http://{}/mcp", listener.local_addr().unwrap())),
+                ..Default::default()
+            },
+        );
+        let tools = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            registry.tools_for_agent(Some(&[])),
+        )
+        .await
+        .expect("an empty allowlist must not wait on any endpoint");
+        assert!(tools.is_empty());
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(20), listener.accept())
+                .await
+                .is_err(),
+            "discovery must not connect for an empty allowlist"
+        );
+    }
+
     fn sample_tool() -> RegistryTool {
         RegistryTool::candidate("fs.read_file", "fs", "read_file")
+    }
+
+    #[test]
+    fn profile_scope_allows_only_selected_source_planes() {
+        assert!(profile_scope_allows_registry_tool(
+            "search_conversations.search",
+            true,
+            true,
+        ));
+        assert!(profile_scope_allows_registry_tool(
+            "composio.GITHUB_SEARCH_ISSUES",
+            true,
+            true,
+        ));
+        assert!(!profile_scope_allows_registry_tool(
+            "composio.GITHUB_SEARCH_ISSUES",
+            false,
+            true,
+        ));
+        assert!(!profile_scope_allows_registry_tool(
+            "composio_connect.search",
+            true,
+            true
+        ));
+        assert!(!profile_scope_allows_registry_tool(
+            "tools.exec",
+            true,
+            true
+        ));
+        assert!(profile_scope_allows_registry_tool(
+            "spaces.search",
+            false,
+            false
+        ));
     }
 
     #[tokio::test]
@@ -7764,9 +8614,16 @@ mod tests {
         // declarative `http` tools reaching a Core loopback bridge).
         // Plus the 4 capability-facade servers (`web`, `browser`, `computer`,
         // `memory`), which are listed unconditionally because their names are
-        // reserved whether or not a provider is currently selected.
+        // reserved whether or not a provider is currently selected, and the
+        // workspace/routines built-ins.
         let summaries = reg.server_summaries();
-        assert_eq!(summaries.len(), 18);
+        assert_eq!(summaries.len(), 20);
+        assert!(summaries
+            .iter()
+            .any(|s| s.name == workspace_tool::SERVER_NAME));
+        assert!(summaries
+            .iter()
+            .any(|s| s.name == routines_tool::SERVER_NAME));
         assert!(
             !summaries.iter().any(|s| s.name == "research"),
             "`research` is no longer a hardcoded built-in — it registers (or does \

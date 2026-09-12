@@ -99,6 +99,8 @@ import {
 } from "./goal-message.ts";
 import { usePinnedUserMessage } from "./hooks/use-pinned-user-message.ts";
 import { useTranscriptAnchor } from "./hooks/use-transcript-anchor.ts";
+import { InlineImagePreview } from "./image-preview.tsx";
+import { FileAttachment } from "./input/file-attachment.tsx";
 import type { LinkPreviewResolvers } from "./link-preview.tsx";
 import { Markdown } from "./markdown.tsx";
 import type { MemoryCitation } from "./memory-citations.ts";
@@ -267,6 +269,11 @@ export interface MessageListProps {
 	messageActions?: ContributedMessageAction[];
 	messages: UIMessage[];
 	onAgentUiSubmit?: AgentUiSubmit;
+	onAnnotateImage?: (image: {
+		filename?: string;
+		id: string;
+		url: string;
+	}) => void;
 	/**
 	 * Branch ("fork into new chat") a message. When provided, a branch button is
 	 * shown in each message's hover toolbar; clicking it calls this with the id of
@@ -346,6 +353,8 @@ export interface MessageListProps {
 	onUndoFileEdits?: (plan: FileEditUndoPlan) => Promise<void>;
 	onWorkflowResume?: (runId: string, payload: string) => Promise<unknown>;
 	previewResolvers?: LinkPreviewResolvers;
+	/** Message id currently selected by the host's chat-local search. */
+	searchActiveMessageId?: string;
 	/** Contributed text-selection toolbar actions (see
 	 * {@link ContributedSelectionAction}), resolved and ordered by the shell. */
 	selectionActions?: ContributedSelectionAction[];
@@ -527,33 +536,56 @@ function isErrorPart(
 	);
 }
 
-/**
- * An assistant image part — a standard AI SDK `file` part whose media type is an
- * image, carrying a `url` (a data: URL for generated images, or a remote URL).
- * Generated images are appended in this exact shape (see ChatPage's
- * handleGenerateImage), so the producer and this consumer agree.
- */
-function getAssistantImageUrl(part: unknown): string | null {
-	if (!isRecord(part) || part.type !== "file") {
+/** An assistant image part, including the filename used by the lightbox. */
+function getAssistantImageMeta(
+	part: unknown
+): { filename?: string; url: string } | null {
+	if (!isRecord(part)) {
 		return null;
 	}
-	const filePart = part as {
-		mediaType?: string;
-		mimeType?: string;
-		url?: string;
-		data?: string;
-	};
-	const media = filePart.mediaType ?? filePart.mimeType;
-	if (!media?.startsWith("image/")) {
+	const type = part.type;
+	const media =
+		typeof part.mediaType === "string"
+			? part.mediaType
+			: typeof part.mimeType === "string"
+				? part.mimeType
+				: undefined;
+	const filename =
+		typeof part.filename === "string"
+			? part.filename
+			: typeof part.fileName === "string"
+				? part.fileName
+				: typeof part.name === "string"
+					? part.name
+					: undefined;
+
+	const rawUrl =
+		type === "image"
+			? typeof part.url === "string"
+				? part.url
+				: typeof part.image === "string"
+					? part.image
+					: undefined
+			: type === "data-image" && isRecord(part.data)
+				? typeof part.data.url === "string"
+					? part.data.url
+					: undefined
+				: typeof part.url === "string"
+					? part.url
+					: undefined;
+	const rawData =
+		type === "file" && typeof part.data === "string" ? part.data : undefined;
+	const url =
+		rawUrl ?? (rawData && media ? `data:${media};base64,${rawData}` : null);
+	if (
+		!(
+			url &&
+			(type === "image" || type === "data-image" || media?.startsWith("image/"))
+		)
+	) {
 		return null;
 	}
-	if (filePart.url) {
-		return filePart.url;
-	}
-	if (filePart.data) {
-		return `data:${media};base64,${filePart.data}`;
-	}
-	return null;
+	return { filename, url };
 }
 
 /** Longest edge, in px, a generated image occupies in the transcript. */
@@ -618,6 +650,8 @@ function getImageGenerationPart(part: unknown): ImageGenerationPartData | null {
  * describing work that never happened here.
  */
 function AssistantGeneratedImage({
+	filename,
+	onAnnotateImage,
 	onRetry,
 	prompt,
 	showStatus,
@@ -625,6 +659,8 @@ function AssistantGeneratedImage({
 	statusText,
 	url,
 }: ImageGenerationPartData & {
+	filename?: string;
+	onAnnotateImage?: MessageListProps["onAnnotateImage"];
 	onRetry?: () => void;
 	showStatus: boolean;
 }) {
@@ -666,8 +702,11 @@ function AssistantGeneratedImage({
 				statusText={statusText}
 			>
 				{url ? (
-					<img
+					<InlineImagePreview
 						alt={prompt ?? "Generated image"}
+						filename={filename ?? prompt ?? "Generated image"}
+						imageClassName="size-full object-contain"
+						onAnnotate={onAnnotateImage}
 						onLoad={handleLoad}
 						src={url}
 					/>
@@ -854,31 +893,41 @@ function getAssistantVideoUrl(part: unknown): string | null {
 /**
  * A NON-image, NON-video assistant `file` part (audio, or any other mime),
  * resolved to a playable/downloadable url + its media type. Images and videos
- * are handled separately by {@link getAssistantImageUrl} and
+ * are handled separately by {@link getAssistantImageMeta} and
  * {@link getAssistantVideoUrl}; this covers the rest so inline audio (and other
  * attachments Core streams) isn't silently dropped.
  */
 function getAssistantFileMeta(
 	part: unknown
-): { media: string; url: string } | null {
+): { filename: string; media: string; size?: number; url: string } | null {
 	if (!isRecord(part) || part.type !== "file") {
 		return null;
 	}
 	const filePart = part as {
+		data?: string;
+		fileName?: string;
+		filename?: string;
 		mediaType?: string;
 		mimeType?: string;
+		name?: string;
+		size?: number;
 		url?: string;
-		data?: string;
 	};
 	const media = filePart.mediaType ?? filePart.mimeType;
 	if (!media || media.startsWith("image/") || media.startsWith("video/")) {
 		return null;
 	}
-	if (filePart.url) {
-		return { url: filePart.url, media };
-	}
-	if (filePart.data) {
-		return { url: `data:${media};base64,${filePart.data}`, media };
+	const url =
+		filePart.url ??
+		(filePart.data ? `data:${media};base64,${filePart.data}` : undefined);
+	if (url) {
+		return {
+			filename:
+				filePart.filename ?? filePart.fileName ?? filePart.name ?? "Attachment",
+			media,
+			size: typeof filePart.size === "number" ? filePart.size : undefined,
+			url,
+		};
 	}
 	return null;
 }
@@ -1638,6 +1687,7 @@ export const MessageList = memo(function MessageList({
 	answerNow,
 	className,
 	showCopyToolbar = true,
+	searchActiveMessageId,
 	onBranch,
 	onAgentUiSubmit,
 	onEditMessage,
@@ -1663,6 +1713,7 @@ export const MessageList = memo(function MessageList({
 	onUndoFileEdits,
 	onOpenLink,
 	onOpenMention,
+	onAnnotateImage,
 	onWorkflowResume,
 	previewResolvers,
 	mentionItems,
@@ -1787,12 +1838,17 @@ export const MessageList = memo(function MessageList({
 		}
 	}, [clearUnreadMessages, followOutput]);
 
-	const { pinnedMessage, registerAnchor, scrollToPinned } =
-		usePinnedUserMessage({
-			enabled: pinUserMessage && !isCompact,
-			messages,
-			scrollerRef,
-		});
+	const {
+		isScrollingUp,
+		pinnedMessage,
+		registerAnchor,
+		scrollToPinned,
+		setScrollDirection,
+	} = usePinnedUserMessage({
+		enabled: pinUserMessage && !isCompact,
+		messages,
+		scrollerRef,
+	});
 
 	const CustomUserMessage = slots?.UserMessage || UserMessage;
 	const CustomToolRenderer = slots?.ToolRenderer || DefaultToolRenderer;
@@ -2196,7 +2252,7 @@ export const MessageList = memo(function MessageList({
 				className={cn("an-message-list flex-1", className)}
 				contentClassName={cn(
 					"w-full gap-0",
-					isCompact ? "px-0.5 py-1" : "mx-auto max-w-[744px] px-3 py-6"
+					isCompact ? "px-0.5 py-1" : "mx-auto max-w-[904px] px-3 py-6"
 				)}
 				contentProps={{ "data-slot": "message-scroller-content" }}
 				followOutput={followOutput}
@@ -2225,7 +2281,7 @@ export const MessageList = memo(function MessageList({
 					<div
 						aria-busy={loadingOlderMessages}
 						aria-live="polite"
-						className="mx-auto w-full max-w-[744px] px-3 py-2 text-center text-muted-foreground text-xs"
+						className="mx-auto w-full max-w-[904px] px-3 py-2 text-center text-muted-foreground text-xs"
 						data-older-messages-loader
 					>
 						{loadingOlderMessages
@@ -2233,7 +2289,7 @@ export const MessageList = memo(function MessageList({
 							: "Scroll up for older messages"}
 					</div>
 				) : null}
-				{pinUserMessage && !isCompact && pinnedMessage ? (
+				{pinUserMessage && !isCompact && isScrollingUp && pinnedMessage ? (
 					// `data-slot` is load-bearing: the pin bar sits IN FLOW, so
 					// mounting it pushes every anchor below it down by its own
 					// height. usePinnedUserMessage measures this element to size the
@@ -2252,7 +2308,7 @@ export const MessageList = memo(function MessageList({
 						className="sticky top-9 z-20 -mb-1"
 						data-slot="pinned-user-message-bar"
 					>
-						<div className="mx-auto w-full max-w-[744px] px-3 pt-2 pb-1">
+						<div className="mx-auto w-full max-w-[904px] px-3 pt-2 pb-1">
 							<PinnedUserMessageBar
 								message={pinnedMessage}
 								onScrollTo={scrollToPinned}
@@ -2260,13 +2316,12 @@ export const MessageList = memo(function MessageList({
 						</div>
 					</div>
 				) : null}
-				{/* 744 = the composer's own 720px column PLUS its `px-3` gutter
-				    (input-bar.tsx wraps `mx-auto max-w-[720px]` in `px-3`).
-				    Matching both numbers — not just the 720 — is what puts a
-				    message's content edges on the composer's card edges at every
-				    width. With `max-w-[720px] px-4` the transcript sat 16px inside
-				    the composer on each side, which reads as a gap to the right of
-				    the user avatar. */}
+				{/* 904 = the composer's own 880px column PLUS its `px-3` gutter
+				    (input-bar.tsx wraps `mx-auto max-w-[880px]` in `px-3`).
+				    Matching both numbers — not just the 880 — is what keeps a
+				    message's content edges aligned with the wider composer at every
+				    width. The shared envelope prevents the transcript from looking
+				    stranded inside a narrower card on wide desktop windows. */}
 				{/* `gap-0`, NOT the `gap-2` this used to carry. A uniform gap can
 				    only express one vertical rhythm, and messaging grouping needs
 				    two: ~2px between consecutive messages from the same speaker
@@ -2294,6 +2349,9 @@ export const MessageList = memo(function MessageList({
 					const hasUnreadMessage = turn.assistantMsgs.some(
 						(msg) => msg.id === firstUnreadMessageId
 					);
+					const isSearchActive =
+						searchActiveMessageId === turn.userMsg?.id ||
+						turn.assistantMsgs.some((msg) => msg.id === searchActiveMessageId);
 
 					return (
 						// A Fragment, NOT a wrapper element: the separator and the
@@ -2308,8 +2366,13 @@ export const MessageList = memo(function MessageList({
 							<div
 								className={cn(
 									"relative space-y-2",
-									continuesRun ? "mt-0.5" : "mt-2"
+									!(isLastTurn || isSearchActive) &&
+										"[contain-intrinsic-size:auto_10rem] [content-visibility:auto]",
+									continuesRun ? "mt-0.5" : "mt-2",
+									isSearchActive &&
+										"rounded-xl bg-primary/5 ring-2 ring-primary/35 ring-offset-2 ring-offset-background"
 								)}
+								data-chat-search-active={isSearchActive ? "true" : undefined}
 								data-group-position={groupPosition}
 								data-message-id={turn.userMsg ? turnKey : undefined}
 								data-slot="message-scroller-item"
@@ -2441,6 +2504,7 @@ export const MessageList = memo(function MessageList({
 														userMsgId
 													)}
 													messageActions={userActions}
+													onAnnotateImage={onAnnotateImage}
 													onContributedMessageAction={
 														onContributedMessageAction
 													}
@@ -2551,10 +2615,14 @@ export const MessageList = memo(function MessageList({
 													</MessageAvatar>
 												) : null}
 												<MessageContent className="gap-1.5">
-													{assistantName ? (
+													{assistantName || assistantTimestamp ? (
 														<MessageHeader className="gap-2 px-0">
-															<span>{assistantName}</span>
-															<AgentTitleBadge title={assistantTitle ?? ""} />
+															{assistantName ? (
+																<span>{assistantName}</span>
+															) : null}
+															{assistantName && assistantTitle ? (
+																<AgentTitleBadge title={assistantTitle} />
+															) : null}
 															{assistantTimestamp && (
 																<TooltipProvider delay={0}>
 																	<Tooltip>
@@ -2705,6 +2773,7 @@ export const MessageList = memo(function MessageList({
 																			mentionItems={mentionItems}
 																			msg={msg}
 																			onAgentUiSubmit={onAgentUiSubmit}
+																			onAnnotateImage={onAnnotateImage}
 																			onOpenFile={onOpenFile}
 																			onOpenLink={onOpenLink}
 																			onOpenMention={onOpenMention}
@@ -2777,7 +2846,7 @@ export const MessageList = memo(function MessageList({
 														// from something the agent wrote, came along when you copied the
 														// reply, and had to be pattern-matched back out on resume.
 														<Marker
-															className="pt-0.5 text-destructive"
+															className="pt-0.5 text-status-destructive"
 															variant="separator"
 														>
 															<MarkerIcon>
@@ -2917,6 +2986,7 @@ export const MessageList = memo(function MessageList({
 					)}
 					onClick={() => {
 						preserveUnreadBoundaryRef.current = false;
+						setScrollDirection("down");
 						const viewport = viewportRef.current;
 						if (!viewport) {
 							return;
@@ -3002,6 +3072,7 @@ function AssistantParts({
 	onOpenFile,
 	onOpenLink,
 	onOpenMention,
+	onAnnotateImage,
 	mentionItems,
 	previewResolvers,
 	onRetryGeneration,
@@ -3022,6 +3093,7 @@ function AssistantParts({
 	onOpenFile?: (path: string) => void;
 	onOpenLink?: (url: string) => void;
 	onOpenMention?: (item: MentionItem) => void;
+	onAnnotateImage?: MessageListProps["onAnnotateImage"];
 	mentionItems?: MentionItem[];
 	previewResolvers?: LinkPreviewResolvers;
 	onRetryGeneration?: MessageListProps["onRetryGeneration"];
@@ -3183,7 +3255,7 @@ function AssistantParts({
 						// one-line reply a small pill and a long one fill the column.
 						<BubbleContent
 							className={cn(
-								"group/assistant-text text-[14px]",
+								"group/assistant-text overflow-visible text-[14px]",
 								messageBubbleRadius("start", groupPosition)
 							)}
 							key={`${msg.id}-text-${i}`}
@@ -3198,6 +3270,7 @@ function AssistantParts({
 								onOpenLink={onOpenLink}
 								onOpenMention={onOpenMention}
 								previewResolvers={previewResolvers}
+								wideBlocks
 							/>
 						</BubbleContent>,
 						true
@@ -3216,6 +3289,7 @@ function AssistantParts({
 				pushPart(
 					<AssistantGeneratedImage
 						key={`${msg.id}-image-generation-${i}`}
+						onAnnotateImage={onAnnotateImage}
 						onRetry={
 							onRetryGeneration && retryPrompt
 								? () => onRetryGeneration(msg.id, "image", retryPrompt)
@@ -3255,14 +3329,16 @@ function AssistantParts({
 				continue;
 			}
 
-			const imageUrl = getAssistantImageUrl(part);
-			if (imageUrl) {
+			const image = getAssistantImageMeta(part);
+			if (image) {
 				pushPart(
 					<AssistantGeneratedImage
+						filename={image.filename}
 						key={`${msg.id}-image-${i}`}
+						onAnnotateImage={onAnnotateImage}
 						showStatus={false}
 						status="complete"
-						url={imageUrl}
+						url={image.url}
 					/>
 				);
 				i++;
@@ -3297,15 +3373,13 @@ function AssistantParts({
 							<a href={fileMeta.url}>Download audio</a>
 						</audio>
 					) : (
-						<a
-							className="inline-flex max-w-[360px] items-center gap-2 rounded-xl bg-foreground/4 px-3 py-2 text-sm hover:bg-foreground/8"
-							download
-							href={fileMeta.url}
+						<FileAttachment
+							filename={fileMeta.filename}
+							id={`${msg.id}-file-${i}`}
 							key={`${msg.id}-file-${i}`}
-							rel="noopener"
-						>
-							Download attachment ({fileMeta.media})
-						</a>
+							size={fileMeta.size}
+							url={fileMeta.url}
+						/>
 					)
 				);
 				i++;

@@ -73,14 +73,17 @@ function StatusIcon({ status }: { status: FileUploadStatus }) {
 	if (status === "success") {
 		return (
 			<HugeiconsIcon
-				className="size-4 text-emerald-600 dark:text-emerald-500"
+				className="size-4 text-status-success"
 				icon={CheckmarkCircle02Icon}
 			/>
 		);
 	}
 	if (status === "error") {
 		return (
-			<HugeiconsIcon className="size-4 text-destructive" icon={Alert01Icon} />
+			<HugeiconsIcon
+				className="size-4 text-status-destructive"
+				icon={Alert01Icon}
+			/>
 		);
 	}
 	return (
@@ -145,7 +148,7 @@ function FileUploadRow({
 					</Progress.Root>
 				) : null}
 				{item.status === "error" && item.error ? (
-					<span className="text-destructive text-xs">{item.error}</span>
+					<span className="text-status-destructive text-xs">{item.error}</span>
 				) : null}
 				{item.status !== "error" && item.note ? (
 					<span className="text-muted-foreground text-xs">{item.note}</span>

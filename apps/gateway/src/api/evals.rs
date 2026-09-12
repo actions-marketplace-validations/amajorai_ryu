@@ -1519,6 +1519,15 @@ mod run_evals_tests {
         }
     }
 
+    fn eval_headers() -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "authorization",
+            "Bearer test-evals-administrator".parse().unwrap(),
+        );
+        headers
+    }
+
     fn eval_state() -> Arc<AppState> {
         let mut config = GatewayConfig {
             routing: RoutingConfig {
@@ -1532,6 +1541,7 @@ mod run_evals_tests {
             },
             ..GatewayConfig::default()
         };
+        config.auth.master_key = Some("test-evals-administrator".to_owned());
         config.evals = EvalsConfig {
             enabled: true,
             max_latency_ms: 5_000,
@@ -1568,7 +1578,7 @@ mod run_evals_tests {
         }))
         .expect("request parses");
 
-        let resp = run_evals(State(state), HeaderMap::new(), Json(req)).await;
+        let resp = run_evals(State(state), eval_headers(), Json(req)).await;
         assert_eq!(resp.status(), StatusCode::OK);
 
         let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
@@ -1586,7 +1596,7 @@ mod run_evals_tests {
         let state = eval_state();
         let req: super::RunEvalsRequest =
             serde_json::from_value(json!({ "model": "test-model" })).expect("request parses");
-        let resp = run_evals(State(state), HeaderMap::new(), Json(req)).await;
+        let resp = run_evals(State(state), eval_headers(), Json(req)).await;
         assert_eq!(resp.status(), StatusCode::OK);
         let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
             .await
@@ -1612,7 +1622,7 @@ mod run_evals_tests {
             "evaluators": ["prompt_injection"]
         }))
         .expect("request parses");
-        let resp = run_evals(State(state), HeaderMap::new(), Json(req)).await;
+        let resp = run_evals(State(state), eval_headers(), Json(req)).await;
         assert_eq!(resp.status(), StatusCode::OK);
         let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
             .await
@@ -1653,7 +1663,7 @@ mod run_evals_tests {
             }]
         }))
         .expect("request parses");
-        let resp = run_evals(State(state), HeaderMap::new(), Json(req)).await;
+        let resp = run_evals(State(state), eval_headers(), Json(req)).await;
         assert_eq!(resp.status(), StatusCode::OK);
         let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
             .await
@@ -1682,7 +1692,7 @@ mod run_evals_tests {
             "dataset": [{"prompt": "hello {{name}}", "expected": "hi", "vars": {"persona": "helpful", "name": "Ada"}}]
         }))
         .expect("request parses");
-        let resp = run_evals(State(state), HeaderMap::new(), Json(req)).await;
+        let resp = run_evals(State(state), eval_headers(), Json(req)).await;
         assert_eq!(resp.status(), StatusCode::OK);
         let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
             .await

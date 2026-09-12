@@ -1,9 +1,10 @@
+import { CallIcon } from "@hugeicons/core-free-icons";
+import { HugeiconsIcon } from "@hugeicons/react";
 import { Button } from "@ryu/ui/components/button.tsx";
 import { cn } from "@ryu/ui/lib/utils.ts";
 import {
 	IconArrowUp,
 	IconMicrophone,
-	IconPhoneCall,
 	IconPlayerPlayFilled,
 	IconPlayerStopFilled,
 } from "@tabler/icons-react";
@@ -96,7 +97,7 @@ export function SendButton({
 				title="Start voice call"
 				type="button"
 			>
-				<IconPhoneCall className="size-4" />
+				<HugeiconsIcon className="size-4" icon={CallIcon} />
 			</Button>
 		);
 	}

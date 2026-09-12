@@ -66,11 +66,17 @@ pub struct ExecToolBody {
     /// arguments. A master-key caller is already fully privileged, so supplying an
     /// arbitrary value grants nothing it doesn't already have. It is therefore
     /// **not agent-spoofable**: an agent never reaches this endpoint with a crafted
-    /// body. Core re-resolves the principal from its own record of the named
-    /// conversation on receipt, so a bad id yields at most that conversation's own
-    /// owner scope — never a cross-tenant escalation beyond the forwarder's trust.
+    /// body. Core additionally requires the process-local proof that it created
+    /// before this Gateway forward when no verified user caller is present, and
+    /// re-resolves the principal from its own record of the named conversation on
+    /// receipt. A bad id therefore yields no owner scope — never a cross-tenant
+    /// escalation beyond the forwarder's trust.
     #[serde(default)]
     pub host_conversation_id: Option<String>,
+    /// Process-local proof created by Core and relayed unchanged. Core uses it
+    /// to distinguish its trusted Gateway forward from a direct node-token call.
+    #[serde(default)]
+    pub host_conversation_proof: Option<String>,
     /// Product-surface tag (`x-ryu-feature`); `"widget"` for widget round-trips.
     /// Accepted for transport tolerance; the widget branch keys off the presence
     /// of the `widget` envelope and hardcodes `feature="widget"` on the audit row.
@@ -266,6 +272,7 @@ async fn exec_widget_tool(
             body.agent_id.as_deref(),
             body.user_id.as_deref(),
             body.host_conversation_id.as_deref(),
+            body.host_conversation_proof.as_deref(),
         )
         .await;
     let duration_ms = start.elapsed().as_millis() as u64;
@@ -334,6 +341,7 @@ async fn exec_kind_tool(
             body.agent_id.as_deref(),
             body.user_id.as_deref(),
             body.host_conversation_id.as_deref(),
+            body.host_conversation_proof.as_deref(),
         )
         .await;
     let duration_ms = start.elapsed().as_millis() as u64;
@@ -400,11 +408,11 @@ async fn exec_kind_forward(
         "user_id": body.user_id,
         "session_id": body.session_id,
         "conversation_id": body.session_id,
-        // Server-derived host conversation for the PTC plane. Core's `ToolExecBody`
-        // ignores unknown fields today, so this is a no-op until the Core PTC
-        // invoker (`ryu-tool-exec`) threads it into `ToolPrincipal` (followup); the
-        // gateway wire is ready now, and it is harmless in the interim.
+        // Server-derived host conversation for the PTC plane. Core validates the
+        // process-local proof and threads the principal into every sandbox tool
+        // call; a direct node-token caller cannot opt into this scope.
         "host_conversation_id": body.host_conversation_id,
+        "host_conversation_proof": body.host_conversation_proof,
         "code": body.code,
         "execution_id": body.execution_id,
         "action": body.action,
@@ -420,11 +428,12 @@ async fn exec_kind_forward(
 }
 
 use crate::firewall::cmdscan::{
-    scan_command_with_rules, ApprovalMode, ManagedCommandRule, ScanVerdict,
+    scan_command_with_rules_policy, ApprovalMode, ManagedCommandRule, ScanVerdict,
 };
 
 /// Request body for `POST /v1/exec/scan` (COMMAND-SCAN CONTRACT, verbatim shape).
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ExecScanBody {
     pub backend: String,
     pub command: String,
@@ -452,8 +461,9 @@ pub struct ExecScanBody {
 /// `{ decision, reason, findings }` shape. Trusted-forwarder / master-key only
 /// (same governance gate as the exec-budget endpoints; NO mesh check, matching
 /// its sibling `check_exec_budget`). Mode is read from `RYU_EXEC_APPROVAL_MODE`
-/// at this boundary; the scanner itself is pure. The HARDLINE blocklist always
-/// denies regardless of mode.
+/// at this boundary; the scanner itself is pure. Permanent deletion and the
+/// legacy HARDLINE blocklist always deny. Approval mode and managed rules cannot
+/// disable either safety block.
 pub async fn exec_scan(
     State(state): State<SharedState>,
     headers: HeaderMap,
@@ -471,7 +481,7 @@ pub async fn exec_scan(
     let mode = std::env::var("RYU_EXEC_APPROVAL_MODE")
         .map(|s| ApprovalMode::from_env_str(&s))
         .unwrap_or(ApprovalMode::Manual);
-    let verdict = scan_command_with_rules(
+    let verdict = scan_command_with_rules_policy(
         &body.backend,
         &body.command,
         mode,
@@ -491,6 +501,19 @@ mod tests {
         assert_eq!(body.kind, "tool");
     }
 
+    #[test]
+    fn exec_scan_body_rejects_the_removed_delete_override() {
+        let parsed = serde_json::from_value::<ExecScanBody>(json!({
+            "backend": "bash",
+            "command": "rm -rf ./tmp",
+            "allow_permanent_delete": true,
+        }));
+        assert!(
+            parsed.is_err(),
+            "legacy deletion override must not be accepted"
+        );
+    }
+
     /// Gateway body passthrough (task C2, deliverable #2): the additive
     /// `host_conversation_id` parses when present and defaults to `None` when
     /// absent (the fail-closed default — a legacy caller resolves `Unresolved` on a
@@ -503,15 +526,21 @@ mod tests {
             "tool_id": "threads.list",
             "agent_id": "a",
             "host_conversation_id": "conv-123",
+            "host_conversation_proof": "proof-123",
         }))
         .unwrap();
         assert_eq!(with_id.host_conversation_id.as_deref(), Some("conv-123"));
+        assert_eq!(
+            with_id.host_conversation_proof.as_deref(),
+            Some("proof-123")
+        );
 
         // Absent → None: fail-closed default is preserved (no accidental fail-open).
         let without_id: ExecToolBody =
             serde_json::from_value(json!({ "kind": "tool", "tool_id": "x", "agent_id": "a" }))
                 .unwrap();
         assert_eq!(without_id.host_conversation_id, None);
+        assert_eq!(without_id.host_conversation_proof, None);
     }
 
     #[test]

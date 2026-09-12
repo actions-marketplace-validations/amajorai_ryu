@@ -182,7 +182,7 @@ export function TurnIntoToolbarButton(
 				>
 					{turnIntoItems.map(({ icon, label, value: itemValue }) => (
 						<DropdownMenuRadioItem
-							className="min-w-[180px] pl-2"
+							className="min-w-[180px] ps-2"
 							key={itemValue}
 							value={itemValue}
 						>

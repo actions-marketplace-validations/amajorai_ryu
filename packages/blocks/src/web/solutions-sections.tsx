@@ -94,7 +94,7 @@ export function iconFor(key: string): LucideIcon {
 
 export function UseCases({ items }: { items: SolutionUseCase[] }) {
 	return (
-		<div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
+		<div className="grid grid-cols-1 gap-x-12 gap-y-6 sm:grid-cols-2 lg:grid-cols-3">
 			{items.map((item, i) => (
 				<Reveal delay={(i % 3) * 0.06} key={item.title}>
 					<div
@@ -103,7 +103,7 @@ export function UseCases({ items }: { items: SolutionUseCase[] }) {
 							"flex h-full flex-col gap-2"
 						)}
 					>
-						<h3 className="font-semibold text-base text-foreground">
+						<h3 className="font-medium text-base text-foreground">
 							{item.title}
 						</h3>
 						<p className="text-muted-foreground text-sm leading-relaxed">
@@ -125,12 +125,9 @@ export function ExamplePrompts({ items }: { items: string[] }) {
 		<ul className="space-y-3">
 			{items.map((prompt) => (
 				<li
-					className="flex items-start gap-3 rounded-xl border border-border/60 bg-muted/30 px-4 py-3.5 text-foreground/90 text-sm leading-relaxed"
+					className="py-3 text-foreground text-sm leading-relaxed"
 					key={prompt}
 				>
-					<span className="mt-0.5 select-none font-medium text-muted-foreground/50 text-xs">
-						›
-					</span>
 					<span>{prompt}</span>
 				</li>
 			))}

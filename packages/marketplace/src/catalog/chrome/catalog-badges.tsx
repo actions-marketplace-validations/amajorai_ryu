@@ -66,11 +66,11 @@ const BASE_CHIP =
 /** Subtle, theme-aware background per badge tone (no border — fill only). */
 const TONE_CLASS: Record<BadgeTone, string> = {
 	neutral: "bg-foreground/8 text-foreground/80",
-	blue: "bg-info/12 text-info dark:text-info",
+	blue: "bg-info/12 text-status-info dark:text-status-info",
 	violet: "bg-violet-500/12 text-violet-600 dark:text-violet-400",
-	amber: "bg-warning/12 text-warning dark:text-warning",
-	rose: "bg-destructive/12 text-destructive dark:text-destructive",
-	emerald: "bg-success/12 text-success dark:text-success",
+	amber: "bg-warning/12 text-status-warning dark:text-status-warning",
+	rose: "bg-destructive/12 text-status-destructive dark:text-status-destructive",
+	emerald: "bg-success/12 text-status-success dark:text-status-success",
 };
 
 /** Token id → icon. Falls back to a tag icon via {@link tokenIcon}. */

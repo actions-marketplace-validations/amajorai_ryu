@@ -4,10 +4,10 @@
   "navLabel": "Tax",
   "category": "Finance & Risk",
   "icon": "Receipt",
-  "tagline": "Prep returns, research positions, and organize records with agents that keep taxpayer data on your machine.",
+  "tagline": "Organize source documents and prepare draft work papers for a qualified reviewer.",
   "heroEyebrow": "Ryu for Tax",
-  "heroTitle": "An AI tax preparer that guards the data.",
-  "heroSubtitle": "Organize source documents, research positions, and draft work papers with agents that run on your own machine. Taxpayer data never leaves your device unless you say so, and every model call is governed, logged, and auditable.",
+  "heroTitle": "Ryu for tax",
+  "heroSubtitle": "Organize source documents and prepare draft work papers for a qualified reviewer.",
   "visualKey": "GatewayVisual",
   "intro": "Tax work handles some of the most sensitive personal and business data there is, and it can't be pasted into a public chatbot that trains on what it sees. Ryu runs capable agents locally, redacts identifiers on egress when you route to the cloud, and records every call, so prep and research move faster while taxpayer data stays protected.",
   "highlights": [

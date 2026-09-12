@@ -7,6 +7,7 @@ import {
 	IconChevronRight,
 	IconDownload,
 	IconMinus,
+	IconPencil,
 	IconPlus,
 	IconX,
 } from "@tabler/icons-react";
@@ -46,6 +47,8 @@ export interface ImageLightboxProps {
 	/** Ceiling for wheel, double-click and keyboard zoom. Values at or below
 	 *  1.1 are raised to 1.1. */
 	maxScale?: number;
+	/** Optional image-editing action for opening Drawesome annotation. */
+	onAnnotate?: (image: LightboxImage) => void;
 	/** Close handler — wired to Escape, the close button, and a backdrop click
 	 *  while unzoomed. The overlay stays mounted until the return flight ends. */
 	onClose: () => void;
@@ -457,6 +460,7 @@ interface Landing {
 
 function Stage({
 	onClose,
+	onAnnotate,
 	images,
 	initialIndex,
 	originRef,
@@ -766,6 +770,22 @@ function Stage({
 				transition={reduced ? { duration: 0 } : VEIL}
 			>
 				<div className="pointer-events-auto flex items-center gap-2">
+					{onAnnotate ? (
+						<Button
+							aria-label={`Annotate ${filename}`}
+							className={CHROME_BUTTON}
+							data-lightbox-focus="1"
+							onClick={() => {
+								onAnnotate(currentImage);
+								onClose();
+							}}
+							size="icon"
+							type="button"
+							variant="ghost"
+						>
+							<IconPencil className="size-[15px]" />
+						</Button>
+					) : null}
 					<a
 						aria-label={`Download ${filename}`}
 						className={CHROME_BUTTON}

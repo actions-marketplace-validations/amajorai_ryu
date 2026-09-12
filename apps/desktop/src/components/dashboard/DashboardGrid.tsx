@@ -8,7 +8,9 @@
 
 import GridLayout, { type Layout, useContainerWidth } from "react-grid-layout";
 import "react-grid-layout/css/styles.css";
-import { useCallback, useMemo, useRef } from "react";
+import { useChatDisplayPrefs } from "@ryu/blocks/desktop/agent-elements/chat-display-prefs.tsx";
+import { useCallback, useMemo, useRef, useState } from "react";
+import { usePrefersReducedMotion } from "@/src/hooks/usePrefersReducedMotion.ts";
 import type { GridLayoutRect, Widget } from "@/src/lib/api/dashboard.ts";
 import { WidgetCard } from "./WidgetCard.tsx";
 
@@ -38,6 +40,13 @@ export function DashboardGrid({
 }) {
 	const { width, containerRef, mounted } = useContainerWidth();
 	const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+	const { animationsEnabled } = useChatDisplayPrefs();
+	const prefersReducedMotion = usePrefersReducedMotion();
+	const motionEnabled = animationsEnabled && !prefersReducedMotion;
+	const [activeInteraction, setActiveInteraction] = useState<{
+		kind: "drag" | "resize";
+		id: string;
+	} | null>(null);
 
 	const layout = useMemo<Layout>(
 		() =>
@@ -88,6 +97,36 @@ export function DashboardGrid({
 		[widgets, onLayoutPersist]
 	);
 
+	const handleDragStart = useCallback(
+		(
+			_layout: Layout,
+			_oldItem: Layout[number] | null,
+			newItem: Layout[number] | null
+		) => {
+			if (newItem) {
+				setActiveInteraction({ id: newItem.i, kind: "drag" });
+			}
+		},
+		[]
+	);
+
+	const handleResizeStart = useCallback(
+		(
+			_layout: Layout,
+			_oldItem: Layout[number] | null,
+			newItem: Layout[number] | null
+		) => {
+			if (newItem) {
+				setActiveInteraction({ id: newItem.i, kind: "resize" });
+			}
+		},
+		[]
+	);
+
+	const handleInteractionStop = useCallback(() => {
+		setActiveInteraction(null);
+	}, []);
+
 	return (
 		<div className="h-full w-full" ref={containerRef}>
 			{mounted && (
@@ -99,7 +138,11 @@ export function DashboardGrid({
 						margin: [12, 12],
 					}}
 					layout={layout}
+					onDragStart={handleDragStart}
+					onDragStop={handleInteractionStop}
 					onLayoutChange={handleLayoutChange}
+					onResizeStart={handleResizeStart}
+					onResizeStop={handleInteractionStop}
 					resizeConfig={{ handles: ["se", "e", "s", "sw"] }}
 					width={width}
 				>
@@ -107,6 +150,12 @@ export function DashboardGrid({
 						<div key={w.id}>
 							<WidgetCard
 								error={live[w.id]?.error ?? w.last_error}
+								interaction={
+									activeInteraction?.id === w.id
+										? activeInteraction.kind
+										: undefined
+								}
+								motionEnabled={motionEnabled}
 								onRefresh={() => onRefresh(w.id)}
 								onRemove={() => onRemove(w.id)}
 								value={

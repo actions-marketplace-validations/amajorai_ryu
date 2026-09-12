@@ -45,7 +45,7 @@ impl ImageHost for CoreImageHost {
     }
 
     fn gateway_token(&self) -> Option<String> {
-        crate::sidecar::gateway::gateway_token()
+        crate::sidecar::gateway::gateway_core_token()
     }
 
     fn start_local_engine(&self) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + '_>> {

@@ -73,17 +73,17 @@ const TONE_STYLES: Record<
 > = {
 	block: {
 		dot: "bg-destructive",
-		pill: "bg-destructive/10 text-destructive",
+		pill: "bg-destructive/10 text-status-destructive",
 		text: "Blocked",
 	},
 	redact: {
 		dot: "bg-warning",
-		pill: "bg-warning/10 text-warning",
+		pill: "bg-warning/10 text-status-warning",
 		text: "Redacted",
 	},
 	allow: {
 		dot: "bg-success",
-		pill: "bg-success/10 text-success",
+		pill: "bg-success/10 text-status-success",
 		text: "Allowed",
 	},
 };
@@ -100,7 +100,7 @@ function MetricTile({
 	return (
 		<div className="rounded-lg bg-muted/40 p-3">
 			<p className="text-muted-foreground text-xs">{label}</p>
-			<p className="mt-1 font-semibold text-foreground text-lg tabular-nums">
+			<p className="mt-1 font-medium text-foreground text-lg tabular-nums">
 				{value}
 			</p>
 			<p className="text-[10px] text-muted-foreground/70">{hint}</p>
@@ -135,10 +135,8 @@ export function GatewayMock() {
 				{/* Content */}
 				<div className="flex-1 space-y-4 p-4">
 					<div className="flex items-center justify-between">
-						<h3 className="font-semibold text-base text-foreground">
-							Overview
-						</h3>
-						<span className="inline-flex items-center gap-1.5 rounded-full bg-success/10 px-2.5 py-1 font-medium text-[11px] text-success">
+						<h3 className="font-medium text-base text-foreground">Overview</h3>
+						<span className="inline-flex items-center gap-1.5 rounded-full bg-success/10 px-2.5 py-1 font-medium text-[11px] text-status-success">
 							<span className="size-1.5 rounded-full bg-success" />
 							Up
 						</span>

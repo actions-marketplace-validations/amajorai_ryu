@@ -14,6 +14,7 @@ import { SvglIcon, type SvglSpec } from "@ryu/blocks/web/svgl-icon.tsx";
 export const PROVIDER_SVGL: [string, SvglSpec][] = [
 	["anthropic", "claude"],
 	["claude", "claude"],
+	["chatgpt", { light: "openai", dark: "openai_dark" }],
 	// Azure OpenAI's label literally contains "openai" — match its own brand FIRST
 	// so it resolves to the Azure mark, not the OpenAI one.
 	["azure", "azure"],

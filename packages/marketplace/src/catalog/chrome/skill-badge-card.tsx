@@ -124,7 +124,7 @@ export default function SkillBadgeCard({
 						<span className="size-3.5 animate-spin rounded-full border-2 border-foreground/30 border-t-foreground" />
 					) : installed ? (
 						<HugeiconsIcon
-							className="size-3.5 text-emerald-500"
+							className="size-3.5 text-status-success"
 							icon={CheckmarkCircle02Icon}
 						/>
 					) : (

@@ -168,7 +168,7 @@ export default function FileEditorPage({ filePath }: { filePath: string }) {
 				</span>
 				{saveState === "error" ? (
 					<div className="flex shrink-0 items-center gap-2">
-						<span className="text-destructive text-xs">Save failed</span>
+						<span className="text-status-destructive text-xs">Save failed</span>
 						<Button
 							onClick={() => {
 								flush().catch(() => undefined);

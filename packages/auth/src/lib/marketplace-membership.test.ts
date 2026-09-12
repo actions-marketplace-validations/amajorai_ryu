@@ -3,8 +3,25 @@ import {
 	allocateMarketplaceMembershipPool,
 	annualizedMarketplacePriceMinor,
 	isMarketplaceMembershipListingEligible,
+	isRecurringMarketplacePlan,
 	marketplaceTierMultiplier,
 } from "./marketplace-membership.ts";
+
+describe("isRecurringMarketplacePlan", () => {
+	it("funds the publisher pool only from A Major Pass", () => {
+		expect(isRecurringMarketplacePlan("marketplace-membership")).toBe(true);
+		for (const plan of [
+			"pro",
+			"plus",
+			"max",
+			"teams",
+			"teams-lite",
+			"business",
+		] as const) {
+			expect(isRecurringMarketplacePlan(plan)).toBe(false);
+		}
+	});
+});
 
 describe("annualizedMarketplacePriceMinor", () => {
 	it("annualizes monthly subscription pricing", () => {
@@ -137,6 +154,9 @@ describe("isMarketplaceMembershipListingEligible", () => {
 		marketplaceVisibility: "public",
 		origin: "first_party",
 		pricing: {
+			amountMinor: 1200,
+			currency: "usd",
+			interval: "month",
 			membershipOptIn: true,
 			model: "subscription",
 			sellerOrgId: "publisher-org",
@@ -167,5 +187,22 @@ describe("isMarketplaceMembershipListingEligible", () => {
 		expect(
 			isMarketplaceMembershipListingEligible(app, { payoutsEnabled: false })
 		).toBe(false);
+	});
+
+	it("rejects malformed or non-USD paid pricing before it can fund a publisher", () => {
+		for (const pricing of [
+			{ ...app.pricing, amountMinor: 0 },
+			{ ...app.pricing, amountMinor: Number.POSITIVE_INFINITY },
+			{ ...app.pricing, amountMinor: 100_000_000 },
+			{ ...app.pricing, currency: "eur" },
+			{ ...app.pricing, interval: "week" },
+		]) {
+			expect(
+				isMarketplaceMembershipListingEligible(
+					{ ...app, pricing },
+					{ payoutsEnabled: true }
+				)
+			).toBe(false);
+		}
 	});
 });

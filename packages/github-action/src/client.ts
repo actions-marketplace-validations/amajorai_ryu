@@ -124,6 +124,7 @@ export class RyuNodeClient {
 	private async request(
 		path: string,
 		options: {
+			accept?: string;
 			body?: unknown;
 			method?: string;
 			timeoutMs: number;
@@ -134,36 +135,7 @@ export class RyuNodeClient {
 			const response = await this.fetchImpl(this.url(path), {
 				body:
 					options.body === undefined ? undefined : JSON.stringify(options.body),
-				headers: this.headers(),
-				method: options.method ?? "GET",
-				signal: timer.signal,
-			});
-			return { response, timer };
-		} catch (error) {
-			timer.clear();
-			if (timer.signal.aborted) {
-				throw new Error(`${path} timed out after ${options.timeoutMs}ms.`);
-			}
-			throw new Error(
-				`${path} could not reach the Ryu node: ${redact(error instanceof Error ? error.message : String(error), this.target.token)}`
-			);
-		}
-	}
-
-	private async openStream(
-		path: string,
-		options: {
-			body?: unknown;
-			method?: string;
-			timeoutMs: number;
-		}
-	): Promise<{ response: Response; timer: ReturnType<typeof timeoutSignal> }> {
-		const timer = timeoutSignal(options.timeoutMs);
-		try {
-			const response = await this.fetchImpl(this.url(path), {
-				body:
-					options.body === undefined ? undefined : JSON.stringify(options.body),
-				headers: this.headers({ Accept: "text/event-stream" }),
+				headers: this.headers({ Accept: options.accept ?? "application/json" }),
 				method: options.method ?? "GET",
 				signal: timer.signal,
 			});
@@ -247,7 +219,8 @@ export class RyuNodeClient {
 		timeoutMs: number,
 		callbacks?: StreamCallbacks
 	): Promise<ChatResult> {
-		const opened = await this.openStream("/api/chat/stream", {
+		const opened = await this.request("/api/chat/stream", {
+			accept: "text/event-stream",
 			body,
 			method: "POST",
 			timeoutMs,

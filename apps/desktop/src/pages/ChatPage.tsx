@@ -7,7 +7,6 @@ import type {
 	StreamedAcpControl,
 } from "@ryu/blocks/composer/composer-acp-sections.ts";
 import { createComposerDirectory } from "@ryu/blocks/composer/composer-directory.ts";
-import { handleComposerSettingsShortcut } from "@ryu/blocks/composer/composer-shortcuts.ts";
 import { answerNowDelayMs } from "@ryu/blocks/desktop/agent-elements/answer-now.ts";
 import {
 	ArtifactHostContext,
@@ -16,10 +15,6 @@ import {
 } from "@ryu/blocks/desktop/agent-elements/artifact-host-context.tsx";
 import { deriveContextUsage } from "@ryu/blocks/desktop/agent-elements/context-usage.tsx";
 import type { GoalCompletion } from "@ryu/blocks/desktop/agent-elements/goal-message.ts";
-import type {
-	ComposerMenuGroup,
-	ComposerMenuItem,
-} from "@ryu/blocks/desktop/agent-elements/input/composer-menu.tsx";
 import { extractMemoryCitations } from "@ryu/blocks/desktop/agent-elements/memory-citations.ts";
 import { isMessageReactionAction } from "@ryu/blocks/desktop/agent-elements/message-action-types.ts";
 import {
@@ -40,7 +35,6 @@ import type {
 	MessageReply,
 	SelectionActionContext,
 } from "@ryu/blocks/desktop/agent-elements/types.ts";
-import { useDeferredComposerPrompt } from "@ryu/blocks/desktop/agent-elements/use-deferred-question.ts";
 import {
 	WidgetHostContext,
 	type WidgetHostServices,
@@ -94,8 +88,8 @@ import type {
 	AttachedImage,
 	InputBarInfoBar,
 	InputBarProps,
+	TemporaryChatSaveControls,
 } from "@/components/agent-elements/input-bar.tsx";
-import { InputBar } from "@/components/agent-elements/input-bar.tsx";
 import type { QueueBarProps } from "@/components/agent-elements/queue/queue-bar.tsx";
 import { formatQuotePrefix } from "@/components/agent-elements/quote.tsx";
 import { openExternal, previewLinkMetadata } from "@/lib/tauri-bridge.ts";
@@ -104,20 +98,24 @@ import {
 	BtwOverlay,
 	type BtwState,
 } from "@/src/components/chat/BtwOverlay.tsx";
+import {
+	ChatSearchBar,
+	type ChatSearchMode,
+} from "@/src/components/chat/ChatSearchBar.tsx";
+import { CouncilInputBar } from "@/src/components/chat/CouncilInputBar.tsx";
 import { DiffReviewPane } from "@/src/components/chat/DiffReviewPane.tsx";
+import {
+	type DrawesomeSketchAttachment,
+	DrawesomeSketchDialog,
+} from "@/src/components/chat/DrawesomeSketchDialog.tsx";
 import {
 	type ForkDestination,
 	ForkDialog,
 } from "@/src/components/chat/ForkDialog.tsx";
 import { InlineArtifact } from "@/src/components/chat/InlineArtifact.tsx";
-import { MentionMenu } from "@/src/components/chat/MentionMenu.tsx";
 import { MergedThreadPicker } from "@/src/components/chat/MergedThreadPicker.tsx";
-import {
-	type ActivePermission,
-	PermissionPrompt,
-} from "@/src/components/chat/PermissionPrompt.tsx";
+import type { ActivePermission } from "@/src/components/chat/PermissionPrompt.tsx";
 import { ShareConversationDialog } from "@/src/components/chat/ShareConversationDialog.tsx";
-import { SlashCommandAutocomplete } from "@/src/components/chat/SlashCommandAutocomplete.tsx";
 import { WorkspaceBar } from "@/src/components/chat/WorkspaceBar.tsx";
 import { WorkspaceRequiredDialog } from "@/src/components/chat/WorkspaceRequiredDialog.tsx";
 import { PluginComposerBarControls } from "@/src/components/composer/PluginComposerBarControls.tsx";
@@ -147,7 +145,7 @@ import { useSystemStatusContext } from "@/src/contexts/SystemStatusContext.tsx";
 import {
 	useCurrentTabId,
 	useIsActiveTab,
-	useTabsContext,
+	useTabSelector,
 } from "@/src/contexts/TabsContext.tsx";
 import { useTitleBar } from "@/src/contexts/TitleBarContext.tsx";
 import { AppWidget } from "@/src/contributions/host/AppWidget.tsx";
@@ -156,6 +154,7 @@ import { useAgents } from "@/src/hooks/useAgents.ts";
 import { useAgentUsage } from "@/src/hooks/useAgentUsage.ts";
 import { useApps } from "@/src/hooks/useApps.ts";
 import { useChatPickerPlacement } from "@/src/hooks/useChatPickerPlacement.ts";
+import { useChatSearch } from "@/src/hooks/useChatSearch.ts";
 import { useComposerAutoQueue } from "@/src/hooks/useComposerAutoQueue.ts";
 import {
 	useComposerDraftAutosave,
@@ -166,7 +165,6 @@ import {
 	shouldShowComposerSelectionToast,
 	useComposerSelectionApplyMode,
 } from "@/src/hooks/useComposerSelectionApplyMode.ts";
-import { useComposerShortcutBindings } from "@/src/hooks/useComposerShortcutBindings.ts";
 import {
 	useComposioConnections,
 	useComposioStatus,
@@ -195,10 +193,12 @@ import {
 	usePluginContributions,
 	usePluginContributionsQuery,
 } from "@/src/hooks/usePluginContributions.ts";
+import { useProjectlessTaskFolder } from "@/src/hooks/useProjectlessTaskFolder.ts";
 import {
 	setQueueDrainMode,
 	useQueueDrainMode,
 } from "@/src/hooks/useQueueDrainMode.ts";
+import { useShowBottomPanelToggle } from "@/src/hooks/useShowBottomPanelToggle.ts";
 import { useSkillsCatalog } from "@/src/hooks/useSkillsCatalog.ts";
 import { useSpeechPlayback } from "@/src/hooks/useSpeechPlayback.ts";
 import { useTeams } from "@/src/hooks/useTeams.ts";
@@ -243,7 +243,10 @@ import {
 } from "@/src/lib/api/plugins.ts";
 import {
 	getDesktopTtsPrefs,
+	getVoiceInputPrefs,
 	getVoiceModeReadbackPrefs,
+	subscribePreferenceChanges,
+	VOICE_PREF_KEY,
 } from "@/src/lib/api/preferences.ts";
 import {
 	fetchDocument,
@@ -251,8 +254,11 @@ import {
 	ingestDocument,
 	updateDocument,
 } from "@/src/lib/api/spaces.ts";
-import type { Team } from "@/src/lib/api/teams.ts";
-import { stageImageUpload } from "@/src/lib/api/uploads.ts";
+import {
+	saveTemporaryChat,
+	TEMPORARY_CONTEXT_FLAG,
+} from "@/src/lib/api/temporary-chat.ts";
+import { fileToDataUrl, stageImageUpload } from "@/src/lib/api/uploads.ts";
 import { generateVideo } from "@/src/lib/api/video.ts";
 import { speakText, transcribeAudio } from "@/src/lib/api/voice.ts";
 import {
@@ -260,10 +266,15 @@ import {
 	widgetCallTool,
 	widgetSetState,
 } from "@/src/lib/api/widgets.ts";
-import type { Workflow } from "@/src/lib/api/workflows.ts";
 import type { Artifact } from "@/src/lib/artifacts.ts";
 import { artifactFromPayload } from "@/src/lib/artifacts.ts";
 import { hydrateHistoryMessage } from "@/src/lib/chat-history-hydrate.ts";
+import {
+	buildVersions,
+	extractAssistantText,
+	isAcpAgent,
+} from "@/src/lib/chat-message-selectors.ts";
+import { readDraggedChatReference } from "@/src/lib/chat-reference-drag.ts";
 import {
 	modelRoutingFieldsForInterface,
 	responseModeForInterface,
@@ -290,18 +301,11 @@ import {
 import { basename, readProjectFile } from "@/src/lib/files.ts";
 import { appMentionVisual } from "@/src/lib/mentions/app-visuals.tsx";
 import {
-	applyMention,
 	buildComposioMentionSources,
 	buildMentionGroups,
-	CHAT_MENTION_KINDS,
-	resolveFirstNamedMentionId,
-	resolveReferencedChatIds,
 } from "@/src/lib/mentions/candidates.ts";
-import {
-	type SelectedHumanMention,
-	selectHumanNotificationTargets,
-} from "@/src/lib/mentions/human-notification.ts";
-import type { MentionItem, MentionSources } from "@/src/lib/mentions/types.ts";
+import type { SelectedHumanMention } from "@/src/lib/mentions/human-notification.ts";
+import type { MentionSources } from "@/src/lib/mentions/types.ts";
 import {
 	getAgentModel,
 	modelsForAgent,
@@ -334,13 +338,14 @@ import { isRealtimeMessageEcho } from "@/src/lib/realtime/message-origin.ts";
 import { useRealtimeRoom } from "@/src/lib/realtime/use-realtime-room.ts";
 import { CHAT_RETRY_STARTED_EVENT } from "@/src/lib/reconnect-retry.ts";
 import {
-	applySlashCommandOption,
 	mergeComposerCommands,
 	parseSlashCommandContribution,
-	parseSlashMenuState,
 	type SlashCommand,
-	type SlashCommandOptionSelection,
 } from "@/src/lib/slash-commands.ts";
+import {
+	registerTabSnapshot,
+	TabTransferBlockedError,
+} from "@/src/lib/tab-transfer.ts";
 import { deriveTurnComposerProgress } from "@/src/lib/turn-composer-progress.ts";
 import { messageNeedsWorkspace } from "@/src/lib/workspace-intent.ts";
 import { resolveWorkspaceFilePath } from "@/src/lib/workspace-links.ts";
@@ -350,12 +355,22 @@ import { useArtifactStore } from "@/src/store/useArtifactStore.ts";
 import { useChatHotkeyTargets } from "@/src/store/useChatHotkeyTargets.ts";
 import { useCreateAgentDialog } from "@/src/store/useCreateAgentDialog.ts";
 import { useDockPanelRequestStore } from "@/src/store/useDockPanelRequestStore.ts";
+import { useFileTreeSearchStore } from "@/src/store/useFileTreeSearchStore.ts";
 import { useMeetingRecordingStore } from "@/src/store/useMeetingRecordingStore.ts";
+import { isLocalNode } from "@/src/store/useNodeStore.ts";
+import { useQuickReplyStore } from "@/src/store/useQuickReplyStore.ts";
 import {
 	publishSidebarTodoProgress,
 	sidebarTodoProgressKey,
 } from "@/src/store/useSidebarTodoProgressStore.ts";
 import { useWorkspaceStore } from "@/src/store/useWorkspaceStore.ts";
+
+interface ChatSearchState {
+	mode: ChatSearchMode;
+	nonce: number;
+	open: boolean;
+	query: string;
+}
 
 // How often the focused chat tab re-probes `/api/chat/stream/resume/:id` while it
 // believes it is idle. The endpoint 404s in-memory when nothing is running, so
@@ -396,110 +411,6 @@ interface SavedPlanDocument {
 	spaceId: string;
 }
 
-/** Returns true when the selected agent uses ACP transport (never touches the gateway). */
-function isAcpAgent(
-	agentId: string | null,
-	agents: ReturnType<typeof useAgents>["agents"]
-): boolean {
-	if (!agentId) {
-		// No agent selected — default to ACP behaviour (no gateway needed).
-		return true;
-	}
-	// Engine ids selected directly from the engines list (e.g. "acp:claude")
-	if (agentId.startsWith("acp:")) {
-		return true;
-	}
-	// Check against known agents in the registry
-	const agent = agents.find((a) => a.id === agentId);
-	if (!agent) {
-		// Unknown id — default to ACP (no gateway required) to avoid false blocks.
-		return true;
-	}
-	// Prefer the transport Core reports — the authoritative signal — over any
-	// client-side re-derivation. Only "openai_compat" needs the gateway.
-	if (agent.transport) {
-		return agent.transport !== "openai_compat";
-	}
-	// Registry built-ins are always ACP
-	if (agent.builtIn) {
-		return true;
-	}
-	// Custom agents: if engine is explicitly set to an ACP variant, it's ACP
-	if (agent.engine?.startsWith("acp:")) {
-		return true;
-	}
-	// Custom agents with an explicit non-ACP engine or no engine: default to ACP
-	// (openai-compat agents would have a non-null engine that does NOT start with "acp:")
-	if (agent.engine && !agent.engine.startsWith("acp:")) {
-		return false;
-	}
-	return true;
-}
-
-/**
- * Build the version-pager map (message id → { index, count, ids }) from a loaded
- * history. Only messages that actually have alternate versions (siblingCount > 1
- * with sibling ids) get an entry, so the pager renders solely at real branch
- * points.
- */
-function buildVersions(
-	history: Array<{
-		id: string;
-		siblingIndex?: number;
-		siblingCount?: number;
-		siblingIds?: string[];
-	}>
-): Record<string, { index: number; count: number; ids: string[] }> {
-	const map: Record<string, { index: number; count: number; ids: string[] }> =
-		{};
-	for (const h of history) {
-		if (h.siblingCount && h.siblingCount > 1 && h.siblingIds?.length) {
-			map[h.id] = {
-				index: h.siblingIndex ?? 0,
-				count: h.siblingCount,
-				ids: h.siblingIds,
-			};
-		}
-	}
-	return map;
-}
-
-/** Plain text from the last assistant message's parts (for auto read-back). */
-function extractAssistantText(message: {
-	parts?: unknown[];
-	content?: string;
-}): string {
-	if (Array.isArray(message.parts) && message.parts.length > 0) {
-		return message.parts
-			.filter(
-				(part): part is { type: string; text?: string } =>
-					typeof part === "object" &&
-					part !== null &&
-					(part as { type?: string }).type === "text" &&
-					typeof (part as { text?: string }).text === "string"
-			)
-			.map((part) => part.text ?? "")
-			.join("\n\n")
-			.trim();
-	}
-	return typeof message.content === "string" ? message.content.trim() : "";
-}
-
-const MENTION_QUERY_RE = /(?:^|\s)@(\w*)$/;
-
-/**
- * Parse the last "@word" being typed in a string.
- * Returns the partial name after "@" if the cursor is at an in-progress mention,
- * or null if the cursor is not on a mention.
- */
-function parseMentionQuery(value: string): string | null {
-	const match = MENTION_QUERY_RE.exec(value);
-	if (!match) {
-		return null;
-	}
-	return match[1];
-}
-
 /** Ryu's own composer commands, always offered alongside agent-advertised ones.
  *  Plugin-owned commands are supplied by `pluginContributions.slash_commands` so
  *  disabling a plugin removes both its discoverability and its handler. */
@@ -512,40 +423,6 @@ const LOCAL_SLASH_COMMANDS: SlashCommand[] = [
 		source: "local",
 	},
 ];
-
-/** Scan message text for the first "@Name" mention and resolve it to an agent id. */
-function resolveFirstMention(
-	text: string,
-	agents: AgentSummary[]
-): string | null {
-	return resolveFirstNamedMentionId(text, agents);
-}
-
-/** Scan message text for the first "@Name" that matches a team, returning its id.
- *  Teams take precedence over agents when a name collides, since a team mention
- *  is the more specific "call all of them" intent. */
-function resolveFirstTeamMention(text: string, teams: Team[]): string | null {
-	return resolveFirstNamedMentionId(text, teams);
-}
-
-/** Scan message text for the first "@Name" that matches a chat-triggerable
- *  workflow, returning its id. A workflow mention is the most specific target
- *  of all — the message becomes the run's input, so it wins over agent/team.
- *
- *  Unlike agents/teams (matched on a `@word` token), workflow names are
- *  arbitrary ("Plan → Implement → Verify"), so the check is an exact
- *  `@Name` substring match — the same form the composer inserts when you pick a
- *  workflow from the mention menu. */
-function resolveFirstWorkflowMention(
-	text: string,
-	workflows: Workflow[]
-): string | null {
-	const lower = text.toLowerCase();
-	const found = workflows.find((w) =>
-		lower.includes(`@${w.name.toLowerCase()}`)
-	);
-	return found?.id ?? null;
-}
 
 // ---------------------------------------------------------------------------
 /**
@@ -572,515 +449,6 @@ export function buildPluginFlags(
 		}
 	}
 	return Object.keys(merged).length > 0 ? merged : undefined;
-}
-
-// #415: Council-aware InputBar — adds @mention autocomplete above the textarea
-// ---------------------------------------------------------------------------
-interface CouncilInputBarProps extends InputBarProps {
-	allAgents: AgentSummary[];
-	allTeams: Team[];
-	/** Chat-triggerable workflows (a root Input node), for @workflow mentions. */
-	allWorkflows: Workflow[];
-	/** Slash commands offered in the "/" popover (agent-advertised + local). */
-	availableCommands: SlashCommand[];
-	/** Host-owned metadata affordances for available app widgets. */
-	chatWidgetTemplates: PluginChatWidgetTemplate[];
-	composerSections: ComposerSettingsSection[];
-	/** Current signed-in Core user, excluded from Inbox mention fan-out. */
-	currentUserId: string | null;
-	/** Sources for the grouped "@" mention menu (apps/plugins/agents/workflows/users
-	 *  plus the existing reference sources). Agents/teams/workflows also drive the target. */
-	mentionSources: MentionSources;
-	/** Sends selected human mentions to the optional Inbox bridge after chat send. */
-	onHumanMentions: (mentions: SelectedHumanMention[], content: string) => void;
-	/** Supplies the resolved chat mentions to the request body for this turn. */
-	onReferencedChats: (conversationIds: string[]) => void;
-	onRespondPermission?: (
-		permission: ActivePermission,
-		optionId: string | null
-	) => void;
-	onTargetAgentChange: (agentId: string | null) => void;
-	onTeamChange: (teamId: string | null) => void;
-	/** Fired on each composer keystroke so the surface can broadcast a debounced
-	 * "typing" presence delta to the conversation room (multi-user collaboration). */
-	onTyping?: () => void;
-	onWorkflowChange: (workflowId: string | null) => void;
-	/** Active interactive ACP tool-permission prompt, rendered above the composer. */
-	permission?: ActivePermission | null;
-}
-
-interface DraggedChatReference {
-	id: string;
-	label: string;
-}
-
-function readDraggedChatReference(
-	dataTransfer: DataTransfer
-): DraggedChatReference | null {
-	try {
-		const value = JSON.parse(
-			dataTransfer.getData(CHAT_REFERENCE_DRAG_MIME)
-		) as Partial<DraggedChatReference>;
-		return typeof value.id === "string" && typeof value.label === "string"
-			? { id: value.id, label: value.label }
-			: null;
-	} catch {
-		return null;
-	}
-}
-
-function CouncilInputBar({
-	allAgents,
-	allTeams,
-	allWorkflows,
-	availableCommands,
-	chatWidgetTemplates,
-	composerSections,
-	currentUserId,
-	mentionSources,
-	onHumanMentions,
-	onReferencedChats,
-	onTargetAgentChange,
-	onTeamChange,
-	onWorkflowChange,
-	onTyping,
-	permission,
-	onRespondPermission,
-	value,
-	onChange,
-	onSend,
-	onTextareaKeyDown,
-	...rest
-}: CouncilInputBarProps) {
-	const botProduct = useProductMode() === "bot";
-	const isActiveTab = useIsActiveTab();
-	const composerShortcuts = useComposerShortcutBindings();
-	const showTechnicalPermissionDetails = useInterfaceLevel() !== "simple";
-	const [mentionQuery, setMentionQuery] = useState<string | null>(null);
-	const [dismissedSlashValue, setDismissedSlashValue] = useState<string | null>(
-		null
-	);
-	const textareaWrapRef = useRef<HTMLDivElement | null>(null);
-	const referencedChatIdsRef = useRef<Set<string>>(new Set());
-	const selectedHumanMentionsRef = useRef<SelectedHumanMention[]>([]);
-	const slashMenuCandidate = useMemo(
-		() => parseSlashMenuState(value ?? "", availableCommands),
-		[value, availableCommands]
-	);
-	const slashMenu =
-		botProduct || dismissedSlashValue === (value ?? "")
-			? null
-			: slashMenuCandidate;
-	const {
-		markComposerActivity: markPermissionActivity,
-		markComposerIdle: markPermissionIdle,
-		visiblePrompt: visiblePermission,
-	} = useDeferredComposerPrompt(permission);
-	const insertChatReference = useCallback(
-		(chat: DraggedChatReference) => {
-			referencedChatIdsRef.current.add(chat.id);
-			onChange?.(
-				`${value?.trimEnd() ?? ""}${value?.trim() ? " " : ""}@${chat.label} `
-			);
-			setMentionQuery(null);
-		},
-		[onChange, value]
-	);
-	useEffect(() => {
-		if (!isActiveTab) {
-			return;
-		}
-		const handleChatReferenceDrop = (event: Event) => {
-			insertChatReference((event as CustomEvent<DraggedChatReference>).detail);
-		};
-		window.addEventListener("ryu:chat-reference-drop", handleChatReferenceDrop);
-		return () =>
-			window.removeEventListener(
-				"ryu:chat-reference-drop",
-				handleChatReferenceDrop
-			);
-	}, [insertChatReference, isActiveTab]);
-
-	// Grouped "@" candidates for the current fragment (empty when the menu is
-	// closed). Recomputed per keystroke; buildMentionGroups is pure.
-	const mentionGroups = useMemo(
-		() =>
-			botProduct || mentionQuery === null
-				? []
-				: buildMentionGroups(mentionSources, mentionQuery, CHAT_MENTION_KINDS),
-		[botProduct, mentionQuery, mentionSources]
-	);
-	const directoryMentionGroups = useMemo(
-		() => (botProduct ? [] : buildMentionGroups(mentionSources, "")),
-		[botProduct, mentionSources]
-	);
-	const composerMenuGroups = useMemo<ComposerMenuGroup[]>(
-		() =>
-			botProduct
-				? []
-				: directoryMentionGroups
-						.filter((group) => group.kind !== "user")
-						.map((group) => ({
-							id: `directory:${group.kind}`,
-							label: group.label,
-							items: group.items.map((item) => ({
-								id: `${item.kind}:${item.id}`,
-								label: item.label,
-								description: item.description,
-								badge:
-									item.kind === "app"
-										? "App"
-										: item.kind === "app-item"
-											? "App item"
-											: item.kind === "plugin"
-												? "Plugin"
-												: item.kind === "integration"
-													? "Integration"
-													: item.kind === "page"
-														? "Page"
-														: item.kind === "output-style"
-															? "Profile"
-															: undefined,
-								icon:
-									item.visualIcon ??
-									(item.icon
-										? createElement(item.icon, { className: "size-4" })
-										: undefined),
-							})),
-						})),
-		[botProduct, directoryMentionGroups]
-	);
-	const composerMentionItems = useMemo(
-		() =>
-			botProduct
-				? []
-				: directoryMentionGroups
-						.flatMap((group) => group.items)
-						.map((item) => ({
-							accentColor: item.accentColor,
-							icon: item.icon
-								? createElement(item.icon, { className: "size-3.5" })
-								: undefined,
-							kind: item.kind,
-							label: item.label,
-							visualIcon: item.visualIcon,
-						})),
-		[botProduct, directoryMentionGroups]
-	);
-
-	const handleChange = useCallback(
-		(next: string) => {
-			onChange?.(next);
-			setDismissedSlashValue(null);
-			onTyping?.();
-			if (next.length > 0) {
-				markPermissionActivity();
-			} else {
-				markPermissionIdle();
-			}
-			const query = parseMentionQuery(next);
-			setMentionQuery(query);
-			if (query === null) {
-				onTargetAgentChange(null);
-				onTeamChange(null);
-				onWorkflowChange(null);
-			}
-		},
-		[
-			markPermissionActivity,
-			markPermissionIdle,
-			onChange,
-			onTyping,
-			onTargetAgentChange,
-			onTeamChange,
-			onWorkflowChange,
-		]
-	);
-
-	const handleSelectSlash = useCallback(
-		(command: SlashCommand) => {
-			// An imported user command (Codex prompt) expands straight into its
-			// template body — the "prompt fills the box, then send" convention
-			// Cursor/Codex use. Everything else inserts "/name " and leaves the
-			// cursor for the argument.
-			if (command.body) {
-				onChange?.(command.body);
-			} else {
-				onChange?.(`/${command.name} `);
-			}
-		},
-		[onChange]
-	);
-	const handleSelectSlashArgument = useCallback(
-		(selection: SlashCommandOptionSelection) => {
-			if (slashMenu?.kind !== "arguments") {
-				return;
-			}
-			const hasNextArgument =
-				slashMenu.argumentIndex < slashMenu.command.args.length - 1;
-			const nextValue = applySlashCommandOption(
-				value ?? "",
-				selection.option.value,
-				hasNextArgument
-			);
-			onChange?.(nextValue);
-			if (!hasNextArgument) {
-				setDismissedSlashValue(nextValue);
-			}
-		},
-		[onChange, slashMenu, value]
-	);
-
-	const handleSelect = useCallback(
-		(item: MentionItem) => {
-			if (botProduct) {
-				return;
-			}
-			onChange?.(applyMention(value ?? "", item));
-			if (item.kind === "chat") {
-				referencedChatIdsRef.current.add(item.id);
-			}
-			if (item.kind === "user") {
-				selectedHumanMentionsRef.current.push({
-					id: item.id,
-					label: item.label,
-				});
-			}
-			setMentionQuery(null);
-			// Agents/teams/workflows set the target directly from the picked id;
-			// spaces/skills/mcp/folders are plain reference tokens and plugins
-			// rewrite the composer — none of those set a target.
-			if (item.kind === "workflow") {
-				onWorkflowChange(item.id);
-				onTeamChange(null);
-				onTargetAgentChange(null);
-			} else if (item.kind === "team") {
-				onTeamChange(item.id);
-				onTargetAgentChange(null);
-				onWorkflowChange(null);
-			} else if (item.kind === "agent") {
-				onTargetAgentChange(item.id);
-				onTeamChange(null);
-				onWorkflowChange(null);
-			}
-		},
-		[
-			value,
-			onChange,
-			onTargetAgentChange,
-			onTeamChange,
-			onWorkflowChange,
-			botProduct,
-		]
-	);
-	const handleDirectorySelect = useCallback(
-		(item: ComposerMenuItem) => {
-			if (botProduct) {
-				return;
-			}
-			const mention = directoryMentionGroups
-				.flatMap((group) => group.items)
-				.find((candidate) => `${candidate.kind}:${candidate.id}` === item.id);
-			if (!mention) {
-				return;
-			}
-			if (mention.kind === "workflow") {
-				onWorkflowChange(mention.id);
-				onTeamChange(null);
-				onTargetAgentChange(null);
-			} else if (mention.kind === "team") {
-				onTeamChange(mention.id);
-				onTargetAgentChange(null);
-				onWorkflowChange(null);
-			} else if (mention.kind === "agent") {
-				onTargetAgentChange(mention.id);
-				onTeamChange(null);
-				onWorkflowChange(null);
-			}
-		},
-		[
-			directoryMentionGroups,
-			botProduct,
-			onWorkflowChange,
-			onTeamChange,
-			onTargetAgentChange,
-		]
-	);
-
-	const handleSend = useCallback(
-		(msg: { role: "user"; content: string }) => {
-			if (botProduct) {
-				setMentionQuery(null);
-				setDismissedSlashValue(value ?? "");
-				onTargetAgentChange(null);
-				onTeamChange(null);
-				onWorkflowChange(null);
-				onSend(msg);
-				return;
-			}
-			// A workflow mention is the most specific target — the message becomes
-			// the run's input — so it wins over a team mention, which wins over an
-			// agent mention.
-			const workflowId = resolveFirstWorkflowMention(msg.content, allWorkflows);
-			const teamId = resolveFirstTeamMention(msg.content, allTeams);
-			if (workflowId) {
-				onWorkflowChange(workflowId);
-				onTeamChange(null);
-				onTargetAgentChange(null);
-			} else if (teamId) {
-				onTeamChange(teamId);
-				onTargetAgentChange(null);
-				onWorkflowChange(null);
-			} else {
-				onTeamChange(null);
-				onWorkflowChange(null);
-				onTargetAgentChange(resolveFirstMention(msg.content, allAgents));
-			}
-			setMentionQuery(null);
-			setDismissedSlashValue(value ?? "");
-			const referencedConversationIds = resolveReferencedChatIds(
-				msg.content,
-				mentionSources.chats,
-				referencedChatIdsRef.current
-			);
-			const humanMentions = selectHumanNotificationTargets({
-				content: msg.content,
-				currentUserId,
-				selected: selectedHumanMentionsRef.current,
-			});
-			referencedChatIdsRef.current.clear();
-			selectedHumanMentionsRef.current = [];
-			onReferencedChats(referencedConversationIds);
-			onSend(msg);
-			onHumanMentions(humanMentions, msg.content);
-		},
-		[
-			onSend,
-			allAgents,
-			allTeams,
-			allWorkflows,
-			mentionSources.chats,
-			currentUserId,
-			onHumanMentions,
-			onTargetAgentChange,
-			onTeamChange,
-			onWorkflowChange,
-			onReferencedChats,
-			botProduct,
-		]
-	);
-
-	return (
-		<div
-			className="relative"
-			onDragOver={(event) => {
-				if (event.dataTransfer.types.includes(CHAT_REFERENCE_DRAG_MIME)) {
-					event.preventDefault();
-					event.stopPropagation();
-					event.dataTransfer.dropEffect = "copy";
-				}
-			}}
-			onDrop={(event) => {
-				const chat = readDraggedChatReference(event.dataTransfer);
-				if (!chat) {
-					return;
-				}
-				event.preventDefault();
-				event.stopPropagation();
-				insertChatReference(chat);
-			}}
-			ref={textareaWrapRef}
-		>
-			{chatWidgetTemplates.length > 0 && (
-				<div className="mb-2 flex flex-wrap items-center gap-1.5 px-1">
-					<span className="text-[11px] text-muted-foreground">
-						Available widgets
-					</span>
-					{chatWidgetTemplates.map((template) => {
-						const prompt = template.examples[0] ?? template.triggers[0];
-						if (!prompt) {
-							return null;
-						}
-						return (
-							<button
-								className="rounded-full border border-border/70 bg-background px-2.5 py-1 text-muted-foreground text-xs transition-colors hover:bg-muted hover:text-foreground"
-								key={`${template.plugin ?? "widget"}:${template.id}`}
-								onClick={() => onChange?.(prompt)}
-								type="button"
-							>
-								{template.title}
-							</button>
-						);
-					})}
-				</div>
-			)}
-			{!botProduct && mentionQuery !== null && (
-				<MentionMenu
-					anchorRef={textareaWrapRef}
-					groups={mentionGroups}
-					onDismiss={() => setMentionQuery(null)}
-					onSelect={handleSelect}
-				/>
-			)}
-			{slashMenu?.kind === "commands" && (
-				<SlashCommandAutocomplete
-					anchorRef={textareaWrapRef}
-					commands={availableCommands}
-					menu={slashMenu}
-					mode="commands"
-					onDismiss={() => setDismissedSlashValue(value ?? "")}
-					onSelect={handleSelectSlash}
-				/>
-			)}
-			{slashMenu?.kind === "arguments" && (
-				<SlashCommandAutocomplete
-					anchorRef={textareaWrapRef}
-					menu={slashMenu}
-					mode="arguments"
-					onDismiss={() => setDismissedSlashValue(value ?? "")}
-					onSelectArgument={handleSelectSlashArgument}
-				/>
-			)}
-			<InputBar
-				{...rest}
-				composerMenuGroups={composerMenuGroups}
-				composerPrompt={
-					visiblePermission && onRespondPermission
-						? {
-								content: (
-									<PermissionPrompt
-										embedded
-										onRespond={(optionId) =>
-											onRespondPermission(visiblePermission, optionId)
-										}
-										permission={visiblePermission}
-										showTechnicalDetails={showTechnicalPermissionDetails}
-									/>
-								),
-								id: `permission:${visiblePermission.requestId}`,
-							}
-						: undefined
-				}
-				mentionItems={composerMentionItems}
-				onChange={handleChange}
-				onComposerMenuSelect={handleDirectorySelect}
-				onSend={handleSend}
-				onTextareaKeyDown={(event) => {
-					if (
-						handleComposerSettingsShortcut(
-							event,
-							composerSections,
-							composerShortcuts
-						)
-					) {
-						event.preventDefault();
-					}
-					onTextareaKeyDown?.(event);
-				}}
-				value={value}
-			/>
-		</div>
-	);
 }
 
 // biome-ignore lint/complexity/noExcessiveCognitiveComplexity: legacy component
@@ -1113,7 +481,9 @@ export default function ChatPage({
 	initialSubmit,
 	initialImages,
 	initialAgent,
+	initialTeamId,
 	initialGhost,
+	initialPluginFlags,
 	initialProject,
 	mergedAgentId,
 	tabWorktreeMode,
@@ -1146,10 +516,14 @@ export default function ChatPage({
 	 * conversation existed, carried into this fresh tab. Consumed once on mount. */
 	initialImages?: AttachedImage[];
 	initialAgent?: string;
+	/** One-shot team target carried from the new-chat launchpad. */
+	initialTeamId?: string;
 	/** Open this thread already temporary — the launchpad's "+" offers the toggle
 	 * before a conversation exists, so the pick arrives as a seed rather than as a
 	 * click on this page's own row. Consumed once on mount. */
 	initialGhost?: boolean;
+	/** One-shot composer flags carried from the new-chat launchpad. */
+	initialPluginFlags?: Record<string, boolean>;
 	initialProject?: string;
 	/** Per-tab isolation requested by a fork destination or workspace handoff. */
 	tabWorktreeMode?: boolean;
@@ -1159,6 +533,7 @@ export default function ChatPage({
 	// the shell banner always agree on the same poll tick.
 	const {
 		coreReachable,
+		connectionPhase,
 		gatewayReachable,
 		loading: statusLoading,
 	} = useSystemStatusContext();
@@ -1175,6 +550,9 @@ export default function ChatPage({
 	const interfaceLevel = useInterfaceLevel();
 	const [chatPickerPlacement] = useChatPickerPlacement();
 	const pluginContributions = usePluginContributions();
+	const drawesomeCompanion = pluginContributions.companions.find(
+		(companion) => companion.pluginId === "@ryu/drawesome" && companion.hasUi
+	);
 	const {
 		isError: pluginContributionsFailed,
 		isSuccess: pluginContributionsLoaded,
@@ -1203,6 +581,12 @@ export default function ChatPage({
 	);
 
 	const { folder, setFolder } = useWorkspaceStore();
+	const activeNode = useActiveNode();
+	const [projectlessTaskFolder] = useProjectlessTaskFolder();
+	const [showBottomPanelToggle] = useShowBottomPanelToggle();
+	const localProjectlessTaskFolder = isLocalNode(activeNode)
+		? projectlessTaskFolder
+		: null;
 	// THIS TAB's composer target. Every chat tab stays mounted at once (Layout),
 	// so this is deliberately per-instance state: nothing outside this ChatPage
 	// may write it. The seed chain (merged-view pin → tab seed → last-used hint →
@@ -1229,7 +613,7 @@ export default function ChatPage({
 	// Persistent group selection from the composer target picker. When set, every
 	// turn fans out to the group's members (Core's `team_id` takes precedence over
 	// `agent_id`). Session-only — distinct from the transient `@group` mention ref.
-	const [teamId, setTeamId] = useState<string | null>(null);
+	const [teamId, setTeamId] = useState<string | null>(initialTeamId ?? null);
 	const [agentTools, setAgentTools] = useState<string[]>([]);
 
 	// One-shot seed from a `ryu://chat/new` deep link: pre-fill the composer and
@@ -1251,7 +635,17 @@ export default function ChatPage({
 	// Workspace panel open/close state (bottom + right panels)
 	const [bottomPanelOpen, setBottomPanelOpen] = useState(false);
 	const [rightPanelOpen, setRightPanelOpen] = useState(false);
+	useEffect(() => {
+		if (!showBottomPanelToggle) {
+			setBottomPanelOpen(false);
+		}
+	}, [showBottomPanelToggle]);
 	const [shareDialogOpen, setShareDialogOpen] = useState(false);
+	const [drawesomeDialogOpen, setDrawesomeDialogOpen] = useState(false);
+	const [drawesomeSourceImage, setDrawesomeSourceImage] = useState<{
+		filename: string;
+		url: string;
+	} | null>(null);
 	// User's intent for the "Pinned summary" sidebar (project ▸ branch ▸
 	// worktree + git changes + commit&push). It docks as its own column stacked
 	// with the right panel (both can be open at once); WorkspacePanels
@@ -1434,18 +828,22 @@ export default function ChatPage({
 	// Remember the last picked agent so a new chat opens with it preselected. The
 	// agent itself is owned by Core (CRUD via U6); this is only the local "last
 	// used" hint, not agent storage.
-	const {
-		openTab,
-		updateTabBusy,
-		updateTabWorktreeMode,
-		bindTabConversation,
-		tabs,
-		clearScrollToMessage,
-	} = useTabsContext();
+	const openTab = useTabSelector((state) => state.openTab);
+	const updateTabBusy = useTabSelector((state) => state.updateTabBusy);
+	const updateTabWorktreeMode = useTabSelector(
+		(state) => state.updateTabWorktreeMode
+	);
+	const bindTabConversation = useTabSelector(
+		(state) => state.bindTabConversation
+	);
+	const clearScrollToMessage = useTabSelector(
+		(state) => state.clearScrollToMessage
+	);
 	const currentTabId = useCurrentTabId();
-	const scrollToMessageId = currentTabId
-		? tabs.find((t) => t.id === currentTabId)?.scrollToMessageId
-		: undefined;
+	const scrollToMessageId = useTabSelector(
+		(state) =>
+			state.tabs.find((tab) => tab.id === currentTabId)?.scrollToMessageId
+	);
 
 	// Model options follow the active agent's engine binding. The effective
 	// value prefers the explicit in-session pick, then the persisted per-agent
@@ -1745,6 +1143,7 @@ export default function ChatPage({
 		createConversation,
 		getConversation,
 		loadMessages,
+		loadMessagesResult,
 		loadMessagesPageResult,
 		forkConversation,
 		editMessage,
@@ -1781,6 +1180,35 @@ export default function ChatPage({
 	const [convId, setConvId] = useState<string | null>(
 		tabConversationId ?? null
 	);
+	const [chatSearch, setChatSearch] = useState<ChatSearchState>({
+		mode: "chat",
+		nonce: 0,
+		open: false,
+		query: "",
+	});
+	const [activeChatSearchMatchIndex, setActiveChatSearchMatchIndex] =
+		useState(0);
+	const fileSearchRequest = useMemo(
+		() =>
+			chatSearch.open && chatSearch.mode === "files"
+				? { nonce: chatSearch.nonce, query: chatSearch.query }
+				: null,
+		[chatSearch]
+	);
+	useEffect(() => {
+		setChatSearch((current) =>
+			current.open
+				? {
+						...current,
+						mode: "chat",
+						nonce: current.nonce + 1,
+						open: false,
+						query: "",
+					}
+				: current
+		);
+		setActiveChatSearchMatchIndex(0);
+	}, [convId]);
 	// Agent-level controls are scoped to the conversation that emitted them. Do
 	// not carry a model/effort override into a different thread that happens to
 	// use the same agent.
@@ -1793,7 +1221,7 @@ export default function ChatPage({
 	// another tab changes that selection.
 	const chatFolder = convId
 		? (getConversation(convId)?.folderPath ?? null)
-		: folder;
+		: (folder ?? localProjectlessTaskFolder);
 	const chatFolderRef = useRef<string | null>(chatFolder);
 	chatFolderRef.current = chatFolder;
 
@@ -1865,7 +1293,6 @@ export default function ChatPage({
 		}
 	}, [isActiveTab, convId, setActiveConversationId]);
 
-	const activeNode = useActiveNode();
 	const chatTarget: ApiTarget = useMemo(
 		() => ({
 			url: activeNode.url,
@@ -1884,7 +1311,7 @@ export default function ChatPage({
 				rows
 					.filter(
 						(draft) =>
-							(draft.folder_path ?? undefined) === (folder ?? undefined)
+							(draft.folder_path ?? undefined) === (chatFolder ?? undefined)
 					)
 					.map((draft) => ({
 						id: draft.id,
@@ -1895,7 +1322,7 @@ export default function ChatPage({
 		} catch {
 			setProjectDrafts([]);
 		}
-	}, [chatTarget, folder]);
+	}, [chatFolder, chatTarget]);
 	useEffect(() => {
 		void refreshProjectDrafts();
 	}, [refreshProjectDrafts]);
@@ -1909,12 +1336,12 @@ export default function ChatPage({
 			onSave: (text: string) => {
 				void saveDraft(chatTarget, {
 					text,
-					folder_path: folder ?? undefined,
+					folder_path: chatFolder ?? undefined,
 					source: "manual",
 				}).then(refreshProjectDrafts);
 			},
 		}),
-		[chatTarget, folder, projectDrafts, refreshProjectDrafts]
+		[chatFolder, chatTarget, projectDrafts, refreshProjectDrafts]
 	);
 
 	// Voice input: a stable transcribe fn (reads the live node target via a ref)
@@ -1960,9 +1387,40 @@ export default function ChatPage({
 			cancelled = true;
 		};
 	}, [effectiveModel]);
+	const [voiceInputEngine, setVoiceInputEngine] = useState<
+		string | undefined
+	>();
+	useEffect(() => {
+		let cancelled = false;
+		const load = () => {
+			getVoiceInputPrefs(chatTarget)
+				.then((prefs) => {
+					if (!cancelled) {
+						setVoiceInputEngine(prefs.engine);
+					}
+				})
+				.catch(() => undefined);
+		};
+		load();
+		const unsubscribe = subscribePreferenceChanges((key) => {
+			if (key === VOICE_PREF_KEY) {
+				load();
+			}
+		});
+		return () => {
+			cancelled = true;
+			unsubscribe();
+		};
+	}, [chatTarget]);
 	const voiceTranscribe = useCallback(
-		(audio: Blob) => transcribeAudio(chatTargetRef.current, audio),
-		[]
+		(audio: Blob) =>
+			transcribeAudio(
+				chatTargetRef.current,
+				audio,
+				"recording.wav",
+				voiceInputEngine
+			),
+		[voiceInputEngine]
 	);
 
 	// #415: Load the conversation's participants so assistant messages can still be
@@ -2046,7 +1504,9 @@ export default function ChatPage({
 	// each control's `flag`. Held in state (drives the toggle's rendered `enabled`)
 	// plus a ref the once-created transport body closure reads when merging the
 	// per-request `plugin_flags` — same pattern as the double-check flag above.
-	const [pluginFlags, setPluginFlags] = useState<Record<string, boolean>>({});
+	const [pluginFlags, setPluginFlags] = useState<Record<string, boolean>>(
+		() => ({ ...initialPluginFlags })
+	);
 	const pluginFlagsRef = useRef<Record<string, boolean>>({});
 	pluginFlagsRef.current = pluginFlags;
 
@@ -2062,8 +1522,8 @@ export default function ChatPage({
 		};
 	}, []);
 
-	// Ghost (temporary) chat: when on, every turn is sent with `persist: false` so
-	// Core writes nothing to the conversation store, and a new ghost chat is never
+	// Temporary chat: when on, every turn is sent with `persist: false` so Core
+	// writes nothing to the conversation store, and a temporary chat is never
 	// registered in the sidebar history — it lives only in this tab's memory and is
 	// gone on close or when a fresh chat starts. Ryu's incognito thread. A ref
 	// mirrors the toggle so the once-created transport body closure reads the live
@@ -2072,7 +1532,7 @@ export default function ChatPage({
 	// existed, so the very first turn is already unsaved (flipping it after mount
 	// would be too late — the turn would have persisted).
 	const [ghostMode, setGhostMode] = useState(Boolean(initialGhost));
-	// A launchpad-seeded ghost chat may render before the contribution fetch lands.
+	// A launchpad-seeded temporary chat may render before the contribution fetch lands.
 	// Keep that initial privacy behavior until the feed settles, then require the
 	// plugin declaration for every subsequent temporary-chat turn.
 	const ghostChatActive =
@@ -2097,7 +1557,7 @@ export default function ChatPage({
 	// blank state clobbers the live one and both stop updating — the "opened it
 	// again and the new tab is broken" report.
 	//
-	// A ghost (temporary) thread never binds: it must leave no durable trace, and
+	// A temporary thread never binds: it must leave no durable trace, and
 	// a persisted binding would restore a tab pointing at a conversation Core
 	// never wrote. Unbinding is equally load-bearing — a tab that starts a fresh
 	// thread must drop its old id, or a click on the OLD conversation would dedup
@@ -2202,7 +1662,7 @@ export default function ChatPage({
 						referencedConversationIds.length > 0
 							? referencedConversationIds
 							: undefined,
-					// A ghost (temporary) chat must leave no durable trace, so it never
+					// A temporary chat must leave no durable trace, so it never
 					// records the turn into long-term cross-session memory — regardless of
 					// the user's standing long-term-memory preference.
 					enable_long_term: ghostModeRef.current
@@ -2250,7 +1710,7 @@ export default function ChatPage({
 						...pluginFlagsRef.current,
 						...firedActionFlags,
 					}),
-					// Ghost (temporary) chat: never write this turn to the conversation
+					// Temporary chat: never write this turn to the conversation
 					// store. Omitted otherwise so Core applies its default (persist=true).
 					persist: ghostModeRef.current ? false : undefined,
 					// Version-tree edit/regenerate re-run: the edited user sibling is
@@ -2662,6 +2122,7 @@ export default function ChatPage({
 	// (VAD, endpointing, barge-in) lives in Core; this reflects it into the overlay.
 	const voiceMode = useVoiceMode(chatTarget, {
 		conversationId: activeConversationId ?? undefined,
+		sttEngine: voiceInputEngine,
 		ttsEngine: desktopTts.engine,
 		ttsVoice: desktopTts.voice || undefined,
 	});
@@ -2737,14 +2198,14 @@ export default function ChatPage({
 	// turn-hook interprets them — so nothing client-side handles them here.
 	const handleOpenFileLink = useCallback(
 		(mentionedPath: string) => {
-			const path = resolveWorkspaceFilePath(folder, mentionedPath);
+			const path = resolveWorkspaceFilePath(chatFolder, mentionedPath);
 			if (!path) {
 				toast.error("That file is outside the current workspace.");
 				return;
 			}
 			openTab(`/file/${encodeURIComponent(path)}`, { title: basename(path) });
 		},
-		[folder, openTab]
+		[chatFolder, openTab]
 	);
 	const handleOpenWebsiteLink = useCallback(
 		async (href: string) => {
@@ -3596,6 +3057,24 @@ export default function ChatPage({
 		setHistoryReloadKey((n) => n + 1);
 	}, []);
 
+	// A history request can lose the race with the shared status probe: the chat
+	// marks itself unavailable first, then the node comes back. Retry that one
+	// restored conversation automatically so the tab does not leave a manual
+	// error card behind after the shell has already reconnected.
+	const previousConnectionPhaseRef = useRef(connectionPhase);
+	useEffect(() => {
+		const previousPhase = previousConnectionPhaseRef.current;
+		previousConnectionPhaseRef.current = connectionPhase;
+		if (
+			connectionPhase === "online" &&
+			previousPhase !== "online" &&
+			historyFailed &&
+			convId
+		) {
+			retryHistoryLoad();
+		}
+	}, [connectionPhase, convId, historyFailed, retryHistoryLoad]);
+
 	// Hydrate the visible thread from Core's server-side store when switching
 	// conversations, so history survives restarts and is shared across clients.
 	// Switching `activeConversationId` changes `chatId`, which makes useChat
@@ -4139,7 +3618,7 @@ export default function ChatPage({
 		[contributedMessageActions]
 	);
 
-	// Emoji reactions for this conversation. A ghost chat is never persisted, so
+	// Emoji reactions for this conversation. A temporary chat is never persisted, so
 	// there is nothing to react TO and no room to fan reactions out over — the
 	// null conversation id disables the query the same way it skips presence.
 	const {
@@ -4405,7 +3884,7 @@ export default function ChatPage({
 		});
 	}, []);
 
-	// A ghost (temporary) chat never opens a realtime room: its turns are never
+	// A temporary chat never opens a realtime room: its turns are never
 	// persisted (so Core fans out nothing), and we also skip presence so a
 	// temporary thread stays fully private. `null` room id = no join.
 	const { publishPresence: publishRoomPresence } = useRealtimeRoom(
@@ -4656,6 +4135,70 @@ export default function ChatPage({
 		setAttachedImages((prev) => prev.filter((img) => img.id !== id));
 	}, []);
 
+	const handleOpenDrawesome = useCallback(() => {
+		if (drawesomeCompanion) {
+			setDrawesomeSourceImage(null);
+			setDrawesomeDialogOpen(true);
+		}
+	}, [drawesomeCompanion]);
+
+	const handleAnnotateImage = useCallback(
+		async (image: { filename?: string; id: string; url: string }) => {
+			if (!drawesomeCompanion) {
+				return;
+			}
+			const filename = image.filename?.trim() || "image.png";
+			try {
+				let dataUrl = image.url;
+				if (!dataUrl.startsWith("data:")) {
+					const response = await fetch(dataUrl, { credentials: "include" });
+					if (!response.ok) {
+						throw new Error(`Image request failed (${response.status})`);
+					}
+					const blob = await response.blob();
+					dataUrl = await fileToDataUrl(
+						new File([blob], filename, {
+							type: blob.type || "image/png",
+						})
+					);
+				}
+				setDrawesomeSourceImage({ filename, url: dataUrl });
+				setDrawesomeDialogOpen(true);
+			} catch {
+				toast.error("Could not open this image for annotation", {
+					description: "The image could not be read by Drawesome.",
+				});
+			}
+		},
+		[drawesomeCompanion]
+	);
+
+	const handleDrawesomeDialogOpenChange = useCallback((open: boolean) => {
+		setDrawesomeDialogOpen(open);
+		if (!open) {
+			setDrawesomeSourceImage(null);
+		}
+	}, []);
+
+	const handleAttachSketch = useCallback(
+		(attachment: DrawesomeSketchAttachment) => {
+			setAttachedImages((previous) => [
+				...previous,
+				{
+					id: `sketch-${Date.now()}`,
+					filename: attachment.filename,
+					url: attachment.dataUrl,
+					mimeType: attachment.mimeType,
+					size: attachment.size,
+				},
+			]);
+			toast.success("Sketch attached", {
+				description: "It will be included with your next message in this chat.",
+			});
+		},
+		[]
+	);
+
 	const handlePaste = useCallback(
 		(e: React.ClipboardEvent) => {
 			const pastedText = e.clipboardData.getData("text/plain");
@@ -4771,6 +4314,10 @@ export default function ChatPage({
 				browserSnapshot?.activeSurface === "dashboard" &&
 				browserSnapshot.activeAgentId === agentId &&
 				browserModel?.capabilities.chatSupport === true &&
+				!(
+					ghostChatActive &&
+					pluginFlagsRef.current[TEMPORARY_CONTEXT_FLAG] === true
+				) &&
 				(message.attachments?.length ?? 0) === 0;
 			if (browserLocalActive) {
 				forceCoreNextRef.current = false;
@@ -4884,7 +4431,7 @@ export default function ChatPage({
 			const sendFolder = chatFolderRef.current ?? undefined;
 			if (!convId) {
 				const newId = draftConvId.current;
-				// A ghost (temporary) chat is never registered in the sidebar history:
+				// A temporary chat is never registered in the sidebar history:
 				// skip `createConversation` so it leaves no trace in the thread list.
 				// The turn still streams (useChat keys off the local id) and Core
 				// persists nothing because the transport sends `persist: false`.
@@ -4915,7 +4462,7 @@ export default function ChatPage({
 			// wait — without it the row reads "New Chat" for the whole first reply
 			// (the list is only re-fetched once the turn completes). The chat-title
 			// plugin replaces it with a model-written name after that reply lands.
-			// Ghost chats are absent from the list, so the seed is a no-op for them.
+			// Temporary chats are absent from the list, so the seed is a no-op for them.
 			if (!ghostChatActive) {
 				const titleTargetId = convIdRef.current ?? draftConvId.current;
 				if (titleTargetId) {
@@ -5030,6 +4577,103 @@ export default function ChatPage({
 		startFreshThread();
 		setGhostMode((on) => !on);
 	}, [ghostChatsPluginEnabled, startFreshThread]);
+
+	const [savingTemporaryChat, setSavingTemporaryChat] = useState(false);
+	const handleSaveTemporaryChat = useCallback(async () => {
+		if (
+			!ghostChatActive ||
+			savingTemporaryChat ||
+			status === "submitted" ||
+			status === "streaming"
+		) {
+			return;
+		}
+		const conversationId = convIdRef.current ?? draftConvId.current;
+		const snapshot = messages.flatMap((message) => {
+			if (message.role !== "user" && message.role !== "assistant") {
+				return [];
+			}
+			return [
+				{
+					content: extractAssistantText(message),
+					parts: Array.isArray(message.parts) ? [...message.parts] : undefined,
+					role: message.role,
+				},
+			];
+		});
+		if (snapshot.length === 0) {
+			return;
+		}
+
+		setSavingTemporaryChat(true);
+		try {
+			const folderPath = chatFolderRef.current ?? folder ?? undefined;
+			await saveTemporaryChat(chatTarget, conversationId, {
+				agentId: agentId ?? undefined,
+				folderPath,
+				messages: snapshot,
+			});
+			createConversation(conversationId, {
+				agentId: agentId ?? undefined,
+				folderPath,
+			});
+			if (folderPath) {
+				setConversationFolder(conversationId, folderPath);
+			}
+			const firstUserMessage = snapshot.find(
+				(message) => message.role === "user"
+			);
+			if (firstUserMessage) {
+				seedTitleFromFirstMessage(conversationId, firstUserMessage.content);
+			}
+			setConvId(conversationId);
+			setGhostMode(false);
+			setActiveConversationId(conversationId);
+
+			const saved = await loadMessagesResult(conversationId);
+			if (saved.status === "ok" && saved.messages.length > 0) {
+				const now = Date.now();
+				for (const message of saved.messages) {
+					if (typeof message.timestamp === "number") {
+						messageSentAtRef.current.set(message.id, message.timestamp);
+					}
+				}
+				setVersions(buildVersions(saved.messages));
+				setMessages(
+					saved.messages.map((message) => hydrateHistoryMessage(message, now))
+				);
+			}
+			clearError();
+			refresh();
+			toast.success("Chat saved", {
+				description: "This temporary chat is now in your history.",
+			});
+		} catch {
+			toast.error("Couldn’t save temporary chat", {
+				description: "The chat is still temporary. Try saving again.",
+			});
+		} finally {
+			setSavingTemporaryChat(false);
+		}
+	}, [
+		agentId,
+		chatFolderRef,
+		chatTarget,
+		clearError,
+		createConversation,
+		folder,
+		ghostChatActive,
+		loadMessagesResult,
+		messages,
+		refresh,
+		savingTemporaryChat,
+		seedTitleFromFirstMessage,
+		setConvId,
+		setActiveConversationId,
+		setConversationFolder,
+		setMessages,
+		status,
+	]);
 
 	// `/btw` side question: an ephemeral question about the current conversation
 	// shown in a dismissible overlay and never added to the chat history (modeled
@@ -5293,6 +4937,25 @@ export default function ChatPage({
 		});
 	}, [stop]);
 
+	const toggleChatSearch = useCallback(() => {
+		setActiveChatSearchMatchIndex(0);
+		setChatSearch((current) =>
+			current.open
+				? {
+						...current,
+						mode: current.mode === "chat" ? "files" : "chat",
+						nonce: current.nonce + 1,
+					}
+				: {
+						...current,
+						mode: "chat",
+						nonce: current.nonce + 1,
+						open: true,
+						query: "",
+					}
+		);
+	}, []);
+
 	// Publish this tab's chat-owned shortcut handlers while it is the FOCUSED tab.
 	// Every chat tab stays mounted, and the hotkey provider keeps one handler per
 	// action id (last-writer-wins), so binding `chat.stop` inside ChatPage would
@@ -5302,9 +4965,12 @@ export default function ChatPage({
 	const hotkeyOwner = useId();
 	const publishHotkeyTargets = useChatHotkeyTargets((s) => s.publish);
 	const clearHotkeyTargets = useChatHotkeyTargets((s) => s.clearIfOwner);
+	const publishFileTreeSearch = useFileTreeSearchStore((s) => s.publish);
+	const clearFileTreeSearch = useFileTreeSearchStore((s) => s.clearIfOwner);
 	useEffect(() => {
 		if (!isActiveTab) {
 			clearHotkeyTargets(hotkeyOwner);
+			clearFileTreeSearch(hotkeyOwner);
 			return;
 		}
 		publishHotkeyTargets(hotkeyOwner, {
@@ -5314,17 +4980,30 @@ export default function ChatPage({
 				effectiveStatus === "streaming" || effectiveStatus === "submitted",
 			stop: handleStop,
 			startVoiceMode: voiceMode.start,
-			toggleBottomPanel: () => setBottomPanelOpen((v) => !v),
+			toggleBottomPanel: showBottomPanelToggle
+				? () => setBottomPanelOpen((v) => !v)
+				: null,
 			toggleRightPanel: () => setRightPanelOpen((v) => !v),
+			toggleSearch: toggleChatSearch,
 		});
-		return () => clearHotkeyTargets(hotkeyOwner);
+		publishFileTreeSearch(hotkeyOwner, fileSearchRequest);
+		return () => {
+			clearHotkeyTargets(hotkeyOwner);
+			clearFileTreeSearch(hotkeyOwner);
+		};
 	}, [
+		chatSearch,
+		clearFileTreeSearch,
+		fileSearchRequest,
 		isActiveTab,
 		hotkeyOwner,
 		effectiveStatus,
 		handleStop,
 		voiceMode.start,
+		toggleChatSearch,
+		showBottomPanelToggle,
 		publishHotkeyTargets,
+		publishFileTreeSearch,
 		clearHotkeyTargets,
 	]);
 
@@ -5708,6 +5387,42 @@ export default function ChatPage({
 	const composerSeed = initialSubmit
 		? undefined
 		: (initialPrompt ?? restoredDraft);
+	useEffect(() => {
+		if (!currentTabId) {
+			return;
+		}
+		return registerTabSnapshot(currentTabId, () => {
+			// Temporary history exists only in this renderer; keep its owner until
+			// the temporary-chat runtime can resume it in another renderer.
+			if (ghostChatActive && messages.length > 0) {
+				throw new TabTransferBlockedError(
+					"Save this temporary chat before moving it to another window."
+				);
+			}
+			return {
+				initialPrompt: composerDraftRef.current,
+				initialImages: attachedImages,
+				initialAgent: agentId ?? undefined,
+				initialModel: effectiveModel ?? undefined,
+				initialProject: chatFolder ?? undefined,
+				initialGhost: ghostChatActive,
+				initialPluginFlags: pluginFlags,
+				initialTeamId: teamId ?? undefined,
+				initialQuote: quote ?? undefined,
+			};
+		});
+	}, [
+		currentTabId,
+		attachedImages,
+		agentId,
+		effectiveModel,
+		chatFolder,
+		ghostChatActive,
+		pluginFlags,
+		teamId,
+		quote,
+		messages.length,
+	]);
 	const handleCreateFocusedThread = useCallback(async () => {
 		const pending = replyContext;
 		if (!(pending && convId) || creatingReplyThread) {
@@ -5815,6 +5530,23 @@ export default function ChatPage({
 		},
 		[maybeAutoQueue, submitNow]
 	);
+
+	// Sidebar quick replies use the same submit path as the visible composer. Keep
+	// the callback in a ref so the tab registers once per conversation instead of
+	// rebuilding its cross-component bridge on every composer render.
+	const registerQuickReplyHandler = useQuickReplyStore(
+		(state) => state.registerHandler
+	);
+	const quickReplySubmitRef = useRef(handleComposerSubmit);
+	quickReplySubmitRef.current = handleComposerSubmit;
+	useEffect(() => {
+		if (!convId) {
+			return;
+		}
+		return registerQuickReplyHandler(chatTarget.url, convId, (content) => {
+			void quickReplySubmitRef.current({ role: "user", content });
+		});
+	}, [chatTarget.url, convId, registerQuickReplyHandler]);
 
 	const handleAgentUiSubmit = useCallback(
 		(value: unknown) => {
@@ -6149,6 +5881,77 @@ export default function ChatPage({
 				: processedMessages,
 		[merged.messages, processedMessages]
 	);
+	const chatSearchMatches = useChatSearch(
+		renderedMessages,
+		chatSearch.query,
+		chatSearch.mode === "chat" && chatSearch.open
+	);
+	const activeChatSearchMatch =
+		chatSearchMatches[activeChatSearchMatchIndex] ?? null;
+	useEffect(() => {
+		setActiveChatSearchMatchIndex((current) =>
+			chatSearchMatches.length === 0
+				? 0
+				: Math.min(current, chatSearchMatches.length - 1)
+		);
+	}, [chatSearchMatches.length]);
+	useEffect(() => {
+		if (
+			!(chatSearch.open && chatSearch.mode === "chat" && activeChatSearchMatch)
+		) {
+			return;
+		}
+		const frame = window.requestAnimationFrame(() => {
+			window.dispatchEvent(
+				new CustomEvent("ryu:scroll-to-message", {
+					detail: { messageId: activeChatSearchMatch.anchorMessageId },
+				})
+			);
+		});
+		return () => window.cancelAnimationFrame(frame);
+	}, [
+		activeChatSearchMatch?.anchorMessageId,
+		activeChatSearchMatch?.messageId,
+		chatSearch.mode,
+		chatSearch.open,
+	]);
+
+	const closeChatSearch = useCallback(() => {
+		setActiveChatSearchMatchIndex(0);
+		setChatSearch((current) => ({
+			...current,
+			mode: "chat",
+			nonce: current.nonce + 1,
+			open: false,
+			query: "",
+		}));
+	}, []);
+	const changeChatSearchMode = useCallback((mode: ChatSearchMode) => {
+		setActiveChatSearchMatchIndex(0);
+		setChatSearch((current) =>
+			current.mode === mode
+				? current
+				: { ...current, mode, nonce: current.nonce + 1, open: true }
+		);
+	}, []);
+	const changeChatSearchQuery = useCallback((query: string) => {
+		setActiveChatSearchMatchIndex(0);
+		setChatSearch((current) => ({ ...current, query, open: true }));
+	}, []);
+	const nextChatSearchMatch = useCallback(() => {
+		setActiveChatSearchMatchIndex((current) =>
+			chatSearchMatches.length === 0
+				? 0
+				: (current + 1) % chatSearchMatches.length
+		);
+	}, [chatSearchMatches.length]);
+	const previousChatSearchMatch = useCallback(() => {
+		setActiveChatSearchMatchIndex((current) =>
+			chatSearchMatches.length === 0
+				? 0
+				: (current - 1 + chatSearchMatches.length) % chatSearchMatches.length
+		);
+	}, [chatSearchMatches.length]);
 
 	// #415: Stable slot reference for the custom InputBar. Using useMemo with an
 	// empty dep array so the component identity is stable across renders, avoiding
@@ -6648,6 +6451,7 @@ export default function ChatPage({
 		interfaceLevel === "simple" || processedMessages.length > 0 ? null : (
 			<WorkspaceBar
 				conversationId={activeConversationId ?? draftConvId.current}
+				folderOverride={chatFolder}
 				onWorktreeModeChange={handleWorktreeModeChange}
 				target={chatTarget}
 				worktreeModeOverride={tabWorktreeMode}
@@ -6691,33 +6495,48 @@ export default function ChatPage({
 	// InputBar slot) so a toggle re-renders the composer without rebuilding the slot.
 	const pluginComposerControls = useMemo<PluginComposerControlRow[]>(
 		() =>
-			partitionedComposerControls.toggles.map((c) => ({
-				id: c.id,
-				flag: c.flag,
-				label: c.label,
-				description: c.description,
-				enabled: Boolean(pluginFlags[c.flag]),
-				onToggle: (flag: string, next: boolean) =>
-					setPluginFlags((m) => ({ ...m, [flag]: next })),
-			})),
-		[partitionedComposerControls.toggles, pluginFlags]
+			partitionedComposerControls.toggles
+				.filter((c) => c.flag !== TEMPORARY_CONTEXT_FLAG || ghostChatActive)
+				.map((c) => ({
+					id: c.id,
+					flag: c.flag,
+					label: c.label,
+					description: c.description,
+					enabled: Boolean(pluginFlags[c.flag]),
+					onToggle: (flag: string, next: boolean) =>
+						setPluginFlags((m) => ({ ...m, [flag]: next })),
+				})),
+		[ghostChatActive, partitionedComposerControls.toggles, pluginFlags]
 	);
 	const pluginComposerControlsRef = useRef<PluginComposerControlRow[]>([]);
 	pluginComposerControlsRef.current = pluginComposerControls;
 	const expandedComposerPluginEnabledRef = useRef(false);
 	expandedComposerPluginEnabledRef.current = expandedComposerPluginEnabled;
 
-	// Ghost (temporary) chat toggle, now a row in the composer "+" dropdown rather
+	// Temporary chat toggle, now a row in the composer "+" dropdown rather
 	// than a standalone toolbar button. Held in a ref (assigned every render) so
 	// the memoized InputBar slot stays stable. Only offered on the new-chat surface
 	// (no rendered messages) — an existing conversation can't retroactively become
-	// temporary — but it stays available during an active ghost chat so the user
+	// temporary — but it stays available during an active temporary chat so the user
 	// can see and exit the temporary state. `undefined` hides the row entirely.
 	const ghostControlsRef = useRef<GhostControls | undefined>(undefined);
 	ghostControlsRef.current =
 		ghostChatsPluginEnabled &&
 		(processedMessages.length === 0 || ghostChatActive)
 			? { active: ghostChatActive, onToggle: toggleGhostMode }
+			: undefined;
+	const temporaryChatSaveControlsRef = useRef<
+		TemporaryChatSaveControls | undefined
+	>(undefined);
+	temporaryChatSaveControlsRef.current =
+		ghostChatActive && messages.length > 0
+			? {
+					disabled: status === "submitted" || status === "streaming",
+					onSave: () => {
+						void handleSaveTemporaryChat();
+					},
+					saving: savingTemporaryChat,
+				}
 			: undefined;
 
 	const councilInputBar = useMemo(() => {
@@ -6740,7 +6559,7 @@ export default function ChatPage({
 					expandComposer={
 						botProduct ? false : expandedComposerPluginEnabledRef.current
 					}
-					// Dashed violet composer treatment while a ghost (temporary) chat is
+					// Dashed violet composer treatment while a temporary chat is
 					// active. `ghostMode` is a dep of this memo, so the closure value is
 					// always current (no ref needed).
 					ghost={botProduct ? false : ghostChatActive}
@@ -6779,6 +6598,9 @@ export default function ChatPage({
 					}
 					queueBar={queueBarRef.current}
 					rightActions={composerControlsRef.current.right}
+					temporaryChatSaveControls={
+						botProduct ? undefined : temporaryChatSaveControlsRef.current
+					}
 					turnProgress={turnProgressRef.current}
 					voice={{
 						transcribe: voiceTranscribe,
@@ -7180,7 +7002,7 @@ export default function ChatPage({
 				{shareAction}
 				<PanelToggleButtons
 					bottomOpen={bottomPanelOpen}
-					folder={folder}
+					folder={chatFolder}
 					onBottomToggle={() => setBottomPanelOpen((v) => !v)}
 					onPinnedSummaryToggle={
 						hasMessages ? () => setPinnedSummaryOpen((v) => !v) : undefined
@@ -7188,6 +7010,7 @@ export default function ChatPage({
 					onRightToggle={() => setRightPanelOpen((v) => !v)}
 					pinnedSummaryOpen={pinnedSummaryOpen}
 					rightOpen={rightPanelOpen}
+					showBottomPanelToggle={showBottomPanelToggle}
 				/>
 			</>
 		);
@@ -7201,10 +7024,30 @@ export default function ChatPage({
 		composerPicker,
 		chatPickerPlacement,
 		bottomPanelOpen,
+		showBottomPanelToggle,
 		rightPanelOpen,
-		folder,
+		chatFolder,
 		pinnedSummaryOpen,
 	]);
+
+	const historyErrorCopy =
+		connectionPhase === "online"
+			? {
+					description:
+						"This node didn't answer. Your messages are still on it — nothing has been lost.",
+					title: "Couldn't load this conversation",
+				}
+			: connectionPhase === "offline"
+				? {
+						description:
+							"Ryu will retry automatically when your connection returns.",
+						title: "Waiting for connectivity",
+					}
+				: {
+						description:
+							"Ryu will retry automatically when this node reconnects.",
+						title: "Waiting for node",
+					};
 
 	useTitleBar(hasThread ? conversationTitle : null, titlebarActions);
 
@@ -7228,6 +7071,13 @@ export default function ChatPage({
 					title={conversationTitle}
 				/>
 			) : null}
+			<DrawesomeSketchDialog
+				companion={drawesomeCompanion}
+				onAttach={handleAttachSketch}
+				onOpenChange={handleDrawesomeDialogOpenChange}
+				open={drawesomeDialogOpen}
+				sourceImage={drawesomeSourceImage ?? undefined}
+			/>
 			<WorkspaceRequiredDialog
 				onFolderSelected={handleWorkspaceFolderSelected}
 				onOpenChange={(open) => {
@@ -7249,7 +7099,8 @@ export default function ChatPage({
 				}}
 				cowork={coworkData}
 				fileReviewRequest={fileReviewRequest}
-				folder={folder}
+				fileSearchRequest={fileSearchRequest}
+				folder={chatFolder}
 				onBottomOpenChange={setBottomPanelOpen}
 				onRightOpenChange={setRightPanelOpen}
 				renderPinnedSummary={
@@ -7287,6 +7138,20 @@ export default function ChatPage({
 						onDragOver={handleDragOver}
 						onDrop={handleDrop}
 					>
+						{chatSearch.open && (
+							<ChatSearchBar
+								activeMatchIndex={activeChatSearchMatchIndex}
+								folderAvailable={Boolean(chatFolder)}
+								matches={chatSearchMatches}
+								mode={chatSearch.mode}
+								onClose={closeChatSearch}
+								onModeChange={changeChatSearchMode}
+								onNextMatch={nextChatSearchMatch}
+								onPreviousMatch={previousChatSearchMatch}
+								onQueryChange={changeChatSearchQuery}
+								query={chatSearch.query}
+							/>
+						)}
 						<WidgetHostContext.Provider value={widgetHostValue}>
 							<AgentChat
 								agentMessageContext={agentMessageContext}
@@ -7298,6 +7163,12 @@ export default function ChatPage({
 								attachments={{
 									images: attachedImages,
 									onAttach: handleAttach,
+									onSketch: drawesomeCompanion
+										? handleOpenDrawesome
+										: undefined,
+									onAnnotateImage: drawesomeCompanion
+										? handleAnnotateImage
+										: undefined,
 									onRemoveImage: handleRemoveImage,
 									onPaste: handlePaste,
 									isDragOver,
@@ -7332,7 +7203,7 @@ export default function ChatPage({
 										// summarises exactly what the composer's own trigger does.
 										sections={composerTriggerSections}
 										showProjectPicker={!botProduct}
-										// Ghost (temporary) chat: the empty-state greeting whispers
+										// Temporary chat: the empty-state greeting whispers
 										// "secretly" so it's obvious this thread won't be saved.
 										title={
 											ghostChatActive
@@ -7376,9 +7247,7 @@ export default function ChatPage({
 								historyError={
 									historyFailed
 										? {
-												title: "Couldn't load this conversation",
-												description:
-													"This node didn't answer. Your messages are still on it — nothing has been lost.",
+												...historyErrorCopy,
 												onRetry: retryHistoryLoad,
 											}
 										: undefined
@@ -7429,6 +7298,11 @@ export default function ChatPage({
 								onWorkflowResume={handleWorkflowResume}
 								previewResolvers={linkPreviewResolvers}
 								quote={quote}
+								searchActiveMessageId={
+									chatSearch.open && chatSearch.mode === "chat"
+										? activeChatSearchMatch?.messageId
+										: undefined
+								}
 								seedDraft={composerSeed}
 								selectionActions={contributedSelectionActions}
 								showCopyToolbar

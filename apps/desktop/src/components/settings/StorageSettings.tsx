@@ -45,6 +45,7 @@ import {
 } from "@/src/lib/api/documents.ts";
 import { formatBytes, NODE_UPLOAD_MAX_BYTES } from "@/src/lib/api/spaces.ts";
 import { listenWhenReady } from "@/src/lib/tauri-ready.ts";
+import { NodeBackupSettings } from "./BackupSettings.tsx";
 
 /** Profiles a copy can target.
  *
@@ -385,7 +386,7 @@ export function StorageSettings() {
 						{humanBytes(picked.validation.target_free_bytes)} free at target
 					</div>
 				) : (
-					<div className="text-destructive text-xs">
+					<div className="text-status-destructive text-xs">
 						{picked.validation.error}
 					</div>
 				)}
@@ -566,6 +567,7 @@ export function StorageSettings() {
 				</>
 			) : null}
 
+			<NodeBackupSettings />
 			<UploadCeilingSection />
 
 			<AlertDialog
@@ -635,7 +637,7 @@ export function StorageSettings() {
 						    memory entry and plugin secret is unreadable — and there is no
 						    rekey path to recover it. Saying so here is the only place a
 						    user can still act on it. */}
-						<AlertDialogDescription className="text-warning">
+						<AlertDialogDescription className="text-status-warning">
 							Your encryption key is stored in this machine&apos;s keychain, not
 							in the backup. If this zip came from another machine or another
 							user account, chats, memory and plugin secrets will restore but

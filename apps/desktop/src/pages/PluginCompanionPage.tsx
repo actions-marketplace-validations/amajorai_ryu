@@ -22,7 +22,7 @@ import {
 	EmptyTitle,
 } from "@ryu/ui/components/empty";
 import { useMemo } from "react";
-import { useTabsContext } from "@/src/contexts/TabsContext.tsx";
+import { useTabSelector } from "@/src/contexts/TabsContext.tsx";
 import { PluginHostPanel } from "@/src/contributions/host/PluginHostPanel.tsx";
 import { usePluginContributions } from "@/src/hooks/usePluginContributions.ts";
 
@@ -42,7 +42,7 @@ import { usePluginContributions } from "@/src/hooks/usePluginContributions.ts";
  * names the Store so the state is actionable instead of a dead end.
  */
 export function CompanionUnavailable() {
-	const { openTab } = useTabsContext();
+	const openTab = useTabSelector((state) => state.openTab);
 
 	return (
 		<div className="flex h-full items-center justify-center p-6">
@@ -113,7 +113,7 @@ export default function PluginCompanionPage({
 						<HugeiconsIcon className="size-5" icon={Package01Icon} />
 					</div>
 					<div className="min-w-0">
-						<h1 className="truncate font-semibold text-lg">
+						<h1 className="truncate font-medium text-lg">
 							{companion.label || companion.name}
 						</h1>
 						<p className="truncate text-muted-foreground text-sm">

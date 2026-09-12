@@ -14,7 +14,8 @@
 //   POST /api/credits/topup   -> a Polar checkout URL + fee breakdown for a pack
 //
 // Top-ups go through Polar (epic #496, Unit B2). The buyer is CHARGED
-// `face + deposit fee` (5% + $0.35) and the wallet is CREDITED the FACE value;
+// `face + deposit fee` (the plan's current percentage/floor quote) and the wallet
+// is CREDITED the FACE value;
 // the topup response carries the {@link TopupQuote} so the UI can show the fee
 // before sending the buyer to checkout. Balances and ledger deltas are in
 // micro-USD (millionths of a dollar) integers to avoid float drift;
@@ -96,12 +97,31 @@ export const LEDGER_REASON_LABELS: Record<LedgerReason, string> = {
 
 /** The materialized prepaid balance for the caller's active org. */
 export interface CreditWallet {
+	/** False when Polar returns only the aggregate meter balance. */
+	balanceBreakdownAvailable?: boolean;
 	balanceMicroUsd: number;
 	currency: string;
 	id: string;
 	ownerId: string;
 	ownerType: string;
+	providerAllocations?: CreditProviderAllocation[];
+	/** `polar` means Polar owns the provider balance; `local` is legacy mode. */
+	source?: "local" | "polar";
+	/** Remaining included plan credit for the current billing period. */
+	subscriptionBalanceMicroUsd: number | null;
+	/** Remaining purchased credit; this balance rolls over. */
+	topupBalanceMicroUsd: number | null;
+	/** Polar aggregate meter balance available for any provider. */
+	unrestrictedBalanceMicroUsd?: number;
 	updatedAt: string;
+}
+
+export interface CreditProviderAllocation {
+	expiresAt: string | null;
+	isFreeProvider: boolean;
+	label: string;
+	poolId: string;
+	remainingMicroUsd: number;
 }
 
 /** One append-only ledger entry (credit or debit). */
@@ -413,7 +433,10 @@ export async function createTopup(input: TopupInput): Promise<TopupResult> {
 	}
 	const resp = await fetch(`${BASE}/topup`, {
 		method: "POST",
-		headers: authHeaders(),
+		headers: {
+			...authHeaders(),
+			"Idempotency-Key": crypto.randomUUID(),
+		},
 		body: JSON.stringify(body),
 	});
 	if (!resp.ok) {

@@ -364,7 +364,7 @@ export function MemoryGitSourceCard({
 					<p className="basis-full text-muted-foreground text-xs">{notice}</p>
 				) : null}
 				{error ? (
-					<p className="basis-full text-destructive text-xs">{error}</p>
+					<p className="basis-full text-status-destructive text-xs">{error}</p>
 				) : null}
 			</CardContent>
 		</Card>

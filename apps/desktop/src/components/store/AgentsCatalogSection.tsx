@@ -18,9 +18,10 @@
 // Recommended agents (the flagship) sort first and carry a "Recommended" badge.
 // The flagship `ryu` is locked: it is always installed and cannot be removed.
 //
-// Below the runtimes sits the COMMUNITY shelf (`CommunityAgents.tsx`): agents
-// other users published, browsed from the control plane rather than Core. They
-// are a different species — a configuration someone wrote, not a vendor program —
+// Below the runtimes sits the Agent Templates shelf (`CommunityAgents.tsx`):
+// customized definitions other users published, browsed from the control plane
+// rather than Core. They are a different species — a configuration someone
+// wrote, not a vendor program —
 // so they never mix into the runtime groups, and installing one goes through
 // Core's published-agent install (which strips the privilege-bearing bindings and
 // reports them back) rather than the runtime installer used above.
@@ -41,8 +42,10 @@ import {
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { InstallProgressButton } from "@ryu/blocks/desktop/install-button.tsx";
+import StoreCatalogCard from "@ryu/marketplace/catalog/chrome/store-catalog-card";
 import StoreCatalogLayout, {
 	StoreCardGrid,
+	useStoreViewMode,
 } from "@ryu/marketplace/catalog/chrome/store-catalog-layout";
 import StoreItemAction, {
 	storeItemContextMenu,
@@ -219,67 +222,90 @@ function AgentCards({
 	 *  installed plugin, which is most agents. */
 	settingsOpener: PluginSettingsOpener;
 }) {
+	const view = useStoreViewMode()?.mode ?? "showcase";
 	return (
 		<StoreCardGrid>
-			{agents.map((entry) => (
-				<AgentBadgeCard
-					action={
-						<AgentCardAction
-							busy={pendingId === entry.id}
-							entry={entry}
-							onInstall={() => onInstall(entry.id)}
-							onOpenSettings={settingsOpener(entry.id)}
-							onUninstall={() => onUninstall(entry.id)}
-						/>
-					}
-					// An agent that cannot run here is dimmed, never hidden: "why is
-					// Codex not in this list?" is a worse question to leave the user with
-					// than a greyed row whose glyph says which platform it needs.
-					className={
-						entry.available || entry.added ? undefined : UNAVAILABLE_ROW_CLASS
-					}
-					// Mirrors `AgentCardAction` branch for branch, in its order. The
-					// flagship is checked FIRST and pinned to installed+locked exactly as
-					// the card does — it ships with Ryu whether or not its catalog row
-					// happens to carry `added`, and a right-click offering to "Add" the
-					// built-in agent is the one wrong answer here. Then: an agent this
-					// platform cannot run has no verbs at all, and everything else gets
-					// the same Add/Settings/Remove the card's own control offers.
-					contextMenu={
-						entry.id === FLAGSHIP_AGENT_ID
+			{agents.map((entry) => {
+				const action = (
+					<AgentCardAction
+						busy={pendingId === entry.id}
+						entry={entry}
+						onInstall={() => onInstall(entry.id)}
+						onOpenSettings={settingsOpener(entry.id)}
+						onUninstall={() => onUninstall(entry.id)}
+					/>
+				);
+				// Mirrors `AgentCardAction` branch for branch, in its order. The
+				// flagship is checked FIRST and pinned to installed+locked exactly as
+				// the card does — it ships with Ryu whether or not its catalog row
+				// happens to carry `added`, and a right-click offering to "Add" the
+				// built-in agent is the one wrong answer here. Then: an agent this
+				// platform cannot run has no verbs at all, and everything else gets
+				// the same Add/Settings/Remove the card's own control offers.
+				const contextMenu =
+					entry.id === FLAGSHIP_AGENT_ID
+						? storeItemContextMenu({
+								installed: true,
+								locked: true,
+								onOpenSettings: settingsOpener(entry.id) ?? undefined,
+							})
+						: entry.available || entry.added
 							? storeItemContextMenu({
-									installed: true,
-									locked: true,
+									installed: entry.added,
+									onInstall: () => onInstall(entry.id),
 									onOpenSettings: settingsOpener(entry.id) ?? undefined,
+									onUninstall: () => onUninstall(entry.id),
 								})
-							: entry.available || entry.added
-								? storeItemContextMenu({
-										installed: entry.added,
-										onInstall: () => onInstall(entry.id),
-										onOpenSettings: settingsOpener(entry.id) ?? undefined,
-										onUninstall: () => onUninstall(entry.id),
-									})
-								: undefined
-					}
-					employeeId={entry.id}
-					key={entry.id}
-					// On the card face, above the name — Claude, Codex and Cursor are
-					// recognised by their marks long before their names are read, and a
-					// 20px glyph in the footer strip under the card read as an
-					// annotation rather than as whose card this is.
-					logo={
-						<AgentCatalogLogo
-							className="size-20 opacity-90"
-							entry={entry}
-							size="80px"
+							: undefined;
+				// An agent that cannot run here is dimmed, never hidden: "why is
+				// Codex not in this list?" is a worse question to leave the user with
+				// than a greyed row whose glyph says which platform it needs.
+				const className =
+					entry.available || entry.added ? undefined : UNAVAILABLE_ROW_CLASS;
+				if (view === "showcase") {
+					return (
+						<AgentBadgeCard
+							action={action}
+							className={className}
+							contextMenu={contextMenu}
+							employeeId={entry.id}
+							key={entry.id}
+							// On the card face, above the name — Claude, Codex and Cursor are
+							// recognised by their marks long before their names are read, and a
+							// 20px glyph in the footer strip under the card read as an
+							// annotation rather than as whose card this is.
+							logo={
+								<AgentCatalogLogo
+									className="size-20 opacity-90"
+									entry={entry}
+									size="80px"
+								/>
+							}
+							name={entry.name}
+							onOpen={() => onSelect(entry.id)}
+							role={entry.description}
+							selected={entry.id === selectedId}
 						/>
-					}
-					name={entry.name}
-					onOpen={() => onSelect(entry.id)}
-					role={entry.description}
-					selected={entry.id === selectedId}
-				/>
-			))}
+					);
+				}
+				return (
+					<StoreCatalogCard
+						action={action}
+						brandIcon={
+							<AgentCatalogLogo className="size-8" entry={entry} size="32px" />
+						}
+						contextMenu={contextMenu}
+						description={entry.description}
+						dimmed={!(entry.available || entry.added)}
+						iconUrl={entry.iconUrl}
+						key={entry.id}
+						name={entry.name}
+						onClick={() => onSelect(entry.id)}
+						seedId={entry.id}
+						selected={entry.id === selectedId}
+					/>
+				);
+			})}
 		</StoreCardGrid>
 	);
 }
@@ -423,7 +449,7 @@ function AgentDetailPanel({
 						onUninstall={onUninstall}
 					/>
 					{error && (
-						<span className="ml-auto flex items-center gap-1.5 text-destructive text-sm">
+						<span className="ml-auto flex items-center gap-1.5 text-sm text-status-destructive">
 							<HugeiconsIcon className="size-4 shrink-0" icon={Alert01Icon} />
 							{error}
 						</span>
@@ -541,7 +567,7 @@ export default function AgentsCatalogSection({
 		useAgentsCatalog();
 	const [errorId, setErrorId] = useState<string | null>(null);
 
-	// ── Community agents (published definitions, control plane) ────────────────
+	// ── Agent Templates (published definitions, control plane) ────────────────
 	// A second, independent catalog: it has its own loading/error state and its own
 	// selection, because a marketplace outage must not touch the runtime list above.
 	const community = useCommunityAgents();

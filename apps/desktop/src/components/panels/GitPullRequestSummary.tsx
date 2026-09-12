@@ -75,17 +75,19 @@ function CheckIcon({ check }: { check: PullRequestCheck }) {
 	const bucket = checkBucket(check);
 	if (bucket === "pass") {
 		return (
-			<IconCircleCheck aria-hidden className="size-3.5 text-emerald-500" />
+			<IconCircleCheck aria-hidden className="size-3.5 text-status-success" />
 		);
 	}
 	if (bucket === "fail") {
-		return <IconCircleX aria-hidden className="size-3.5 text-destructive" />;
+		return (
+			<IconCircleX aria-hidden className="size-3.5 text-status-destructive" />
+		);
 	}
 	if (bucket === "pending") {
 		return (
 			<IconLoader2
 				aria-hidden
-				className="size-3.5 animate-spin text-amber-500"
+				className="size-3.5 animate-spin text-status-warning"
 			/>
 		);
 	}
@@ -146,11 +148,11 @@ export function GitPullRequestSummary({
 					: "No checks yet";
 	const ciTone =
 		failed.length > 0
-			? "text-destructive"
+			? "text-status-destructive"
 			: pending > 0
-				? "text-amber-600 dark:text-amber-400"
+				? "text-status-warning"
 				: checkCount > 0
-					? "text-emerald-600 dark:text-emerald-400"
+					? "text-status-success"
 					: "text-muted-foreground";
 
 	return (
@@ -182,7 +184,7 @@ export function GitPullRequestSummary({
 				<span className={cn("min-w-0 truncate", ciTone)}>{ciLabel}</span>
 				{onFix && failed.length > 0 ? (
 					<button
-						className="ml-auto shrink-0 rounded-md px-1.5 py-0.5 font-medium text-destructive transition-colors hover:bg-destructive/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+						className="ml-auto shrink-0 rounded-md px-1.5 py-0.5 font-medium text-status-destructive transition-colors hover:bg-destructive/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
 						onClick={(event) => {
 							event.preventDefault();
 							event.stopPropagation();
@@ -201,7 +203,7 @@ export function GitPullRequestSummary({
 				>
 					<IconCircleX
 						aria-hidden
-						className="size-3.5 shrink-0 text-destructive"
+						className="size-3.5 shrink-0 text-status-destructive"
 					/>
 					<span className="min-w-0 truncate text-muted-foreground">
 						Merge conflicts
@@ -209,7 +211,7 @@ export function GitPullRequestSummary({
 					{onFixMergeConflicts ? (
 						<button
 							aria-label={`Fix merge conflicts in pull request #${pullRequest.number}`}
-							className="ml-auto shrink-0 rounded-md px-1.5 py-0.5 font-medium text-destructive transition-colors hover:bg-destructive/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+							className="ml-auto shrink-0 rounded-md px-1.5 py-0.5 font-medium text-status-destructive transition-colors hover:bg-destructive/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
 							onClick={(event) => {
 								event.preventDefault();
 								event.stopPropagation();

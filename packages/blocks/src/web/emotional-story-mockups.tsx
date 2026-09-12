@@ -85,10 +85,10 @@ export function InstallLocalMock() {
 	return (
 		<MinimalCard contentClassName="space-y-3">
 			<div className="flex items-center justify-between rounded-lg bg-success/10 px-3 py-2">
-				<span className="text-[11px] text-success">
+				<span className="text-[11px] text-status-success">
 					gemma-4 running locally · :8080
 				</span>
-				<span className="text-[10px] text-success/80">0 API keys</span>
+				<span className="text-[10px] text-status-success/80">0 API keys</span>
 			</div>
 			<div className="space-y-2">
 				{models.map((model) => (
@@ -133,7 +133,7 @@ export function DemoDeathMock() {
 					Refactored auth. Tests pass on my machine.
 				</div>
 				<div className="rounded-xl border border-destructive/30 bg-destructive/5 p-3">
-					<p className="font-medium text-[11px] text-destructive">
+					<p className="font-medium text-[11px] text-status-destructive">
 						Security review
 					</p>
 					<ul className="mt-2 space-y-1.5">
@@ -143,7 +143,7 @@ export function DemoDeathMock() {
 								key={q}
 							>
 								<X
-									className="size-3 shrink-0 text-destructive"
+									className="size-3 shrink-0 text-status-destructive"
 									strokeWidth={2}
 								/>
 								{q}
@@ -191,7 +191,9 @@ export function TrustReceiptMock() {
 					<div className="h-2 overflow-hidden rounded-full bg-muted">
 						<div className="h-full w-[24%] rounded-full bg-foreground" />
 					</div>
-					<p className="text-[10px] text-success">Under cap · no surprises</p>
+					<p className="text-[10px] text-status-success">
+						Under cap · no surprises
+					</p>
 				</div>
 			</div>
 			<p className="text-center font-medium text-[11px] text-foreground">
@@ -221,7 +223,7 @@ export function SevenMinuteMock() {
 							className="flex items-center gap-2 text-[10px]"
 							key={step.label}
 						>
-							<Check className="size-3 text-success" strokeWidth={2.5} />
+							<Check className="size-3 text-status-success" strokeWidth={2.5} />
 							<span className="text-foreground/80">{step.label}</span>
 						</div>
 					))}
@@ -249,7 +251,7 @@ export function StillRunningMock() {
 							overnight run · governed
 						</p>
 					</div>
-					<span className="inline-flex items-center gap-1.5 rounded-full bg-success/10 px-2 py-1 text-[10px] text-success">
+					<span className="inline-flex items-center gap-1.5 rounded-full bg-success/10 px-2 py-1 text-[10px] text-status-success">
 						<StatusDot tone="ok" />
 						running
 					</span>

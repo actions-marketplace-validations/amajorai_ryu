@@ -32,6 +32,7 @@ mod router;
 mod ryu_analytics;
 mod semantic_cache;
 mod skills;
+mod security_contact;
 mod state;
 mod telemetry;
 mod tools;
@@ -88,10 +89,11 @@ async fn main() -> anyhow::Result<()> {
     // `before_send`; never fed `tracing`/log events, so no content reaches Sentry.
     let _crash_guard = crash::init();
 
-    let mut config = GatewayConfig::load().unwrap_or_else(|e| {
-        tracing::warn!("Failed to load config ({e}), using defaults");
-        GatewayConfig::default()
-    });
+    let mut config = GatewayConfig::load()?;
+    let credential_dir = GatewayConfig::config_path()
+        .and_then(|path| path.parent().map(std::path::Path::to_path_buf))
+        .ok_or_else(|| anyhow::anyhow!("cannot determine Gateway credential directory"))?;
+    config.auth.bootstrap(&credential_dir)?;
 
     let vault_http = reqwest::Client::builder()
         .timeout(Duration::from_secs(10))
@@ -143,21 +145,20 @@ async fn main() -> anyhow::Result<()> {
         "configuration loaded"
     );
 
-    // Security guard: the gateway is an LLM proxy. Binding to a non-loopback
-    // interface without auth exposes a fully open, billable proxy to the network.
-    // Default bind is 127.0.0.1:7981 and require_auth is only enabled when
-    // GATEWAY_MASTER_KEY is set. This is a HARD REFUSAL, not a warning (WS2): a
-    // publicly-reachable fleet replica must never boot without auth. A loopback
-    // bind keeps the old permissive behavior for local dev.
-    let is_loopback_bind = bind_addr.starts_with("127.0.0.1")
-        || bind_addr.starts_with("localhost")
-        || bind_addr.starts_with("[::1]");
+    // Even an explicit development auth opt-out cannot expose a billable proxy.
+    let is_loopback_bind = bind_addr
+        .parse::<std::net::SocketAddr>()
+        .map(|address| address.ip().is_loopback())
+        .unwrap_or_else(|_| {
+            bind_addr
+                .rsplit_once(':')
+                .is_some_and(|(host, _)| host == "localhost")
+        });
     if !is_loopback_bind && !config.auth.require_auth {
         anyhow::bail!(
             "refusing to start: gateway is bound to a non-loopback address ({bind_addr}) \
              with auth DISABLED — anyone who can reach this port could use your providers \
-             and spend your credits. Set GATEWAY_MASTER_KEY (require_auth) and/or populate \
-             auth.api_keys, or bind to 127.0.0.1 for local-only use."
+             and spend your credits. Enable auth.require_auth and provision credentials, or bind to 127.0.0.1 for local-only use."
         );
     }
 
@@ -295,7 +296,9 @@ async fn main() -> anyhow::Result<()> {
         .allow_headers(Any)
         .allow_private_network(true);
 
+    let listener = tokio::net::TcpListener::bind(&bind_addr).await?;
     let app = api::router(Arc::clone(&state))
+        .layer(axum::Extension(listener.local_addr()?))
         .layer(TraceLayer::new_for_http())
         .layer(TimeoutLayer::with_status_code(
             axum::http::StatusCode::GATEWAY_TIMEOUT,
@@ -303,7 +306,6 @@ async fn main() -> anyhow::Result<()> {
         ))
         .layer(cors);
 
-    let listener = tokio::net::TcpListener::bind(&bind_addr).await?;
     tracing::info!("listening on http://{}", listener.local_addr()?);
 
     // `into_make_service_with_connect_info` exposes the peer `SocketAddr` to

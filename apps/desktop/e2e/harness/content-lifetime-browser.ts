@@ -1,0 +1,115 @@
+type Listener = (...args: unknown[]) => unknown;
+const settingsListeners = new Set<Listener>();
+const messageListeners = new Set<Listener>();
+const counts = { pushes: 0, saves: 0, health: 0, asks: 0, extracts: 0 };
+const settings = {
+	islandBridgeEnabled: true,
+	autoSaveEnabled: true,
+	aiToolbarEnabled: true,
+	copilotEnabled: true,
+	selectionButtonEnabled: true,
+	saveSpaceId: null,
+};
+let releaseSettings: (() => void) | undefined;
+const waitingSettings = new Promise<void>((resolve) => {
+	releaseSettings = resolve;
+});
+const asks: ((value: unknown) => void)[] = [];
+function publish() {
+	for (const [key, value] of Object.entries(counts)) {
+		document.documentElement.dataset[key] = String(value);
+	}
+	document.documentElement.dataset.settingsListeners = String(
+		settingsListeners.size
+	);
+	document.documentElement.dataset.messageListeners = String(
+		messageListeners.size
+	);
+}
+export function extracted() {
+	counts.extracts++;
+	publish();
+}
+export function release() {
+	releaseSettings?.();
+}
+export function resolveAsk() {
+	asks.shift()?.({
+		ok: true,
+		answer: "Current content context ready.",
+		model: "Fixture",
+	});
+}
+export function askPage() {
+	for (const listener of messageListeners) {
+		listener({ type: "ryu:ask-page" });
+	}
+}
+export function settingsChanged() {
+	for (const listener of settingsListeners) {
+		listener({ ryu_browser_settings: { newValue: settings } }, "local");
+	}
+}
+export const browser = {
+	runtime: {
+		id: "performance-extension",
+		onMessage: {
+			addListener: (listener: Listener) => {
+				messageListeners.add(listener);
+				publish();
+			},
+			removeListener: (listener: Listener) => {
+				messageListeners.delete(listener);
+				publish();
+			},
+		},
+		sendMessage: async (input: unknown) => {
+			const message = input as { type: string; defaultMessage?: string };
+			if (message.type === "ryu:i18n-translate") {
+				return { ok: true, value: message.defaultMessage };
+			}
+			if (message.type === "ryu:connection-status") {
+				counts.health++;
+				publish();
+				return { ok: true, reachable: true };
+			}
+			if (message.type === "ryu:push-context") {
+				counts.pushes++;
+				publish();
+				return { ok: true };
+			}
+			if (message.type === "ryu:save-page") {
+				counts.saves++;
+				publish();
+				return { ok: true, spaceName: "Saved pages" };
+			}
+			if (message.type === "ryu:ask") {
+				counts.asks++;
+				publish();
+				return new Promise((resolve) => asks.push(resolve));
+			}
+			return { ok: true };
+		},
+	},
+	storage: {
+		local: {
+			get: async () => {
+				if (location.search.includes("late")) {
+					await waitingSettings;
+				}
+				return { ryu_browser_settings: settings };
+			},
+			set: async () => undefined,
+		},
+		onChanged: {
+			addListener: (listener: Listener) => {
+				settingsListeners.add(listener);
+				publish();
+			},
+			removeListener: (listener: Listener) => {
+				settingsListeners.delete(listener);
+				publish();
+			},
+		},
+	},
+};

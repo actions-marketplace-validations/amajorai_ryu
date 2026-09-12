@@ -146,7 +146,7 @@ export function ImportWizard({
 	return (
 		<div className="flex h-full min-h-0 flex-col">
 			<header className="border-b px-4 py-3">
-				<h2 className="font-semibold text-base">
+				<h2 className="font-medium text-base">
 					Import {subject.object.plural}
 				</h2>
 				<p className="text-muted-foreground text-xs">
@@ -156,7 +156,7 @@ export function ImportWizard({
 			</header>
 
 			{error && (
-				<div className="flex items-start gap-2 border-b bg-destructive/10 px-4 py-2 text-destructive text-xs">
+				<div className="flex items-start gap-2 border-b bg-destructive/10 px-4 py-2 text-status-destructive text-xs">
 					<HugeiconsIcon icon={Alert01Icon} size={14} />
 					<span>{error}</span>
 				</div>
@@ -408,7 +408,7 @@ export function ImportWizard({
 function Stat({ label, value }: { label: string; value: number }) {
 	return (
 		<div className="rounded-md border bg-card p-3">
-			<div className="font-semibold text-lg tabular-nums">
+			<div className="font-medium text-lg tabular-nums">
 				{formatNumber(value)}
 			</div>
 			<div className="text-muted-foreground text-xs">{label}</div>

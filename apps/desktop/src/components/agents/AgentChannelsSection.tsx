@@ -14,12 +14,12 @@ import {
 	SettingsCard,
 	SettingsSection,
 } from "@/src/components/settings/shared/settings-items.tsx";
-import { useTabsContext } from "@/src/contexts/TabsContext.tsx";
+import { useTabSelector } from "@/src/contexts/TabsContext.tsx";
 import { useChannels } from "@/src/hooks/useChannels.ts";
 import { CHANNEL_LABELS } from "@/src/lib/api/channels.ts";
 
 export function AgentChannelsSection({ agentId }: { agentId: string | null }) {
-	const { openTab } = useTabsContext();
+	const openTab = useTabSelector((state) => state.openTab);
 	const { channels, loading, authed } = useChannels();
 
 	const bound = useMemo(

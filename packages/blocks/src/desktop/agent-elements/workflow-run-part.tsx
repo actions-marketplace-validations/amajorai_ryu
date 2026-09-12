@@ -154,7 +154,7 @@ function WorkflowResumePrompt({
 				</Button>
 			</div>
 			{error ? (
-				<p aria-live="assertive" className="text-destructive text-xs">
+				<p aria-live="assertive" className="text-status-destructive text-xs">
 					{error}
 				</p>
 			) : null}

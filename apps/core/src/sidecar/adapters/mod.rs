@@ -1,3 +1,8 @@
+mod messages;
+pub use messages::{ImagePart, UiContent, UiMessage};
+pub(crate) use messages::{append_last_user_text, set_last_user_text, ui_message_text};
+use messages::{document_context_block, last_user_images, last_user_message, message_image_parts};
+
 pub mod acp;
 pub mod acp_probe_cache;
 pub mod context_breakdown;
@@ -17,9 +22,13 @@ use crate::registry::ProviderRegistry;
 use crate::ryu_platform::RyuResponseMode;
 use crate::server::conversations::{ConversationStore, MessageSearchHit, Tenancy};
 use crate::server::memory::{
-    MemoryCategory, MemoryScope, MemoryStore, NewMemory, DEFAULT_SHORT_TERM_LIMIT, LOCAL_USER,
+    MemoryCategory, MemoryScope, MemoryStore, MemoryVisibility, NewMemory,
+    DEFAULT_SHORT_TERM_LIMIT, LOCAL_USER,
 };
-use crate::server::retrieval::{ChunkSource, RetrievalOptions, RetrievalStore, ScoredChunk};
+use crate::server::retrieval::{
+    ChunkSource, MemoryGraph, MemoryGraphDocument, MemoryGraphQuery, RetrievalOptions,
+    RetrievalStore, ScoredChunk,
+};
 use crate::sidecar::active_engine::{is_local_engine, local_engine_base_url};
 use crate::sidecar::mcp::McpRegistry;
 use crate::sidecar::untrusted;
@@ -463,6 +472,13 @@ pub trait ProviderAdapter: Send + Sync {
 
 // ── Chat stream types (used by the /api/chat/stream endpoint) ─────────────────
 
+/// One server-validated Composio connection selected for a scoped profile run.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ComposioConnectionBinding {
+    pub id: String,
+    pub toolkit: String,
+}
+
 /// Incoming request body from the UI (matches Vercel AI SDK v6 UIMessage format).
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ChatStreamRequest {
@@ -489,11 +505,25 @@ pub struct ChatStreamRequest {
     pub model: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub conversation_id: Option<String>,
+    /// Optional durable harness session binding. Core resolves this to the
+    /// session's conversation and runnable before loading history, so external
+    /// callers cannot accidentally run a different agent inside the session.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
     /// Saved chats explicitly attached to this turn through an `@Chat` mention.
     /// Core loads their recent transcript as read-only labeled context; the ids
     /// are never treated as routing targets or merged into this conversation.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub referenced_conversation_ids: Vec<String>,
+    /// Optional server-validated Composio connection scope used by the
+    /// onboarding profile builder. `None` preserves normal agent behavior;
+    /// `Some(empty)` deliberately denies every Composio action for a profile
+    /// that selected no connected accounts.
+    #[serde(default, skip_deserializing, skip_serializing_if = "Option::is_none")]
+    pub composio_connection_scope: Option<Vec<ComposioConnectionBinding>>,
+    /// Optional server-owned conversation search ceiling for profile bootstrap.
+    #[serde(default, skip_deserializing, skip_serializing_if = "Option::is_none")]
+    pub profile_conversation_scope: Option<Vec<String>>,
     /// Opt-in long-term (cross-session) memory (spec unit U11). When `true`,
     /// prior durable facts for this user/agent are injected as context and the
     /// current turn is recorded for future sessions. Defaults to `false` per
@@ -588,6 +618,10 @@ pub struct ChatStreamRequest {
     /// streamed view and a later reload identical.
     #[serde(default = "default_persist")]
     pub persist: bool,
+    /// Core-owned one-shot runtime request. Keep the transcript and permission
+    /// scope, but release the ACP process after this turn rather than pooling it.
+    #[serde(skip)]
+    pub fresh_session: bool,
     /// Skip persisting the incoming user turn for this request, while still
     /// persisting the assistant reply. Set by the version-tree edit/regenerate
     /// re-run: the edit route has already created the user sibling (and pointed
@@ -785,42 +819,6 @@ fn request_environment_variables(req: &ChatStreamRequest) -> Vec<(String, String
 /// Default for [`ChatStreamRequest::persist`] — normal turns persist.
 fn default_persist() -> bool {
     true
-}
-
-/// A single message in the AI SDK UIMessage format (simplified subset).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct UiMessage {
-    pub role: String,
-    /// Legacy string or parts array (AI SDK v5 and earlier).
-    #[serde(default)]
-    pub content: UiContent,
-    /// AI SDK v6 sends parts at the top level instead of content.
-    #[serde(default)]
-    pub parts: Vec<serde_json::Value>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-#[serde(untagged)]
-pub enum UiContent {
-    #[default]
-    Empty,
-    Text(String),
-    Parts(Vec<Value>),
-}
-
-impl UiContent {
-    /// Extract a plain-text string from any content shape.
-    pub fn as_text(&self) -> String {
-        match self {
-            Self::Text(s) => s.clone(),
-            Self::Parts(parts) => parts
-                .iter()
-                .filter_map(|p| p.get("text")?.as_str().map(str::to_owned))
-                .collect::<Vec<_>>()
-                .join(""),
-            Self::Empty => String::new(),
-        }
-    }
 }
 
 // ── AI SDK v6 UI Message Stream encoding ──────────────────────────────────────
@@ -2036,17 +2034,30 @@ fn ryu_agent_route(
     acp_registry: &AcpAgentRegistry,
     provider_reg: &ProviderRegistry,
 ) -> Option<AgentRoute> {
-    ryu_agent_route_with_user_jwt(acp_registry, provider_reg, None)
+    ryu_agent_route_with_user_jwt(acp_registry, provider_reg, None, None, None, None)
 }
 
 fn ryu_agent_route_with_user_jwt(
     acp_registry: &AcpAgentRegistry,
     provider_reg: &ProviderRegistry,
     user_jwt: Option<&str>,
+    composio_connection_scope: Option<&[crate::sidecar::adapters::ComposioConnectionBinding]>,
+    conversation_scope: Option<&[String]>,
+    host_conversation_id: Option<&str>,
 ) -> Option<AgentRoute> {
+    if host_conversation_id.is_some_and(|id| !acp::is_safe_host_conversation_id(id)) {
+        tracing::warn!("ryu agent route refused an invalid host conversation id");
+        return None;
+    }
     // Prefer Core's own managed Pi binary (~/.ryu/bin/pi). This is a separate
     // install from any Pi the user has on PATH — same relationship as OpenClaw to Pi.
-    if let Some(cmd) = acp::ryu_pi_acp_cmd_for_agent(user_jwt, Some("ryu")) {
+    if let Some(cmd) = acp::ryu_pi_acp_cmd_for_agent(
+        user_jwt,
+        Some("ryu"),
+        composio_connection_scope,
+        conversation_scope,
+        host_conversation_id,
+    ) {
         return Some(AgentRoute::Acp { spawn_cmd: cmd });
     }
 
@@ -2061,7 +2072,8 @@ fn ryu_agent_route_with_user_jwt(
             // zero-key defaultModel + Pi-side skills off + gateway models.json
             // pin) — this fallback Pi reads the same isolated config dir.
             if let Err(e) = crate::pi_config::ensure_managed_defaults() {
-                tracing::warn!(error = %e, "ryu fallback: could not write managed Pi defaults");
+                tracing::error!(error = %e, "ryu fallback: refusing stale managed Pi configuration");
+                return None;
             }
             let config_dir = crate::pi_config::config_dir_str();
             let gateway = crate::pi_config::is_gateway_routing();
@@ -2071,7 +2083,7 @@ fn ryu_agent_route_with_user_jwt(
             // fallback Pi rather than present it. Only resolved when gateway routing
             // is on (otherwise the token is unused and Pi talks straight to provider).
             let token = if gateway {
-                match crate::sidecar::gateway::gateway_bearer() {
+                match crate::sidecar::gateway::gateway_bearer_for_agent(Some("ryu"), None, host_conversation_id) {
                     Ok(t) => t,
                     Err(e) => {
                         tracing::error!(error = %e, "ryu fallback: no gateway bearer, refusing to route fallback Pi through the gateway");
@@ -2085,35 +2097,27 @@ fn ryu_agent_route_with_user_jwt(
             // `mcpCapabilities {http:false, sse:false}` and drops `session/new`'s
             // `mcpServers` on the floor), so its ONLY road to Ryu's tools is the
             // `ryu-mcp` extension in the isolated config dir, which dials Core over
-            // HTTP. These three vars are how it finds and authenticates to Core.
-            //
-            // Omitting them does not disable the extension — it makes it guess. Its
-            // defaults are `http://127.0.0.1:7980` and an EMPTY token
-            // (`assets/pi-extensions/ryu-mcp.ts`), so under any non-release
-            // `RYU_PROFILE` it dials the wrong port, and on a token-guarded node it
-            // presents no bearer. Either way the user sees an agent that silently has
-            // no Ryu tools. The managed-binary path (`acp::ryu_pi_acp_cmd`) has always
-            // injected them; this PATH fallback did not, which made the two roads to
-            // the same agent behave differently.
-            let gated_cmd = if cfg!(target_os = "windows") {
-                let gateway_env = if gateway {
-                    format!("set OPENAI_BASE_URL={gateway_v1}&& set OPENAI_API_KEY={token}&& ")
-                } else {
-                    String::new()
-                };
-                let mcp_env = acp::pi_mcp_extension_env(true, user_jwt);
-                format!(
-                    "cmd /c {gateway_env}{mcp_env}set PI_CODING_AGENT_DIR={config_dir}&& {}",
-                    spawn_cmd.trim_start_matches("cmd /c ")
-                )
-            } else {
-                let gateway_env = if gateway {
-                    format!("OPENAI_BASE_URL={gateway_v1} OPENAI_API_KEY={token} ")
-                } else {
-                    String::new()
-                };
-                let mcp_env = acp::pi_mcp_extension_env(false, user_jwt);
-                format!("{gateway_env}{mcp_env}PI_CODING_AGENT_DIR={config_dir} {spawn_cmd}")
+            // HTTP. Add every value through ACP's structured environment field so
+            // the fallback has the same scope without interpolating user data into
+            // a shell command.
+            let mut env = Vec::new();
+            if gateway {
+                env.push(("OPENAI_BASE_URL".to_owned(), gateway_v1));
+                env.push(("OPENAI_API_KEY".to_owned(), token));
+            }
+            env.push(("PI_CODING_AGENT_DIR".to_owned(), config_dir));
+            env.extend(acp::pi_mcp_extension_env(
+                user_jwt,
+                composio_connection_scope,
+                conversation_scope,
+                host_conversation_id,
+            ));
+            let gated_cmd = match acp::acp_spawn_with_env(spawn_cmd, env) {
+                Ok(command) => command,
+                Err(error) => {
+                    tracing::warn!(error = %error, "ryu fallback: invalid ACP spawn declaration");
+                    return None;
+                }
             };
             return Some(AgentRoute::Acp {
                 spawn_cmd: gated_cmd,
@@ -2149,7 +2153,17 @@ fn agent_route(
     acp_registry: &AcpAgentRegistry,
     provider_reg: &ProviderRegistry,
 ) -> Option<AgentRoute> {
-    agent_route_with_user_jwt(agent_id, engine, model, acp_registry, provider_reg, None)
+    agent_route_with_user_jwt(
+        agent_id,
+        engine,
+        model,
+        acp_registry,
+        provider_reg,
+        None,
+        None,
+        None,
+        None,
+    )
 }
 
 fn agent_route_with_user_jwt(
@@ -2159,11 +2173,21 @@ fn agent_route_with_user_jwt(
     acp_registry: &AcpAgentRegistry,
     provider_reg: &ProviderRegistry,
     user_jwt: Option<&str>,
+    composio_connection_scope: Option<&[crate::sidecar::adapters::ComposioConnectionBinding]>,
+    conversation_scope: Option<&[String]>,
+    host_conversation_id: Option<&str>,
 ) -> Option<AgentRoute> {
     // Ryu flagship: Pi engine with gateway on top. Checked before the generic
     // default so "ryu" never falls through to the plain-LLM path.
     if agent_id == Some("ryu") {
-        return ryu_agent_route_with_user_jwt(acp_registry, provider_reg, user_jwt);
+        return ryu_agent_route_with_user_jwt(
+            acp_registry,
+            provider_reg,
+            user_jwt,
+            composio_connection_scope,
+            conversation_scope,
+            host_conversation_id,
+        );
     }
     if is_default_agent(agent_id) {
         return Some(default_agent_route(provider_reg));
@@ -2283,12 +2307,22 @@ fn agent_route_with_user_jwt(
                 // Responses egress is governed while the OAuth subscription
                 // credential is forwarded upstream unchanged. Overrides the
                 // default API-key OPENAI_BASE_URL injection baked into the entry.
-                acp::codex_acp_gateway_cmd()
+                match acp::codex_acp_gateway_cmd() {
+                    Ok(command) => command,
+                    Err(error) => {
+                        tracing::error!(error = %error, "agent_route: refusing Codex because its safe deletion home could not be prepared");
+                        return None;
+                    }
+                }
             } else if entry.id == "acp:codex" && crate::agent_routing::is_gateway_routing(route_id)
             {
                 // API-key Codex remains on the OpenAI-compatible path when the
                 // subscription-preserving toggle is off; keep its spend under
                 // the selected agent as well.
+                if let Err(error) = crate::codex_config::ensure_safety_home() {
+                    tracing::error!(error = %error, "agent_route: refusing Codex because its safe deletion home could not be prepared");
+                    return None;
+                }
                 match acp::openai_gateway_cmd_for_agent(spawn_cmd, Some(route_id)) {
                     Ok(c) => c,
                     Err(e) => {
@@ -2309,6 +2343,12 @@ fn agent_route_with_user_jwt(
                         return None;
                     }
                 }
+            } else if entry.id == "acp:codex" {
+                if let Err(error) = crate::codex_config::ensure_safety_home() {
+                    tracing::error!(error = %error, "agent_route: refusing direct Codex because its safe deletion home could not be prepared");
+                    return None;
+                }
+                spawn_cmd.clone()
             } else {
                 spawn_cmd.clone()
             };
@@ -2355,307 +2395,6 @@ pub async fn resolve_acp_spawn_cmd(
         AgentRoute::Acp { spawn_cmd } => Some(spawn_cmd),
         _ => None,
     }
-}
-
-/// Extract the last user message as a prompt string for ACP agents.
-/// Image extracted from a user message part (base64 data + MIME type).
-#[derive(Debug, Clone)]
-pub struct ImagePart {
-    pub data: String,
-    pub mime_type: String,
-}
-
-fn last_user_message(messages: &[UiMessage]) -> String {
-    messages
-        .iter()
-        .rev()
-        .find(|m| m.role == "user")
-        .map(ui_message_text)
-        .unwrap_or_default()
-}
-
-/// Extract the plain-text of a single UI message, handling both the legacy
-/// `content` shape and the AI SDK v6 top-level `parts` array. Shared so the
-/// plugin pre-turn hook (which rewrites the outgoing user message) reads text the
-/// same way the chat path does.
-pub(crate) fn ui_message_text(m: &UiMessage) -> String {
-    let from_content = m.content.as_text();
-    if !from_content.is_empty() {
-        return from_content;
-    }
-    // AI SDK v6: text lives in top-level parts array.
-    m.parts
-        .iter()
-        .filter_map(|p| {
-            let t = p.get("type")?.as_str()?;
-            if t == "text" {
-                p.get("text")?.as_str().map(str::to_owned)
-            } else {
-                None
-            }
-        })
-        .collect::<Vec<_>>()
-        .join("")
-}
-
-/// Replace the text of the most recent `user` message in place with `text`,
-/// preserving any non-text parts (e.g. image `file` parts stay attached). Used by
-/// the plugin pre-turn hook to swap the outgoing prompt for its expanded form
-/// before the turn is streamed and persisted. Returns `true` if a user message
-/// was found and rewritten.
-pub(crate) fn set_last_user_text(messages: &mut [UiMessage], text: String) -> bool {
-    if let Some(m) = messages.iter_mut().rev().find(|m| m.role == "user") {
-        m.content = UiContent::Text(text);
-        // Drop v6 text parts so the rewritten `content` is authoritative; keep
-        // non-text parts (images/files) so multimodal input survives the rewrite.
-        m.parts
-            .retain(|p| p.get("type").and_then(|t| t.as_str()) != Some("text"));
-        true
-    } else {
-        false
-    }
-}
-
-/// Append `extra` as additional context to the most recent `user` message
-/// (additive, not a replacement — the user's own text is kept). Used by the
-/// plugin `Inject` directive (`session_start` / `pre_user_turn`) to fold
-/// plugin-supplied context into the outgoing turn. Returns `true` if a user
-/// message was found.
-pub(crate) fn append_last_user_text(messages: &mut [UiMessage], extra: &str) -> bool {
-    if let Some(m) = messages.iter_mut().rev().find(|m| m.role == "user") {
-        let base = ui_message_text(m);
-        let joined = if base.is_empty() {
-            extra.to_string()
-        } else {
-            format!("{base}\n\n{extra}")
-        };
-        m.content = UiContent::Text(joined);
-        m.parts
-            .retain(|p| p.get("type").and_then(|t| t.as_str()) != Some("text"));
-        true
-    } else {
-        false
-    }
-}
-
-/// Image `file` parts of a single message (AI SDK v6 `file` parts with an image
-/// mediaType/mimeType carrying a data-URL `data:<mime>;base64,<data>`).
-///
-/// The `mime.starts_with("image/")` skip below is NOT a drop: non-image `file` parts
-/// are handled by [`message_document_parts`], which both call sites invoke alongside
-/// this one. Adding a third kind of part means extending that pair — a part type
-/// neither function claims reaches the model as nothing, which is exactly the bug
-/// this seam was split to fix.
-fn message_image_parts(msg: &UiMessage) -> Vec<ImagePart> {
-    let mut images = Vec::new();
-    for part in &msg.parts {
-        let type_ = part.get("type").and_then(|v| v.as_str()).unwrap_or("");
-        if type_ != "file" {
-            continue;
-        }
-        let mime = part
-            .get("mediaType")
-            .or_else(|| part.get("mimeType"))
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-        if !mime.starts_with("image/") {
-            continue;
-        }
-        let url = part.get("url").and_then(|v| v.as_str()).unwrap_or("");
-        if let Some(base64) = extract_base64_from_data_url(url) {
-            images.push(ImagePart {
-                data: base64,
-                mime_type: mime.to_owned(),
-            });
-        }
-    }
-    images
-}
-
-/// Cap on the extracted text a single attached document may contribute to a turn.
-///
-/// Mirrors `crate::document_parse::MAX_MARKDOWN_BYTES`, which already clamped it on
-/// the way in. Repeated here because this side must hold regardless of who wrote the
-/// part: a `file` part arrives from a client and is not trusted to have been
-/// through Core's own parse facade.
-const MAX_DOCUMENT_PART_CHARS: usize = 400_000;
-
-/// Cap on how many attached documents one message may contribute, so a drag-and-drop
-/// of forty files cannot crowd the conversation out of its own context window.
-const MAX_DOCUMENT_PARTS: usize = 12;
-
-/// The **document half** of the multimodal seam, and the reason a dropped PDF is no
-/// longer discarded.
-///
-/// [`message_image_parts`] deliberately skips every `file` part whose mediaType is
-/// not `image/*`. Until this function existed, that `continue` was the end of the
-/// road: a PDF, a DOCX, a spreadsheet — anything not an image — reached the model as
-/// nothing at all, with no error anywhere in the stack. This is its sibling, so the
-/// two together account for every `file` part instead of one of them quietly eating
-/// the rest.
-///
-/// ## Why the extracted text arrives as a part rather than as the user's prose
-///
-/// The desktop extracts through `POST /api/documents/parse` (the one
-/// `document.parse` facade) and attaches the resulting markdown as a
-/// `text/markdown` `file` part carrying the ORIGINAL filename. It is not folded into
-/// the user's message text on the client, because the user did not type it: a 60k
-/// character extraction rendered inside their own chat bubble is not a chat message.
-/// Keeping it a part lets the transcript render a document chip while the model
-/// receives the contents, and — because message parts are persisted (the sealed
-/// `parts` column) — a reloaded thread still carries the document without re-parsing
-/// a file the user may have since deleted.
-///
-/// ## Why it is resolved HERE and not further out
-///
-/// Both chat planes converge on this module, and both build their prompt text from
-/// the same `UiMessage`s. Resolving at this seam means one implementation serves the
-/// openai-compat plane (per message, so document context survives across the whole
-/// history) and the ACP plane (last turn only) with the same rules, instead of two
-/// prompt builders growing their own idea of what an attachment is.
-///
-/// Only `data:` URLs are read. A part pointing at an `http(s)` URL is skipped rather
-/// than fetched: this runs inside the chat request path, and turning a
-/// client-supplied URL into a server-side fetch would be an SSRF primitive on the
-/// hottest path in the product.
-fn message_document_parts(msg: &UiMessage) -> Vec<(String, String)> {
-    let mut docs = Vec::new();
-    for part in &msg.parts {
-        if docs.len() >= MAX_DOCUMENT_PARTS {
-            break;
-        }
-        if part.get("type").and_then(|v| v.as_str()) != Some("file") {
-            continue;
-        }
-        let mime = part
-            .get("mediaType")
-            .or_else(|| part.get("mimeType"))
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-        // Images are the other half of the seam.
-        if mime.starts_with("image/") {
-            continue;
-        }
-        let filename = part
-            .get("filename")
-            .and_then(|v| v.as_str())
-            .filter(|s| !s.trim().is_empty())
-            .unwrap_or("attachment")
-            .to_owned();
-
-        // A `file` part that is neither an image nor readable text is the case the
-        // desktop no longer produces (it extracts before sending) but that any other
-        // client still can — native, TUI, the extension, a channel adapter. It gets a
-        // NOTE, not a skip. Dropping it is the original bug, and "the model was never
-        // told there was a file" is precisely the failure mode that made it invisible
-        // for so long: this way the assistant can say "I can see notes.pdf is attached
-        // but I can't read it", which is a debuggable answer.
-        let text = mime
-            .starts_with("text/")
-            .then(|| part.get("url").and_then(|v| v.as_str()).unwrap_or(""))
-            .and_then(decode_text_data_url)
-            .filter(|t| !t.trim().is_empty());
-        let Some(text) = text else {
-            docs.push((
-                filename,
-                format!(
-                    "[This file is attached but no text could be extracted from it \
-                     (type: {}). Tell the user you cannot read it rather than \
-                     guessing at its contents.]",
-                    if mime.is_empty() { "unknown" } else { mime }
-                ),
-            ));
-            continue;
-        };
-
-        let mut body = text;
-        if body.chars().count() > MAX_DOCUMENT_PART_CHARS {
-            body = body
-                .chars()
-                .take(MAX_DOCUMENT_PART_CHARS)
-                .collect::<String>()
-                + "\n\n[truncated]";
-        }
-        docs.push((filename, body));
-    }
-    docs
-}
-
-/// The attached documents of `msg` rendered as one context block, or `None`.
-///
-/// Fenced and labelled with the source filename so the model can tell the user's own
-/// words from a file's contents — the same reason retrieved memory is delimited.
-fn document_context_block(msg: &UiMessage) -> Option<String> {
-    let docs = message_document_parts(msg);
-    if docs.is_empty() {
-        return None;
-    }
-    let mut out = String::new();
-    for (filename, body) in docs {
-        out.push_str(&format!(
-            "\n\n<attached-document filename=\"{}\">\n{}\n</attached-document>",
-            filename.replace('"', "'"),
-            body
-        ));
-    }
-    Some(out)
-}
-
-/// Decode a `data:` URL whose payload is text, base64 or percent/plain encoded.
-/// `None` for a non-data URL or bytes that are not valid UTF-8.
-fn decode_text_data_url(url: &str) -> Option<String> {
-    let rest = url.strip_prefix("data:")?;
-    let (meta, data) = rest.split_once(',')?;
-    if meta.ends_with(";base64") {
-        use base64::Engine as _;
-        let bytes = base64::engine::general_purpose::STANDARD
-            .decode(data)
-            .ok()?;
-        return String::from_utf8(bytes).ok();
-    }
-    // Non-base64 data URLs are percent-encoded text.
-    Some(percent_decode(data))
-}
-
-/// Minimal percent-decode for a plain `data:` URL payload. Invalid escapes are kept
-/// verbatim rather than dropped — losing characters from a document silently is the
-/// class of bug this whole change exists to remove.
-fn percent_decode(s: &str) -> String {
-    let bytes = s.as_bytes();
-    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'%' && i + 2 < bytes.len() {
-            if let Ok(byte) = u8::from_str_radix(&s[i + 1..i + 3], 16) {
-                out.push(byte);
-                i += 3;
-                continue;
-            }
-        }
-        out.push(bytes[i]);
-        i += 1;
-    }
-    String::from_utf8_lossy(&out).into_owned()
-}
-
-/// Extract image parts from the last user message (for the ACP plane, which
-/// sends only the latest turn). The openai_compat plane uses
-/// [`message_image_parts`] per message instead, to preserve image context across
-/// the full history.
-fn last_user_images(messages: &[UiMessage]) -> Vec<ImagePart> {
-    messages
-        .iter()
-        .rev()
-        .find(|m| m.role == "user")
-        .map(message_image_parts)
-        .unwrap_or_default()
-}
-
-/// Strip `data:<mime>;base64,` prefix and return the raw base64 string.
-fn extract_base64_from_data_url(url: &str) -> Option<String> {
-    let rest = url.strip_prefix("data:")?;
-    let (_meta, data) = rest.split_once(',')?;
-    Some(data.to_owned())
 }
 
 /// Per-modality slot selections resolved from a carded agent's `AgentRecord`.
@@ -3082,9 +2821,44 @@ fn project_instructions_hint_when(safe_mode: bool, cwd: Option<&str>) -> Option<
 
 const USER_PERSONALIZATION_PREF: &str = "user-personalization";
 
+fn should_include_user_personalization(
+    setup_kind: Option<crate::server::onboarding_state::NodeSetupKind>,
+    node_scope: Option<crate::sidecar::control_plane::NodeScope>,
+    managed_node: bool,
+) -> bool {
+    if managed_node
+        || matches!(
+            node_scope,
+            Some(
+                crate::sidecar::control_plane::NodeScope::Org
+                    | crate::sidecar::control_plane::NodeScope::Team
+            )
+        )
+    {
+        return false;
+    }
+    !matches!(
+        setup_kind,
+        Some(crate::server::onboarding_state::NodeSetupKind::Team)
+    )
+}
+
 async fn user_personalization_block(
     preferences: &crate::server::preferences::PreferencesStore,
 ) -> Option<String> {
+    // The preference is a desktop-facing personal field. Never fold it into a
+    // shared team node's prompt, even if an older client left the preference
+    // behind; company context and shared knowledge have their own node scope.
+    let onboarding = crate::server::onboarding_state::read_state(preferences)
+        .await
+        .ok()?;
+    if !should_include_user_personalization(
+        onboarding.setup_kind,
+        crate::sidecar::control_plane::registered_node().map(|node| node.scope),
+        crate::sidecar::control_plane::is_managed_node(),
+    ) {
+        return None;
+    }
     let raw = preferences
         .get(USER_PERSONALIZATION_PREF)
         .await
@@ -3286,9 +3060,17 @@ fn infer_new_memory(content: &str, project_id: Option<&str>, agent_id: Option<&s
     } else {
         MemoryCategory::UserFact
     };
-    let (scope, scope_id) = match project_id.filter(|p| !p.trim().is_empty()) {
-        Some(p) => (MemoryScope::Project, Some(p.to_string())),
-        None => (MemoryScope::User, None),
+    // Sensitive facts are user-scoped in this release. Keep the automatic capture
+    // usable when a user has opted in by avoiding a project-scoped row, even if the
+    // turn also has a working-folder project.
+    let sensitive = crate::server::memory::detect_sensitive_topics(content);
+    let (scope, scope_id) = if !sensitive.is_empty() {
+        (MemoryScope::User, None)
+    } else {
+        match project_id.filter(|p| !p.trim().is_empty()) {
+            Some(p) => (MemoryScope::Project, Some(p.to_string())),
+            None => (MemoryScope::User, None),
+        }
     };
     NewMemory {
         content: content.to_string(),
@@ -3340,11 +3122,53 @@ async fn assemble_long_term_context(
     agent_id: Option<&str>,
     limit: usize,
 ) -> LongTermMemoryContext {
+    assemble_long_term_context_for_user(
+        memory,
+        enabled,
+        LOCAL_USER,
+        agent_id,
+        None,
+        &[],
+        MemoryVisibility::unrestricted(),
+        limit,
+        true,
+    )
+    .await
+}
+
+/// Build the recency block for the server-resolved owner and sensitive-topic
+/// consent of the current turn. The legacy wrapper above remains for pure tests
+/// and callers on an unbound personal node.
+async fn assemble_long_term_context_for_user(
+    memory: &MemoryStore,
+    enabled: bool,
+    user_id: &str,
+    agent_id: Option<&str>,
+    project_id: Option<&str>,
+    read_levels: &[String],
+    visibility: MemoryVisibility<'_>,
+    limit: usize,
+    include_sensitive: bool,
+) -> LongTermMemoryContext {
     if !enabled {
         return LongTermMemoryContext::default();
     }
-    let scope = long_term_agent_scope(agent_id);
-    let entries = match memory.recall(LOCAL_USER, &scope, limit).await {
+    let parsed_levels = read_levels
+        .iter()
+        .map(|level| MemoryScope::from_str(level))
+        .collect::<Vec<_>>();
+    let entries = match memory
+        .recall_visible_scoped_for_agent(
+            user_id,
+            &parsed_levels,
+            agent_id,
+            project_id,
+            visibility,
+            limit,
+            include_sensitive,
+        )
+        .await
+    {
         Ok(e) => e,
         Err(e) => {
             tracing::warn!("failed to recall long-term memory: {e:#}");
@@ -3441,6 +3265,7 @@ const AUTO_RECALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(
 /// backlog cannot make the (already timeout-wrapped) backfill unbounded; facts
 /// beyond this are picked up on later turns (newest are enumerated first).
 const MEMORY_BACKFILL_LIMIT: usize = 500;
+const MEMORY_BACKFILL_PAGE_SIZE: usize = 128;
 
 /// Resolved auto-recall config threaded into `route_chat_stream`. `None` (the
 /// param is `Option<AutoRecallConfig>`) means the feature is disabled for this
@@ -3457,8 +3282,9 @@ pub struct AutoRecallConfig {
     /// past-chat set (deduped by message id). When `false`, no FTS work is done.
     pub fts_enabled: bool,
     /// Memory scope levels the active agent may recall from (subset of
-    /// `["user", "node", "project"]`). **Empty** means all three levels (the
-    /// back-compat default for an unconfigured agent). Resolved from the agent's
+    /// `["agent", "user", "node", "project", "org"]`). **Empty** means all personal
+    /// levels (the back-compat default for an unconfigured agent); organization memory
+    /// must be explicitly named. Resolved from the agent's
     /// `MemorySlot.read_levels` at the call site.
     pub read_levels: Vec<String>,
     /// Space IDs the active agent may inject into chat, from its
@@ -3480,6 +3306,10 @@ pub struct AutoRecallConfig {
     /// owner's context; programmatic turns leave this unset and retain the
     /// conversation-owner fallback below.
     pub caller_user_id: Option<String>,
+    /// Active agent id used to resolve `agent`-scoped memory and its graph facet.
+    pub agent_id: Option<String>,
+    /// Server-resolved per-user consent for special-category memory.
+    pub include_sensitive_topics: bool,
 }
 
 /// Resolve the principal used for per-caller auto-recall. Interactive requests
@@ -3490,6 +3320,14 @@ fn effective_recall_user_id(
     conversation_owner_id: Option<String>,
 ) -> Option<String> {
     caller_user_id.map(str::to_owned).or(conversation_owner_id)
+}
+
+/// A bound node must never use the local-account fallback for an interactive
+/// memory operation. The fallback is valid only for an unbound personal node;
+/// on a shared node an absent verified caller means there is no user partition
+/// to read from or write to.
+fn has_memory_principal(node_bound: bool, caller_user_id: Option<&str>) -> bool {
+    !node_bound || caller_user_id.is_some()
 }
 
 /// Truncate a snippet to `AUTO_RECALL_SNIPPET_CHARS` on a char boundary, adding
@@ -3624,26 +3462,15 @@ fn drop_recency_dupes(
 /// searches.
 ///
 /// FAIL-OPEN + BOUNDED: a per-fact embed failure logs and skips that fact (the
-/// loop never aborts); enumeration is capped at [`MEMORY_BACKFILL_LIMIT`]; the
-/// whole call already runs inside the [`AUTO_RECALL_TIMEOUT`] budget. Never
-/// panics or propagates.
+/// loop never aborts); at most [`MEMORY_BACKFILL_LIMIT`] new facts are embedded
+/// per call, while indexed facts are scanned in pages so an already-indexed head
+/// cannot starve older facts forever. The whole call already runs inside the
+/// [`AUTO_RECALL_TIMEOUT`] budget. Never panics or propagates.
 /// Enumerates facts across ALL scope levels (per-agent/level filtering happens at
 /// retrieve time, using the chunk's denormalized `mem_scope`/`mem_scope_id`), so a
 /// fact recorded at any level becomes searchable once indexed.
 async fn backfill_memory_facts(memory: &MemoryStore, retrieval: &RetrievalStore) {
-    let facts = match memory.all_for_backfill(MEMORY_BACKFILL_LIMIT).await {
-        Ok(f) => f,
-        Err(e) => {
-            tracing::warn!(
-                "auto-recall: enumerating memory facts failed (skipping backfill): {e:#}"
-            );
-            return;
-        }
-    };
-    if facts.is_empty() {
-        return;
-    }
-    let indexed = match retrieval.indexed_memory_ids().await {
+    let mut indexed = match retrieval.indexed_memory_ids().await {
         Ok(ids) => ids,
         Err(e) => {
             tracing::warn!(
@@ -3653,37 +3480,186 @@ async fn backfill_memory_facts(memory: &MemoryStore, retrieval: &RetrievalStore)
         }
     };
     let node_org = crate::sidecar::control_plane::registered_org().map(|o| o.id);
-    for fact in facts {
-        if indexed.contains(&fact.id) {
-            continue;
-        }
-        // Denormalize the fact's own owner onto its retrieval chunk so the
-        // per-caller filter can gate it. A legacy `'local'`/None owner → shared
-        // (the retrieval memory-owner backfill re-stamps it on the next open).
-        let owner = match (node_org.as_deref(), fact.owner_user_id.as_deref()) {
-            (Some(org), Some(uid)) if uid != crate::server::memory::LOCAL_USER => {
-                crate::server::retrieval::RetrievalOwner::owned(Some(uid), Some(org), None)
-            }
-            _ => crate::server::retrieval::RetrievalOwner::shared(),
-        };
-        if let Err(e) = retrieval
-            .index_memory_chunk(
-                &fact.id,
-                &fact.content,
-                fact.scope.as_str(),
-                fact.scope_id.as_deref(),
-                fact.category.as_str(),
-                fact.importance,
-                owner,
-            )
+    let mut offset = 0usize;
+    let mut newly_indexed = 0usize;
+    loop {
+        let facts = match memory
+            .all_for_backfill_page(MEMORY_BACKFILL_PAGE_SIZE, offset)
             .await
         {
-            tracing::warn!(
-                "auto-recall: indexing memory fact {} failed (skipping): {e:#}",
-                fact.id
-            );
+            Ok(facts) => facts,
+            Err(error) => {
+                tracing::warn!(
+                    "auto-recall: enumerating memory facts failed (skipping backfill): {error:#}"
+                );
+                return;
+            }
+        };
+        if facts.is_empty() {
+            return;
+        }
+        offset += facts.len();
+        for fact in facts {
+            let consent_user = fact
+                .owner_user_id
+                .as_deref()
+                .unwrap_or(crate::server::memory::LOCAL_USER);
+            let sensitive = !fact.sensitive_topics.is_empty();
+            if sensitive
+                && !memory
+                    .include_sensitive_topics(consent_user)
+                    .await
+                    .unwrap_or(false)
+            {
+                // Revocation removes the derived copy while the encrypted source
+                // remains available for an explicit owner review.
+                let _ = retrieval.remove_chunk(&fact.id).await;
+                continue;
+            }
+            // Denormalize the fact's own owner onto its retrieval chunk so the
+            // per-caller filter can gate it. A legacy `'local'`/None owner → shared
+            // (the retrieval memory-owner backfill re-stamps it on the next open).
+            let owner = match (node_org.as_deref(), fact.owner_user_id.as_deref()) {
+                (Some(org), Some(uid)) if uid != crate::server::memory::LOCAL_USER => {
+                    crate::server::retrieval::RetrievalOwner::owned(Some(uid), Some(org), None)
+                }
+                _ => crate::server::retrieval::RetrievalOwner::shared(),
+            };
+            if indexed.contains(&fact.id) {
+                if let Err(error) = retrieval
+                    .update_memory_metadata(
+                        &fact.id,
+                        fact.scope.as_str(),
+                        fact.scope_id.as_deref(),
+                        fact.category.as_str(),
+                        fact.importance,
+                        fact.author_agent_id.as_deref(),
+                        sensitive,
+                        owner,
+                    )
+                    .await
+                {
+                    tracing::warn!(
+                        "auto-recall: refreshing memory metadata {} failed (skipping): {error:#}",
+                        fact.id
+                    );
+                }
+                continue;
+            }
+            if let Err(error) = retrieval
+                .index_memory_chunk_with_metadata(
+                    &fact.id,
+                    &fact.content,
+                    fact.scope.as_str(),
+                    fact.scope_id.as_deref(),
+                    fact.category.as_str(),
+                    fact.importance,
+                    fact.author_agent_id.as_deref(),
+                    sensitive,
+                    owner,
+                )
+                .await
+            {
+                tracing::warn!(
+                    "auto-recall: indexing memory fact {} failed (skipping): {error:#}",
+                    fact.id
+                );
+            } else {
+                indexed.insert(fact.id);
+                newly_indexed += 1;
+                if newly_indexed >= MEMORY_BACKFILL_LIMIT {
+                    return;
+                }
+            }
         }
     }
+}
+
+fn memory_graph_document(entry: &crate::server::memory::LongTermEntry) -> MemoryGraphDocument {
+    MemoryGraphDocument {
+        memory_id: entry.id.clone(),
+        content: entry.content.clone(),
+        scope: entry.scope.as_str().to_owned(),
+        scope_id: entry.scope_id.clone(),
+        category: entry.category.as_str().to_owned(),
+        agent_id: entry.author_agent_id.clone(),
+        owner_user_id: entry.owner_user_id.clone(),
+        owner_org_id: None,
+        importance: entry.importance,
+        tags: entry.tags.clone(),
+        sensitive_topics: entry
+            .sensitive_topics
+            .iter()
+            .map(|topic| topic.as_str().to_owned())
+            .collect(),
+    }
+}
+
+/// Run the local typed Memory GraphRAG projection. The graph is rebuilt from a
+/// bounded source snapshot so it never becomes a second authority or a stale
+/// plaintext database. Every returned fact is still selected by the same scope,
+/// caller, project, and sensitive-topic filters used by vector retrieval.
+async fn graph_memory_chunks(
+    memory: &MemoryStore,
+    cfg: &AutoRecallConfig,
+    project_id: Option<&str>,
+    caller_user_id: Option<&str>,
+    caller_org_id: Option<&str>,
+    node_bound: bool,
+    query: &str,
+    limit: usize,
+) -> Vec<ScoredChunk> {
+    let facts = match memory.all_for_backfill(MEMORY_BACKFILL_LIMIT).await {
+        Ok(facts) => facts,
+        Err(error) => {
+            tracing::warn!("auto-recall: memory graph source scan failed (skipping): {error:#}");
+            return Vec::new();
+        }
+    };
+    let graph = MemoryGraph::from_documents(facts.iter().map(memory_graph_document));
+    let allowed_scopes = if cfg.read_levels.is_empty() {
+        None
+    } else {
+        Some(cfg.read_levels.as_slice())
+    };
+    let filter = MemoryGraphQuery {
+        agent_id: cfg.agent_id.as_deref(),
+        include_all_agents: false,
+        allowed_scopes,
+        project_id,
+        include_all_projects: false,
+        node_bound,
+        caller_user_id,
+        caller_org_id,
+        include_sensitive: cfg.include_sensitive_topics,
+    };
+    graph
+        .search(query, &filter, limit)
+        .into_iter()
+        .filter_map(|hit| {
+            graph.document(&hit.memory_id).map(|entry| ScoredChunk {
+                id: entry.memory_id.clone(),
+                source: ChunkSource::Memory,
+                space_id: None,
+                content: entry.content.clone(),
+                score: hit.score,
+            })
+        })
+        .collect()
+}
+
+/// Merge graph candidates with the ordinary vector/Space result without
+/// inventing a score scale. Reciprocal-rank fusion is the existing primitive for
+/// combining independently ranked sources, and it deduplicates by memory id.
+fn fuse_memory_graph_candidates(
+    vector_chunks: Vec<ScoredChunk>,
+    graph_chunks: Vec<ScoredChunk>,
+    limit: usize,
+) -> Vec<ScoredChunk> {
+    if graph_chunks.is_empty() {
+        return vector_chunks;
+    }
+    crate::server::retrieval::fuse_ranked_lists(vector_chunks, vec![graph_chunks], limit)
 }
 
 /// Run the auto-recall retrieval and return a ready-to-merge context block, or
@@ -3756,6 +3732,17 @@ async fn run_auto_recall_context(
     // rankings are merged by rank (their scores are not comparable — a graph hit has
     // none). An EMPTY allowlist skips `spaces.db` entirely, which is what keeps the
     // default agent's turn free of that work.
+    let graph_chunks = graph_memory_chunks(
+        memory,
+        cfg,
+        project_id,
+        caller_user_id.as_deref(),
+        caller_org_id.as_deref(),
+        node_bound,
+        query,
+        cfg.top_k + recency_ids.len(),
+    )
+    .await;
     let memory_chunks = {
         let opts = RetrievalOptions {
             top_k: cfg.top_k + recency_ids.len(),
@@ -3769,18 +3756,30 @@ async fn run_auto_recall_context(
                 Some(cfg.read_levels.clone())
             },
             project_id: project_id.map(str::to_string),
+            agent_id: cfg.agent_id.clone(),
+            include_sensitive: cfg.include_sensitive_topics,
             node_bound,
             caller_user_id: caller_user_id.clone(),
             caller_org_id: caller_org_id.clone(),
             ..RetrievalOptions::default()
         };
-        match cfg.retrieval.retrieve(query, &opts).await {
-            Ok(chunks) => drop_recency_dupes(chunks, recency_ids),
+        let vector_chunks = match cfg.retrieval.retrieve(query, &opts).await {
+            Ok(chunks) => chunks,
             Err(e) => {
-                tracing::warn!("auto-recall: memory retrieve failed (skipping): {e:#}");
+                tracing::warn!(
+                    "auto-recall: vector memory retrieve failed (using graph only): {e:#}"
+                );
                 Vec::new()
             }
-        }
+        };
+        drop_recency_dupes(
+            fuse_memory_graph_candidates(
+                vector_chunks,
+                graph_chunks,
+                cfg.top_k + recency_ids.len(),
+            ),
+            recency_ids,
+        )
     };
 
     // The past-chat half must scope to the caller's readable conversations on a
@@ -4017,6 +4016,8 @@ pub async fn run_reply_text(
             Arc::clone(&mcp),
             skills.clone(),
             traces.clone(),
+            None,
+            Vec::new(),
         )
         .await;
         let result = match turn_result {
@@ -4346,6 +4347,8 @@ pub(crate) async fn run_text_turn(
     mcp: Arc<McpRegistry>,
     skills: SkillRegistry,
     traces: TraceStore,
+    composio_connection_scope: Option<Vec<ComposioConnectionBinding>>,
+    referenced_conversation_ids: Vec<String>,
 ) -> anyhow::Result<String> {
     run_text_turn_with_metadata(
         conversation_id,
@@ -4364,6 +4367,8 @@ pub(crate) async fn run_text_turn(
         mcp,
         skills,
         traces,
+        composio_connection_scope,
+        referenced_conversation_ids,
     )
     .await
     .map(|result| result.reply)
@@ -4391,6 +4396,8 @@ async fn run_text_turn_with_metadata(
     mcp: Arc<McpRegistry>,
     skills: SkillRegistry,
     traces: TraceStore,
+    composio_connection_scope: Option<Vec<ComposioConnectionBinding>>,
+    referenced_conversation_ids: Vec<String>,
 ) -> anyhow::Result<TextReplyResult> {
     run_text_turn_in_with_metadata(
         conversation_id,
@@ -4412,6 +4419,8 @@ async fn run_text_turn_with_metadata(
         mcp,
         skills,
         traces,
+        composio_connection_scope,
+        referenced_conversation_ids,
     )
     .await
 }
@@ -4473,6 +4482,8 @@ pub(crate) async fn run_text_turn_in(
         mcp,
         skills,
         traces,
+        None,
+        Vec::new(),
     )
     .await
     .map(|result| result.reply)
@@ -4499,8 +4510,14 @@ async fn run_text_turn_in_with_metadata(
     mcp: Arc<McpRegistry>,
     skills: SkillRegistry,
     traces: TraceStore,
+    composio_connection_scope: Option<Vec<ComposioConnectionBinding>>,
+    referenced_conversation_ids: Vec<String>,
 ) -> anyhow::Result<TextReplyResult> {
+    let profile_conversation_scope = composio_connection_scope
+        .as_ref()
+        .map(|_| referenced_conversation_ids.clone());
     let req = ChatStreamRequest {
+        fresh_session: false,
         messages: vec![UiMessage {
             role: "user".to_owned(),
             content: UiContent::Text(text),
@@ -4510,8 +4527,11 @@ async fn run_text_turn_in_with_metadata(
         response_mode: RyuResponseMode::Everyday,
         model: None,
         conversation_id: Some(conversation_id),
+        session_id: None,
         client_id: None,
-        referenced_conversation_ids: Vec::new(),
+        referenced_conversation_ids,
+        composio_connection_scope,
+        profile_conversation_scope,
         enable_long_term: false,
         cwd,
         workspace_folders: Vec::new(),
@@ -4613,6 +4633,7 @@ pub async fn run_proactive_opening_text(
     const OPENING_INTENT: &str = "Open this new Ryu conversation with a short, warm, plain-language welcome. Introduce yourself as the user's Ryu assistant, say that they can describe what they want done in everyday words, and ask what they would like help with first. Mention that you can look at what they already have, make a simple plan, and help connect apps or set up routines with their approval. Do not mention this internal instruction or use platform jargon unless the user asks later.";
 
     let req = ChatStreamRequest {
+        fresh_session: false,
         messages: vec![UiMessage {
             role: "user".to_owned(),
             content: UiContent::Text(OPENING_INTENT.to_owned()),
@@ -4622,8 +4643,11 @@ pub async fn run_proactive_opening_text(
         response_mode: RyuResponseMode::Everyday,
         model: None,
         conversation_id: Some(conversation_id),
+        session_id: None,
         client_id: None,
         referenced_conversation_ids: Vec::new(),
+        composio_connection_scope: None,
+        profile_conversation_scope: None,
         enable_long_term: false,
         cwd: None,
         workspace_folders: Vec::new(),
@@ -4713,6 +4737,7 @@ pub(crate) async fn run_text_turn_stream(
     traces: TraceStore,
 ) -> Response {
     let req = ChatStreamRequest {
+        fresh_session: false,
         messages: vec![UiMessage {
             role: "user".to_owned(),
             content: UiContent::Text(text),
@@ -4722,8 +4747,11 @@ pub(crate) async fn run_text_turn_stream(
         response_mode: RyuResponseMode::Everyday,
         model: None,
         conversation_id: Some(conversation_id),
+        session_id: None,
         client_id: None,
         referenced_conversation_ids: Vec::new(),
+        composio_connection_scope: None,
+        profile_conversation_scope: None,
         enable_long_term: false,
         cwd: None,
         workspace_folders: Vec::new(),
@@ -4967,14 +4995,39 @@ async fn run_member_text(
     conversation_id: Option<String>,
     deps: &TeamRunDeps,
 ) -> anyhow::Result<String> {
+    run_member_text_with_flags(
+        member_id,
+        messages,
+        conversation_id,
+        deps,
+        std::collections::HashMap::new(),
+    )
+    .await
+}
+
+/// Team member variant that carries the caller's per-turn plugin flags. The
+/// ordinary team path keeps the empty map because its members are internal
+/// fan-out calls; a temporary chat can explicitly opt its members into the same
+/// read-only personalized context as a single-agent turn.
+async fn run_member_text_with_flags(
+    member_id: &str,
+    messages: Vec<UiMessage>,
+    conversation_id: Option<String>,
+    deps: &TeamRunDeps,
+    plugin_flags: std::collections::HashMap<String, bool>,
+) -> anyhow::Result<String> {
     let req = ChatStreamRequest {
+        fresh_session: false,
         messages,
         agent_id: Some(member_id.to_owned()),
         response_mode: RyuResponseMode::Everyday,
         model: None,
         conversation_id,
+        session_id: None,
         client_id: None,
         referenced_conversation_ids: Vec::new(),
+        composio_connection_scope: None,
+        profile_conversation_scope: None,
         enable_long_term: false,
         cwd: None,
         workspace_folders: Vec::new(),
@@ -5004,7 +5057,7 @@ async fn run_member_text(
         // Programmatic fan-out (delegate / threads / worker / scheduled / team
         // member) — yield to a directly-typing user on the shared local engine.
         background: true,
-        plugin_flags: std::collections::HashMap::new(),
+        plugin_flags,
         // Unstyled, same scope rule as [`run_text_turn_in`].
         output_style: None,
         // Programmatic per-member turn, no human author to attribute.
@@ -5236,6 +5289,7 @@ pub async fn route_team_chat_stream(
         .lead_agent_id
         .clone()
         .unwrap_or_else(|| team.members[0].clone());
+    let member_plugin_flags = req.plugin_flags.clone();
     let persist_combined = req.persist;
 
     let stream = async_stream::stream! {
@@ -5248,7 +5302,7 @@ pub async fn route_team_chat_stream(
             // Every member answers the same prompt independently.
             Coordination::Broadcast => {
                 for (idx, (mid, mname)) in members.iter().enumerate() {
-                    let text = match run_member_text(mid, original_messages.clone(), conversation_id.clone(), &deps).await {
+                    let text = match run_member_text_with_flags(mid, original_messages.clone(), conversation_id.clone(), &deps, member_plugin_flags.clone()).await {
                         Ok(t) if !t.trim().is_empty() => t,
                         Ok(_) => "_(no response)_".to_owned(),
                         Err(e) => format!("_(error: {e})_"),
@@ -5271,7 +5325,7 @@ pub async fn route_team_chat_stream(
                         );
                         messages_with_preamble(&original_messages, &preamble)
                     };
-                    let text = match run_member_text(mid, msgs, conversation_id.clone(), &deps).await {
+                    let text = match run_member_text_with_flags(mid, msgs, conversation_id.clone(), &deps, member_plugin_flags.clone()).await {
                         Ok(t) if !t.trim().is_empty() => t,
                         Ok(_) => "_(no response)_".to_owned(),
                         Err(e) => format!("_(error: {e})_"),
@@ -5287,7 +5341,7 @@ pub async fn route_team_chat_stream(
             Coordination::DebateSynthesis => {
                 let mut round1 = String::new();
                 for (idx, (mid, mname)) in members.iter().enumerate() {
-                    let text = match run_member_text(mid, original_messages.clone(), conversation_id.clone(), &deps).await {
+                    let text = match run_member_text_with_flags(mid, original_messages.clone(), conversation_id.clone(), &deps, member_plugin_flags.clone()).await {
                         Ok(t) if !t.trim().is_empty() => t,
                         Ok(_) => "_(no response)_".to_owned(),
                         Err(e) => format!("_(error: {e})_"),
@@ -5308,7 +5362,7 @@ pub async fn route_team_chat_stream(
                     "You are the lead of a team. Your teammates gave these answers to the user's request:\n\n{round1}\nSynthesize them into one definitive, non-repetitive answer for the user."
                 );
                 let msgs = messages_with_preamble(&original_messages, &preamble);
-                let synth = match run_member_text(&lead_id, msgs, conversation_id.clone(), &deps).await {
+                let synth = match run_member_text_with_flags(&lead_id, msgs, conversation_id.clone(), &deps, member_plugin_flags.clone()).await {
                     Ok(t) if !t.trim().is_empty() => t,
                     Ok(_) => "_(no synthesis)_".to_owned(),
                     Err(e) => format!("_(synthesis error: {e})_"),
@@ -5342,7 +5396,7 @@ pub async fn route_team_chat_stream(
                     .find(|(id, _)| pick.contains(id.as_str()))
                     .cloned()
                     .unwrap_or_else(|| members[0].clone());
-                let text = match run_member_text(&chosen.0, original_messages.clone(), conversation_id.clone(), &deps).await {
+                let text = match run_member_text_with_flags(&chosen.0, original_messages.clone(), conversation_id.clone(), &deps, member_plugin_flags.clone()).await {
                     Ok(t) if !t.trim().is_empty() => t,
                     Ok(_) => "_(no response)_".to_owned(),
                     Err(e) => format!("_(error: {e})_"),
@@ -5780,6 +5834,23 @@ pub async fn route_chat_stream(
     );
 
     let user_text = last_user_message(&req.messages);
+    // A normal turn is allowed to create its row later in this function, but a
+    // non-persisted turn may only reuse a conversation that an orchestrator has
+    // already created (team members). This keeps client-held temporary chats from
+    // becoming durable through participant/status/trace side effects.
+    let durable_conversation = if req.persist {
+        req.conversation_id.is_some()
+    } else {
+        match req.conversation_id.as_deref() {
+            Some(conversation_id) => conversations
+                .get_access_meta(conversation_id)
+                .await
+                .ok()
+                .flatten()
+                .is_some(),
+            None => false,
+        }
+    };
     let widget_provenance =
         req.widget_provenance
             .as_ref()
@@ -5798,14 +5869,16 @@ pub async fn route_chat_stream(
     // use the primary `agent_id` (backward compatible).
     let effective_agent_id: Option<String> = if let Some(ref target) = req.target_agent_id {
         // Auto-register the target as a participant in this conversation.
-        if let Some(ref conv_id) = req.conversation_id {
-            // The conversation row already exists and is stamped by
-            // `gate_and_claim_conversation` upstream; COALESCE preserves its owner.
-            if let Err(e) = conversations
-                .add_participant(conv_id, target, Tenancy::Unattributed)
-                .await
-            {
-                tracing::warn!("failed to add participant {target}: {e:#}");
+        if durable_conversation {
+            if let Some(ref conv_id) = req.conversation_id {
+                // The conversation row already exists and is stamped by
+                // `gate_and_claim_conversation` upstream; COALESCE preserves its owner.
+                if let Err(e) = conversations
+                    .add_participant(conv_id, target, Tenancy::Unattributed)
+                    .await
+                {
+                    tracing::warn!("failed to add participant {target}: {e:#}");
+                }
             }
         }
         Some(target.clone())
@@ -5828,12 +5901,16 @@ pub async fn route_chat_stream(
         tracing::info!(resolved_agent = %resolved, "agent-auto: resolved 'auto' to concrete agent");
         // Register the resolved agent as a participant so the conversation reflects
         // which agent actually handled the turn (mirrors the target_agent_id path).
-        if let Some(ref conv_id) = req.conversation_id {
-            if let Err(e) = conversations
-                .add_participant(conv_id, &resolved, Tenancy::Unattributed)
-                .await
-            {
-                tracing::warn!("agent-auto: failed to add resolved participant {resolved}: {e:#}");
+        if durable_conversation {
+            if let Some(ref conv_id) = req.conversation_id {
+                if let Err(e) = conversations
+                    .add_participant(conv_id, &resolved, Tenancy::Unattributed)
+                    .await
+                {
+                    tracing::warn!(
+                        "agent-auto: failed to add resolved participant {resolved}: {e:#}"
+                    );
+                }
             }
         }
         Some(resolved)
@@ -6014,7 +6091,8 @@ pub async fn route_chat_stream(
     // workflow target is a stronger user intent and leaves the pending control
     // for the next ordinary turn. Applying here keeps the ordinary model router
     // as the default and makes agent control the deliberate post-routing override.
-    if !req.background
+    if durable_conversation
+        && !req.background
         && req.target_agent_id.is_none()
         && req.team_id.is_none()
         && req.workflow_id.is_none()
@@ -6358,24 +6436,84 @@ pub async fn route_chat_stream(
         Some(state) => crate::memory_policy::MemoryPolicy::load(&state.preferences).await,
         None => crate::memory_policy::MemoryPolicy::default(),
     };
+    // Sensitive-topic consent is per verified user on a bound node. The request
+    // author wins over the local-account fallback; an unbound node keeps the
+    // single LOCAL_USER principal.
+    let memory_principal_available = has_memory_principal(
+        crate::server::node_org_id().is_some(),
+        req.author_user_id.as_deref(),
+    );
+    let memory_owner = if crate::server::node_org_id().is_some() {
+        req.author_user_id
+            .clone()
+            .unwrap_or_else(crate::server::background_memory_user_id)
+    } else {
+        LOCAL_USER.to_owned()
+    };
+    let memory_policy = memory_policy.with_sensitive_topics(if memory_principal_available {
+        memory
+            .include_sensitive_topics(&memory_owner)
+            .await
+            .unwrap_or(false)
+    } else {
+        false
+    });
+    // A temporary chat normally opts out of every personalized context layer.
+    // The Memory plugin's composer flag is the explicit read-only exception: it
+    // allows existing facts/recall for this request, but never changes the
+    // `persist` boundary or the separate write decision below.
+    let temporary_context_flag_enabled = req
+        .plugin_flags
+        .get(crate::memory_policy::TEMPORARY_CONTEXT_FLAG)
+        .copied()
+        .unwrap_or(false);
+    let memory_context_enabled = memory_principal_available
+        && crate::memory_policy::MemoryPolicy::context_enabled(
+            req.enable_long_term,
+            req.persist,
+            temporary_context_flag_enabled,
+        );
     // The per-REQUEST opt-in AND the per-NODE policy. The policy can only narrow
     // what the request asked for — it can never turn memory on for a caller that
     // did not request it, which is what keeps privacy-by-default intact.
-    let auto_recall_allowed = memory_policy.should_auto_recall(req.enable_long_term);
+    let auto_recall_allowed = memory_policy.should_auto_recall(memory_context_enabled);
+    // Auto-recall is independently resolved by the interactive handler. Keep a
+    // second boundary here because programmatic callers can invoke this shared
+    // route directly and must not inherit the bound node's local-owner fallback.
+    let recall = if memory_principal_available && (req.persist || temporary_context_flag_enabled) {
+        recall
+    } else {
+        None
+    };
 
     // Recall long-term (cross-session) memory BEFORE recording the current turn,
     // so the just-sent message does not echo back to the model as a remembered
     // "fact". This keeps long-term context strictly cross-session.
     // Use effective_agent_id so multi-agent turns scope memory correctly.
+    let memory_read_levels = recall
+        .as_ref()
+        .map(|config| config.read_levels.as_slice())
+        .unwrap_or(&[]);
+    let memory_node_org = crate::server::node_org_id();
+    let memory_visibility = MemoryVisibility::for_caller_in_org(
+        req.author_user_id.as_deref(),
+        memory_node_org.as_deref(),
+        memory_node_org.is_some(),
+    );
     let LongTermMemoryContext {
         system: long_term_system,
         citations: mut memory_citations,
         recency_ids,
-    } = assemble_long_term_context(
+    } = assemble_long_term_context_for_user(
         &memory,
         auto_recall_allowed,
+        &memory_owner,
         effective_agent_id.as_deref(),
+        req.cwd.as_deref(),
+        memory_read_levels,
+        memory_visibility,
         memory_policy.recall_budget.long_term_limit(),
+        memory_policy.include_sensitive_topics,
     )
     .await;
 
@@ -6391,10 +6529,11 @@ pub async fn route_chat_stream(
         // Both READ-side hooks under ONE timeout budget, run concurrently: the
         // provider's standing summary (opt-in) and the facts matching this turn.
         // Sequentially they would spend two budgets on a turn that needs one.
-        let mut blocks = crate::memory_provider::read_hooks(
+        let mut blocks = crate::memory_provider::read_hooks_with_consent(
             &user_text,
             memory_policy.recall_budget.long_term_limit(),
             memory_policy.provider_context,
+            memory_policy.include_sensitive_topics,
         )
         .await;
 
@@ -6435,10 +6574,15 @@ pub async fn route_chat_stream(
         managed_instructions.as_deref(),
     );
     let long_term_system = merge_system_prompt(long_term_system, managed_instructions);
-    let user_personalization = match crate::learning::global_state() {
-        Some(state) => user_personalization_block(&state.preferences).await,
-        None => None,
-    };
+    let user_personalization =
+        if memory_principal_available && (req.persist || memory_context_enabled) {
+            match crate::learning::global_state() {
+                Some(state) => user_personalization_block(&state.preferences).await,
+                None => None,
+            }
+        } else {
+            None
+        };
     let long_term_system = merge_system_prompt(long_term_system, user_personalization);
 
     // Project instructions remain host-discovered data, but injection belongs to
@@ -6579,7 +6723,10 @@ pub async fn route_chat_stream(
     // future sessions. No-op (and nothing is stored) when disabled. Metadata is
     // auto-classified from the text + active project (`cwd`); users can edit any
     // field later in the desktop Memory Library.
-    if memory_policy.should_write(req.enable_long_term) && !user_text.is_empty() {
+    if memory_principal_available
+        && memory_policy.should_write(req.enable_long_term && req.persist)
+        && !user_text.is_empty()
+    {
         let scope = long_term_agent_scope(effective_agent_id.as_deref());
         // Sanitize at WRITE time too: the raw turn is stored verbatim and will
         // re-enter a future session's system context, so template tokens are
@@ -6591,21 +6738,28 @@ pub async fn route_chat_stream(
             req.cwd.as_deref(),
             effective_agent_id.as_deref(),
         );
-        // Attribute to the local owner on a bound node (no HTTP caller on the chat
-        // path) so the captured fact is recallable by its owner; LOCAL_USER on an
-        // unbound node keeps the single-user path byte-identical.
-        let owner = crate::server::background_memory_user_id();
-        let mirrored = new.content.clone();
-        let mirrored_scope = new.scope.as_str();
-        if let Err(e) = memory.record_full(&owner, &scope, new).await {
-            tracing::warn!("failed to record long-term memory: {e:#}");
-        } else if memory_policy.mirror_builtin {
-            // MIRROR hook: echo the just-recorded fact to the external provider so
-            // the two stores do not drift. Only on success — mirroring a write that
-            // failed locally would put a fact in the remote store that this node has
-            // no record of. Fire-and-forget: the built-in write is the source of
-            // truth and already succeeded, so a mirror failure surfaces nowhere.
-            crate::memory_provider::mirror(&mirrored, mirrored_scope);
+        let sensitive = crate::server::memory::detect_sensitive_topics(&new.content);
+        if !sensitive.is_empty() && !memory_policy.include_sensitive_topics {
+            tracing::info!(
+                "long-term memory capture skipped because sensitive-topic consent is off"
+            );
+        } else {
+            // Attribute to the verified caller on a bound node so the fact is
+            // recallable by its owner; LOCAL_USER on an unbound node keeps the
+            // single-user path byte-identical.
+            let owner = memory_owner.clone();
+            let mirrored = new.content.clone();
+            let mirrored_scope = new.scope.as_str();
+            if let Err(e) = memory.record_full(&owner, &scope, new).await {
+                tracing::warn!("failed to record long-term memory: {e:#}");
+            } else if memory_policy.mirror_builtin {
+                // MIRROR hook: echo the just-recorded fact to the external provider so
+                // the two stores do not drift. Only on success — mirroring a write that
+                // failed locally would put a fact in the remote store that this node has
+                // no record of. Fire-and-forget: the built-in write is the source of
+                // truth and already succeeded, so a mirror failure surfaces nowhere.
+                crate::memory_provider::mirror(&mirrored, mirrored_scope);
+            }
         }
     }
 
@@ -6615,7 +6769,13 @@ pub async fn route_chat_stream(
     // nothing, while sync is about what a provider the user deliberately chose is
     // allowed to see. Off by default — raw turns leaving the node is not something to
     // start doing without being asked.
-    if memory_policy.sync_turns && !user_text.is_empty() {
+    if memory_principal_available
+        && req.persist
+        && memory_policy.sync_turns
+        && !user_text.is_empty()
+        && (memory_policy.include_sensitive_topics
+            || crate::server::memory::detect_sensitive_topics(&user_text).is_empty())
+    {
         crate::memory_provider::sync_turn(&user_text, "user");
     }
 
@@ -6626,6 +6786,9 @@ pub async fn route_chat_stream(
         &registry,
         &provider_reg,
         req.user_jwt.as_deref(),
+        req.composio_connection_scope.as_deref(),
+        req.profile_conversation_scope.as_deref(),
+        req.conversation_id.as_deref(),
     ) {
         Some(r) => r,
         None => {
@@ -6742,7 +6905,11 @@ pub async fn route_chat_stream(
         plane_breakdown.add_text("instructions", "Output style", style_prefix.as_deref());
         plane_breakdown.add_messages("Conversation history", &req.messages);
         record_context_breakdown(
-            req.conversation_id.as_deref(),
+            if durable_conversation {
+                req.conversation_id.as_deref()
+            } else {
+                None
+            },
             plane_breakdown,
             context_breakdown::ContextPlane::Openai,
         );
@@ -6829,25 +6996,27 @@ pub async fn route_chat_stream(
     // so the state is durable even if the connection drops mid-stream (U013).
     // When worktree isolation is active, the guard's path takes priority over
     // any client-supplied worktree_path.
-    if let Some(ref conv_id) = req.conversation_id {
-        let folder_path = req.cwd.as_deref();
-        let branch = req.branch.as_deref();
-        let resolved_worktree = worktree_guard
-            .as_ref()
-            .map(|g| g.path.to_string_lossy().into_owned());
-        let worktree_path = resolved_worktree
-            .as_deref()
-            .or(req.worktree_path.as_deref());
-        if folder_path.is_some() || branch.is_some() || worktree_path.is_some() {
-            if let Err(e) = conversations
-                .set_run_metadata(conv_id, folder_path, branch, worktree_path)
-                .await
-            {
-                tracing::warn!("failed to set run metadata: {e:#}");
+    if durable_conversation {
+        if let Some(ref conv_id) = req.conversation_id {
+            let folder_path = req.cwd.as_deref();
+            let branch = req.branch.as_deref();
+            let resolved_worktree = worktree_guard
+                .as_ref()
+                .map(|g| g.path.to_string_lossy().into_owned());
+            let worktree_path = resolved_worktree
+                .as_deref()
+                .or(req.worktree_path.as_deref());
+            if folder_path.is_some() || branch.is_some() || worktree_path.is_some() {
+                if let Err(e) = conversations
+                    .set_run_metadata(conv_id, folder_path, branch, worktree_path)
+                    .await
+                {
+                    tracing::warn!("failed to set run metadata: {e:#}");
+                }
             }
-        }
-        if let Err(e) = conversations.set_run_status(conv_id, "running").await {
-            tracing::warn!("failed to set run status to running: {e:#}");
+            if let Err(e) = conversations.set_run_status(conv_id, "running").await {
+                tracing::warn!("failed to set run status to running: {e:#}");
+            }
         }
     }
 
@@ -6903,7 +7072,7 @@ pub async fn route_chat_stream(
                     // base_url; the gateway token (not the provider key) is the
                     // bearer.
                     let gateway_base = crate::sidecar::gateway::gateway_url();
-                    let gateway_token = crate::sidecar::gateway::gateway_token();
+                    let gateway_token = crate::sidecar::gateway::gateway_core_token();
                     // Forward the selected agent id so the gateway can apply
                     // per-agent token budgets (U21). Core has no local user concept,
                     // so `x-ryu-user-id` is left for cloud/multi-tenant gateways.
@@ -7208,7 +7377,11 @@ pub async fn route_chat_stream(
             );
             breakdown.add_tools(&mcp.tools_for_agent(allowlist.as_deref()).await);
             record_context_breakdown(
-                req.conversation_id.as_deref(),
+                if durable_conversation {
+                    req.conversation_id.as_deref()
+                } else {
+                    None
+                },
                 breakdown,
                 context_breakdown::ContextPlane::Acp,
             );
@@ -7227,7 +7400,11 @@ pub async fn route_chat_stream(
                 persist_store_for_acp,
                 conversation_id_for_persist,
                 persist_agent_id,
-                conversation_id,
+                if durable_conversation {
+                    conversation_id
+                } else {
+                    None
+                },
                 worktree_diffs,
                 mcp,
                 allowlist,
@@ -9537,9 +9714,10 @@ async fn route_acp_stream(
         project_rules.as_deref(),
     )
     .await;
-    let fresh_session = rewritten_prompt
-        .as_ref()
-        .is_some_and(|rewrite| rewrite.fresh_session);
+    let fresh_session = req.fresh_session
+        || rewritten_prompt
+            .as_ref()
+            .is_some_and(|rewrite| rewrite.fresh_session);
     let prompt = rewritten_prompt.map_or(prompt, |rewrite| rewrite.text);
 
     // The primary cwd is already the first ACP root. Secondary roots are
@@ -9572,6 +9750,8 @@ async fn route_acp_stream(
         composio_actions,
         bridge_agent_id,
         identity_profile_ids,
+        req.composio_connection_scope.clone(),
+        req.profile_conversation_scope.clone(),
         turn,
         conversation_id.clone(),
     );
@@ -9598,6 +9778,7 @@ async fn route_acp_stream(
     // flag to decide whether to act this turn.
     let plugin_flags = req.plugin_flags.clone();
     let agent_control_applied = req.agent_control_applied.clone();
+    let harness_session_id = req.session_id.clone();
     tokio::spawn(async move {
         // After stream completes the guard is transferred into WorktreeRun
         // (so the worktree survives for apply). If abandoned before completion
@@ -10411,6 +10592,19 @@ async fn route_acp_stream(
                             }
                         }
                     }
+                    if let (Some(harness_id), Some(native_id)) = (
+                        harness_session_id.as_deref(),
+                        info.get("sessionId").and_then(Value::as_str),
+                    ) {
+                        if let Err(error) = persist_store
+                            .set_session_native_id(harness_id, native_id)
+                            .await
+                        {
+                            tracing::debug!(
+                                "harness: native session binding update skipped: {error:#}"
+                            );
+                        }
+                    }
                     emit!(ui_data("ryu-acp-session-info", &info));
                 }
                 acp::AcpEvent::Usage(u) => {
@@ -10860,6 +11054,9 @@ pub trait AgentAdapter: Send + Sync {
 mod tests {
     use super::*;
     use crate::server::memory::DEFAULT_LONG_TERM_LIMIT;
+    use agent_client_protocol::schema::McpServer;
+    use agent_client_protocol_tokio::AcpAgent;
+    use std::str::FromStr;
 
     /// The prompt-cache preference is forwarded verbatim as a header, so an
     /// unvalidated value would reach the gateway (and the provider) mid-turn.
@@ -11152,127 +11349,6 @@ mod tests {
         assert_eq!(out[2].content.as_text(), "CONTEXT\n\nlatest question");
     }
 
-    // ── Attached documents (the non-image half of the `file`-part seam) ─────────
-
-    /// Build a `file` part the way the desktop composer sends an extracted document.
-    fn doc_part(filename: &str, markdown: &str) -> serde_json::Value {
-        use base64::Engine as _;
-        let b64 = base64::engine::general_purpose::STANDARD.encode(markdown);
-        serde_json::json!({
-            "type": "file",
-            "mediaType": "text/markdown",
-            "filename": filename,
-            "url": format!("data:text/markdown;base64,{b64}"),
-        })
-    }
-
-    fn user_with_parts(text: &str, parts: Vec<serde_json::Value>) -> UiMessage {
-        UiMessage {
-            role: "user".to_owned(),
-            content: UiContent::Text(text.to_owned()),
-            parts,
-        }
-    }
-
-    #[test]
-    fn attached_document_reaches_the_prompt_labelled_with_its_filename() {
-        let m = user_with_parts(
-            "summarise this",
-            vec![doc_part("q3.pdf", "# Revenue\nUp 12%.")],
-        );
-        let block = document_context_block(&m).expect("a document part yields a block");
-        assert!(block.contains("filename=\"q3.pdf\""), "got: {block}");
-        assert!(block.contains("Up 12%."), "got: {block}");
-    }
-
-    #[test]
-    fn images_and_documents_do_not_claim_each_others_parts() {
-        let image = serde_json::json!({
-            "type": "file",
-            "mediaType": "image/png",
-            "url": "data:image/png;base64,AAAA",
-        });
-        let m = user_with_parts("both", vec![image, doc_part("notes.md", "hello")]);
-        // Exactly one each — neither function eats the other's part, and nothing is
-        // dropped by both (the bug this seam exists to close).
-        assert_eq!(message_image_parts(&m).len(), 1);
-        assert_eq!(message_document_parts(&m).len(), 1);
-    }
-
-    #[test]
-    fn remote_urls_are_never_fetched_but_are_still_declared() {
-        let remote = serde_json::json!({
-            "type": "file",
-            "mediaType": "text/markdown",
-            "filename": "evil.md",
-            "url": "https://internal.example/admin",
-        });
-        let m = user_with_parts("read it", vec![remote]);
-        let block = document_context_block(&m).expect("declared, not silently dropped");
-        // The URL is never dereferenced — a client-supplied URL must not become a
-        // server-side fetch on the chat path.
-        assert!(!block.contains("internal.example"), "got: {block}");
-        assert!(block.contains("no text could be extracted"), "got: {block}");
-    }
-
-    #[test]
-    fn an_unreadable_file_part_is_declared_rather_than_dropped() {
-        // What every non-desktop client still sends: the raw document, unparsed.
-        let raw = serde_json::json!({
-            "type": "file",
-            "mediaType": "application/pdf",
-            "filename": "contract.pdf",
-            "url": "data:application/pdf;base64,JVBERi0=",
-        });
-        let m = user_with_parts("what does it say", vec![raw]);
-        let block = document_context_block(&m).expect("must not vanish");
-        assert!(block.contains("contract.pdf"), "got: {block}");
-        assert!(block.contains("application/pdf"), "got: {block}");
-    }
-
-    #[test]
-    fn plain_data_urls_decode_too() {
-        let part = serde_json::json!({
-            "type": "file",
-            "mediaType": "text/plain",
-            "filename": "a.txt",
-            "url": "data:text/plain,hello%20world",
-        });
-        let m = user_with_parts("", vec![part]);
-        assert!(document_context_block(&m).unwrap().contains("hello world"));
-    }
-
-    #[test]
-    fn a_message_with_only_a_document_still_produces_a_block() {
-        // The ACP plane's emptiness guard depends on this: attaching a file with no
-        // typed text is a real turn, not "no user message".
-        let m = user_with_parts("", vec![doc_part("spec.docx", "body text")]);
-        assert!(document_context_block(&m).is_some());
-    }
-
-    #[test]
-    fn attached_documents_are_capped_per_message() {
-        let parts: Vec<_> = (0..40)
-            .map(|i| doc_part(&format!("f{i}.md"), "x"))
-            .collect();
-        let m = user_with_parts("many", parts);
-        assert_eq!(message_document_parts(&m).len(), MAX_DOCUMENT_PARTS);
-    }
-
-    #[test]
-    fn a_blank_extraction_says_so_instead_of_looking_like_no_attachment() {
-        let m = user_with_parts("hi", vec![doc_part("blank.txt", "   \n  ")]);
-        let block = document_context_block(&m).expect("the file was still attached");
-        assert!(block.contains("blank.txt"), "got: {block}");
-        assert!(block.contains("no text could be extracted"), "got: {block}");
-    }
-
-    #[test]
-    fn a_message_with_no_file_parts_adds_nothing() {
-        let m = user_with_parts("just a question", vec![]);
-        assert!(document_context_block(&m).is_none());
-    }
-
     // ── Auto-recall block assembly (U17) ────────────────────────────────────────
     // Pure assembly + merge, exercised without a network embed.
 
@@ -11502,6 +11578,80 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn backfill_reaches_older_facts_after_the_newest_page_is_indexed() {
+        let memory = MemoryStore::open_in_memory().unwrap();
+        let retrieval = RetrievalStore::open_in_memory(
+            crate::registry::DEFAULT_EMBED_DIMS,
+            crate::registry::DEFAULT_RERANKER_MODEL.to_owned(),
+        )
+        .unwrap();
+        let oldest_id = memory
+            .record(LOCAL_USER, "default", "the oldest searchable fact")
+            .await
+            .unwrap()
+            .unwrap();
+        for index in 0..500 {
+            memory
+                .record(
+                    LOCAL_USER,
+                    "default",
+                    &format!("newer searchable fact {index}"),
+                )
+                .await
+                .unwrap();
+        }
+
+        backfill_memory_facts(&memory, &retrieval).await;
+        assert!(!retrieval
+            .indexed_memory_ids()
+            .await
+            .unwrap()
+            .contains(&oldest_id));
+
+        backfill_memory_facts(&memory, &retrieval).await;
+        assert!(retrieval
+            .indexed_memory_ids()
+            .await
+            .unwrap()
+            .contains(&oldest_id));
+    }
+
+    #[tokio::test]
+    async fn graph_recall_connects_people_and_shared_topics() {
+        let memory = MemoryStore::open_in_memory().unwrap();
+        let retrieval = RetrievalStore::open_in_memory(
+            crate::registry::DEFAULT_EMBED_DIMS,
+            crate::registry::DEFAULT_RERANKER_MODEL.to_owned(),
+        )
+        .unwrap();
+        memory
+            .record(LOCAL_USER, "agent-a", "Maya owns the launch plan")
+            .await
+            .unwrap();
+        let related_id = memory
+            .record(LOCAL_USER, "agent-a", "The launch plan needs a review")
+            .await
+            .unwrap()
+            .unwrap();
+        let cfg = AutoRecallConfig {
+            retrieval,
+            top_k: 5,
+            fts_enabled: false,
+            read_levels: Vec::new(),
+            space_ids: Vec::new(),
+            caller_user_id: None,
+            agent_id: Some("agent-a".to_owned()),
+            include_sensitive_topics: false,
+        };
+        let chunks = graph_memory_chunks(&memory, &cfg, None, None, None, false, "Maya", 5).await;
+        assert!(chunks.iter().any(|chunk| chunk.content.contains("Maya")));
+        assert!(
+            chunks.iter().any(|chunk| chunk.id == related_id),
+            "a shared launch topic should connect the related fact"
+        );
+    }
+
     /// FTS session-search sub-source: with `fts_enabled = false` the FTS pass does
     /// no work (a matching past message is NOT surfaced); with `fts_enabled = true`
     /// an FTS-only match surfaces in the assembled recall block. Network-free.
@@ -11542,6 +11692,8 @@ mod tests {
             read_levels: Vec::new(),
             space_ids: Vec::new(),
             caller_user_id: None,
+            agent_id: None,
+            include_sensitive_topics: false,
         };
         let block_off = run_auto_recall(
             &cfg_off,
@@ -11566,6 +11718,8 @@ mod tests {
             read_levels: Vec::new(),
             space_ids: Vec::new(),
             caller_user_id: None,
+            agent_id: None,
+            include_sensitive_topics: false,
         };
         let block_disabled = run_auto_recall(
             &cfg_on,
@@ -11611,6 +11765,13 @@ mod tests {
             Some("alice".to_owned())
         );
         assert_eq!(effective_recall_user_id(None, None), None);
+    }
+
+    #[test]
+    fn bound_node_memory_requires_a_verified_caller() {
+        assert!(has_memory_principal(false, None));
+        assert!(has_memory_principal(true, Some("alice")));
+        assert!(!has_memory_principal(true, None));
     }
 
     // ── ACP skill injection seam (per-agent allowlist on the ACP plane) ─────────
@@ -11743,6 +11904,33 @@ mod tests {
     fn project_instructions_absent_without_folder_or_in_safe_mode() {
         assert!(project_instructions_hint_when(false, None).is_none());
         assert!(project_instructions_hint_when(true, Some("/tmp")).is_none());
+    }
+
+    #[test]
+    fn team_nodes_do_not_receive_personalization() {
+        use crate::server::onboarding_state::NodeSetupKind;
+
+        assert!(!should_include_user_personalization(
+            Some(NodeSetupKind::Team),
+            None,
+            false
+        ));
+        assert!(should_include_user_personalization(
+            Some(NodeSetupKind::Personal),
+            Some(crate::sidecar::control_plane::NodeScope::Personal),
+            false
+        ));
+        assert!(should_include_user_personalization(None, None, false));
+        assert!(!should_include_user_personalization(
+            Some(NodeSetupKind::Personal),
+            Some(crate::sidecar::control_plane::NodeScope::Org),
+            false
+        ));
+        assert!(!should_include_user_personalization(
+            Some(NodeSetupKind::Personal),
+            Some(crate::sidecar::control_plane::NodeScope::Personal),
+            true
+        ));
     }
 
     // ── Output-style injection (docs/output-styles.md §5) ──────────────────────
@@ -12357,73 +12545,63 @@ mod tests {
         // one was installed. A first version of this test passed unchanged after the
         // fallback's injection was deleted. So pin the property that removes the drift
         // instead: exactly one renderer, both roads calling it.
-        for windows in [true, false] {
-            let env = acp::pi_mcp_extension_env(windows, None);
-            for var in ["RYU_MCP_CORE_URL", "RYU_MCP_AGENT_ID"] {
-                assert!(env.contains(var), "{var} missing from rendered env: {env}");
-            }
-            assert!(
-                env.contains(&crate::sidecar::gateway::core_self_url()),
-                "must carry THIS node's Core URL, not the extension's default: {env}"
-            );
-            // Shell rendering is the half a second caller would most plausibly get
-            // wrong on its own — POSIX inline vs `set VAR=…&&` chaining.
-            assert_eq!(
-                env.contains("set RYU_MCP_CORE_URL="),
-                windows,
-                "wrong shell form for windows={windows}: {env}"
-            );
-        }
+        let env = acp::pi_mcp_extension_env(
+            Some("verified-user-jwt"),
+            None,
+            None,
+            Some("profile-conversation"),
+        );
+        assert!(env.iter().any(|(name, value)| {
+            name == "RYU_MCP_CORE_URL" && value == &crate::sidecar::gateway::core_self_url()
+        }));
+        assert!(env
+            .iter()
+            .any(|(name, value)| { name == "RYU_MCP_USER_JWT" && value == "verified-user-jwt" }));
+        assert!(env.iter().any(|(name, value)| {
+            name == "RYU_MCP_HOST_CONVERSATION_ID" && value == "profile-conversation"
+        }));
 
-        // And neither road may re-derive the values itself. `RYU_MCP_CORE_URL=` should
-        // appear ONLY inside the renderer; a call site formatting its own is exactly
-        // how the two drifted apart, and it would not be a compile error.
-        let acp_rs = include_str!("acp.rs");
-        let mod_rs = include_str!("mod.rs");
-        // The renderer formats the var once per shell, so two occurrences — both
-        // inside it. What must never grow is a THIRD, which would be a call site
-        // rendering its own and is precisely how the two roads drifted.
-        // Built at runtime, never written as one literal: this test reads its OWN
-        // file, so a contiguous needle would match the assertion below and the check
-        // would be about itself rather than about the call sites.
-        let needle = format!("{}{}", "RYU_MCP_CORE_URL=", "{core_url}");
-        assert_eq!(
-            acp_rs.matches(needle.as_str()).count(),
-            2,
-            "only pi_mcp_extension_env's two shell branches may format this var"
-        );
-        assert!(
-            !mod_rs.contains(needle.as_str()),
-            "the PATH fallback must call pi_mcp_extension_env, not re-render the env"
-        );
-        // Both roads reach the renderer, in both shell forms.
-        for (file, src, call) in [
-            ("acp.rs", acp_rs, "pi_mcp_extension_env("),
-            ("mod.rs", mod_rs, "acp::pi_mcp_extension_env("),
-        ] {
-            for arg in ["true, user_jwt)", "false, user_jwt)"] {
-                let want = format!("{call}{arg}");
-                assert!(
-                    src.contains(&want),
-                    "{file} must call the shared renderer as `{want}`"
-                );
-            }
+        // A shell metacharacter is rejected before it can become an environment
+        // value. Valid values are serialized through ACP's structured stdio
+        // transport for both platform launch shapes.
+        let malicious =
+            acp::pi_mcp_extension_env(None, None, None, Some("x&whoami>%TEMP%/ryu-pwned&rem"));
+        assert!(!malicious
+            .iter()
+            .any(|(name, _)| name == "RYU_MCP_HOST_CONVERSATION_ID"));
+        let posix = acp::acp_stdio_spawn_json(
+            "ryu-pi",
+            PathBuf::from("npx"),
+            vec!["-y".to_owned(), "pi-acp".to_owned()],
+            env.clone(),
+        )
+        .expect("POSIX ACP config serializes");
+        let windows = acp::acp_stdio_spawn_json(
+            "ryu-pi",
+            PathBuf::from("cmd"),
+            vec![
+                "/d".to_owned(),
+                "/s".to_owned(),
+                "/c".to_owned(),
+                "npx -y pi-acp".to_owned(),
+            ],
+            env,
+        )
+        .expect("Windows ACP config serializes");
+        for serialized in [posix, windows] {
+            let parsed = AcpAgent::from_str(&serialized).expect("structured ACP parses");
+            let McpServer::Stdio(stdio) = parsed.into_server() else {
+                panic!("expected stdio ACP config")
+            };
+            assert!(stdio.args.iter().all(|arg| !arg.contains("whoami")));
+            assert!(stdio.env.iter().any(|entry| {
+                entry.name == "RYU_MCP_HOST_CONVERSATION_ID"
+                    && entry.value == "profile-conversation"
+            }));
         }
-
-        // Calling it is not enough — the result must reach the command. Deleting the
-        // interpolation leaves the call in place and compiles cleanly, so nothing but
-        // this assertion catches it. Needles built at runtime for the same
-        // self-reference reason as above.
-        let used_posix = format!("{}{}", "{gateway_env}{mcp_env}", "PI_CODING_AGENT_DIR");
-        let used_win = format!("{}{}", "{gateway_env}{mcp_env}", "set PI_CODING_AGENT_DIR");
-        assert!(
-            mod_rs.contains(used_posix.as_str()),
-            "the PATH fallback renders mcp_env but never interpolates it (posix)"
-        );
-        assert!(
-            mod_rs.contains(used_win.as_str()),
-            "the PATH fallback renders mcp_env but never interpolates it (windows)"
-        );
+        let extension = include_str!("../../../../core/assets/pi-extensions/ryu-mcp.ts");
+        assert!(extension.contains("x-ryu-user-jwt"));
+        assert!(extension.contains("host_conversation_id"));
     }
 
     #[test]
@@ -12602,6 +12780,75 @@ mod tests {
                 assert_eq!(model, "llama3");
             }
             _ => panic!("expected LocalEngine route for an ollama binding"),
+        }
+    }
+
+    #[test]
+    fn lemonade_binding_preserves_model_and_openai_endpoint() {
+        let route = agent_route(
+            Some("test"),
+            Some("lemonade"),
+            Some("Qwen3-0.6B-GGUF"),
+            &acp_reg(),
+            &provider_reg(),
+        );
+        match route {
+            Some(AgentRoute::LocalEngine {
+                engine,
+                model,
+                base_url,
+            }) => {
+                assert_eq!(engine, "lemonade");
+                assert_eq!(model, "Qwen3-0.6B-GGUF");
+                assert_eq!(base_url, "http://127.0.0.1:13305");
+            }
+            _ => panic!("expected Lemonade local route"),
+        }
+    }
+
+    #[test]
+    fn llama_swap_binding_preserves_model_and_openai_endpoint() {
+        let route = agent_route(
+            Some("test"),
+            Some("llama-swap"),
+            Some("Qwen3-0.6B-GGUF"),
+            &acp_reg(),
+            &provider_reg(),
+        );
+        match route {
+            Some(AgentRoute::LocalEngine {
+                engine,
+                model,
+                base_url,
+            }) => {
+                assert_eq!(engine, "llama-swap");
+                assert_eq!(model, "Qwen3-0.6B-GGUF");
+                assert_eq!(base_url, "http://127.0.0.1:9292");
+            }
+            _ => panic!("expected llama-swap local route"),
+        }
+    }
+
+    #[test]
+    fn freetoken_binding_preserves_model_and_openai_endpoint() {
+        let route = agent_route(
+            Some("test"),
+            Some("freetoken"),
+            Some("Qwen3-0.6B-GGUF"),
+            &acp_reg(),
+            &provider_reg(),
+        );
+        match route {
+            Some(AgentRoute::LocalEngine {
+                engine,
+                model,
+                base_url,
+            }) => {
+                assert_eq!(engine, "freetoken");
+                assert_eq!(model, "Qwen3-0.6B-GGUF");
+                assert_eq!(base_url, "http://127.0.0.1:1919");
+            }
+            _ => panic!("expected freetoken local route"),
         }
     }
 
@@ -12836,6 +13083,21 @@ mod tests {
         assert_eq!(long_term_agent_scope(None), "default");
         assert_eq!(long_term_agent_scope(Some("")), "default");
         assert_eq!(long_term_agent_scope(Some("acp:claude")), "acp:claude");
+    }
+
+    #[test]
+    fn sensitive_captures_use_user_scope_even_inside_a_project() {
+        let memory = infer_new_memory(
+            "I have a medical condition",
+            Some("/work/ryu"),
+            Some("agent-a"),
+        );
+        assert_eq!(memory.scope, MemoryScope::User);
+        assert!(memory.scope_id.is_none());
+
+        let unassigned = infer_new_memory("I have a medical condition", Some("/work/ryu"), None);
+        assert_eq!(unassigned.scope, MemoryScope::User);
+        assert!(unassigned.scope_id.is_none());
     }
 
     #[tokio::test]

@@ -26,7 +26,13 @@ import {
 	type CreditPoolId,
 } from "@ryu/auth/lib/credit-pools";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { createElement, type ReactNode, useCallback, useMemo } from "react";
+import {
+	createElement,
+	type ReactNode,
+	useCallback,
+	useMemo,
+	useState,
+} from "react";
 import { sileo } from "sileo";
 import type { ComposerSettingsSection } from "@/components/agent-elements/input/composer-settings-menu.tsx";
 import { isChatModelStem } from "@/components/agent-elements/input/model-groups.ts";
@@ -69,6 +75,12 @@ import {
 	browserProviderHost,
 	useBrowserProviderSnapshot,
 } from "@/src/lib/extension-host.ts";
+import {
+	getRecents,
+	type PickerRef,
+	parseRefKey,
+	removeRecent,
+} from "@/src/lib/picker-favorites.ts";
 import { useGatewayDialog } from "@/src/store/useGatewayDialog.ts";
 
 /** The flagship agent id (mirrors Core `DEFAULT_AGENT_ID`). */
@@ -96,6 +108,7 @@ const PROVIDER_ENGINE_KEY: Record<string, string> = {
 	google: "gemini",
 	"claude-pro-max": "claude",
 	"openai-codex": "codex",
+	chatgpt: "chatgpt",
 	anthropic: "anthropic",
 	openai: "openai",
 	mistral: "mistral",
@@ -214,6 +227,14 @@ export function useUniversalPicker(
 		surface = "dashboard",
 	} = params;
 	const browserSnapshot = useBrowserProviderSnapshot();
+	const [recentRevision, setRecentRevision] = useState(0);
+	const recentRefs = useMemo<PickerRef[]>(
+		() =>
+			getRecents()
+				.map(parseRefKey)
+				.filter((ref): ref is PickerRef => ref !== null),
+		[recentRevision]
+	);
 
 	const { config, catalog, save } = usePiConfig();
 	const catalogAgents = useAgentsCatalog();
@@ -585,9 +606,29 @@ export function useUniversalPicker(
 				availableExternal,
 				installPendingId: catalogAgents.pendingId,
 				canSetGatewayAccount,
+				recentRefs,
 				teams: teamEntries,
 				thinkingLevels,
-				onSelectAgent: (id) => onSelectAgent(id),
+				onRemoveRecent: (ref) => {
+					removeRecent(ref);
+					setRecentRevision((revision) => revision + 1);
+				},
+				onSelectAgent: (id) => {
+					onSelectAgent(id);
+					setRecentRevision((revision) => revision + 1);
+				},
+				onSelectRecentModel: (providerId, modelId, effort) => {
+					if (onSelectProviderModel) {
+						onSelectProviderModel(providerId, modelId);
+					} else if (providerId === LOCAL_PROVIDER_ID) {
+						switchToLocalModel(modelId, null);
+					} else {
+						saveProvider(providerId, modelId, null);
+					}
+					if (effort && onSelectProviderThinking) {
+						onSelectProviderThinking(providerId, effort);
+					}
+				},
 				onSelectTeam: onSelectTeam ? (id) => onSelectTeam(id) : undefined,
 				onCreateAgent,
 				onInstallExternal: (id) => {
@@ -764,6 +805,7 @@ export function useUniversalPicker(
 			grantedPoolIds,
 			thinkingLevels,
 			config,
+			recentRefs,
 			teams,
 			teamId,
 			catalogAgents,

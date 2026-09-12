@@ -6,6 +6,7 @@ import {
 	assertGranted,
 	type Capability,
 	CapabilityError,
+	createI18nHostServices,
 	dispatchRpc,
 	GRANT_CAPABILITY,
 	type HostServices,
@@ -16,6 +17,14 @@ const AGENTS = [{ id: "ryu", name: "Ryu" }];
 
 function services(): HostServices {
 	return {
+		i18nSnapshot: () => ({
+			direction: "ltr",
+			locale: "en",
+			packId: null,
+			packName: null,
+			packVersion: null,
+		}),
+		i18nTranslate: (input) => input.defaultMessage,
 		listAgents: () => Promise.resolve(AGENTS),
 		catalogSnapshot: () =>
 			Promise.resolve({
@@ -63,6 +72,47 @@ function services(): HostServices {
 const GRANTED = new Set<Capability>(["core.listAgents"]);
 const NONE = new Set<Capability>();
 
+describe("createI18nHostServices", () => {
+	it("shares snapshots, fallback translation, and abortable subscriptions", async () => {
+		const listeners = new Set<() => void>();
+		const snapshot = {
+			direction: "ltr" as const,
+			locale: "en",
+			packId: null,
+			packName: null,
+			packVersion: null,
+		};
+		const services = createI18nHostServices({
+			getSnapshot: () => snapshot,
+			subscribe: (listener) => {
+				listeners.add(listener);
+				return () => listeners.delete(listener);
+			},
+			t: (id, _values, fallback) => fallback ?? id,
+		});
+		expect(await services.i18nSnapshot?.()).toEqual(snapshot);
+		expect(
+			await services.i18nTranslate?.({
+				defaultMessage: "Refresh",
+				id: "app.refresh",
+			})
+		).toBe("Refresh");
+
+		const updates: string[] = [];
+		const controller = new AbortController();
+		const subscription = services.i18nSubscribe?.(
+			{},
+			(value) => updates.push(value),
+			controller.signal
+		);
+		expect(updates).toEqual([JSON.stringify(snapshot)]);
+		expect(listeners.size).toBe(1);
+		controller.abort();
+		await subscription;
+		expect(listeners.size).toBe(0);
+	});
+});
+
 function errorContract(value: unknown): {
 	code: unknown;
 	message: string;
@@ -108,6 +158,18 @@ describe("dispatchRpc capability gate", () => {
 			providerId: "openai",
 			source: "test",
 		});
+	});
+
+	it("dispatches the scoped NotifyUser recipient roster through the catalog grant", async () => {
+		const catalogGrant = new Set<Capability>(["workflows.catalogs"]);
+		const svc: HostServices = {
+			...services(),
+			workflowsNotifyTargets: () =>
+				Promise.resolve([{ id: "user-ada", name: "Ada Lovelace" }]),
+		};
+		await expect(
+			dispatchRpc("workflows.notifyTargets", [], catalogGrant, svc)
+		).resolves.toEqual([{ id: "user-ada", name: "Ada Lovelace" }]);
 	});
 
 	it("dispatches Chat Broadcast list and send through the explicit grant", async () => {
@@ -157,7 +219,11 @@ describe("dispatchRpc capability gate", () => {
 
 	it("keeps unary dispatch denials identical to the shared streaming gate", async () => {
 		for (const [method, capability] of Object.entries(METHOD_CAPABILITY)) {
-			if (capability === "host.capabilities") {
+			if (
+				capability === "host.capabilities" ||
+				capability === "i18n" ||
+				method === "node.shareOrigins"
+			) {
 				continue;
 			}
 			let assertedError: unknown;
@@ -274,6 +340,8 @@ describe("grant-mapping completeness invariant", () => {
 	// set is empty, and every call is denied (the `timeline.read` regression).
 	const LOCAL_HOST_CAPS = new Set<Capability>([
 		"host.capabilities",
+		"i18n",
+		"node.shareOrigins",
 		"widget.state",
 		"ui.displayMode",
 	]);
@@ -293,6 +361,26 @@ describe("grant-mapping completeness invariant", () => {
 			});
 		}
 		expect(unmapped).toEqual([]);
+	});
+});
+
+describe("node share-origin host method", () => {
+	it("is local, argument-free, and secret-free", async () => {
+		const origins = [
+			{ origin: "http://192.168.1.20:7980", source: "active", reachable: true },
+		] as const;
+		await expect(
+			dispatchRpc("node.shareOrigins", [], new Set(), {
+				...services(),
+				nodeShareOrigins: () => Promise.resolve([...origins]),
+			})
+		).resolves.toEqual(origins);
+		await expect(
+			dispatchRpc("node.shareOrigins", [{}], new Set(), {
+				...services(),
+				nodeShareOrigins: () => Promise.resolve([]),
+			})
+		).rejects.toThrow("takes no arguments");
 	});
 });
 

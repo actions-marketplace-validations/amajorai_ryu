@@ -342,7 +342,7 @@ function ConflictList({
 	}
 	return (
 		<div className="space-y-1.5">
-			<p className="text-amber-600 text-sm">
+			<p className="text-sm text-status-warning">
 				External changes are paused until reviewed.
 			</p>
 			<SettingsGroup>
@@ -581,7 +581,7 @@ export function AgentSyncImportSection({ target }: { target: ApiTarget }) {
 				<SettingsCard className="flex flex-col gap-4">
 					<SyncStatusLine status={status} />
 					{profileError ? (
-						<p className="text-destructive text-sm">{profileError}</p>
+						<p className="text-sm text-status-destructive">{profileError}</p>
 					) : null}
 					<RootDetection detected={detected} home={home} onScan={onScan} />
 					<div className="grid gap-3 sm:grid-cols-[1fr_150px_auto]">
@@ -711,7 +711,7 @@ export function AgentSyncImportSection({ target }: { target: ApiTarget }) {
 							</>
 						) : null}
 						{scan.warnings.map((warning) => (
-							<p className="text-amber-600 text-xs" key={warning}>
+							<p className="text-status-warning text-xs" key={warning}>
 								{warning}
 							</p>
 						))}
@@ -932,7 +932,7 @@ export function AgentSyncExportSection({ target }: { target: ApiTarget }) {
 				<SettingsCard className="flex flex-col gap-4">
 					<SyncStatusLine status={status} />
 					{profileError ? (
-						<p className="text-destructive text-sm">{profileError}</p>
+						<p className="text-sm text-status-destructive">{profileError}</p>
 					) : null}
 					<div className="flex flex-col gap-1.5">
 						<Label htmlFor="agent-sync-export-destination">

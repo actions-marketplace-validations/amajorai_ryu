@@ -126,7 +126,7 @@ function AgentCard({
 	return (
 		<SettingsCard className="p-0">
 			<Collapsible onOpenChange={setOpen} open={open}>
-				<CollapsibleTrigger className="flex w-full items-center justify-between gap-3 rounded-[10px] p-3.5 text-left hover:bg-muted/40">
+				<CollapsibleTrigger className="flex w-full items-center justify-between gap-3 rounded-lg p-3.5 text-left hover:bg-muted/40">
 					<div className="flex min-w-0 items-center gap-2.5">
 						<AgentAvatar
 							className="size-4 shrink-0"
@@ -155,7 +155,7 @@ function AgentCard({
 						</span>
 					) : null}
 					{!configQuery.isPending && configQuery.isError ? (
-						<span className="text-destructive text-xs">
+						<span className="text-status-destructive text-xs">
 							Could not read this agent's models:{" "}
 							{errMessage(configQuery.error, "the agent did not respond.")}
 						</span>

@@ -9,6 +9,7 @@
 // base.css is imported once in index.css (see the WorkflowCanvas note there); the
 // controls reuse the shared `.workflow-controls` styling.
 
+import { useChatDisplayPrefs } from "@ryu/blocks/desktop/agent-elements/chat-display-prefs.tsx";
 import {
 	Background,
 	Controls,
@@ -25,6 +26,7 @@ import {
 } from "@xyflow/react";
 import { PlusIcon } from "lucide-react";
 import { useCallback, useEffect, useRef } from "react";
+import { usePrefersReducedMotion } from "@/src/hooks/usePrefersReducedMotion.ts";
 import type { CanvasLayoutRect, Widget } from "@/src/lib/api/dashboard.ts";
 import type { WidgetLiveState } from "./DashboardGrid.tsx";
 import { WidgetCard } from "./WidgetCard.tsx";
@@ -56,6 +58,7 @@ function rectFor(widget: Widget): CanvasLayoutRect {
 
 interface WidgetNodeData {
 	error?: string | null;
+	motionEnabled: boolean;
 	onRefresh: () => void;
 	onRemove: () => void;
 	/** Persist this node's current geometry (called on drag/resize settle). */
@@ -69,7 +72,7 @@ type WidgetNode = Node<WidgetNodeData, "widget">;
 
 /** One widget as a canvas node: the shared WidgetCard wrapped with a NodeResizer.
  *  The card fills the node box; resizing/ dragging persist via `data.persist`. */
-function WidgetNodeView({ data, selected }: NodeProps<WidgetNode>) {
+function WidgetNodeView({ data, dragging, selected }: NodeProps<WidgetNode>) {
 	return (
 		<>
 			<NodeResizer
@@ -83,6 +86,8 @@ function WidgetNodeView({ data, selected }: NodeProps<WidgetNode>) {
 			<div className="h-full w-full">
 				<WidgetCard
 					error={data.error}
+					interaction={dragging ? "drag" : undefined}
+					motionEnabled={data.motionEnabled}
 					onRefresh={data.onRefresh}
 					onRemove={data.onRemove}
 					value={data.value}
@@ -122,6 +127,9 @@ function CanvasInner({
 	const [nodes, setNodes, onNodesChange] = useNodesState<WidgetNode>([]);
 	const containerRef = useRef<HTMLDivElement | null>(null);
 	const rf = useReactFlow();
+	const { animationsEnabled } = useChatDisplayPrefs();
+	const prefersReducedMotion = usePrefersReducedMotion();
+	const motionEnabled = animationsEnabled && !prefersReducedMotion;
 
 	// Latest nodes, for reading a node's final geometry inside the debounced persist
 	// without re-creating the callback on every drag frame.
@@ -194,6 +202,7 @@ function CanvasInner({
 					onRefresh: () => onRefresh(w.id),
 					onRemove: () => onRemove(w.id),
 					persist: () => persist(w.id),
+					motionEnabled,
 				};
 				const existing = byId.get(w.id);
 				if (existing) {
@@ -211,7 +220,7 @@ function CanvasInner({
 				};
 			});
 		});
-	}, [widgets, live, onRefresh, onRemove, persist, setNodes]);
+	}, [widgets, live, motionEnabled, onRefresh, onRemove, persist, setNodes]);
 
 	// Report the viewport centre (in flow coords) so HomePage can place a new widget
 	// where the user is looking. Fired on mount and after every pan/zoom settle.

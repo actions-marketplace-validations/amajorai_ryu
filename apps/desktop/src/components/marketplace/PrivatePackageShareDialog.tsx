@@ -5,6 +5,7 @@ import {
 	Key01Icon,
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
+import { marketplaceBrowseKindLabel } from "@ryu/marketplace/catalog/chrome/marketplace-sections";
 import { Button } from "@ryu/ui/components/button";
 import {
 	Dialog,
@@ -42,17 +43,11 @@ const SHAREABLE_KINDS: MarketplaceKind[] = [
 	"skill",
 	"space",
 	"theme",
+	"language_pack",
 	"workflow",
 ];
 
 type ShareAudience = "organization" | "shareable";
-
-function kindLabel(kind: MarketplaceKind): string {
-	return kind
-		.split("_")
-		.map((part) => part.charAt(0).toUpperCase() + part.slice(1))
-		.join(" ");
-}
 
 export default function PrivatePackageShareDialog({
 	onClose,
@@ -221,7 +216,7 @@ export default function PrivatePackageShareDialog({
 								/>
 								Code ready
 							</div>
-							<p className="break-all font-mono font-semibold text-2xl tracking-[0.18em]">
+							<p className="break-all font-medium font-mono text-2xl tracking-[0.18em]">
 								{result.code}
 							</p>
 							<Button
@@ -252,7 +247,9 @@ export default function PrivatePackageShareDialog({
 								{result.maxRedemptions === 1 ? "" : "s"}.
 							</span>
 						</div>
-						{error ? <p className="text-destructive text-sm">{error}</p> : null}
+						{error ? (
+							<p className="text-sm text-status-destructive">{error}</p>
+						) : null}
 						<DialogFooter className="gap-2">
 							<Button
 								disabled={revoking || Boolean(result.revokedAt)}
@@ -272,7 +269,7 @@ export default function PrivatePackageShareDialog({
 								<span className="font-medium text-sm">Package type</span>
 								<Select
 									items={SHAREABLE_KINDS.map((value) => ({
-										label: kindLabel(value),
+										label: marketplaceBrowseKindLabel(value),
 										value,
 									}))}
 									onValueChange={(value) => {
@@ -291,7 +288,7 @@ export default function PrivatePackageShareDialog({
 									<SelectContent>
 										{SHAREABLE_KINDS.map((value) => (
 											<SelectItem key={value} value={value}>
-												{kindLabel(value)}
+												{marketplaceBrowseKindLabel(value)}
 											</SelectItem>
 										))}
 									</SelectContent>
@@ -398,7 +395,9 @@ export default function PrivatePackageShareDialog({
 								/>
 							</label>
 						</div>
-						{error ? <p className="text-destructive text-sm">{error}</p> : null}
+						{error ? (
+							<p className="text-sm text-status-destructive">{error}</p>
+						) : null}
 						<DialogFooter>
 							<Button onClick={onClose} variant="ghost">
 								Cancel

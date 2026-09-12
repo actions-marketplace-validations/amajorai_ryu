@@ -20,7 +20,7 @@ export interface IslandAction {
 // glass look as the logo circle. They overlap like an avatar group — the ring on
 // each shows the stacking seam so part of every circle stays visible.
 const DOCK_CIRCLE =
-	"relative flex shrink-0 items-center justify-center overflow-hidden rounded-full bg-neutral-900/80 text-neutral-200 shadow-xl ring-1 ring-white/10 backdrop-blur-2xl transition-colors hover:bg-neutral-800/90";
+	"relative flex shrink-0 items-center justify-center overflow-hidden rounded-full bg-card/80 text-foreground shadow-xl ring-1 ring-border backdrop-blur-2xl transition-colors hover:bg-card/90";
 
 /**
  * The quick-action islands beside the composer input (text mode): a stacked

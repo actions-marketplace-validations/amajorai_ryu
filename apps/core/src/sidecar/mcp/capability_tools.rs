@@ -408,7 +408,7 @@ fn schema_memory_search() -> Value {
         "type": "object",
         "properties": {
             "query": { "type": "string", "description": "What to recall." },
-            "scope": { "type": "string", "description": "Restrict to one scope level.", "enum": ["user", "node", "project", "team", "org"] },
+            "scope": { "type": "string", "description": "Restrict to one scope level.", "enum": ["agent", "user", "node", "project", "org"] },
             "limit": { "type": "integer", "minimum": 1, "maximum": 50 }
         },
         "required": ["query"]
@@ -420,7 +420,7 @@ fn schema_memory_store() -> Value {
         "type": "object",
         "properties": {
             "content": { "type": "string", "description": "The durable fact to remember." },
-            "scope": { "type": "string", "description": "How broadly the fact applies.", "enum": ["user", "node", "project", "team", "org"] },
+            "scope": { "type": "string", "description": "How broadly the fact applies.", "enum": ["agent", "user", "node", "project", "org"] },
             "category": { "type": "string", "description": "What kind of fact this is." },
             "importance": { "type": "integer", "minimum": 1, "maximum": 5 },
             "when_to_use": { "type": "string", "description": "Hint describing when this fact is relevant." }
@@ -683,8 +683,8 @@ pub fn verbs() -> &'static [Verb] {
             server: SERVER_MEMORY,
             name: "store",
             capability: CAP_MEMORY,
-            description: "Remember a durable fact at a given scope level (user, node, project, \
-                          team, or org).",
+            description: "Remember a durable fact at a given scope level (agent, user, node, \
+                          project, or org).",
             schema: schema_memory_store,
         },
         Verb {
@@ -970,6 +970,39 @@ pub fn resolve_verbs(enabled: &[PluginManifest], config: &BindingConfig) -> Vec<
     out
 }
 
+/// Effect metadata belongs to the canonical verb, not the selected provider's
+/// spelling. Keep unknown future verbs unclassified until their effects are reviewed.
+fn verb_annotations(id: &str) -> Option<Value> {
+    let read_only = match id {
+        "web.search" | "web.extract" | "browser.snapshot" | "browser.screenshot"
+        | "browser.tabs" | "browser.context" | "computer.capture" | "memory.search"
+        | "memory.context" => true,
+        "web.crawl"
+        | "browser.navigate"
+        | "browser.click"
+        | "browser.type"
+        | "browser.scroll"
+        | "browser.annotate"
+        | "browser.clear_annotations"
+        | "browser.hover"
+        | "browser.click_at"
+        | "browser.key"
+        | "browser.drag"
+        | "computer.click"
+        | "computer.type"
+        | "computer.key"
+        | "computer.scroll"
+        | "computer.focus_app"
+        | "memory.store"
+        | "memory.sync"
+        | "memory.forget" => false,
+        _ => return None,
+    };
+    // Input and navigation can submit forms or trigger page handlers. Conservatively
+    // classify them as mutations; read-only/trial agents must not reach those effects.
+    Some(json!({ "readOnlyHint": read_only, "destructiveHint": !read_only }))
+}
+
 /// The registry rows for a set of resolved verbs.
 pub fn tools(resolved: &[ResolvedVerb]) -> Vec<RegistryTool> {
     resolved
@@ -980,6 +1013,7 @@ pub fn tools(resolved: &[ResolvedVerb]) -> Vec<RegistryTool> {
             name: r.verb.name.to_owned(),
             description: Some(r.verb.description.to_owned()),
             input_schema: Some((r.verb.schema)()),
+            annotations: verb_annotations(r.verb.id),
             ..Default::default()
         })
         .collect()
@@ -1250,6 +1284,56 @@ fn map_item(map: &CapabilityResponseMap, item: &Value) -> Value {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn every_canonical_verb_has_explicit_effect_metadata() {
+        use crate::agent_execution::{classify_tool_with_metadata, ToolEffect};
+        for verb in super::verbs() {
+            let annotations = super::verb_annotations(verb.id)
+                .unwrap_or_else(|| panic!("missing effect contract for {}", verb.id));
+            let effect = classify_tool_with_metadata(verb.id, Some(&annotations), None);
+            assert_ne!(effect, ToolEffect::Unknown, "{}", verb.id);
+        }
+        for id in [
+            "browser.type",
+            "browser.click",
+            "browser.navigate",
+            "computer.key",
+            "memory.store",
+            "web.crawl",
+        ] {
+            assert_eq!(
+                classify_tool_with_metadata(id, super::verb_annotations(id).as_ref(), None),
+                ToolEffect::Mutate,
+                "{id}"
+            );
+        }
+        for id in [
+            "browser.snapshot",
+            "computer.capture",
+            "web.search",
+            "memory.search",
+        ] {
+            assert_eq!(
+                classify_tool_with_metadata(id, super::verb_annotations(id).as_ref(), None),
+                ToolEffect::Read,
+                "{id}"
+            );
+        }
+        assert!(super::verb_annotations("browser.future_verb").is_none());
+    }
+
+    #[test]
+    fn advertised_verbs_carry_effects_to_the_agent_gate() {
+        let provider = search_provider("@ryu/test", true, "test.search");
+        let resolved = super::resolve_verbs(&[provider], &Default::default());
+        let tools = super::tools(&resolved);
+        assert!(!tools.is_empty());
+        assert!(tools.iter().all(|tool| tool
+            .annotations
+            .as_ref()
+            .is_some_and(|a| a["readOnlyHint"] == true)));
+    }
+
     use super::*;
     use crate::plugin_manifest::ProvidesEntry;
 

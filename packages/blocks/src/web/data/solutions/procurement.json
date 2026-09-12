@@ -4,10 +4,10 @@
   "navLabel": "Procurement",
   "category": "People & Operations",
   "icon": "ShoppingCart",
-  "tagline": "Compare vendors, review contracts, and track spend with agents connected to your sourcing tools.",
+  "tagline": "Compare supplier quotes and contract terms, then prepare a summary for your purchasing team.",
   "heroEyebrow": "Ryu for Procurement",
-  "heroTitle": "Source smarter, with every quote and clause checked.",
-  "heroSubtitle": "Agents compare supplier quotes, flag risky contract terms against your standards, and track spend across the tools you buy through. Connected to your sourcing and finance systems, with the Gateway keeping pricing and supplier data governed and on the record.",
+  "heroTitle": "Ryu for procurement",
+  "heroSubtitle": "Compare supplier quotes and contract terms, then prepare a summary for your purchasing team.",
   "visualKey": "ConnectionsVisual",
   "intro": "Procurement is comparison and diligence at scale: quotes that don't line up, contracts full of one-sided terms, renewals that creep. The data sits across spreadsheets, emails, and your sourcing tool. Ryu connects agents to those systems to normalize the comparison, check the terms against your standards, and keep a defensible record of every decision.",
   "highlights": [

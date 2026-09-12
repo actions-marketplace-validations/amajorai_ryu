@@ -13,7 +13,7 @@
 //! one into its slot — the classic rename-then-replace. The `.old` file is
 //! cleaned up on the next launch.
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, ensure, Context, Result};
 use serde::Serialize;
 use std::path::{Path, PathBuf};
 
@@ -40,6 +40,107 @@ pub struct ApplyResult {
     pub message: String,
 }
 
+/// The caller selects an official asset; it cannot select a filesystem path or
+/// a download origin. Resolve its digest independently from the release API.
+fn release_tag(asset: &ReleaseAsset) -> Result<String> {
+    ensure!(
+        !asset.name.is_empty()
+            && asset.name != "."
+            && asset.name != ".."
+            && asset
+                .name
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-')),
+        "invalid update asset filename"
+    );
+    ensure!(
+        super::asset_kind(&asset.name) == asset.kind && asset.kind != "unknown",
+        "invalid update asset kind"
+    );
+    let prefix = format!("https://github.com/{}/releases/download/", super::RYU_REPO);
+    let suffix = asset
+        .url
+        .strip_prefix(&prefix)
+        .context("update must come from the official release repository")?;
+    let (tag, name) = suffix
+        .split_once('/')
+        .context("invalid release asset URL")?;
+    ensure!(
+        !tag.is_empty()
+            && tag
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-')),
+        "invalid release tag"
+    );
+    ensure!(
+        name == asset.name,
+        "update asset URL and filename do not match"
+    );
+    Ok(tag.to_owned())
+}
+
+fn release_digest(asset: &ReleaseAsset, tag: &str, release: &serde_json::Value) -> Result<String> {
+    ensure!(
+        release.get("draft").and_then(serde_json::Value::as_bool) == Some(false),
+        "update release is not published"
+    );
+    ensure!(
+        release.get("tag_name").and_then(serde_json::Value::as_str) == Some(tag),
+        "update release tag mismatch"
+    );
+    let entry = release
+        .get("assets")
+        .and_then(serde_json::Value::as_array)
+        .and_then(|assets| {
+            assets.iter().find(|entry| {
+                entry.get("name").and_then(serde_json::Value::as_str) == Some(asset.name.as_str())
+                    && entry
+                        .get("browser_download_url")
+                        .and_then(serde_json::Value::as_str)
+                        == Some(asset.url.as_str())
+            })
+        })
+        .context("update asset is not in the published release")?;
+    ensure!(
+        entry.get("size").and_then(serde_json::Value::as_u64) == Some(asset.size) && asset.size > 0,
+        "update asset size mismatch"
+    );
+    let digest = entry
+        .get("digest")
+        .and_then(serde_json::Value::as_str)
+        .and_then(|value| value.strip_prefix("sha256:"))
+        .filter(|value| value.len() == 64 && value.bytes().all(|b| b.is_ascii_hexdigit()))
+        .context("published update has no valid SHA-256 digest")?;
+    Ok(digest.to_ascii_lowercase())
+}
+
+async fn verified_digest(asset: &ReleaseAsset) -> Result<String> {
+    let tag = release_tag(asset)?;
+    let client = reqwest::Client::builder()
+        .https_only(true)
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(std::time::Duration::from_secs(30))
+        .user_agent("ryu-update-verifier")
+        .build()?;
+    let mut response = client
+        .get(format!(
+            "https://api.github.com/repos/{}/releases/tags/{tag}",
+            super::RYU_REPO
+        ))
+        .send()
+        .await?
+        .error_for_status()?;
+    let mut body = Vec::new();
+    while let Some(chunk) = response.chunk().await? {
+        ensure!(
+            body.len() + chunk.len() <= 2 * 1024 * 1024,
+            "release metadata exceeds size limit"
+        );
+        body.extend_from_slice(&chunk);
+    }
+    release_digest(asset, &tag, &serde_json::from_slice(&body)?)
+}
+
 /// Download `asset` into the staging dir. Returns the staged file path.
 ///
 /// Goes through the global [`crate::downloads::DownloadCenter`] rather than a bare
@@ -50,6 +151,7 @@ pub struct ApplyResult {
 /// Downloads page and tray, and makes it pausable/resumable/cancelable like every
 /// other artifact.
 async fn download_asset(downloads: &DownloadCenter, asset: &ReleaseAsset) -> Result<PathBuf> {
+    let digest = verified_digest(asset).await?;
     let dir = staging_dir();
     std::fs::create_dir_all(&dir)
         .with_context(|| format!("creating staging dir {}", dir.display()))?;
@@ -61,9 +163,8 @@ async fn download_asset(downloads: &DownloadCenter, asset: &ReleaseAsset) -> Res
             label: format!("Ryu update ({})", asset.name),
             url: asset.url.clone(),
             dest: dir.join(&asset.name),
-            // The release feed carries no per-asset digest here; the transfer is
-            // still length- and resume-checked by the center.
-            sha256: None,
+            // DownloadCenter verifies bytes against independently fetched metadata.
+            sha256: Some(digest),
             version_record: None,
         })
         .await
@@ -150,5 +251,102 @@ pub async fn apply_update(downloads: &DownloadCenter, asset: &ReleaseAsset) -> R
                 .to_string(),
         }),
         other => Err(anyhow!("unsupported update asset kind: {other}")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn asset() -> ReleaseAsset {
+        ReleaseAsset {
+            name: "ryu-core.zip".into(),
+            url: format!(
+                "https://github.com/{}/releases/download/v0.3.0/ryu-core.zip",
+                super::super::RYU_REPO
+            ),
+            kind: "archive".into(),
+            size: 123,
+        }
+    }
+
+    #[test]
+    fn update_mutations_require_node_management_before_side_effects() {
+        let source = include_str!("../server/mod.rs");
+        for (handler, mutation) in [
+            (
+                "async fn update_apply(",
+                "crate::update::apply::apply_update(",
+            ),
+            (
+                "async fn schedule_update(",
+                "crate::update::schedule::set_pending(",
+            ),
+            (
+                "async fn cancel_update_schedule(",
+                "crate::update::schedule::clear_pending(",
+            ),
+        ] {
+            let body = source
+                .split_once(handler)
+                .unwrap()
+                .1
+                .split_once("\n}\n")
+                .unwrap()
+                .0;
+            let permission = body
+                .find("crate::identity_verify::permissions::NODES_MANAGE")
+                .unwrap();
+            assert!(body.contains("if let Err(status) = enforce_permission("));
+            assert!(permission < body.find(mutation).unwrap(), "{handler}");
+        }
+    }
+
+    #[test]
+    fn refuses_untrusted_update_paths_and_origins() {
+        assert_eq!(release_tag(&asset()).unwrap(), "v0.3.0");
+        for name in [
+            "../ryu-core.zip",
+            "/tmp/ryu-core.zip",
+            "..\\ryu-core.zip",
+            "ryu-core.zip?x",
+            "ryu-core.zip#x",
+        ] {
+            let mut value = asset();
+            value.name = name.into();
+            assert!(release_tag(&value).is_err());
+        }
+        for url in [
+            "http://github.com/other/file.zip",
+            "https://evil.example/ryu-core.zip",
+            "https://github.com/other/repo/releases/download/v0.3.0/ryu-core.zip",
+        ] {
+            let mut value = asset();
+            value.url = url.into();
+            assert!(release_tag(&value).is_err());
+        }
+    }
+
+    #[test]
+    fn requires_matching_published_metadata_and_sha256() {
+        let asset = asset();
+        let digest = "ab".repeat(32);
+        let mut release = json!({"tag_name":"v0.3.0", "draft":false, "assets":[{"name":asset.name,"browser_download_url":asset.url,"size":123,"digest":format!("sha256:{digest}")}]});
+        assert_eq!(release_digest(&asset, "v0.3.0", &release).unwrap(), digest);
+        for invalid in [
+            serde_json::Value::Null,
+            json!("sha256:bad"),
+            json!("md5:abc"),
+        ] {
+            release["assets"][0]["digest"] = invalid;
+            assert!(release_digest(&asset, "v0.3.0", &release).is_err());
+        }
+        release["assets"][0]["digest"] = json!(format!("sha256:{digest}"));
+        release["draft"] = json!(true);
+        assert!(release_digest(&asset, "v0.3.0", &release).is_err());
+        release["draft"] = json!(false);
+        release["assets"][0]["size"] = json!(124);
+        assert!(release_digest(&asset, "v0.3.0", &release).is_err());
     }
 }

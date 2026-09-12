@@ -182,9 +182,9 @@ function VersionDiff({
 		...row,
 		tone:
 			row.kind === "added"
-				? "text-success dark:text-success"
+				? "text-status-success dark:text-status-success"
 				: row.kind === "removed"
-					? "text-destructive"
+					? "text-status-destructive"
 					: "text-muted-foreground",
 		text:
 			row.kind === "added"
@@ -321,7 +321,7 @@ export function VersionHistory({
 			{open ? (
 				<div className="absolute right-0 z-20 mt-1 max-h-96 w-80 overflow-auto rounded-lg border bg-popover p-2 shadow-md">
 					{error ? (
-						<p className="p-2 text-destructive text-xs">{error}</p>
+						<p className="p-2 text-status-destructive text-xs">{error}</p>
 					) : null}
 					{loading ? (
 						<div className="flex items-center gap-2 p-2 text-muted-foreground text-xs">

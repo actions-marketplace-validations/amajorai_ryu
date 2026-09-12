@@ -858,7 +858,7 @@ async fn call_sub_agent(
     }
 
     let gw_url = crate::sidecar::gateway::gateway_url();
-    let gw_token = crate::sidecar::gateway::gateway_token();
+    let gw_token = crate::sidecar::gateway::gateway_core_token();
 
     // Model + clean-context system message. An inline ephemeral agent definition
     // (an LLM-authored "dynamic subagent" with no registered `agent_id`) overrides
@@ -1136,16 +1136,17 @@ mod tests {
     }
 
     #[test]
-    fn lifecycle_registry_is_global_across_overlapping_runs() {
-        let baseline = ACTIVE_DELEGATES.load(Ordering::Acquire);
+    fn lifecycle_registry_tracks_overlapping_runs() {
         let mut first = DelegationLifecycleLease::admit("run-a", "agent-a");
-        assert_eq!(ACTIVE_DELEGATES.load(Ordering::Acquire), baseline + 1);
+        assert_eq!(active_by_run().lock().unwrap().get("run-a"), Some(&1));
         let mut second = DelegationLifecycleLease::admit("run-b", "agent-b");
-        assert_eq!(ACTIVE_DELEGATES.load(Ordering::Acquire), baseline + 2);
+        assert_eq!(active_by_run().lock().unwrap().get("run-a"), Some(&1));
+        assert_eq!(active_by_run().lock().unwrap().get("run-b"), Some(&1));
         first.finish();
-        assert_eq!(ACTIVE_DELEGATES.load(Ordering::Acquire), baseline + 1);
+        assert!(!active_by_run().lock().unwrap().contains_key("run-a"));
+        assert_eq!(active_by_run().lock().unwrap().get("run-b"), Some(&1));
         second.finish();
-        assert_eq!(ACTIVE_DELEGATES.load(Ordering::Acquire), baseline);
+        assert!(!active_by_run().lock().unwrap().contains_key("run-b"));
     }
 
     #[tokio::test]

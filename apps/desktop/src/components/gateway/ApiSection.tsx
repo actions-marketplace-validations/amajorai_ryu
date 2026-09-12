@@ -218,7 +218,7 @@ function KeyManagement({
 					</div>
 				) : null}
 				{error ? (
-					<p className="px-3 text-destructive text-sm">{error}</p>
+					<p className="px-3 text-sm text-status-destructive">{error}</p>
 				) : null}
 
 				{managed ? null : (
@@ -431,7 +431,7 @@ function LiveTraffic({
 						{connected ? "Live" : error ? "Reconnecting" : "Offline"}
 					</Badge>
 					{error ? (
-						<span className="max-w-[220px] truncate text-destructive text-xs">
+						<span className="max-w-[220px] truncate text-status-destructive text-xs">
 							{error}
 						</span>
 					) : null}
@@ -520,7 +520,7 @@ function Tile({ label, value }: { label: string; value: string }) {
 	return (
 		<div className="flex flex-col gap-0.5 rounded-md border bg-background px-3 py-2">
 			<span className="text-muted-foreground text-xs">{label}</span>
-			<span className="font-semibold text-lg tabular-nums">{value}</span>
+			<span className="font-medium text-lg tabular-nums">{value}</span>
 		</div>
 	);
 }

@@ -59,13 +59,13 @@ export default function CommunityTrustNotice({
 	return (
 		<Alert
 			className={cn(
-				"border-amber-500/30 bg-amber-500/5 text-foreground",
+				"border-warning/30 bg-warning/5 text-foreground",
 				tone === "inline" && "px-3 py-2.5",
 				className
 			)}
 			data-testid="community-trust-notice"
 		>
-			<HugeiconsIcon className="text-amber-600" icon={Alert02Icon} />
+			<HugeiconsIcon className="text-status-warning" icon={Alert02Icon} />
 			<AlertTitle>Not reviewed by Ryu</AlertTitle>
 			<AlertDescription>
 				Listings are discovered automatically from the GitHub topic{" "}

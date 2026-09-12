@@ -18,7 +18,8 @@ export function FileElementStatic(props: SlateElementProps<TFileElement>) {
 			<a
 				className={cn(
 					"group relative m-0 flex cursor-pointer items-center rounded px-0.5 py-[3px] hover:bg-muted",
-					isRemoveSuggestion && "bg-red-100 text-red-700 hover:bg-red-200/80"
+					isRemoveSuggestion &&
+						"bg-destructive/10 text-status-destructive hover:bg-destructive/20"
 				)}
 				contentEditable={false}
 				download={name}

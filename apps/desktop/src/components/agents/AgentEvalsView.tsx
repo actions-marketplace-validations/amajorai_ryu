@@ -60,12 +60,12 @@ function pct(value: number): string {
 
 function scoreTone(score: number): string {
 	if (score >= 0.75) {
-		return "text-success dark:text-success";
+		return "text-status-success dark:text-status-success";
 	}
 	if (score >= 0.5) {
-		return "text-warning dark:text-warning";
+		return "text-status-warning dark:text-status-warning";
 	}
-	return "text-destructive";
+	return "text-status-destructive";
 }
 
 export function AgentEvalsView({
@@ -179,7 +179,10 @@ export function AgentEvalsView({
 	const loadHistory = useCallback(async () => {
 		setHistoryLoading(true);
 		try {
-			const res = await fetchGatewayAudit(target, { limit: 50 });
+			const res = await fetchGatewayAudit(target, {
+				agentId: agentId ?? undefined,
+				limit: 50,
+			});
 			setEntries(res.entries);
 			setReachable(res.reachable);
 		} finally {

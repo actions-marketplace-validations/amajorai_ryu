@@ -1,86 +1,187 @@
-// Standalone browser story for the REAL `AppIcon` — the one icon square every
-// surface renders (Store lists, Installed tab, sidebar, workspace tab strips, the
-// composer "+" menu).
-//
-// It exists because the icon's legibility is a property of the PAINTED PIXELS, not
-// of the manifest data, and it fails in only one theme at a time. Every packaged
-// manifest now declares the standard `{from: <hue>, to: "transparent", direction:
-// "down"}` wash, which covers only the top of the square; the square's bottom is
-// whatever surface is behind it. A hardcoded white glyph on that reads perfectly on
-// a dark card and vanishes completely on a light one — so a story that renders one
-// theme, or that asserts on props instead of pixels, would certify nothing.
-//
-// Both themes are mounted side by side, over the real `bg-card`, with the real
-// hues taken from the shipped manifests. Screenshot it and look: every glyph must
-// be readable in BOTH columns.
-
+// Product components with every shipped app/plugin manifest; no catalog mocks.
 import AppIcon from "@ryu/marketplace/catalog/chrome/app-icon";
+import StoreCatalogCard from "@ryu/marketplace/catalog/chrome/store-catalog-card";
+import type { CardDither } from "@ryu/marketplace/catalog/types";
+import { Button } from "@ryu/ui/components/button";
+import { useState } from "react";
 import { createRoot } from "react-dom/client";
 import "../../src/index.css";
 
-/** Real ids, glyphs and hues, copied from the shipped manifests — spanning the
- *  wheel so a hue that only fails in one sector cannot hide. */
-const SAMPLES: Array<{ hue: number; icon: string; id: string; name: string }> =
-	[
-		{ hue: 8, icon: "ai-brain-01", id: "@ryu/finetune", name: "Finetune" },
-		{
-			hue: 53,
-			icon: "pulse-01",
-			id: "@ryu/agent-status",
-			name: "Agent Status",
-		},
-		{ hue: 96, icon: "shapes", id: "@ryu/whiteboard", name: "Whiteboard" },
-		{ hue: 138, icon: "activity-03", id: "@ryu/activity", name: "Activity" },
-		{ hue: 185, icon: "brain-01", id: "@ryu/memory", name: "Memory" },
-		{
-			hue: 233,
-			icon: "workflow-circle-06",
-			id: "@ryu/workflows",
-			name: "Workflows",
-		},
-		{ hue: 275, icon: "bulb", id: "@ryu/advisor", name: "Advisor" },
-		{ hue: 318, icon: "webhook", id: "@ryu/webhooks", name: "Webhooks" },
-		{ hue: 348, icon: "film-01", id: "@ryu/clips", name: "Clips" },
-	];
-
-function Row({ label }: { label: string }) {
-	return (
-		<div className="flex flex-wrap gap-4 rounded-xl bg-card p-4">
-			{SAMPLES.map((s) => (
-				<div className="w-20 text-center" data-testid="tile" key={s.id}>
-					<AppIcon
-						className="mx-auto size-14"
-						dither={{ direction: "down", from: s.hue, to: "transparent" }}
-						iconId={s.icon}
-						name={s.name}
-						seedId={s.id}
-						size={26}
-					/>
-					<div className="mt-1 truncate text-[10px] text-muted-foreground">
-						{s.name}
-					</div>
-				</div>
-			))}
-			<div className="w-full pt-1 text-[10px] text-muted-foreground">
-				{label}
-			</div>
-		</div>
-	);
+interface Manifest {
+	icon?: string;
+	iconDither?: CardDither;
+	iconPadding?: string;
+	iconUrl?: string;
+	id: string;
+	name: string;
+	tagline?: string;
 }
+const source = import.meta.glob<Manifest>(
+	[
+		"../../../../apps-store/*/manifest.json",
+		"../../../../plugins-store/plugins/*/manifest.json",
+		"../../../../plugins-store/lsp/*/manifest.json",
+		"../../../../plugins-store/external_plugins/*/manifest.json",
+	],
+	{ eager: true, import: "default" }
+);
+const entries = Object.entries(source).sort((a, b) =>
+	a[1].name.localeCompare(b[1].name)
+);
 
 function Story() {
+	const [theme, setTheme] = useState("light");
+	const [kind, setKind] = useState("apps");
+	const [selected, setSelected] = useState<Manifest | null>(null);
+	const visible = entries.filter(([path]) =>
+		kind === "apps"
+			? path.includes("apps-store/")
+			: path.includes("plugins-store/")
+	);
 	return (
-		<div className="grid grid-cols-2">
-			<div className="light bg-background p-6 text-foreground">
-				<Row label="light theme — standard wash, theme-foreground glyph" />
+		<main className={`${theme} min-h-screen bg-background text-foreground`}>
+			<div className="mx-auto max-w-6xl p-5 sm:p-10">
+				<header className="mb-8 flex flex-wrap items-center justify-between gap-4">
+					<div>
+						<h1 className="font-semibold text-2xl">Marketplace</h1>
+						<p className="mt-1 text-muted-foreground text-sm">
+							Apps and plugins for your workspace
+						</p>
+					</div>
+					<Button
+						onClick={() => setTheme(theme === "light" ? "dark" : "light")}
+						variant="outline"
+					>
+						{theme === "light" ? "Dark appearance" : "Light appearance"}
+					</Button>
+				</header>
+				<nav aria-label="Catalog" className="mb-6 flex gap-2">
+					<Button
+						onClick={() => {
+							setKind("apps");
+							setSelected(null);
+						}}
+						variant={kind === "apps" ? "default" : "ghost"}
+					>
+						Apps
+					</Button>
+					<Button
+						onClick={() => {
+							setKind("plugins");
+							setSelected(null);
+						}}
+						variant={kind === "plugins" ? "default" : "ghost"}
+					>
+						Plugins
+					</Button>
+				</nav>
+				{selected ? (
+					<section
+						aria-label="Selected app"
+						className="mb-6 flex items-center gap-5 rounded-2xl bg-muted/30 p-6"
+					>
+						<AppIcon
+							className="size-20"
+							dither={selected.iconDither}
+							iconId={selected.icon}
+							iconPadding={selected.iconPadding}
+							iconUrl={selected.iconUrl}
+							name={selected.name}
+							seedId={selected.id}
+							size={40}
+							variant="hero"
+						/>
+						<div>
+							<h2 className="font-semibold text-xl">{selected.name}</h2>
+							<p className="text-muted-foreground text-sm">
+								{selected.tagline}
+							</p>
+						</div>
+					</section>
+				) : null}
+				<section
+					aria-label={kind === "apps" ? "Apps" : "Plugins"}
+					className="grid grid-cols-1 gap-x-6 gap-y-1 sm:grid-cols-2 lg:grid-cols-3"
+				>
+					{visible.map(([, m]) => (
+						<div data-package={m.id} data-testid="tile" key={m.id}>
+							<StoreCatalogCard
+								description={m.tagline}
+								dither={m.iconDither}
+								iconId={m.icon}
+								iconPadding={m.iconPadding}
+								iconUrl={m.iconUrl}
+								name={m.name}
+								onClick={() => setSelected(m)}
+								seedId={m.id}
+							/>
+						</div>
+					))}
+				</section>
+				<section
+					aria-label="Artwork closeups"
+					className="mt-10 rounded-2xl bg-card p-6"
+				>
+					<h2 className="mb-6 font-medium text-lg">Icon artwork</h2>
+					<div className="grid grid-cols-2 gap-6 sm:grid-cols-5 lg:grid-cols-5">
+						{entries
+							.filter(([, m]) =>
+								[
+									"@ryu/browser",
+									"@ryu/calendar",
+									"@ryu/mail",
+									"@ryu/canvas",
+									"@ryu/sites",
+									"@ryu/voice",
+									"@ryu/dictation",
+									"@ryu/whiteboard",
+									"@ryu/agent-status",
+									"@ryu/tuition",
+								].includes(m.id)
+							)
+							.map(([, m]) => (
+								<div className="text-center" key={m.id}>
+									<AppIcon
+										className="mx-auto size-32"
+										name={m.name}
+										seedId={m.id}
+										size={64}
+									/>
+									<p className="mt-3 text-sm">{m.name}</p>
+								</div>
+							))}
+					</div>
+				</section>
+				<section
+					aria-label="Icon sizes"
+					className="mt-10 flex items-end gap-6 border-t pt-6"
+				>
+					{[20, 40, 80, 128].map((size) => (
+						<div key={size}>
+							<AppIcon
+								className={
+									size === 20
+										? "size-5"
+										: size === 40
+											? "size-10"
+											: size === 80
+												? "size-20"
+												: "size-32"
+								}
+								dither={{ from: 351 }}
+								iconId="browser"
+								name="Browser"
+								seedId="@ryu/browser"
+								size={size / 2}
+							/>
+							<p className="mt-2 text-muted-foreground text-xs">{size}px</p>
+						</div>
+					))}
+				</section>
 			</div>
-			<div className="dark bg-background p-6 text-foreground">
-				<Row label="dark theme — standard wash, theme-foreground glyph" />
-			</div>
-		</div>
+		</main>
 	);
 }
-
 const root = document.getElementById("root");
 if (root) {
 	createRoot(root).render(<Story />);

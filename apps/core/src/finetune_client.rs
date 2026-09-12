@@ -12,7 +12,7 @@
 //! an in-process store, so the sidecar is the single owner of `finetune.db`.
 //!
 //! Security mirrors the ext-proxy hop exactly: loopback target on the sidecar's
-//! declared port ([`crate::profile::port`]-shifted for dev profiles), with the
+//! live manager-owned port, with the
 //! per-plugin minted bearer ([`crate::sidecar::ext_proxy::ext_token`]) the sidecar
 //! was spawned with — nothing hardcoded.
 
@@ -33,35 +33,25 @@ use crate::sidecar::ext_proxy::{ext_token, node_token};
 /// pointed at the Rust sidecar rather than the worker.
 const FINETUNE_SIDECAR: &str = "ryu-finetune";
 
-/// Resolve the `ryu-finetune` sidecar's loopback port from the loaded manifests,
-/// profile-shifted the same way the ext-proxy forwards ([`crate::profile::port`]),
-/// so dev/custom profiles hit the same shifted port the sidecar was told to bind. The
-/// port comes from the manifest and ONLY the manifest — see
-/// [`crate::sidecar::ext_proxy::sidecar_port`] for why a built-in absence is a
-/// build-time invariant rather than a runtime fallback.
-pub fn sidecar_port(manifests: &[crate::plugin_manifest::PluginManifest]) -> u16 {
-    crate::sidecar::ext_proxy::sidecar_port(manifests, FINETUNE_PLUGIN_ID, FINETUNE_SIDECAR).expect(
-        "built-in finetune.manifest.json must declare the ryu-finetune sidecar (see \
-             plugin_manifest::BUILTIN_MANIFESTS)",
-    )
-}
-
 /// Typed loopback client for the `ryu-finetune` sidecar. Cheap to clone (holds only
-/// the resolved port); the bearer is minted per call so it always tracks the current
+/// the manager); the bearer is minted per call so it always tracks the current
 /// node token.
 #[derive(Clone)]
 pub struct FinetuneClient {
-    port: u16,
+    manager: std::sync::Arc<crate::sidecar::SidecarManager>,
 }
 
 impl FinetuneClient {
-    /// Build a client bound to the sidecar's resolved loopback port.
-    pub fn new(port: u16) -> Self {
-        Self { port }
+    /// Build a client that resolves the manager's live target before each request.
+    pub fn new(manager: std::sync::Arc<crate::sidecar::SidecarManager>) -> Self {
+        Self { manager }
     }
 
-    fn base_url(&self) -> String {
-        format!("http://127.0.0.1:{}/api/finetune", self.port)
+    fn base_url(&self) -> std::result::Result<String, String> {
+        self.manager
+            .sidecar_base_url(FINETUNE_PLUGIN_ID, FINETUNE_SIDECAR)
+            .map(|url| format!("{url}/api/finetune"))
+            .map_err(|denied| denied.reason())
     }
 
     /// The per-plugin minted bearer the sidecar was spawned with — the same value
@@ -76,7 +66,7 @@ impl FinetuneClient {
     /// shape the plugin-host bridge expects.
     async fn get_json(&self, path: &str) -> Result<Value, String> {
         let resp = reqwest::Client::new()
-            .get(format!("{}{path}", self.base_url()))
+            .get(format!("{}{path}", self.base_url()?))
             .bearer_auth(self.bearer())
             .send()
             .await
@@ -88,7 +78,7 @@ impl FinetuneClient {
     /// mapping as [`Self::get_json`]).
     async fn post_json(&self, path: &str, body: Value) -> Result<Value, String> {
         let resp = reqwest::Client::new()
-            .post(format!("{}{path}", self.base_url()))
+            .post(format!("{}{path}", self.base_url()?))
             .bearer_auth(self.bearer())
             .json(&body)
             .send()
@@ -100,7 +90,7 @@ impl FinetuneClient {
     /// Issue a DELETE and return the parsed JSON body (same error mapping).
     async fn delete_json(&self, path: &str) -> Result<Value, String> {
         let resp = reqwest::Client::new()
-            .delete(format!("{}{path}", self.base_url()))
+            .delete(format!("{}{path}", self.base_url()?))
             .bearer_auth(self.bearer())
             .send()
             .await
@@ -164,7 +154,17 @@ impl FinetuneClient {
     /// bridge (`finetune.stream`) and the equivalent HTTP surface. The sidecar owns
     /// the local-vs-remote source decision, so this is a straight passthrough.
     pub async fn stream(&self, id: &str) -> Response {
-        let url = format!("{}/{id}/stream", self.base_url());
+        let base_url = match self.base_url() {
+            Ok(url) => url,
+            Err(error) => {
+                return (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    Json(json!({ "error": error })),
+                )
+                    .into_response()
+            }
+        };
+        let url = format!("{base_url}/{id}/stream");
         let resp = reqwest::Client::new()
             .get(&url)
             .bearer_auth(self.bearer())

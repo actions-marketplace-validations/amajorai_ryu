@@ -228,27 +228,34 @@ export function scanAgentSyncRoot(
 
 export async function importAgentSyncThread(
 	target: ApiTarget,
-	input: { agentId: string; threadId: string }
+	input: { agentId: string; dryRun?: boolean; threadId: string }
 ): Promise<{
 	alreadyImported: boolean;
 	conversationId: string | null;
+	dryRun: boolean;
 	messagesAdded: number;
+	wouldCreate: boolean;
 }> {
 	const body = await request<{
 		already_imported?: boolean;
 		conversation_id?: string;
+		dry_run?: boolean;
 		messages_added?: number;
+		would_create?: boolean;
 	}>(target, "/api/agent-sync/threads/import", {
 		method: "POST",
 		body: {
 			agentId: input.agentId,
+			dryRun: input.dryRun ?? false,
 			threadId: input.threadId,
 		},
 	});
 	return {
 		alreadyImported: body.already_imported ?? false,
 		conversationId: body.conversation_id ?? null,
+		dryRun: body.dry_run ?? false,
 		messagesAdded: body.messages_added ?? 0,
+		wouldCreate: body.would_create ?? false,
 	};
 }
 

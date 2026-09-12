@@ -172,7 +172,7 @@ function StandaloneBootstrap({
 					</p>
 				) : null}
 				{phase === "error" ? (
-					<p className="text-destructive text-sm">
+					<p className="text-sm text-status-destructive">
 						Check the local Ryu Core logs, then restart this app.
 					</p>
 				) : null}

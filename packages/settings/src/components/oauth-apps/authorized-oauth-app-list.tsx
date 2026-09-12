@@ -77,7 +77,7 @@ export function AuthorizedOAuthAppList({
 						) : (
 							<Button
 								aria-label={`Revoke access for ${app.clientName}`}
-								className="size-8 shrink-0 text-muted-foreground hover:text-destructive"
+								className="size-8 shrink-0 text-muted-foreground hover:text-status-destructive"
 								disabled={isRevoking}
 								onClick={() => onStartRevoke(app.clientId)}
 								size="icon"

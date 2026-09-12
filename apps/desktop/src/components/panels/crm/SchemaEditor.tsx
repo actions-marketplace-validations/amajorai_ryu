@@ -24,6 +24,7 @@ import { HugeiconsIcon } from "@hugeicons/react";
 import { Badge } from "@ryu/ui/components/badge";
 import { Button } from "@ryu/ui/components/button";
 import { Checkbox } from "@ryu/ui/components/checkbox";
+import { ColorPickerPopover } from "@ryu/ui/components/color-picker";
 import { Input } from "@ryu/ui/components/input";
 import { Label } from "@ryu/ui/components/label";
 import {
@@ -136,7 +137,7 @@ export function SchemaEditor({
 		<div className="flex h-full min-h-0 flex-col">
 			<header className="flex items-start justify-between gap-2 border-b px-4 py-3">
 				<div>
-					<h2 className="font-semibold text-base capitalize">
+					<h2 className="font-medium text-base capitalize">
 						{subject.object.plural} schema
 					</h2>
 					<p className="text-muted-foreground text-xs">
@@ -156,7 +157,7 @@ export function SchemaEditor({
 			</header>
 
 			{error && (
-				<div className="flex items-start gap-2 border-b bg-destructive/10 px-4 py-2 text-destructive text-xs">
+				<div className="flex items-start gap-2 border-b bg-destructive/10 px-4 py-2 text-status-destructive text-xs">
 					<HugeiconsIcon icon={Alert01Icon} size={14} />
 					<span>{error}</span>
 				</div>
@@ -587,19 +588,17 @@ function FieldForm({
 									}
 									value={option.label}
 								/>
-								<Input
-									aria-label={`Option ${option.label} colour`}
-									className="h-9 w-14 p-1"
-									onChange={(event) =>
+								<ColorPickerPopover
+									onValueChange={(value) =>
 										setOptions((current) =>
 											current.map((o) =>
-												o.id === option.id
-													? { ...o, color: event.target.value }
-													: o
+												o.id === option.id ? { ...o, color: value } : o
 											)
 										)
 									}
-									type="color"
+									triggerAriaLabel={`Option ${option.label} colour`}
+									triggerClassName="h-9 w-14 shrink-0 p-1"
+									triggerShowValue={false}
 									value={option.color ?? "#888888"}
 								/>
 								{fieldType === "status" && (
@@ -680,7 +679,7 @@ function FieldForm({
 						</p>
 					)}
 					{removedOptions.length > 0 && (
-						<p className="mt-1 text-destructive text-xs">
+						<p className="mt-1 text-status-destructive text-xs">
 							Removing {removedOptions.map((o) => o.label).join(", ")} affects
 							records that still hold{" "}
 							{removedOptions.length === 1 ? "it" : "them"}.

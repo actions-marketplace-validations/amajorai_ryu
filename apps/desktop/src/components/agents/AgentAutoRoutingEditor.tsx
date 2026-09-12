@@ -424,7 +424,7 @@ export function AgentAutoRoutingEditor() {
 									</p>
 								) : null}
 								{classifierUnserved ? (
-									<p className="text-destructive text-xs">
+									<p className="text-status-destructive text-xs">
 										{classifierUnservedCopy}
 									</p>
 								) : null}
@@ -519,7 +519,7 @@ export function AgentAutoRoutingEditor() {
 												variant="ghost"
 											>
 												<HugeiconsIcon
-													className="size-3.5 text-destructive"
+													className="size-3.5 text-status-destructive"
 													icon={Delete01Icon}
 												/>
 												<span className="sr-only">Remove rule {idx + 1}</span>
@@ -576,7 +576,7 @@ export function AgentAutoRoutingEditor() {
 						</div>
 
 						{saveError ? (
-							<p className="text-destructive text-sm">{saveError}</p>
+							<p className="text-sm text-status-destructive">{saveError}</p>
 						) : null}
 					</div>
 				) : (

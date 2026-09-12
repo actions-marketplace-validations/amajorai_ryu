@@ -10,7 +10,7 @@ export function CodeDrawingElementStatic({
 	return (
 		<SlateElement className="my-4 flex w-full items-stretch" {...props}>
 			<div className={cn("flex w-full flex-col md:flex-row")}>
-				<div className="relative h-full min-w-0 flex-1 rounded-md bg-muted/50 p-8 pr-4">
+				<div className="relative h-full min-w-0 flex-1 rounded-md bg-muted/50 p-8 pe-4">
 					<pre className="m-0 overflow-x-auto font-mono text-sm leading-[normal] [tab-size:2] print:break-inside-avoid">
 						<code className="block w-full">
 							{(props.element.data?.code as string) ||

@@ -41,9 +41,8 @@
 
 use crate::plugin_manifest::PluginManifest;
 use crate::plugins::{
-	builtins::{CHAT_BROADCAST_PLUGIN_ID, CORE_PREINSTALLED},
-	graph,
-	PluginStore,
+    builtins::{CHAT_BROADCAST_PLUGIN_ID, CORE_PREINSTALLED},
+    graph, PluginStore,
 };
 
 /// One pre-installed plugin and everything the seed must write for it.
@@ -80,17 +79,18 @@ pub struct SeedSpec {
 /// pre-installed set: the explicit install path derives opt-in companion bundles from
 /// this same table. Adding a 16th companion to a second list is what caused the
 /// original carriage bug; there is no second list.
-fn seed_overrides() -> [SeedSpec; 35] {
-	use crate::plugin_manifest::{
-		ACTIVITY_UI_HTML, APPROVALS_UI_HTML, BLUEPRINT_UI_HTML, CALENDAR_UI_HTML,
-		CHAT_BROADCAST_UI_HTML, CANVAS_PLUGIN_ID,
-        CANVAS_UI_HTML, FINETUNE_PLUGIN_ID, FINETUNE_UI_HTML, HELP_CENTER_UI_HTML,
-        SITES_UI_HTML,
-        LEARNING_UI_HTML, MAIL_UI_HTML,
-        EXPENSES_UI_HTML, INVOICES_UI_HTML, MEETINGS_UI_HTML, MONITORS_UI_HTML, NEWS_UI_HTML, OUTREACH_UI_HTML, PEOPLE_UI_HTML, PROJECTS_UI_HTML, PULL_REQUESTS_UI_HTML, QUESTS_UI_HTML,
-        REASONING_PLUGIN_ID, REASONING_UI_HTML, RLM_UI_HTML, SKILL_EDITOR_UI_HTML, SOCIAL_UI_HTML,
-        SLIDES_PLUGIN_ID, SLIDES_UI_HTML, SUBTITLES_UI_HTML, TIMELINE_UI_HTML, TUITION_UI_HTML, WARMUP_UI_HTML, WEBHOOKS_UI_HTML,
-        WHITEBOARD_PLUGIN_ID, WHITEBOARD_UI_HTML, WORKFLOWS_UI_HTML,
+fn seed_overrides() -> [SeedSpec; 39] {
+    use crate::plugin_manifest::{
+        ACTIVITY_UI_HTML, APPROVALS_UI_HTML, AUTOPILOT_UI_HTML, BLUEPRINT_UI_HTML,
+        CALENDAR_UI_HTML, CANVAS_PLUGIN_ID, CANVAS_UI_HTML, CHAT_BROADCAST_UI_HTML, CLIPS_UI_HTML,
+        CONVERT_PLUGIN_ID, CONVERT_UI_HTML, DRAWSOME_PLUGIN_ID, DRAWSOME_UI_HTML, EXPENSES_UI_HTML, FINETUNE_PLUGIN_ID,
+        FINETUNE_UI_HTML, HELP_CENTER_UI_HTML, INVOICES_UI_HTML, LEARNING_UI_HTML, MAIL_UI_HTML,
+        MEETINGS_UI_HTML, MONITORS_UI_HTML, NEWS_UI_HTML, OUTREACH_UI_HTML, PEOPLE_UI_HTML,
+        PROJECTS_UI_HTML, PULL_REQUESTS_UI_HTML, QUESTS_UI_HTML, REASONING_PLUGIN_ID,
+        REASONING_UI_HTML, RLM_UI_HTML, SITES_UI_HTML, SKILL_EDITOR_UI_HTML, SLIDES_PLUGIN_ID,
+        SLIDES_UI_HTML, SOCIAL_UI_HTML, SUBTITLES_UI_HTML, TIMELINE_UI_HTML, TUITION_UI_HTML,
+        WARMUP_UI_HTML, WEBHOOKS_UI_HTML, WHITEBOARD_PLUGIN_ID, WHITEBOARD_UI_HTML,
+        WORKFLOWS_UI_HTML,
     };
     [
         SeedSpec {
@@ -120,6 +120,21 @@ fn seed_overrides() -> [SeedSpec; 35] {
                 "ui:declarative-http",
             ],
             ui_code: Some(CANVAS_UI_HTML),
+        },
+        SeedSpec {
+            id: DRAWSOME_PLUGIN_ID,
+            // Drawesome's Companion persists only its own title + stroke data through
+            // the generic app-scoped KV bridge; it has no provider or sidecar access.
+            grants: &["storage:kv", "ui:toast"],
+            ui_code: Some(DRAWSOME_UI_HTML),
+        },
+        SeedSpec {
+            id: CONVERT_PLUGIN_ID,
+            // Convert only persists bounded conversion metadata through the
+            // generic app-scoped KV bridge and emits optional host toasts. File
+            // bytes are read and transformed inside the Companion document.
+            grants: &["storage:kv", "ui:toast"],
+            ui_code: Some(CONVERT_UI_HTML),
         },
         SeedSpec {
             id: SLIDES_PLUGIN_ID,
@@ -482,6 +497,20 @@ fn seed_overrides() -> [SeedSpec; 35] {
             ui_code: Some(OUTREACH_UI_HTML),
         },
         SeedSpec {
+            id: crate::plugins::builtins::AUTOPILOT_PLUGIN_ID,
+            // Autopilot is a pure Companion orchestration layer. The selected
+            // Ryu agent performs the tool loop, while the frame owns only its
+            // durable brief/cycle ledger and reads the secret-free catalog.
+            grants: &[
+                "hook:run-agent",
+                "storage:kv",
+                "core:list_agents",
+                "shell:integrate",
+                "ui:toast",
+            ],
+            ui_code: Some(AUTOPILOT_UI_HTML),
+        },
+        SeedSpec {
             id: crate::plugins::builtins::PROJECTS_PLUGIN_ID,
             grants: &["storage:kv", "shell:integrate", "ui:toast"],
             ui_code: Some(PROJECTS_UI_HTML),
@@ -520,6 +549,14 @@ fn seed_overrides() -> [SeedSpec; 35] {
                 "ui:declarative-http",
             ],
             ui_code: Some(REASONING_UI_HTML),
+        },
+        SeedSpec {
+            id: crate::plugins::builtins::CLIPS_PLUGIN_ID,
+            // Clips is opt-in because its sidecar can capture the user's screen. The
+            // generic app:http bridge is the only host capability the Companion needs;
+            // capture/ingest authorization remains in the app's permission levels.
+            grants: &["app:http"],
+            ui_code: Some(CLIPS_UI_HTML),
         },
         SeedSpec {
             id: crate::plugins::builtins::RLM_PLUGIN_ID,
@@ -573,11 +610,7 @@ fn seed_overrides() -> [SeedSpec; 35] {
             // it up and the opt-in pass writes only `ui_code`, leaving `enable_app` to
             // persist the Gateway-approved set. Recorded anyway, and set-equal to the
             // manifest's `permission_grants`, so a promotion is correct by construction.
-            grants: &[
-                "blueprint:review",
-                "mcp:blueprint",
-                "ui:declarative-http",
-            ],
+            grants: &["blueprint:review", "mcp:blueprint", "ui:declarative-http"],
             ui_code: Some(BLUEPRINT_UI_HTML),
         },
         SeedSpec {
@@ -995,10 +1028,12 @@ const LEGACY_DISABLED_SEED_IDS: &[&str] = &[
     // companion), so the Store would keep listing five uninstalled apps as
     // *Installed* and an uninstall would not survive a reboot.
     //
-    // These five carry no compiled-in companion bundle — their UI is served by
-    // their own sidecar through the ext-proxy — so the `compiled_in_ui_code`
-    // carriage that makes this posture safe for whiteboard/canvas is not even
-    // needed here. There is nothing left for a seeded record to carry.
+    // Four of these remain sidecar-only and carry no compiled-in companion bundle;
+    // Clips is the exception now that its opt-in editor is carried by
+    // `CLIPS_UI_HTML` in `seed_overrides`. The v5 list stays historical: it removes
+    // the old pre-installed lifecycle record for Clips as well as the four sidecars,
+    // while explicit re-install still gets whichever carriage the current manifest
+    // provides.
     crate::plugins::builtins::RESEARCH_PLUGIN_ID,
     crate::plugins::builtins::DASHBOARDS_PLUGIN_ID,
     crate::plugins::builtins::TEAMS_PLUGIN_ID,
@@ -1190,10 +1225,7 @@ pub async fn run_one_time_migrations(store: &PluginStore, manifests: &[PluginMan
                 // The earlier migrations have completed. Record that prefix so a
                 // later boot retries only the tenant move after an account exists;
                 // otherwise every boot would re-assert v1-v5 user state.
-                if let Err(error) = store
-                    .set_schema_version(STORE_SCHEMA_VERSION - 1)
-                    .await
-                {
+                if let Err(error) = store.set_schema_version(STORE_SCHEMA_VERSION - 1).await {
                     tracing::warn!(
                         "store migration v6: could not record pending account state: {error}"
                     );
@@ -1552,8 +1584,9 @@ async fn remove_legacy_disabled_seed_records(store: &PluginStore) {
 ///
 /// Same argument as v3, and it is stronger here because these apps are fully
 /// out-of-process. The record holds `enabled`, `approved_grants` (re-derived by
-/// `enable_app` from the manifest at every enable) and `ui_code` (which these five
-/// do not use at all — their UI is served by their own sidecar over the ext-proxy).
+/// `enable_app` from the manifest at every enable) and, for Clips, the current
+/// `ui_code` companion carriage. The other four sidecar apps do not use `ui_code`;
+/// their UI is served by their own sidecar over the ext-proxy.
 /// The user's actual data — teams in `teams.db`, dashboards in `dashboards.db`,
 /// recorded clips in the Clips Space, recipes in Ghost's RecipeStore — lives in
 /// stores this never touches, and is still there when the app is re-installed. So
@@ -1820,7 +1853,12 @@ mod migration_tests {
 
         assert!(store.get(LEARNING).await.unwrap().unwrap().enabled);
         assert!(
-            !store.get(still_preinstalled).await.unwrap().unwrap().enabled,
+            !store
+                .get(still_preinstalled)
+                .await
+                .unwrap()
+                .unwrap()
+                .enabled,
             "another pre-installed app the user disabled must stay disabled"
         );
         assert!(
@@ -2122,11 +2160,9 @@ mod tests {
                 .all(|seed| seed.id != crate::plugins::builtins::MEMORY_PLUGIN_ID),
             "Memory was skipped during production pre-installed ordering: {skipped:?}"
         );
-        assert!(
-            ordered
-                .iter()
-                .any(|id| id == crate::plugins::builtins::MEMORY_PLUGIN_ID)
-        );
+        assert!(ordered
+            .iter()
+            .any(|id| id == crate::plugins::builtins::MEMORY_PLUGIN_ID));
     }
 
     /// Capability edges (`requires.capabilities`) are lowered at seed time, so the
@@ -2563,7 +2599,10 @@ mod tests {
                     .await
                     .unwrap()
                     .unwrap_or_else(|| panic!("pre-installed '{id}' must be seeded"));
-                assert!(record.enabled, "pre-installed '{id}' must be seeded enabled");
+                assert!(
+                    record.enabled,
+                    "pre-installed '{id}' must be seeded enabled"
+                );
             }
         }
     }

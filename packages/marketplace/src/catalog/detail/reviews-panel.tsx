@@ -155,7 +155,7 @@ export default function ReviewsPanel({
 			/>
 
 			{state.error ? (
-				<p className="flex items-center gap-1.5 text-destructive text-sm">
+				<p className="flex items-center gap-1.5 text-sm text-status-destructive">
 					<HugeiconsIcon className="size-4" icon={Alert02Icon} />
 					{state.error}
 				</p>
@@ -244,7 +244,7 @@ function RatingSummary({
 				) : (
 					<>
 						<div className="flex items-baseline gap-2">
-							<span className="font-semibold text-3xl tabular-nums">
+							<span className="font-medium text-3xl tabular-nums">
 								{(Math.round(average * 10) / 10).toFixed(1)}
 							</span>
 							<span className="text-muted-foreground text-sm">out of 5</span>
@@ -280,7 +280,7 @@ function ReviewRow({ review }: { review: MarketplaceReview }) {
 				{review.verifiedPurchase ? (
 					<Badge className="shrink-0 gap-1 text-xs" variant="secondary">
 						<HugeiconsIcon
-							className="size-3 text-success"
+							className="size-3 text-status-success"
 							icon={CheckmarkBadge01Icon}
 						/>
 						Verified purchase
@@ -403,7 +403,9 @@ function WriteReviewForm({
 					value={body}
 				/>
 			</div>
-			{error ? <p className="text-destructive text-sm">{error}</p> : null}
+			{error ? (
+				<p className="text-sm text-status-destructive">{error}</p>
+			) : null}
 			<div className="flex items-center gap-2">
 				<Button loading={busy} onClick={submit} size="sm">
 					{existing ? "Update review" : "Post review"}

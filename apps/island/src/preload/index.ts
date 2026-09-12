@@ -44,6 +44,7 @@ import {
 	type IslandStartMeetingInput,
 	type IslandSuggestion,
 	type IslandWinApi,
+	type LanguagePacksResult,
 	type MoveByPayload,
 	type PluginContributionsResult,
 	type PluginCoreHttpRequest,
@@ -171,6 +172,10 @@ const api: IslandApi = {
 			listener: (event: PluginHostStreamEndEvent) => void
 		): (() => void) => subscribe(IPC.plugins.hostStreamEnd, listener),
 	},
+	languagePacks: {
+		get: (): Promise<LanguagePacksResult> =>
+			ipcRenderer.invoke(IPC.languagePacks.get),
+	},
 	command: {
 		onOpen: (listener: () => void): (() => void) =>
 			subscribe(IPC.command.open, listener),
@@ -190,6 +195,8 @@ const api: IslandApi = {
 			ipcRenderer.invoke(IPC.catalog.selectSource, req),
 	},
 	shadow: {
+		getSpeechHistory: (input) =>
+			ipcRenderer.invoke(IPC.shadow.getSpeechHistory, input),
 		getCurrentContext: (): Promise<ShadowContextResult> =>
 			ipcRenderer.invoke(IPC.shadow.getCurrentContext),
 		getProactive: (): Promise<ShadowProactiveResult> =>

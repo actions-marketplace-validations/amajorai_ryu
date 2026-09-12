@@ -1,3 +1,4 @@
+import { useConfirmDialog } from "@ryu/ui/hooks/use-confirm-dialog.tsx";
 // The desktop surface for a plugin-contributed **declarative view** (the Raycast
 // tier). A plugin declares `contributes.views[]` in its manifest; Core serves them
 // via `GET /api/plugins/contributions` tagged with the owning plugin id, and this
@@ -41,7 +42,7 @@ import {
 	DeclarativeView,
 	type ViewSourceFetcher,
 } from "@/src/components/views/DeclarativeView.tsx";
-import { useTabsContext } from "@/src/contexts/TabsContext.tsx";
+import { useTabSelector } from "@/src/contexts/TabsContext.tsx";
 import { useActiveNode } from "@/src/hooks/useActiveNode.ts";
 import { usePluginContributions } from "@/src/hooks/usePluginContributions.ts";
 import { apiUrl, requestHeaders, toTarget } from "@/src/lib/api/client.ts";
@@ -54,8 +55,10 @@ export default function PluginViewPage({
 	pluginId: string;
 	viewId: string;
 }) {
+	const { confirm, confirmationDialog } = useConfirmDialog();
+
 	const { views } = usePluginContributions();
-	const { openTab } = useTabsContext();
+	const openTab = useTabSelector((state) => state.openTab);
 	const node = useActiveNode();
 	const queryClient = useQueryClient();
 	const [reloadToken, setReloadToken] = useState(0);
@@ -115,7 +118,7 @@ export default function PluginViewPage({
 	const handleAction = useCallback(
 		async (action: ViewAction, ctx: ViewActionContext) => {
 			// biome-ignore lint/suspicious/noAlert: the v1 declarative confirm gate — a spec-declared destructive-action prompt.
-			if (action.confirm && !window.confirm(action.confirm)) {
+			if (action.confirm && !(await confirm(action.confirm))) {
 				return;
 			}
 			const target = toTarget(node);
@@ -170,12 +173,14 @@ export default function PluginViewPage({
 				toast.error(e instanceof Error ? e.message : "Action failed");
 			}
 		},
-		[contribution, node, pluginId, queryClient, viewId]
+		[contribution, node, pluginId, queryClient, viewId, confirm]
 	);
 
 	if (!contribution?.spec) {
 		return (
 			<Empty>
+				{confirmationDialog}
+
 				<EmptyHeader>
 					<EmptyTitle>View unavailable</EmptyTitle>
 					<EmptyDescription>
@@ -193,8 +198,10 @@ export default function PluginViewPage({
 
 	return (
 		<div className="mx-auto max-w-3xl p-6">
+			{confirmationDialog}
+
 			{contribution.title ? (
-				<h2 className="mb-4 font-semibold text-lg">{contribution.title}</h2>
+				<h2 className="mb-4 font-medium text-lg">{contribution.title}</h2>
 			) : null}
 			<DeclarativeView
 				fetchJson={fetchJson}

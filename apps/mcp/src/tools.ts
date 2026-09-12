@@ -6,6 +6,7 @@
 // All logging MUST go to stderr — stdout is the JSON-RPC channel.
 
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { fetchAgents } from "@ryuhq/core-client/agents";
 import { askBtw } from "@ryuhq/core-client/btw";
 import type { ApiTarget } from "@ryuhq/core-client/client";
@@ -30,13 +31,10 @@ import {
 } from "@ryuhq/core-client/system";
 import { fetchTeams } from "@ryuhq/core-client/teams";
 import { fetchWorkflows, runWorkflow } from "@ryuhq/core-client/workflows";
-import { z } from "zod";
+import * as z from "zod/v4";
 import { fetchSession, loadToken } from "./auth.ts";
 
-interface ToolText {
-	content: { type: "text"; text: string }[];
-	isError?: boolean;
-}
+type ToolText = CallToolResult;
 
 const ok = (value: unknown): ToolText => ({
 	content: [{ type: "text", text: JSON.stringify(value, null, 2) }],
@@ -236,16 +234,21 @@ export const registerRyuTools = (
 		{
 			title: "Ryu Run Workflow",
 			description:
-				"Run a workflow by id with an optional string input map. Returns the run state (may be awaiting_input on a human-in-the-loop gate).",
+				"Run a workflow by id with an optional string input map. Set dryRun to true for a transient read-only preview that skips effectful nodes and creates no run history.",
 			inputSchema: {
 				id: z.string().describe("Workflow id to run."),
 				input: z
 					.record(z.string(), z.string())
 					.optional()
 					.describe("String key/value inputs for the workflow run."),
+				dryRun: z
+					.boolean()
+					.optional()
+					.describe("Read-only preview; no run history or effectful nodes."),
 			},
 		},
-		({ id, input }) => run(() => runWorkflow(target, id, input ?? {}))
+		({ id, input, dryRun }) =>
+			run(() => runWorkflow(target, id, input ?? {}, { dryRun }))
 	);
 
 	// ── MCP bridge ──────────────────────────────────────────────────────────────

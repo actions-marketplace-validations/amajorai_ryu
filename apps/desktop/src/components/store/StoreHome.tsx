@@ -166,7 +166,7 @@ function HomeCardAction({
 		return (
 			<Button className="shrink-0" disabled size="sm" variant="secondary">
 				<HugeiconsIcon
-					className="size-3.5 text-success"
+					className="size-3.5 text-status-success"
 					icon={CheckmarkCircle02Icon}
 				/>
 				Added
