@@ -84,6 +84,7 @@ export interface ChallengeEntry {
 	allowPublicDisplay: boolean;
 	awardPlace: number | null;
 	awardPoints: number | null;
+	awardStatus: "reserved" | "awarded" | null;
 	challengeId: string;
 	displayName: string;
 	email?: string;
