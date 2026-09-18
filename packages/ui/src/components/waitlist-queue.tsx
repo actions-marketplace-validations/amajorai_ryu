@@ -87,6 +87,8 @@ export interface WaitlistQueueProps {
 	className?: string;
 	/** True once the invite link has just been copied; drives the row's label. */
 	copied?: boolean;
+	/** Optional community link supplied by a host surface. */
+	discordHref?: string;
 	/** The queue read failed. The screen still renders, minus the numbers. */
 	error?: boolean;
 	eta?: string | null;
@@ -152,6 +154,7 @@ export function WaitlistQueue({
 	avatarUrl,
 	className,
 	questsContent,
+	discordHref,
 	leaderboardEnabled = false,
 	onOpenLeaderboard,
 	onUpgrade,
@@ -310,6 +313,22 @@ export function WaitlistQueue({
 								) : (
 									`Refresh status${cooldownLeftMs > 0 ? ` ${cooldownSeconds}s` : ""}`
 								)}
+							</Button>
+						) : null}
+						{discordHref ? (
+							<Button
+								className="flex-1"
+								render={
+									<a
+										href={discordHref}
+										rel="noopener noreferrer"
+										target="_blank"
+									/>
+								}
+								size="lg"
+								variant="outline"
+							>
+								Join our Discord
 							</Button>
 						) : null}
 						{/* The door swings open on hover — the same gesture the account menu's

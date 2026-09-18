@@ -892,7 +892,10 @@ async fn disable_app_inner(
     let mut disabled: Vec<PluginRecord> = Vec::new();
     for plugin_id in &order {
         let record = if dry_run {
-            records.iter().find(|record| record.id == *plugin_id).cloned()
+            records
+                .iter()
+                .find(|record| record.id == *plugin_id)
+                .cloned()
         } else {
             store
                 .set_disabled(plugin_id)
@@ -1050,7 +1053,8 @@ async fn uninstall_app_inner(
     // dependents refusal, cascade order, and idempotent teardown of the bits.
     // `force = false`: any load-bearing plugin is pre-installed and already refused at
     // step 2, so this can never be a forced disable of a core subsystem.
-    let disabled = match disable_app_inner(store, id, all_manifests, cascade, false, dry_run).await {
+    let disabled = match disable_app_inner(store, id, all_manifests, cascade, false, dry_run).await
+    {
         Ok(outcome) => outcome.disabled,
         Err(DisableError::NotInstalled { id }) => return Err(UninstallError::NotInstalled { id }),
         Err(DisableError::Dependency(e)) => return Err(UninstallError::Dependency(e)),
@@ -1208,10 +1212,10 @@ pub async fn update_app(
         UpdatePlan::Proceed => {}
     }
 
-    // Bump the version (this also confirms the row still exists and returns the
-    // record with the preserved enabled bit + grants), then replace the bundled
-    // UI code with the freshly-verified blob.
-    let updated = store
+    // Bump the version (this also confirms the row still exists), then reconcile
+    // persisted approvals against the new manifest before replacing the bundled
+    // UI code. A removed declaration revokes the old capability immediately.
+    let mut updated = store
         .set_version(&manifest.id, &manifest.version)
         .await
         .map_err(UpdateError::Other)?
@@ -1221,6 +1225,29 @@ pub async fn update_app(
                 manifest.id
             ))
         })?;
+    let reconciled_grants: Vec<String> = record
+        .approved_grants
+        .iter()
+        .filter(|grant| {
+            manifest
+                .permission_grants
+                .iter()
+                .any(|declared| declared == *grant)
+        })
+        .cloned()
+        .collect();
+    if reconciled_grants.len() != record.approved_grants.len() {
+        updated = store
+            .set_approved_grants(&manifest.id, &reconciled_grants)
+            .await
+            .map_err(UpdateError::Other)?
+            .ok_or_else(|| {
+                UpdateError::Other(anyhow::anyhow!(
+                    "app '{}' disappeared while reconciling grants",
+                    manifest.id
+                ))
+            })?;
+    }
     store
         .set_ui_code(&manifest.id, ui_code)
         .await
@@ -1363,17 +1390,40 @@ async fn validate_grants_via_gateway(
                 reason: format!("invalid JSON from Gateway: {e}"),
             })?;
 
-    // Parse Gateway response. Expected shape:
-    // { "approved": [...], "denied": [...] }
+    parse_grant_validation_response(&result, grants).map_err(|reason| {
+        EnableError::GatewayUnreachable {
+            reason: format!("invalid grant validation response: {reason}"),
+        }
+    })
+}
+
+fn parse_grant_validation_response(
+    result: &serde_json::Value,
+    requested: &[String],
+) -> Result<GrantValidationResult, String> {
     let approved: Vec<String> = result
         .get("approved")
-        .and_then(|v| serde_json::from_value(v.clone()).ok())
-        .unwrap_or_default();
+        .and_then(|value| serde_json::from_value(value.clone()).ok())
+        .ok_or_else(|| "approved must be an array".to_owned())?;
     let denied: Vec<String> = result
         .get("denied")
-        .and_then(|v| serde_json::from_value(v.clone()).ok())
-        .unwrap_or_default();
-    let all_approved = denied.is_empty();
+        .and_then(|value| serde_json::from_value(value.clone()).ok())
+        .ok_or_else(|| "denied must be an array".to_owned())?;
+    let all_approved = result
+        .get("all_approved")
+        .and_then(serde_json::Value::as_bool)
+        .ok_or_else(|| "all_approved must be a boolean".to_owned())?;
+
+    let requested: std::collections::HashSet<&str> = requested.iter().map(String::as_str).collect();
+    let mut seen = std::collections::HashSet::new();
+    for grant in approved.iter().chain(denied.iter()) {
+        if !requested.contains(grant.as_str()) || !seen.insert(grant.as_str()) {
+            return Err("approved and denied must partition the requested grants".to_owned());
+        }
+    }
+    if seen.len() != requested.len() || all_approved != denied.is_empty() {
+        return Err("grant validation response does not cover every requested grant".to_owned());
+    }
 
     Ok(GrantValidationResult {
         approved,
@@ -1478,6 +1528,21 @@ mod tests {
                 "'{grant}' does not spawn a process and must stay stub-approvable"
             );
         }
+    }
+
+    #[test]
+    fn grant_validation_requires_a_complete_partition_and_verdict() {
+        let requested = vec!["a".to_owned(), "b".to_owned()];
+        assert!(parse_grant_validation_response(
+            &serde_json::json!({ "approved": ["a"], "denied": [], "all_approved": true }),
+            &requested
+        )
+        .is_err());
+        assert!(parse_grant_validation_response(
+            &serde_json::json!({ "approved": ["a"], "denied": ["b"], "all_approved": false }),
+            &requested
+        )
+        .is_ok());
     }
 
     fn make_manifest(id: &str, version: &str, grants: Vec<&str>) -> PluginManifest {
@@ -1724,7 +1789,12 @@ mod tests {
         .unwrap();
         assert!(enable.target.enabled);
         assert_eq!(
-            store.get("com.test.preview").await.unwrap().unwrap().enabled,
+            store
+                .get("com.test.preview")
+                .await
+                .unwrap()
+                .unwrap()
+                .enabled,
             false,
             "an enable plan must not flip the store bit"
         );
@@ -1750,18 +1820,19 @@ mod tests {
         .unwrap();
         assert_eq!(disable.target().id, manifest.id);
         assert!(
-            store.get("com.test.preview").await.unwrap().unwrap().enabled,
+            store
+                .get("com.test.preview")
+                .await
+                .unwrap()
+                .unwrap()
+                .enabled,
             "a disable plan must not clear the live enabled bit"
         );
 
-        let uninstall = plan_uninstall_app(
-            &store,
-            &manifest.id,
-            std::slice::from_ref(&manifest),
-            false,
-        )
-        .await
-        .unwrap();
+        let uninstall =
+            plan_uninstall_app(&store, &manifest.id, std::slice::from_ref(&manifest), false)
+                .await
+                .unwrap();
         assert_eq!(uninstall.removed, manifest.id);
         assert!(
             store.get("com.test.preview").await.unwrap().is_some(),
@@ -1982,6 +2053,30 @@ mod tests {
         assert_eq!(rec.version, "2.0.0");
         assert!(rec.enabled, "an enabled app stays enabled across an update");
         assert_eq!(rec.approved_grants, vec!["spaces:docs"]);
+    }
+
+    #[tokio::test]
+    async fn update_revokes_grants_removed_from_manifest() {
+        let _stub = StubGrants::on();
+        let s = store();
+        let old = make_manifest("com.test.app", "1.0.0", vec!["spaces:docs"]);
+        install_app(&s, &old).await.unwrap();
+        let client = reqwest::Client::new();
+        enable_app(
+            &s,
+            &old,
+            std::slice::from_ref(&old),
+            "http://127.0.0.1:7981",
+            None,
+            &client,
+        )
+        .await
+        .unwrap();
+
+        let updated = make_manifest("com.test.app", "2.0.0", vec![]);
+        let record = update_app(&s, &updated, None, false).await.unwrap();
+        assert!(record.enabled);
+        assert!(record.approved_grants.is_empty());
     }
 
     /// The verified `ui_code` is persisted on the record, and a later version that

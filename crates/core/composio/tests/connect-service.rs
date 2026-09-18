@@ -59,6 +59,43 @@ async fn rust_dispatch_reaches_native_connect_and_preserves_authorization() {
         200
     );
 
+    let legacy_root = tempfile::tempdir().unwrap();
+    let legacy_store = ryu_composio::ComposioTriggerStore::open(
+        client.clone(),
+        legacy_root.path().join("legacy.db"),
+    )
+    .unwrap();
+    let rejected = legacy_store
+        .subscribe_workflow(
+            "workflow-a",
+            "gmail",
+            "GMAIL_NEW_GMAIL_MESSAGE",
+            "account-a",
+            json!({}),
+        )
+        .await
+        .unwrap_err();
+    assert!(rejected
+        .to_string()
+        .contains("Connect owns provider triggers"));
+    let rejected = legacy_store
+        .reconcile_webhook_subscription("https://core.example/webhook")
+        .await
+        .unwrap_err();
+    assert!(rejected
+        .to_string()
+        .contains("Connect owns provider webhook subscriptions"));
+    assert!(legacy_store.list().await.unwrap().is_empty());
+    let proof: Value = client
+        .get(format!("{base}proof"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(proof["providerCalls"], 0);
+
     let catalog = ryu_composio::service::catalog(Some("user-a"))
         .await
         .unwrap()
@@ -247,6 +284,46 @@ async fn rust_dispatch_reaches_native_connect_and_preserves_authorization() {
         executed,
         json!({"account":"account-c","user":"provider-user-c","version":"latest","arguments":{}})
     );
+    assert!(ryu_composio::service::create_trigger(
+        "GMAIL_NEW_GMAIL_MESSAGE",
+        "wrong-account",
+        &json!({"label":"fixture"}),
+        Some("user-c")
+    )
+    .await
+    .unwrap()
+    .is_err());
+    let trigger = ryu_composio::service::create_trigger(
+        "GMAIL_NEW_GMAIL_MESSAGE",
+        "account-c",
+        &json!({"label":"fixture"}),
+        Some("user-c"),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(trigger.trigger_id.as_deref(), Some("ti_c"));
+    assert_eq!(trigger.user_id, "provider-user-c");
+    assert_eq!(trigger.auth_config_id, "auth-c");
+    assert_eq!(trigger.status, "active");
+    let triggers = ryu_composio::service::list_triggers(Some("user-c"))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(triggers.len(), 1);
+    assert_eq!(triggers[0].id, trigger.id);
+    assert!(ryu_composio::service::list_triggers(Some("user-b"))
+        .await
+        .unwrap()
+        .is_err());
+    assert_eq!(
+        ryu_composio::service::delete_trigger(&trigger.id, Some("user-c"))
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        "deleted"
+    );
     let revoked = client
         .post(format!("{base}v1/composio/revoke"))
         .bearer_auth("manager-c")
@@ -289,8 +366,115 @@ async fn rust_dispatch_reaches_native_connect_and_preserves_authorization() {
         "revoked execution must not contact the provider"
     );
 
+    assert_eq!(
+        ryu_composio::service::toolkits(Some("user-a"))
+            .await
+            .unwrap()
+            .unwrap()["data"],
+        json!([{"slug":"gmail","name":"gmail","description":null,"logo":null}])
+    );
+    assert_eq!(
+        ryu_composio::service::toolkits(Some("user-b"))
+            .await
+            .unwrap()
+            .unwrap()["data"],
+        json!([])
+    );
+    assert!(ryu_composio::service::toolkits(Some("unmapped"))
+        .await
+        .unwrap()
+        .is_err());
+    let schema = ryu_composio::service::describe("GMAIL_GET_PROFILE", Some("user-a"))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        schema,
+        json!({"name":"GMAIL_GET_PROFILE","description":"Read profile","input_schema":{"type":"object","properties":{"query":{"type":"string"}},"required":["query"]}})
+    );
+    assert!(
+        ryu_composio::service::describe("GMAIL_DELETE_EMAIL", Some("user-a"))
+            .await
+            .unwrap()
+            .is_err()
+    );
+    assert!(
+        ryu_composio::service::describe("GMAIL_GET_PROFILE", Some("user-b"))
+            .await
+            .unwrap()
+            .is_err()
+    );
+    let actions = ryu_composio::service::actions("gmail", "profile", 1, &["read"], Some("user-a"))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(actions["data"].as_array().unwrap().len(), 1);
+    assert_eq!(actions["data"][0]["name"], "GMAIL_GET_PROFILE");
+    assert_eq!(
+        ryu_composio::service::actions("gmail", "", 50, &["write"], Some("user-a"))
+            .await
+            .unwrap()
+            .unwrap()["data"],
+        json!([])
+    );
+    assert_eq!(
+        ryu_composio::service::actions("", "", 50, &[], Some("user-b"))
+            .await
+            .unwrap()
+            .unwrap()["data"],
+        json!([])
+    );
+    assert!(ryu_composio::service::claim_event(Some("user-b"))
+        .await
+        .unwrap()
+        .unwrap()
+        .is_none());
+    assert!(ryu_composio::service::claim_event(Some("unmapped"))
+        .await
+        .unwrap()
+        .is_err());
+    let lease = ryu_composio::service::claim_event(Some("user-a"))
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(lease.delivery_id, "event-a");
+    assert_eq!(lease.payload, json!({"data":{"fixture":"trigger"}}));
+    assert!(!ryu_composio::service::renew_event(&lease, Some("user-b"))
+        .await
+        .unwrap()
+        .unwrap());
+    assert!(ryu_composio::service::renew_event(&lease, Some("user-a"))
+        .await
+        .unwrap()
+        .unwrap());
+    assert!(
+        !ryu_composio::service::acknowledge_event(&lease, Some("user-b"))
+            .await
+            .unwrap()
+            .unwrap()
+    );
+    assert!(
+        ryu_composio::service::acknowledge_event(&lease, Some("user-a"))
+            .await
+            .unwrap()
+            .unwrap()
+    );
+    assert!(!ryu_composio::service::renew_event(&lease, Some("user-a"))
+        .await
+        .unwrap()
+        .unwrap());
+    assert!(ryu_composio::service::claim_event(Some("user-a"))
+        .await
+        .unwrap()
+        .unwrap()
+        .is_none());
     process.0.kill().unwrap();
     process.0.wait().unwrap();
+    assert!(ryu_composio::service::claim_event(Some("user-a"))
+        .await
+        .unwrap()
+        .is_err());
     assert!(
         ryu_composio::service::dispatch("GMAIL_GET_PROFILE", &json!({}), Some("user-a"), None)
             .await

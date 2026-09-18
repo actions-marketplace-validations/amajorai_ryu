@@ -169,48 +169,10 @@ pub async fn list(
         Ok(manifest) => manifest,
         Err(response) => return response,
     };
-    let store = match crate::identity::global() {
-        Some(store) => store,
-        None => {
-            return error(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "identity store not initialized",
-            )
-        }
+    let connection_values = match crate::mcp_oauth::connections(&owner, &plugin_id).await {
+        Ok(values) => values,
+        Err(message) => return error(StatusCode::BAD_GATEWAY, message),
     };
-    let connections = match store.list_mcp_oauth_connections(&owner, &plugin_id).await {
-        Ok(connections) => connections,
-        Err(message) => return error(StatusCode::INTERNAL_SERVER_ERROR, message),
-    };
-    let mut connection_values = Vec::with_capacity(connections.len());
-    for connection in &connections {
-        let access_level = match store
-            .get_connection_access_level(
-                &owner,
-                crate::connection_policy::MCP_PROVIDER,
-                &crate::connection_policy::mcp_connection_key(
-                    &connection.profile_id,
-                    &connection.plugin_id,
-                    &connection.server_name,
-                ),
-            )
-            .await
-        {
-            Ok(level) => level,
-            Err(message) => return error(StatusCode::INTERNAL_SERVER_ERROR, message),
-        };
-        let mut value = match serde_json::to_value(connection) {
-            Ok(value) => value,
-            Err(message) => return error(StatusCode::INTERNAL_SERVER_ERROR, message),
-        };
-        if let Some(object) = value.as_object_mut() {
-            object.insert(
-                "access_level".to_owned(),
-                Value::String(access_level.as_str().to_owned()),
-            );
-        }
-        connection_values.push(value);
-    }
     let servers: Vec<Value> = manifest
         .mcp_servers
         .iter()

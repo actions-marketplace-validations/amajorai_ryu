@@ -18,15 +18,22 @@
 //     - control: text `VoiceServerMsg` (ready/state/stt/chat_delta/stop_playback/…)
 //     - audio:   BINARY WAV, one frame per synthesized sentence
 //
-// Browsers can't set headers on a WS upgrade, so the node token rides `?token=`.
-// Uses the global `WebSocket` + Web Audio (present in both renderer surfaces).
+// Browsers can't set headers on a WS upgrade, so this client exchanges its HTTP
+// credentials for a short-lived, one-use ticket. Only that opaque ticket rides
+// the upgrade URL. Uses the global `WebSocket` + Web Audio (present in both
+// renderer surfaces).
 
 import {
 	parseVoiceServerMsg,
 	type VoiceServerMsg,
 	type VoiceState,
 } from "@ryuhq/protocol/voice";
-import { type ApiTarget, apiUrl } from "./client.ts";
+import {
+	appendWebSocketTicket,
+	type ApiTarget,
+	apiUrl,
+	requestWebSocketTicket,
+} from "./client.ts";
 
 /** Rate the server's VAD + STT expect; the client resamples the mic to this. */
 const TARGET_SAMPLE_RATE = 16_000;
@@ -75,16 +82,10 @@ export interface VoiceSessionOptions {
 	ttsVoice?: string;
 }
 
-/** Build the `ws(s)://…/api/voice/ws?token=&jwt=` URL from a node target. */
-export function voiceWsUrl(target: ApiTarget, jwt?: string | null): string {
+/** Build the credential-free `ws(s)://…/api/voice/ws` URL from a node target. */
+export function voiceWsUrl(target: ApiTarget, _jwt?: string | null): string {
 	const url = new URL(apiUrl(target, "/api/voice/ws"));
 	url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
-	if (target.token) {
-		url.searchParams.set("token", target.token);
-	}
-	if (jwt) {
-		url.searchParams.set("jwt", jwt);
-	}
 	return url.toString();
 }
 
@@ -140,6 +141,7 @@ function audioLevel(samples: Float32Array): number {
  */
 export class VoiceSessionConnection {
 	private socket: WebSocket | null = null;
+	private readonly target: ApiTarget;
 	private readonly url: string;
 	private readonly options: VoiceSessionOptions;
 
@@ -156,6 +158,8 @@ export class VoiceSessionConnection {
 	private readonly playing = new Set<AudioBufferSourceNode>();
 
 	constructor(target: ApiTarget, options: VoiceSessionOptions = {}) {
+		this.target =
+			options.jwt === undefined ? target : { ...target, userJwt: options.jwt };
 		this.options = options;
 		this.url = voiceWsUrl(target, options.jwt);
 	}
@@ -176,7 +180,18 @@ export class VoiceSessionConnection {
 			},
 		});
 
-		const socket = new WebSocket(this.url);
+		let ticket: string;
+		try {
+			ticket = await requestWebSocketTicket(this.target, {
+				roomId: this.options.conversationId,
+				route: "voice",
+			});
+		} catch (error) {
+			this.teardownAudio();
+			throw error;
+		}
+
+		const socket = new WebSocket(appendWebSocketTicket(this.url, ticket));
 		socket.binaryType = "arraybuffer";
 		this.socket = socket;
 		const { handlers } = this.options;

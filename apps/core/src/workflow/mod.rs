@@ -845,9 +845,33 @@ fn collect_referenced_agents(
 /// into external resources (scheduler jobs + Composio subscriptions). The
 /// reconcile step is best-effort — it never fails the save, mirroring the prior
 /// handler behaviour. Returns the persisted workflow (with its final id/stamps).
+pub fn has_unscoped_managed_nodes(workflow: &Workflow) -> bool {
+    workflow.nodes.iter().any(|node| {
+        matches!(
+            &node.kind,
+            NodeKind::SubWorkflow { .. }
+                | NodeKind::Tool { .. }
+                | NodeKind::Mcp { .. }
+                | NodeKind::Agent { .. }
+                | NodeKind::Prompt {
+                    agent_id: Some(_),
+                    ..
+                }
+        )
+    })
+}
+
 pub async fn persist_workflow(mut workflow: Workflow) -> Result<Workflow, String> {
     // Validate the DAG before persisting so callers never store a broken graph.
     WorkflowGraph::build(&workflow).map_err(|e| e.to_string())?;
+    if crate::sidecar::control_plane::registered_org().is_some()
+        && has_unscoped_managed_nodes(&workflow)
+    {
+        return Err(
+            "workflow agent and nested-workflow references are disabled on organization-bound nodes until resource ACL propagation is available"
+                .to_owned(),
+        );
+    }
     ensure_agents_active(&workflow).await?;
 
     if workflow.id.is_empty() {
@@ -946,6 +970,13 @@ pub async fn reconcile_triggers(workflow: &Workflow) {
         tokio::spawn(crate::webhook_ingress::ensure_relay_started_after_save());
     }
 
+    // Connect target bindings are managed separately from workflow definitions.
+    // Saving a workflow must neither remove those bindings nor mutate provider
+    // subscriptions through Core's legacy Composio client.
+    if ryu_composio::service::is_configured() {
+        return;
+    }
+
     // Composio reconcile makes a network call per subscription; keep it
     // best-effort and inline so a save reflects the declared set, but never let
     // it surface an error to the caller.
@@ -968,7 +999,7 @@ pub async fn reconcile_triggers(workflow: &Workflow) {
     }
     // Replace the workflow's existing composio subs with the declared set
     // (simplest convergent strategy: drop all, re-create the current ones).
-    if let Err(e) = store.delete_for_workflow(&workflow.id).await {
+    if let Err(e) = store.delete_embedded_for_workflow(&workflow.id).await {
         tracing::warn!(workflow = %workflow.id, error = %e, "clearing prior composio workflow subs");
     }
     for trigger in &workflow.triggers {

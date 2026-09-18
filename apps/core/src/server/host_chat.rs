@@ -97,6 +97,11 @@ pub struct StartTurnBody {
     /// Pin the model for this turn only.
     #[serde(default)]
     pub model: Option<String>,
+    /// Optional project working directory. Core records it on the persisted
+    /// conversation so project coordinator/worker turns appear under the same
+    /// workspace and receive the normal AGENTS.md / project-rule context.
+    #[serde(default)]
+    pub cwd: Option<String>,
 }
 
 /// Handle `chat.startTurn`.
@@ -117,6 +122,22 @@ pub async fn host_chat_start_turn(
         Ok((id, _grants)) => id,
         Err((status, msg)) => return (status, Json(json!({ "error": msg }))).into_response(),
     };
+    // A sidecar ext-token authenticates the app, not the human who owns a
+    // conversation or agent. Until the host bridge carries a Core-issued
+    // conversation proof plus verified caller binding, allowing this capability
+    // on a shared node would let an app choose another user's destination.
+    // Personal/unbound nodes retain the local single-user behavior.
+    if crate::sidecar::control_plane::registered_org().is_some()
+        || crate::sidecar::control_plane::is_managed_node()
+    {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({
+                "error": "chat.startTurn is unavailable on managed nodes until the host caller is bound to the destination conversation and agent"
+            })),
+        )
+            .into_response();
+    }
     // The authenticated calling app is the only trustworthy source for this
     // app-run signal. Core keeps it local until the existing anonymous beacon
     // sends a consented aggregate snapshot.
@@ -172,6 +193,7 @@ pub async fn host_chat_start_turn(
         plugin_id: plugin_id.clone(),
         agent_id: body.agent_id.clone(),
         conversation_id: conversation_id.clone(),
+        cwd: body.cwd.clone(),
         text: text.to_owned(),
         model: body.model.clone(),
     };

@@ -59,7 +59,8 @@ test("Prompt Studio keeps the complete local prompt-testing workflow visible", a
 		.fill("Keep this concise.");
 	await page.getByRole("button", { name: "Save comment" }).first().click();
 	await page
-		.getByRole("button", { name: /Promptfoo regression suite · proof/ })
+		.getByRole("button", { name: /Promptfoo regression suite/ })
+		.first()
 		.click();
 
 	await page.getByRole("button", { name: "Save version" }).click();

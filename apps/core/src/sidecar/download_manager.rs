@@ -236,6 +236,7 @@ pub(crate) fn extract_from_tar_gz(data: &[u8], binary_name: &str) -> anyhow::Res
 
     let gz = GzDecoder::new(data);
     let mut archive = Archive::new(gz);
+    const MAX_NAMED_BINARY_BYTES: u64 = 256 * 1024 * 1024;
 
     for entry in archive.entries().context("reading tar entries")? {
         let mut entry = entry.context("reading tar entry")?;
@@ -245,8 +246,12 @@ pub(crate) fn extract_from_tar_gz(data: &[u8], binary_name: &str) -> anyhow::Res
         if file_name == binary_name {
             let mut bytes = Vec::new();
             entry
+                .take(MAX_NAMED_BINARY_BYTES + 1)
                 .read_to_end(&mut bytes)
                 .context("reading entry bytes")?;
+            if bytes.len() as u64 > MAX_NAMED_BINARY_BYTES {
+                anyhow::bail!("binary entry exceeds the {MAX_NAMED_BINARY_BYTES}-byte cap");
+            }
             return Ok(bytes);
         }
     }
@@ -323,16 +328,18 @@ pub(crate) fn extract_tar_gz_to_dir(
             std::fs::create_dir_all(parent)
                 .with_context(|| format!("creating dir {}", parent.display()))?;
         }
+        let remaining = max_total_bytes.saturating_sub(total_bytes);
         let mut bytes = Vec::new();
         entry
+            .take(remaining.saturating_add(1))
             .read_to_end(&mut bytes)
             .context("reading entry bytes")?;
-        total_bytes += bytes.len() as u64;
-        if total_bytes > max_total_bytes {
+        if bytes.len() as u64 > remaining {
             anyhow::bail!(
                 "archive expands past the {max_total_bytes}-byte cap (decompression bomb?)"
             );
         }
+        total_bytes += bytes.len() as u64;
         std::fs::write(&out_path, &bytes)
             .with_context(|| format!("writing {}", out_path.display()))?;
         written.push(rel.to_string_lossy().into_owned());
@@ -390,16 +397,18 @@ pub(crate) fn extract_tar_bz2_to_dir(
             std::fs::create_dir_all(parent)
                 .with_context(|| format!("creating dir {}", parent.display()))?;
         }
+        let remaining = max_total_bytes.saturating_sub(total_bytes);
         let mut bytes = Vec::new();
         entry
+            .take(remaining.saturating_add(1))
             .read_to_end(&mut bytes)
             .context("reading entry bytes")?;
-        total_bytes += bytes.len() as u64;
-        if total_bytes > max_total_bytes {
+        if bytes.len() as u64 > remaining {
             anyhow::bail!(
                 "archive expands past the {max_total_bytes}-byte cap (decompression bomb?)"
             );
         }
+        total_bytes += bytes.len() as u64;
         std::fs::write(&out_path, &bytes)
             .with_context(|| format!("writing {}", out_path.display()))?;
         written.push(rel.to_string_lossy().into_owned());
@@ -466,15 +475,17 @@ pub(crate) fn extract_zip_to_dir(
             std::fs::create_dir_all(parent)
                 .with_context(|| format!("creating dir {}", parent.display()))?;
         }
+        let remaining = max_total_bytes.saturating_sub(total_bytes);
         let mut bytes = Vec::new();
-        file.read_to_end(&mut bytes)
+        file.take(remaining.saturating_add(1))
+            .read_to_end(&mut bytes)
             .context("reading zip entry bytes")?;
-        total_bytes += bytes.len() as u64;
-        if total_bytes > max_total_bytes {
+        if bytes.len() as u64 > remaining {
             anyhow::bail!(
                 "archive expands past the {max_total_bytes}-byte cap (decompression bomb?)"
             );
         }
+        total_bytes += bytes.len() as u64;
         std::fs::write(&out_path, &bytes)
             .with_context(|| format!("writing {}", out_path.display()))?;
         written.push(entry_name);
@@ -490,14 +501,19 @@ pub(crate) fn extract_from_zip(data: &[u8], binary_name: &str) -> anyhow::Result
 
     let reader = Cursor::new(data);
     let mut archive = ZipArchive::new(reader).context("reading zip archive")?;
+    const MAX_NAMED_BINARY_BYTES: u64 = 256 * 1024 * 1024;
 
     for i in 0..archive.len() {
         let mut file = archive.by_index(i).context("reading zip entry")?;
         let name = file.name().to_string();
         if name.ends_with(binary_name) || name.ends_with(&format!("{binary_name}.exe")) {
             let mut bytes = Vec::new();
-            file.read_to_end(&mut bytes)
+            file.take(MAX_NAMED_BINARY_BYTES + 1)
+                .read_to_end(&mut bytes)
                 .context("reading zip entry bytes")?;
+            if bytes.len() as u64 > MAX_NAMED_BINARY_BYTES {
+                anyhow::bail!("binary entry exceeds the {MAX_NAMED_BINARY_BYTES}-byte cap");
+            }
             return Ok(bytes);
         }
     }
@@ -522,8 +538,13 @@ pub(crate) fn extract_all_to_dir(data: &[u8], dest_dir: &Path) -> anyhow::Result
     let reader = Cursor::new(data);
     let mut archive = ZipArchive::new(reader).context("reading zip archive")?;
     let mut written = Vec::new();
+    let mut total_bytes = 0u64;
+    const MAX_ENTRIES: usize = 50_000;
 
     for i in 0..archive.len() {
+        if i >= MAX_ENTRIES {
+            anyhow::bail!("archive has too many entries (cap {MAX_ENTRIES})");
+        }
         let mut file = archive.by_index(i).context("reading zip entry")?;
         let entry_name = file.name().to_string();
         // Skip directory entries (zip dirs end with '/').
@@ -539,9 +560,17 @@ pub(crate) fn extract_all_to_dir(data: &[u8], dest_dir: &Path) -> anyhow::Result
             continue;
         }
 
+        let remaining = DEFAULT_EXTRACT_CAP_BYTES.saturating_sub(total_bytes);
         let mut bytes = Vec::new();
-        file.read_to_end(&mut bytes)
+        file.take(remaining.saturating_add(1))
+            .read_to_end(&mut bytes)
             .context("reading zip entry bytes")?;
+        if bytes.len() as u64 > remaining {
+            anyhow::bail!(
+                "archive expands past the {DEFAULT_EXTRACT_CAP_BYTES}-byte cap (decompression bomb?)"
+            );
+        }
+        total_bytes += bytes.len() as u64;
 
         let dest = dest_dir.join(&file_name);
         let tmp = dest.with_extension("download-tmp");

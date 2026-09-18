@@ -35,6 +35,10 @@ import {
 	messageBubbleRadius,
 } from "./message-bubble.ts";
 import {
+	MessageReadReceipt,
+	type MessageReadReceiptState,
+} from "./message-read-receipt.tsx";
+import {
 	messageSelectableProps,
 	QuoteBlock,
 	splitLeadingQuote,
@@ -108,6 +112,8 @@ export interface UserMessageProps {
 	onOpenLink?: (url: string) => void;
 	onOpenMention?: (item: MentionItem) => void;
 	previewResolvers?: LinkPreviewResolvers;
+	/** Durable per-person read state for this message. */
+	readReceipt?: MessageReadReceiptState;
 }
 
 /** Compact transcript annotation shown beneath a goal-setting user message. */
@@ -298,6 +304,7 @@ export const UserMessage = memo(function UserMessage({
 	onAnnotateImage,
 	mentionItems,
 	previewResolvers,
+	readReceipt,
 }: UserMessageProps) {
 	const [lightboxIndex, setLightboxIndex] = useState<number | null>(null);
 	const lightboxOriginRef = useRef<HTMLElement | null>(null);
@@ -326,7 +333,13 @@ export const UserMessage = memo(function UserMessage({
 
 	const remoteAuthor = getAuthor(message);
 	const widgetAttribution = getWidgetMessageAttribution(message);
-	const isOwnMessage = !remoteAuthor;
+	// Core persists the verified author on every human message, including the
+	// current user's own messages. Match that id back to the current user before
+	// deciding alignment; otherwise a reload would move the user's blue bubble
+	// to the remote side and label it as a teammate.
+	const isOwnMessage =
+		!remoteAuthor ||
+		Boolean(currentUser?.id && remoteAuthor.id === currentUser.id);
 	const author = isOwnMessage ? (currentUser ?? null) : remoteAuthor;
 	const createdAt = (message as { createdAt?: Date | string }).createdAt;
 	const timestamp = createdAt ? new Date(createdAt) : null;
@@ -538,6 +551,10 @@ export const UserMessage = memo(function UserMessage({
 	const showTimestamp =
 		Boolean(TimestampNode) &&
 		(groupPosition === "single" || groupPosition === "last");
+	const showSentReceipt = isOwnMessage && readReceipt?.delivered === true;
+	const showReadReceipt =
+		showSentReceipt ||
+		Boolean(readReceipt?.readers && readReceipt.readers.length > 0);
 	// Gated as a whole — an empty `MessageHeader` still renders a 16px gapped row.
 	const HeaderNode =
 		showName || showWidgetAttribution ? (
@@ -606,9 +623,17 @@ export const UserMessage = memo(function UserMessage({
 			>
 				{HeaderNode}
 				{MessageRow}
-				{showTimestamp ? (
-					<MessageFooter className="h-4 gap-2 px-0">
-						{TimestampNode}
+				{showTimestamp || showReadReceipt ? (
+					<MessageFooter className="min-h-5 gap-2 px-0">
+						{showReadReceipt ? (
+							<MessageReadReceipt
+								delivered={readReceipt?.delivered}
+								messageAuthorId={remoteAuthor?.id ?? currentUser?.id}
+								readers={readReceipt?.readers ?? []}
+								showSent={showSentReceipt}
+							/>
+						) : null}
+						{showTimestamp ? TimestampNode : null}
 					</MessageFooter>
 				) : null}
 			</MessageContent>

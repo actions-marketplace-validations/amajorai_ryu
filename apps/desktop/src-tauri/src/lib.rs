@@ -39,9 +39,8 @@ use crate::core::process::RyuCoreProcess;
 
 #[cfg(target_os = "macos")]
 fn apply_macos_titlebar_mask(ns_window: *mut std::ffi::c_void) {
-    use cocoa::appkit::{NSWindow, NSWindowStyleMask, NSWindowTitleVisibility};
-    use cocoa::base::{id, YES};
-
+    use cocoa::appkit::{NSColor, NSWindow, NSWindowStyleMask, NSWindowTitleVisibility};
+    use cocoa::base::{id, nil, NO, YES};
     if ns_window.is_null() {
         return;
     }
@@ -57,7 +56,111 @@ fn apply_macos_titlebar_mask(ns_window: *mut std::ffi::c_void) {
         ns_window.setStyleMask_(mask);
         ns_window.setTitlebarAppearsTransparent_(YES);
         ns_window.setTitleVisibility_(NSWindowTitleVisibility::NSWindowTitleHidden);
+        ns_window.setOpaque_(NO);
+        ns_window.setBackgroundColor_(NSColor::clearColor(nil));
+        ns_window.setHasShadow_(NO);
     }
+    position_macos_traffic_lights(ns_window.cast());
+}
+
+#[cfg(target_os = "macos")]
+fn position_macos_traffic_lights(ns_window: *mut std::ffi::c_void) {
+    use cocoa::appkit::{NSView, NSWindow, NSWindowButton, NSWindowStyleMask};
+    use cocoa::base::id;
+    use cocoa::foundation::NSRect;
+    use objc::{msg_send, sel, sel_impl};
+    if ns_window.is_null() {
+        return;
+    }
+    let ns_window = ns_window as id;
+    // AppKit owns the titlebar during fullscreen; preserve its style and layout.
+    unsafe {
+        if ns_window
+            .styleMask()
+            .contains(NSWindowStyleMask::NSFullScreenWindowMask)
+        {
+            return;
+        }
+        let buttons = [
+            ns_window.standardWindowButton_(NSWindowButton::NSWindowCloseButton),
+            ns_window.standardWindowButton_(NSWindowButton::NSWindowMiniaturizeButton),
+            ns_window.standardWindowButton_(NSWindowButton::NSWindowZoomButton),
+        ];
+        if buttons.iter().any(|button| button.is_null()) {
+            return;
+        }
+        let parent = buttons[0].superview();
+        if parent.is_null() || parent.superview().is_null() {
+            return;
+        }
+        let container = parent.superview();
+        let (x, y) = if standalone::enabled() {
+            (12.0, 16.0)
+        } else {
+            (28.0, 39.4)
+        };
+        let button_height = NSView::frame(buttons[0]).size.height;
+        let height = button_height + y;
+        let mut frame = NSView::frame(container);
+        frame.size.height = height;
+        frame.origin.y = NSView::frame(ns_window).size.height - height;
+        let _: () = msg_send![container, setFrame: frame];
+        for (index, button) in buttons.into_iter().enumerate() {
+            let mut frame: NSRect = NSView::frame(button);
+            frame.origin.x = x + index as f64 * 20.0;
+            frame.origin.y = (height - button_height) / 2.0 - 4.0;
+            button.setFrameOrigin(frame.origin);
+        }
+    }
+}
+
+/// Install one semantic AppKit backdrop below the webview. The web shell stays
+/// opaque by default; the frontend's independent sidebar/window attributes
+/// decide which surfaces reveal this layer. This gives macOS a real system
+/// vibrancy backdrop while keeping the CSS fallback usable on other platforms.
+#[cfg(target_os = "macos")]
+fn apply_macos_vibrancy<R: tauri::Runtime>(window: &tauri::Window<R>) {
+    use window_vibrancy::{apply_vibrancy, NSVisualEffectMaterial, NSVisualEffectState};
+
+    if let Err(error) = apply_vibrancy(
+        window,
+        NSVisualEffectMaterial::Sidebar,
+        Some(NSVisualEffectState::FollowsWindowActiveState),
+        Some(32.0),
+    ) {
+        tracing::debug!("macOS vibrancy backdrop unavailable: {}", error);
+    }
+}
+
+/// Match the native backdrop to the one visible CSS window silhouette.
+#[tauri::command]
+fn set_window_corner_radius(window: tauri::Window, radius: f64) -> Result<(), String> {
+    if !radius.is_finite() || !(0.0..=256.0).contains(&radius) {
+        return Err("invalid window corner radius".to_owned());
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let target = window.clone();
+        window
+            .run_on_main_thread(move || {
+                use window_vibrancy::{
+                    apply_vibrancy, clear_vibrancy, NSVisualEffectMaterial, NSVisualEffectState,
+                };
+                let _ = clear_vibrancy(&target);
+                if let Err(error) = apply_vibrancy(
+                    &target,
+                    NSVisualEffectMaterial::Sidebar,
+                    Some(NSVisualEffectState::FollowsWindowActiveState),
+                    Some(radius),
+                ) {
+                    tracing::debug!("macOS window corner update unavailable: {}", error);
+                }
+            })
+            .map_err(|error| error.to_string())?;
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = window;
+    Ok(())
 }
 
 /// Tauri plugin that restores the native macOS title bar mask on every window
@@ -69,6 +172,7 @@ fn macos_titlebar_plugin<R: tauri::Runtime>() -> tauri::plugin::TauriPlugin<R> {
             if let Ok(ns_window) = win.ns_window() {
                 apply_macos_titlebar_mask(ns_window);
             }
+            apply_macos_vibrancy(&win);
         })
         .build()
 }
@@ -1535,6 +1639,107 @@ fn encode_param(s: &str) -> String {
     out
 }
 
+fn standalone_window_label(app_id: &str) -> String {
+    use std::hash::{Hash, Hasher};
+
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    app_id.hash(&mut hasher);
+    format!("standalone-app-{:016x}", hasher.finish())
+}
+
+fn valid_standalone_app_id(app_id: &str) -> bool {
+    !app_id.is_empty()
+        && app_id.len() <= 200
+        && !app_id.starts_with('/')
+        && !app_id.ends_with('/')
+        && !app_id.contains("//")
+        && app_id
+            .split('/')
+            .all(|segment| segment != "." && segment != "..")
+        && app_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"@._/-".contains(&byte))
+}
+
+/// Open an app-first window backed by the current Desktop node. This is a host
+/// projection only: it never installs, enables, disables, or uninstalls the
+/// plugin, so its Companion keeps using the same Core-owned data as the main
+/// Ryu interface.
+#[tauri::command]
+async fn open_standalone_app_window(
+    app: tauri::AppHandle,
+    app_id: String,
+    title: String,
+) -> Result<(), String> {
+    let app_id = app_id.trim();
+    if !valid_standalone_app_id(app_id) {
+        return Err("invalid standalone app id".to_owned());
+    }
+
+    let label = standalone_window_label(app_id);
+    if let Some(window) = app.get_webview_window(&label) {
+        window.show().map_err(|error| error.to_string())?;
+        window.unminimize().map_err(|error| error.to_string())?;
+        window.set_focus().map_err(|error| error.to_string())?;
+        return Ok(());
+    }
+
+    let safe_title: String = title
+        .trim()
+        .chars()
+        .filter(|character| !character.is_control())
+        .take(120)
+        .collect();
+    let window_title = if safe_title.is_empty() {
+        "Ryu App"
+    } else {
+        safe_title.as_str()
+    };
+    let query = format!("window=standalone-app&appId={}", encode_param(app_id));
+    let url = if cfg!(debug_assertions) {
+        let raw = format!("http://localhost:5173/?{query}");
+        WebviewUrl::External(
+            raw.parse()
+                .map_err(|error| format!("bad standalone app url: {error}"))?,
+        )
+    } else {
+        WebviewUrl::App(format!("index.html?{query}").into())
+    };
+
+    let window = WebviewWindowBuilder::new(&app, &label, url)
+        .title(window_title)
+        .inner_size(1200.0, 800.0)
+        .min_inner_size(800.0, 600.0)
+        .center()
+        .decorations(false)
+        .transparent(true)
+        .shadow(false)
+        .disable_drag_drop_handler()
+        .zoom_hotkeys_enabled(true)
+        .build()
+        .map_err(|error| error.to_string())?;
+
+    #[cfg(not(target_os = "macos"))]
+    window
+        .create_overlay_titlebar()
+        .map_err(|error| error.to_string())?;
+    #[cfg(target_os = "macos")]
+    if let Ok(ns_window) = window.ns_window() {
+        apply_macos_titlebar_mask(ns_window);
+    }
+
+    window.show().map_err(|error| error.to_string())?;
+    window.unminimize().map_err(|error| error.to_string())?;
+    window.set_focus().map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+/// Close the current app-first window without touching the app lifecycle.
+#[tauri::command]
+fn close_current_window(window: tauri::WebviewWindow) -> Result<(), String> {
+    window.close().map_err(|error| error.to_string())
+}
+
 /// Open a tab in a separate OS window (browser-style "open in new window").
 /// The new window loads the same app shell; the `window=tab` query seeds a single
 /// tab focused on `conversation_id` and pinned to `node` (so a tab targeting a
@@ -2229,6 +2434,8 @@ pub fn run() {
             open_media_pip,
             close_media_pip,
             agent_browser_stream_status,
+            open_standalone_app_window,
+            close_current_window,
             open_tab_window,
             tab_transfer::tab_transfer_ready,
             tab_transfer::watch_tab_drag,
@@ -2275,11 +2482,18 @@ pub fn run() {
             permissions::request_input_monitoring_permission,
             permissions::automation_permissions_required,
             // Quick Capture: the double-Shift keep gesture (macOS; no-ops elsewhere).
+            set_window_corner_radius,
             quick_capture::quick_capture_status,
             quick_capture::quick_capture_set_enabled,
             quick_capture::quick_capture_set_binding,
         ])
         .on_window_event(|window, event| {
+            #[cfg(target_os = "macos")]
+            if matches!(event, WindowEvent::Resized(_) | WindowEvent::Focused(true)) {
+                if let Ok(ns_window) = window.ns_window() {
+                    position_macos_traffic_lights(ns_window);
+                }
+            }
             if let WindowEvent::Focused(true) = event {
                 window
                     .app_handle()

@@ -177,6 +177,9 @@ impl Provider for AliasedProvider {
 pub struct ProviderRegistry {
     providers: HashMap<String, Arc<dyn Provider>>,
     order: Vec<String>,
+    /// Verified routing-region metadata. Unknown/plugin providers intentionally
+    /// have no entry so an effective allowed-regions policy fails closed.
+    regions: HashMap<String, String>,
 }
 
 impl ProviderRegistry {
@@ -185,6 +188,7 @@ impl ProviderRegistry {
         let mut registry = Self {
             providers: HashMap::new(),
             order: Vec::new(),
+            regions: provider_regions(config),
         };
 
         // Register built-ins in the same deterministic order as before so
@@ -450,6 +454,54 @@ impl ProviderRegistry {
     pub fn available_providers(&self) -> Vec<String> {
         self.order.clone()
     }
+
+    /// Return the verified region for a provider route. Global and local are
+    /// explicit labels for providers whose endpoint is not geography-specific;
+    /// Bedrock and Vertex require a region-bearing endpoint. A new provider id
+    /// without metadata is deliberately unknown.
+    pub fn region_for(&self, id: &str) -> Option<String> {
+        self.regions.get(id).cloned().or_else(|| match id {
+            "openai" | "anthropic" | "openrouter" | "modal" | "genai" | "replicate" | "fal"
+            | "cloudflare" | "openai-credits" => Some("global".to_string()),
+            "local" | "classify" | "core" => Some("local".to_string()),
+            _ => None,
+        })
+    }
+}
+
+fn provider_regions(config: &ProvidersConfig) -> HashMap<String, String> {
+    let mut regions = HashMap::new();
+    if let Some(provider) = &config.bedrock {
+        if let Some(region) = region_from_bedrock_url(&provider.base_url) {
+            regions.insert(BEDROCK_PROVIDER_ID.to_string(), region);
+        }
+    }
+    if let Some(provider) = &config.vertex {
+        if let Some(region) = region_from_vertex_url(&provider.base_url) {
+            regions.insert(VERTEX_PROVIDER_ID.to_string(), region);
+        }
+    }
+    regions
+}
+
+fn region_from_bedrock_url(base_url: &str) -> Option<String> {
+    let host = reqwest::Url::parse(base_url)
+        .ok()?
+        .host_str()?
+        .to_ascii_lowercase();
+    let region = host
+        .strip_prefix("bedrock-mantle.")?
+        .strip_suffix(".api.aws")?;
+    (!region.is_empty()).then(|| region.to_string())
+}
+
+fn region_from_vertex_url(base_url: &str) -> Option<String> {
+    let host = reqwest::Url::parse(base_url)
+        .ok()?
+        .host_str()?
+        .to_ascii_lowercase();
+    let region = host.strip_suffix("-aiplatform.googleapis.com")?;
+    (!region.is_empty()).then(|| region.to_string())
 }
 
 fn build_client() -> reqwest::Client {
@@ -709,6 +761,28 @@ mod tests {
         .expect("local-only config parses");
         let reg = ProviderRegistry::new(&config, quota());
         assert!(reg.get("classify").is_none());
+    }
+
+    #[test]
+    fn regional_provider_metadata_is_required_for_region_policy() {
+        let config: ProvidersConfig = serde_json::from_value(serde_json::json!({
+            "bedrock": {
+                "api_key": "aws",
+                "base_url": "https://bedrock-mantle.eu-west-1.api.aws/anthropic"
+            },
+            "vertex": {
+                "api_key": "gcp",
+                "base_url": "https://europe-west4-aiplatform.googleapis.com/v1/projects/p/locations/europe-west4/endpoints/openapi"
+            },
+            "openai": { "api_key": "sk-openai" }
+        }))
+        .expect("regional provider config parses");
+        let reg = ProviderRegistry::new(&config, quota());
+
+        assert_eq!(reg.region_for("bedrock").as_deref(), Some("eu-west-1"));
+        assert_eq!(reg.region_for("vertex").as_deref(), Some("europe-west4"));
+        assert_eq!(reg.region_for("openai").as_deref(), Some("global"));
+        assert_eq!(reg.region_for("unregistered-plugin"), None);
     }
 
     #[test]

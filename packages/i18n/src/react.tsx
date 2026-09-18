@@ -140,13 +140,16 @@ function I18nDomLocalizer() {
 
 		let disposed = false;
 		let scanQueued = false;
+		const pendingRoots = new Set<Node>();
+		let hostVersion = 0;
+		let hostSnapshotKey: string | null = null;
 		let hostPackId: string | null = null;
 		let disposeHostSubscription: () => void = () => undefined;
 		const remoteCache = new Map<string, Promise<string>>();
 		const host = companionI18nApi();
 		const translationKey = () => {
 			const current = stateRef.current;
-			return `${hostPackId ?? ""}\u0000${current.selectedPackId ?? ""}\u0000${current.locale}`;
+			return `${i18n.version}\u0000${hostVersion}\u0000${hostPackId ?? ""}\u0000${current.selectedPackId ?? ""}\u0000${current.locale}`;
 		};
 
 		const setText = (node: Text, source: string, output: string) => {
@@ -210,6 +213,10 @@ function I18nDomLocalizer() {
 			apply: (output: string) => void,
 			keepCurrentOutput: boolean
 		) => {
+			if (keepCurrentOutput) {
+				return;
+			}
+			const key = translationKey();
 			const trimmed = source.trim();
 			if (!hasTranslatableCharacters(trimmed)) {
 				return;
@@ -217,17 +224,15 @@ function I18nDomLocalizer() {
 			const id = messageIdForLiteral(trimmed);
 			const current = stateRef.current;
 			const locallyTranslated = current.t(id, {}, trimmed);
-			if (!keepCurrentOutput) {
-				apply(
-					source === trimmed
-						? locallyTranslated
-						: source.replace(trimmed, locallyTranslated)
-				);
-			}
+			apply(
+				source === trimmed
+					? locallyTranslated
+					: source.replace(trimmed, locallyTranslated)
+			);
 			const remote = remoteTranslation(trimmed, id);
 			if (remote) {
 				void remote.then((output) => {
-					if (!disposed && output !== trimmed) {
+					if (!disposed && key === translationKey() && output !== trimmed) {
 						apply(
 							source === trimmed ? output : source.replace(trimmed, output)
 						);
@@ -236,9 +241,9 @@ function I18nDomLocalizer() {
 			}
 		};
 
-		const scan = () => {
-			const walker = document.createTreeWalker(root, 4);
-			let node = walker.nextNode();
+		const scan = (scanRoot: Node) => {
+			const walker = document.createTreeWalker(scanRoot, 4);
+			let node = scanRoot.nodeType === 3 ? scanRoot : walker.nextNode();
 			while (node) {
 				const textNode = node as Text;
 				const parent = textNode.parentElement;
@@ -271,10 +276,13 @@ function I18nDomLocalizer() {
 				node = walker.nextNode();
 			}
 
+			if (!(scanRoot instanceof Element)) {
+				return;
+			}
 			const selector = elementAttributeSelector();
-			const queriedElements = Array.from(root.querySelectorAll(selector));
-			const elements = root.matches(selector)
-				? [root, ...queriedElements]
+			const queriedElements = Array.from(scanRoot.querySelectorAll(selector));
+			const elements = scanRoot.matches(selector)
+				? [scanRoot, ...queriedElements]
 				: queriedElements;
 			for (const element of elements) {
 				if (shouldSkipDomElement(element)) {
@@ -311,44 +319,85 @@ function I18nDomLocalizer() {
 			}
 		};
 
-		const queueScan = () => {
-			if (scanQueued || disposed) {
+		const queueScan = (node: Node = root) => {
+			if (disposed) {
+				return;
+			}
+			pendingRoots.add(node);
+			if (scanQueued) {
 				return;
 			}
 			scanQueued = true;
 			queueMicrotask(() => {
 				scanQueued = false;
-				if (!disposed) {
-					scan();
+				const queued = new Set(pendingRoots);
+				pendingRoots.clear();
+				if (disposed) {
+					return;
+				}
+				for (const candidate of queued) {
+					if (!root.contains(candidate)) {
+						continue;
+					}
+					let parent = candidate.parentNode;
+					while (parent && !queued.has(parent)) {
+						parent = parent.parentNode;
+					}
+					if (!parent) {
+						scan(candidate);
+					}
 				}
 			});
 		};
 
-		const observer = new MutationObserver(queueScan);
+		const observer = new MutationObserver((mutations) => {
+			for (const mutation of mutations) {
+				if (mutation.type === "childList") {
+					for (const node of Array.from(mutation.addedNodes)) {
+						queueScan(node);
+					}
+				} else {
+					queueScan(mutation.target);
+				}
+			}
+		});
 		observer.observe(root, {
-			attributeFilter: [...DOM_TRANSLATABLE_ATTRIBUTES],
+			attributeFilter: [
+				...DOM_TRANSLATABLE_ATTRIBUTES,
+				"data-ryu-i18n",
+				"contenteditable",
+			],
 			attributes: true,
 			characterData: true,
 			childList: true,
 			subtree: true,
 		});
 
+		const applyHostSnapshot = (snapshot: I18nHostSnapshot) => {
+			const key = `${snapshot.packId ?? ""}\u0000${snapshot.packVersion ?? ""}\u0000${snapshot.locale}`;
+			if (disposed || key === hostSnapshotKey) {
+				return;
+			}
+			hostSnapshotKey = key;
+			hostVersion += 1;
+			remoteCache.clear();
+			hostPackId = snapshot.packId;
+			queueScan();
+		};
+
 		if (host) {
+			const requestedHostVersion = hostVersion;
 			void host
 				.get()
 				.then((snapshot) => {
-					if (!disposed) {
-						hostPackId = snapshot.packId;
-						queueScan();
+					if (!disposed && hostVersion === requestedHostVersion) {
+						applyHostSnapshot(snapshot);
 					}
 				})
 				.catch(() => undefined);
 			try {
 				const subscription = host.subscribe({
-					onChange: (snapshot) => {
-						hostPackId = snapshot.packId;
-						queueScan();
-					},
+					onChange: applyHostSnapshot,
 				});
 				disposeHostSubscription = () => subscription.dispose();
 			} catch {
@@ -356,9 +405,10 @@ function I18nDomLocalizer() {
 			}
 		}
 
-		scan();
+		scan(root);
 		return () => {
 			disposed = true;
+			pendingRoots.clear();
 			observer.disconnect();
 			disposeHostSubscription();
 		};
@@ -414,6 +464,7 @@ export function I18nProvider({
 		const root = document.documentElement;
 		root.lang = instance.locale;
 		root.dir = instance.direction;
+		root.style.setProperty("--ryu-locale", instance.locale);
 	}, [instance, version]);
 
 	return (

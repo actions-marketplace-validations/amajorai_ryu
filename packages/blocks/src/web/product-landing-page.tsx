@@ -3,6 +3,7 @@ import FAQ from "./faq.tsx";
 import {
 	BentoGrid,
 	FeatureSplitRow,
+	Highlights,
 	ProductCta,
 	ProductHero,
 	SectionHeading,
@@ -10,7 +11,6 @@ import {
 
 /** Shared product-page body used by the catalog and the public surface aliases. */
 export default function ProductLandingPage({ product }: { product: Product }) {
-	const visualFeatures = product.bento.items.filter((item) => item.visual);
 	const faqItems = product.faq?.map((item, index) => ({
 		id: `${product.slug}-faq-${index}`,
 		title: item.q,
@@ -21,14 +21,18 @@ export default function ProductLandingPage({ product }: { product: Product }) {
 		<div className="pb-8" data-testid={`product-page-${product.slug}`}>
 			<ProductHero {...product.hero} />
 
-			{visualFeatures.length ? (
+			{product.highlights?.length ? (
+				<Highlights items={product.highlights} />
+			) : null}
+
+			{product.bento.items.length ? (
 				<section className="container mx-auto px-4 py-16 md:py-24">
 					<div className="mx-auto max-w-6xl">
 						<SectionHeading
-							eyebrow={product.bento.eyebrow}
-							title={`What you can do with ${product.name}`}
+							subtitle={product.bento.subtitle}
+							title={product.bento.title}
 						/>
-						<BentoGrid items={visualFeatures} />
+						<BentoGrid items={product.bento.items} />
 					</div>
 				</section>
 			) : null}
@@ -45,7 +49,7 @@ export default function ProductLandingPage({ product }: { product: Product }) {
 
 			{faqItems?.length ? <FAQ items={faqItems} /> : null}
 
-			<ProductCta {...product.cta} subtitle="" title={`Try ${product.name}`} />
+			<ProductCta {...product.cta} />
 		</div>
 	);
 }

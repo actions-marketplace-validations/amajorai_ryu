@@ -2,6 +2,7 @@
 // The story supplies a deterministic Core status response so the product surface
 // can be inspected without starting Core or depending on a user's node file.
 
+import { I18nProvider } from "@ryu/i18n/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { ThemeProvider } from "next-themes";
 import { createRoot } from "react-dom/client";
@@ -28,7 +29,13 @@ function jsonResponse(body: unknown): Response {
 	});
 }
 
-window.fetch = async (input) => {
+declare global {
+	interface Window {
+		nodeMenuProof: { info: number; gateway: number; cancelled: number };
+	}
+}
+window.nodeMenuProof = { info: 0, gateway: 0, cancelled: 0 };
+window.fetch = async (input, init) => {
 	const url =
 		typeof input === "string"
 			? input
@@ -36,6 +43,27 @@ window.fetch = async (input) => {
 				? input.url
 				: input.toString();
 
+	const detail = url.endsWith("/api/system/info")
+		? "info"
+		: url.endsWith("/api/gateway/status")
+			? "gateway"
+			: null;
+	if (detail) {
+		window.nodeMenuProof[detail]++;
+		if (new URLSearchParams(location.search).has("hold")) {
+			return new Promise<Response>((_resolve, reject) => {
+				const abort = () => {
+					window.nodeMenuProof.cancelled++;
+					reject(new DOMException("cancelled", "AbortError"));
+				};
+				if (init?.signal?.aborted) {
+					abort();
+				} else {
+					init?.signal?.addEventListener("abort", abort, { once: true });
+				}
+			});
+		}
+	}
 	if (url.endsWith("/api/system/status")) {
 		return jsonResponse({
 			engine: { active: "llamacpp", running: true },
@@ -76,24 +104,26 @@ const queryClient = new QueryClient({
 
 function Story() {
 	return (
-		<ThemeProvider attribute="class" defaultTheme="dark" enableSystem={false}>
-			<QueryClientProvider client={queryClient}>
-				<EntitlementProvider>
-					<TabsProvider>
-						<SystemStatusProvider>
-							<main className="min-h-screen bg-background p-10 text-foreground">
-								<div className="w-80 rounded-xl border border-border/60 bg-sidebar p-4 shadow-sm">
-									<p className="mb-3 font-medium text-muted-foreground text-xs uppercase tracking-wider">
-										Node selector
-									</p>
-									<NodeSelector mode="compact-dropdown" />
-								</div>
-							</main>
-						</SystemStatusProvider>
-					</TabsProvider>
-				</EntitlementProvider>
-			</QueryClientProvider>
-		</ThemeProvider>
+		<I18nProvider>
+			<ThemeProvider attribute="class" defaultTheme="dark" enableSystem={false}>
+				<QueryClientProvider client={queryClient}>
+					<EntitlementProvider>
+						<TabsProvider>
+							<SystemStatusProvider>
+								<main className="min-h-screen bg-background p-10 text-foreground">
+									<div className="w-80 rounded-xl border border-border/60 bg-sidebar p-4 shadow-sm">
+										<p className="mb-3 font-medium text-muted-foreground text-xs uppercase tracking-wider">
+											Node selector
+										</p>
+										<NodeSelector mode="compact-dropdown" />
+									</div>
+								</main>
+							</SystemStatusProvider>
+						</TabsProvider>
+					</EntitlementProvider>
+				</QueryClientProvider>
+			</ThemeProvider>
+		</I18nProvider>
 	);
 }
 

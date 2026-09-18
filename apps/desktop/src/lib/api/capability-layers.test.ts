@@ -231,3 +231,58 @@ describe("fetchCapabilityLayers toolkit flag", () => {
 		expect((await firstLayer({})).title).toBeNull();
 	});
 });
+
+it("cancels a held capability read", async () => {
+	let closed = false;
+	let receivedHeaders = false;
+	const server = Bun.serve({
+		hostname: "127.0.0.1",
+		port: 0,
+		fetch() {
+			return new Response(
+				new ReadableStream({
+					start(controller) {
+						controller.enqueue(new TextEncoder().encode("{"));
+					},
+					cancel() {
+						closed = true;
+					},
+				})
+			);
+		},
+	});
+	const originalFetch = globalThis.fetch;
+	globalThis.fetch = Object.assign(
+		async (input: RequestInfo | URL, init?: RequestInit) => {
+			const response = await originalFetch(input, init);
+			receivedHeaders = true;
+			return response;
+		},
+		{ preconnect: originalFetch.preconnect }
+	);
+	try {
+		const controller = new AbortController();
+		const result = fetchCapabilityLayers(
+			{ url: server.url.toString(), token: "fixture", userJwt: "fixture" },
+			controller.signal
+		).then(
+			() => "complete",
+			() => "aborted"
+		);
+		const startDeadline = Date.now() + 1000;
+		while (!receivedHeaders && Date.now() < startDeadline) {
+			await Bun.sleep(5);
+		}
+		expect(receivedHeaders).toBe(true);
+		controller.abort();
+		const closeDeadline = Date.now() + 1000;
+		while (!closed && Date.now() < closeDeadline) {
+			await Bun.sleep(5);
+		}
+		expect(closed).toBe(true);
+		expect(await result).toBe("aborted");
+	} finally {
+		globalThis.fetch = originalFetch;
+		server.stop(true);
+	}
+});

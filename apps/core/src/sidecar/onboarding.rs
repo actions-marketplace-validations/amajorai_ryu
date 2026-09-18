@@ -1104,8 +1104,8 @@ impl SetupManager {
             // Bundled-by-default so text-to-image works zero-setup, mirroring the STT/
             // TTS engines. `ensure_installed` fetches the prebuilt sd-server binary for
             // the platform (Windows x64 / macOS arm64 / Linux x86_64) plus the default
-            // SDXL base model — the Q8_0 UNet GGUF with its CLIP-L / CLIP-G text
-            // encoders and VAE (~4.6 GB total). The video default (Wan2.1) is not part
+            // SDXL base model — a stable-diffusion.cpp-compatible Q4_K GGUF with
+            // optional CLIP-L / CLIP-G text encoders and VAE (~4.6 GB total). The video default (Wan2.1) is not part
             // of onboarding; it is downloaded lazily on first use. Non-fatal and
             // independent of everything else — on a platform with no prebuilt server
             // (Intel mac, arm Linux) it warns and never blocks. The engine stays opt-in

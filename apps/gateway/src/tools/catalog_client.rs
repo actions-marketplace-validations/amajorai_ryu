@@ -294,6 +294,15 @@ pub trait CoreCatalog: Send + Sync {
     /// `GET /api/tools/describe` — one tool's argument schema by FQ id.
     async fn describe(&self, id: &str) -> Result<DescribedTool, String>;
 
+    /// Keep description under the same installed-agent scope as search.
+    async fn describe_for_agent(
+        &self,
+        id: &str,
+        _agent: Option<&str>,
+    ) -> Result<DescribedTool, String> {
+        self.describe(id).await
+    }
+
     /// `POST /api/mcp/tools/call` — execute one tool. Maps Core's
     /// `{ok,output}` / `{ok,error}` to a `Result<output, error>`.
     ///
@@ -389,11 +398,23 @@ impl CoreCatalog for ToolSearchClient {
     }
 
     async fn describe(&self, id: &str) -> Result<DescribedTool, String> {
+        self.describe_for_agent(id, None).await
+    }
+
+    async fn describe_for_agent(
+        &self,
+        id: &str,
+        agent: Option<&str>,
+    ) -> Result<DescribedTool, String> {
+        let mut params = vec![("id", id)];
+        if let Some(agent) = agent.filter(|agent| !agent.is_empty()) {
+            params.push(("agent", agent));
+        }
         let resp = self
             .with_auth(
                 self.http
                     .get(self.url("/api/tools/describe"))
-                    .query(&[("id", id)]),
+                    .query(&params),
             )
             .send()
             .await

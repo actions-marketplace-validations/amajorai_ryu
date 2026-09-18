@@ -65,6 +65,30 @@ describe("htmlCompanionSrcdoc", () => {
 		expect(themed).toContain("--panel: #181a20;");
 	});
 
+	it("seeds the explicit mode and appearance state before the app script", () => {
+		const themed = htmlCompanionSrcdoc(
+			NONCE,
+			APP_HTML,
+			PLUGIN_ID,
+			undefined,
+			undefined,
+			{
+				"--ryu-theme-mode": "dark",
+				"--ryu-color-scheme": "dark",
+				"--ryu-ui-scale": "1.25",
+				"--ryu-dialog-overlay-mode": "off",
+			}
+		);
+		expect(themed).toContain('"--ryu-theme-mode":"dark"');
+		expect(themed).toContain("--ryu-ui-scale: 1.25;");
+		expect(themed).toContain(
+			"html body{zoom:var(--ryu-ui-scale, 1) !important;}"
+		);
+		expect(
+			themed.indexOf("applyThemeTokens(INITIAL_THEME_TOKENS)")
+		).toBeLessThan(themed.indexOf('console.log("app")'));
+	});
+
 	it("does not inject a node target, token, or realtime URL into the frame", () => {
 		expect(out).not.toContain("/api/realtime/ws");
 		expect(out).not.toContain("node-secret");

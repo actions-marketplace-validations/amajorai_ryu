@@ -159,10 +159,7 @@ export function FadeOverflowText({
 			onPointerLeave={() => setHovered(false)}
 			ref={clipRef}
 		>
-			<span
-				className="inline-block max-w-none align-bottom will-change-transform"
-				ref={innerRef}
-			>
+			<span className="inline-block max-w-none align-bottom" ref={innerRef}>
 				{children}
 			</span>
 		</span>

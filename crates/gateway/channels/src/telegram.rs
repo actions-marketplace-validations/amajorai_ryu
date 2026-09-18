@@ -39,7 +39,7 @@
 //! turn "the server does not know `sendRichMessage`" into a silently dropped
 //! reply.
 
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -61,9 +61,10 @@ use crate::media::{self, Attachment, AttachmentKind, VoiceDelivery};
 use crate::pairing::PairingStore;
 use crate::status::StatusReporter;
 use crate::{
-    handle_turn, is_token_rejected, pack_thread, unpack_thread, BotProfile, Channel, ChannelCaps,
-    ChannelHost, ChannelRuntime, GroupReplyMode, InboundMessage, TelegramChannelConfig,
-    TokenRejected,
+    claim_inbound_delivery, handle_turn_with_delivery, is_token_rejected, pack_thread,
+    run_claimed_delivery, scoped_delivery_id, unpack_thread, BotProfile, Channel, ChannelCaps,
+    ChannelHost, ChannelRuntime, ChannelTurnOutcome, GroupReplyMode, InboundMessage,
+    TelegramChannelConfig, TokenRejected,
 };
 
 /// Seconds the Telegram server holds an open `getUpdates` request waiting for
@@ -162,8 +163,10 @@ impl TelegramChannel {
             .post(&url)
             .json(&body)
             .send()
-            .await?
-            .error_for_status()?;
+            .await
+            .map_err(reqwest::Error::without_url)?
+            .error_for_status()
+            .map_err(reqwest::Error::without_url)?;
         let envelope: ApiEnvelope = resp.json().await?;
         if !envelope.ok {
             anyhow::bail!(
@@ -368,9 +371,39 @@ impl TelegramChannel {
         host: Arc<dyn ChannelHost>,
         message: InboundMessage,
         draft: Option<i64>,
+        provider_id: String,
+        claimed_delivery_id: Option<String>,
     ) {
         let channel = Arc::clone(self);
         tokio::spawn(async move {
+            let (delivery_id, claim) = if let Some(delivery_id) = claimed_delivery_id {
+                (delivery_id, crate::pairing::DeliveryClaim::Claimed)
+            } else {
+                match claim_inbound_delivery(&*channel, &provider_id).await {
+                    Ok(result) => result,
+                    Err(error) => {
+                        warn!(
+                            channel = "telegram",
+                            %error,
+                            "telegram delivery could not be durably claimed; processing once without dedupe"
+                        );
+                        (
+                            scoped_delivery_id(&*channel, &provider_id),
+                            crate::pairing::DeliveryClaim::Claimed,
+                        )
+                    }
+                }
+            };
+            if !matches!(claim, crate::pairing::DeliveryClaim::Claimed) {
+                debug!(
+                    channel = "telegram",
+                    delivery_id = %delivery_id,
+                    ?claim,
+                    "duplicate telegram delivery suppressed"
+                );
+                return;
+            }
+
             let mut message = message;
             // A stranger should see the pairing prompt, not a "Thinking…" draft and
             // a transcription bill. Both of those run ahead of `handle_turn`'s
@@ -390,7 +423,19 @@ impl TelegramChannel {
                     channel.runtime.ingest_media(&mut message, downloaded).await;
                 }
             }
-            handle_turn(channel, host, message).await;
+            let work_channel = Arc::clone(&channel);
+            let work_host = Arc::clone(&host);
+            let work_delivery_id = delivery_id.clone();
+            run_claimed_delivery(channel, delivery_id, move || {
+                let channel = Arc::clone(&work_channel);
+                let host = Arc::clone(&work_host);
+                let message = message.clone();
+                let delivery_id = work_delivery_id.clone();
+                async move {
+                    handle_turn_with_delivery(channel, host, message, Some(&delivery_id)).await
+                }
+            })
+            .await;
         });
     }
 
@@ -402,79 +447,40 @@ impl TelegramChannel {
         host: Arc<dyn ChannelHost>,
         update: Update,
         me: &BotIdentity,
+        claimed_delivery_id: Option<String>,
     ) {
+        let provider_id = format!("update:{}", update.update_id);
         if let Some(guest) = update.guest_message {
             if self.options.guest_mode {
                 if let Some(inbound) = guest_inbound(&guest) {
-                    self.spawn_turn(host, inbound, None);
+                    self.spawn_turn(host, inbound, None, provider_id, claimed_delivery_id);
                 } else {
                     warn!("telegram guest_message had no guest_query_id; dropped");
+                    complete_claimed_delivery(Arc::clone(self), claimed_delivery_id);
                 }
+            } else {
+                complete_claimed_delivery(Arc::clone(self), claimed_delivery_id);
             }
             return;
         }
 
         if let Some(reaction) = update.message_reaction {
             if self.runtime.cfg.reaction_learning.enabled {
-                let channel = Arc::clone(self);
-                let bot_id = me.id;
-                tokio::spawn(async move {
-                    let Some(user) = reaction.user.as_ref() else {
-                        // Anonymous group/channel reactions carry actor_chat rather
-                        // than a person. They are intentionally not attributed to
-                        // Learning's node-wide feedback sink.
-                        return;
-                    };
-                    if user.id == bot_id {
-                        return;
-                    }
-                    let is_group = reaction.chat.chat_type != "private";
-                    if is_group && !channel.runtime.cfg.reaction_learning.allow_group {
-                        return;
-                    }
-                    let thread = reaction
-                        .message_thread_id
-                        .map(|id| format!("{TOPIC_TAG}{id}"));
-                    let target = pack_thread(&reaction.chat.id.to_string(), thread.as_deref());
-                    let emoji = reaction
-                        .new_reaction
-                        .iter()
-                        .find_map(|item| item.emoji.as_deref())
-                        .unwrap_or_default();
-                    match channel
-                        .runtime
-                        .record_reaction_feedback(
-                            "telegram",
-                            &target,
-                            &reaction.message_id.to_string(),
-                            emoji,
-                        )
-                        .await
-                    {
-                        Ok(true) => info!(
-                            chat_id = %target,
-                            message_id = reaction.message_id,
-                            user_id = user.id,
-                            "telegram reaction recorded as Learning feedback"
-                        ),
-                        Ok(false) => debug!(
-                            chat_id = %target,
-                            message_id = reaction.message_id,
-                            "telegram reaction was not linked to a Core assistant reply"
-                        ),
-                        Err(error) => warn!(
-                            chat_id = %target,
-                            message_id = reaction.message_id,
-                            %error,
-                            "telegram reaction feedback failed"
-                        ),
-                    }
-                });
+                spawn_reaction_delivery(
+                    Arc::clone(self),
+                    reaction,
+                    me.id,
+                    provider_id,
+                    claimed_delivery_id,
+                );
+            } else {
+                complete_claimed_delivery(Arc::clone(self), claimed_delivery_id);
             }
             return;
         }
 
         let Some(message) = update.message else {
+            complete_claimed_delivery(Arc::clone(self), claimed_delivery_id);
             return;
         };
         let raw_text = message
@@ -484,6 +490,7 @@ impl TelegramChannel {
             .unwrap_or_default();
         let attachments = attachments_from(&message);
         if raw_text.trim().is_empty() && attachments.is_empty() {
+            complete_claimed_delivery(Arc::clone(self), claimed_delivery_id);
             return;
         }
         let Some(routed_text) = decide_reply_with_options(
@@ -493,6 +500,7 @@ impl TelegramChannel {
             self.runtime.cfg.group_reply_mode,
             &self.options,
         ) else {
+            complete_claimed_delivery(Arc::clone(self), claimed_delivery_id);
             return;
         };
         let thread = thread_of(&message);
@@ -504,6 +512,7 @@ impl TelegramChannel {
                     .and_then(|value| value.get(1..))
                     .is_some_and(|value| value == ignored)
         }) {
+            complete_claimed_delivery(Arc::clone(self), claimed_delivery_id);
             return;
         }
         let chat_id = pack_thread(&message.chat.id.to_string(), thread.as_deref());
@@ -525,7 +534,7 @@ impl TelegramChannel {
             is_group: is_group_chat(&message.chat.chat_type),
             attachments,
         };
-        self.spawn_turn(host, inbound, draft);
+        self.spawn_turn(host, inbound, draft, provider_id, claimed_delivery_id);
     }
 
     async fn run_webhook(
@@ -558,12 +567,13 @@ impl TelegramChannel {
         let bind = self.options.webhook_bind.clone();
         let path = normalize_webhook_path(&self.options.webhook_path);
         let listener = TcpListener::bind(&bind).await?;
-        let (tx, mut rx) = mpsc::channel::<Update>(128);
+        let (tx, mut rx) = mpsc::channel::<PendingUpdate>(128);
         let app = Router::new()
             .route(&path, post(telegram_webhook))
             .with_state(TelegramWebhookState {
                 tx,
                 secret: secret.to_string(),
+                channel: Arc::downgrade(&self),
             });
         tokio::spawn(async move {
             if let Err(err) = axum::serve(listener, app).await {
@@ -575,8 +585,13 @@ impl TelegramChannel {
             reporter.online().await;
         }
 
-        while let Some(update) = rx.recv().await {
-            self.dispatch_update(Arc::clone(&host), update, &me);
+        while let Some(pending) = rx.recv().await {
+            self.dispatch_update(
+                Arc::clone(&host),
+                pending.update,
+                &me,
+                Some(pending.delivery_id),
+            );
             if let Some(reporter) = &self.runtime.status {
                 reporter.online().await;
             }
@@ -739,8 +754,10 @@ impl Channel for TelegramChannel {
             .post(&url)
             .multipart(form)
             .send()
-            .await?
-            .error_for_status()?;
+            .await
+            .map_err(reqwest::Error::without_url)?
+            .error_for_status()
+            .map_err(reqwest::Error::without_url)?;
         let envelope: ApiEnvelope = resp.json().await?;
         if !envelope.ok {
             anyhow::bail!(
@@ -910,7 +927,7 @@ impl Channel for TelegramChannel {
                     }
                     for update in updates {
                         offset = offset.max(update.update_id + 1);
-                        self.dispatch_update(Arc::clone(&host), update, &me);
+                        self.dispatch_update(Arc::clone(&host), update, &me, None);
                     }
                 }
                 // A rejected token is terminal for THIS adapter: the token is
@@ -945,8 +962,14 @@ impl Channel for TelegramChannel {
 
 #[derive(Clone)]
 struct TelegramWebhookState {
-    tx: mpsc::Sender<Update>,
+    tx: mpsc::Sender<PendingUpdate>,
     secret: String,
+    channel: Weak<TelegramChannel>,
+}
+
+struct PendingUpdate {
+    update: Update,
+    delivery_id: String,
 }
 
 async fn telegram_webhook(
@@ -967,11 +990,167 @@ async fn telegram_webhook(
     let Ok(update) = serde_json::from_slice::<Update>(&body) else {
         return StatusCode::BAD_REQUEST;
     };
-    state
-        .tx
-        .send(update)
-        .await
-        .map_or(StatusCode::SERVICE_UNAVAILABLE, |_| StatusCode::OK)
+    let provider_id = format!("update:{}", update.update_id);
+    let Some(channel) = state.channel.upgrade() else {
+        return StatusCode::SERVICE_UNAVAILABLE;
+    };
+    let (delivery_id, claim) = match claim_inbound_delivery(&*channel, &provider_id).await {
+        Ok(result) => result,
+        Err(error) => {
+            warn!(%error, "telegram webhook delivery could not be durably claimed");
+            return StatusCode::SERVICE_UNAVAILABLE;
+        }
+    };
+    if !matches!(claim, crate::pairing::DeliveryClaim::Claimed) {
+        debug!(
+            delivery_id = %delivery_id,
+            ?claim,
+            "duplicate telegram webhook delivery suppressed"
+        );
+        return StatusCode::OK;
+    }
+
+    let pending = PendingUpdate {
+        update,
+        delivery_id: delivery_id.clone(),
+    };
+    match state.tx.try_send(pending) {
+        Ok(()) => StatusCode::OK,
+        Err(error) => {
+            if let Err(persist_error) = channel
+                .runtime
+                .pairing
+                .fail_delivery("telegram", &delivery_id)
+                .await
+            {
+                warn!(%persist_error, "telegram webhook queue failure could not be persisted");
+            }
+            warn!(%error, "telegram webhook queue is unavailable; asking Telegram to retry");
+            StatusCode::SERVICE_UNAVAILABLE
+        }
+    }
+}
+
+fn complete_claimed_delivery(channel: Arc<TelegramChannel>, delivery_id: Option<String>) {
+    let Some(delivery_id) = delivery_id else {
+        return;
+    };
+    tokio::spawn(async move {
+        if let Err(error) = channel
+            .runtime
+            .pairing
+            .complete_delivery("telegram", &delivery_id)
+            .await
+        {
+            warn!(%error, "telegram ignored delivery could not be marked complete");
+        }
+    });
+}
+
+fn spawn_reaction_delivery(
+    channel: Arc<TelegramChannel>,
+    reaction: MessageReactionUpdated,
+    bot_id: i64,
+    provider_id: String,
+    claimed_delivery_id: Option<String>,
+) {
+    tokio::spawn(async move {
+        let (delivery_id, claim) = if let Some(delivery_id) = claimed_delivery_id {
+            (delivery_id, crate::pairing::DeliveryClaim::Claimed)
+        } else {
+            match claim_inbound_delivery(&*channel, &provider_id).await {
+                Ok(result) => result,
+                Err(error) => {
+                    warn!(
+                        channel = "telegram",
+                        %error,
+                        "telegram reaction could not be durably claimed; processing once without dedupe"
+                    );
+                    (
+                        scoped_delivery_id(&*channel, &provider_id),
+                        crate::pairing::DeliveryClaim::Claimed,
+                    )
+                }
+            }
+        };
+        if !matches!(claim, crate::pairing::DeliveryClaim::Claimed) {
+            debug!(
+                channel = "telegram",
+                delivery_id = %delivery_id,
+                ?claim,
+                "duplicate telegram reaction suppressed"
+            );
+            return;
+        }
+
+        let work_channel = Arc::clone(&channel);
+        run_claimed_delivery(channel, delivery_id, move || {
+            let channel = Arc::clone(&work_channel);
+            let reaction = reaction.clone();
+            async move {
+                let Some(user) = reaction.user.as_ref() else {
+                    // Anonymous group/channel reactions carry actor_chat rather
+                    // than a person. They are intentionally not attributed to
+                    // Learning's node-wide feedback sink.
+                    return ChannelTurnOutcome::Completed;
+                };
+                if user.id == bot_id {
+                    return ChannelTurnOutcome::Completed;
+                }
+                let is_group = reaction.chat.chat_type != "private";
+                if is_group && !channel.runtime.cfg.reaction_learning.allow_group {
+                    return ChannelTurnOutcome::Completed;
+                }
+                let thread = reaction
+                    .message_thread_id
+                    .map(|id| format!("{TOPIC_TAG}{id}"));
+                let target = pack_thread(&reaction.chat.id.to_string(), thread.as_deref());
+                let emoji = reaction
+                    .new_reaction
+                    .iter()
+                    .find_map(|item| item.emoji.as_deref())
+                    .unwrap_or_default();
+                match channel
+                    .runtime
+                    .record_reaction_feedback(
+                        "telegram",
+                        &target,
+                        &reaction.message_id.to_string(),
+                        emoji,
+                    )
+                    .await
+                {
+                    Ok(true) => {
+                        info!(
+                            chat_id = %target,
+                            message_id = reaction.message_id,
+                            user_id = user.id,
+                            "telegram reaction recorded as Learning feedback"
+                        );
+                        ChannelTurnOutcome::Completed
+                    }
+                    Ok(false) => {
+                        debug!(
+                            chat_id = %target,
+                            message_id = reaction.message_id,
+                            "telegram reaction was not linked to a Core assistant reply"
+                        );
+                        ChannelTurnOutcome::Completed
+                    }
+                    Err(error) => {
+                        warn!(
+                            chat_id = %target,
+                            message_id = reaction.message_id,
+                            %error,
+                            "telegram reaction feedback failed"
+                        );
+                        ChannelTurnOutcome::Failed
+                    }
+                }
+            }
+        })
+        .await;
+    });
 }
 
 /// Build a Telegram Bot API base from either the public endpoint or a custom
@@ -1455,7 +1634,7 @@ struct Update {
     message_reaction: Option<MessageReactionUpdated>,
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, Clone)]
 struct MessageReactionUpdated {
     chat: Chat,
     #[serde(default)]
@@ -1468,7 +1647,7 @@ struct MessageReactionUpdated {
     message_thread_id: Option<i64>,
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, Clone)]
 struct TelegramReaction {
     #[serde(default)]
     emoji: Option<String>,
@@ -1513,7 +1692,7 @@ struct Message {
     document: Option<TgFile>,
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, Clone)]
 struct Chat {
     id: i64,
     /// `private`, `group`, `supergroup`, or `channel`. Absent → treated as
@@ -1528,7 +1707,7 @@ struct DirectMessagesTopic {
     topic_id: i64,
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, Clone)]
 struct TgUser {
     id: i64,
     #[serde(default)]
@@ -1585,6 +1764,52 @@ mod tests {
             username: Some("ryubot".to_string()),
             ..Default::default()
         }
+    }
+
+    #[tokio::test]
+    async fn webhook_claims_before_ack_and_suppresses_duplicate_updates() {
+        let channel = Arc::new(
+            TelegramChannel::new(
+                make_cfg("token"),
+                reqwest::Client::new(),
+                PairingStore::ephemeral(),
+            )
+            .unwrap(),
+        );
+        let (tx, mut rx) = mpsc::channel(2);
+        let state = TelegramWebhookState {
+            tx,
+            secret: "secret".to_string(),
+            channel: Arc::downgrade(&channel),
+        };
+        let body = Bytes::from_static(br#"{"update_id":42}"#);
+        let mut headers = HeaderMap::new();
+        headers.insert("x-telegram-bot-api-secret-token", "secret".parse().unwrap());
+
+        assert_eq!(
+            telegram_webhook(State(state.clone()), headers.clone(), body.clone()).await,
+            StatusCode::OK
+        );
+        let pending = rx.try_recv().expect("first update should be queued");
+        assert_eq!(pending.update.update_id, 42);
+
+        assert_eq!(
+            telegram_webhook(State(state), headers, body).await,
+            StatusCode::OK
+        );
+        assert!(
+            rx.try_recv().is_err(),
+            "the retry must not enqueue a second update"
+        );
+        assert_eq!(
+            channel
+                .runtime
+                .pairing
+                .claim_delivery("telegram", "telegram:update:42")
+                .await
+                .unwrap(),
+            crate::pairing::DeliveryClaim::InFlight
+        );
     }
 
     // ─── decide_reply: the group gate ───────────────────────────────────────

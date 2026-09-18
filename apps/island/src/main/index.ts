@@ -25,7 +25,6 @@ import {
 	parseHideOnFullscreen,
 } from "../shared/hide-on-fullscreen.ts";
 import { type ConsentState, IPC } from "../shared/ipc.ts";
-import { parseKeybindingOverrides } from "../shared/keybindings.ts";
 import {
 	DEFAULT_SCREEN_PRIVACY,
 	parseScreenPrivacy,
@@ -58,7 +57,7 @@ import {
 	getEdgeOffsetRaw,
 	subscribeEdgeOffsetChanges,
 } from "./services/edge-offset.ts";
-import { pluginContributions } from "./services/plugin-host.ts";
+import { createPluginShortcutRefresh } from "./services/plugin-shortcuts.ts";
 import {
 	getPreferenceRaw,
 	setPreferenceRaw,
@@ -157,53 +156,51 @@ function toElectronAccelerator(shortcut: string): string | null {
 	].join("+");
 }
 
-async function applyPluginShortcuts(): Promise<void> {
-	for (const accelerator of pluginShortcuts.values()) {
-		globalShortcut.unregister(accelerator);
-	}
-	pluginShortcuts.clear();
-	const occupied = new Set(
-		[
-			commandShortcut,
-			voiceShortcut,
-			dictationShortcut,
-			dictationAskShortcut,
-		].filter((value): value is string => value !== null)
-	);
-	const result = await pluginContributions();
-	if (!result.available) {
-		return;
-	}
-	const overrides = parseKeybindingOverrides(
-		await getPreferenceRaw("keybindings")
-	);
-	for (const companion of result.companions) {
-		const actionId = `plugin:${companion.pluginId}`;
-		const configured = Object.hasOwn(overrides, actionId)
-			? overrides[actionId]
-			: companion.shortcut;
-		if (!configured) {
-			continue;
+const applyPluginShortcuts = createPluginShortcutRefresh(
+	(result, overrides) => {
+		for (const accelerator of pluginShortcuts.values()) {
+			globalShortcut.unregister(accelerator);
 		}
-		const accelerator = toElectronAccelerator(configured);
-		if (!accelerator || occupied.has(accelerator)) {
-			continue;
+		pluginShortcuts.clear();
+		const occupied = new Set(
+			[
+				commandShortcut,
+				voiceShortcut,
+				dictationShortcut,
+				dictationAskShortcut,
+			].filter((value): value is string => value !== null)
+		);
+		if (!result.available) {
+			return;
 		}
-		try {
-			if (
-				globalShortcut.register(accelerator, () => {
-					focusForCommand();
-					islandWindow?.webContents.send(IPC.plugins.shortcut, companion.id);
-				})
-			) {
-				pluginShortcuts.set(companion.id, accelerator);
-				occupied.add(accelerator);
+		for (const companion of result.companions) {
+			const actionId = `plugin:${companion.pluginId}`;
+			const configured = Object.hasOwn(overrides, actionId)
+				? overrides[actionId]
+				: companion.shortcut;
+			if (!configured) {
+				continue;
 			}
-		} catch {
-			/* invalid or unavailable accelerator: leave the app usable */
+			const accelerator = toElectronAccelerator(configured);
+			if (!accelerator || occupied.has(accelerator)) {
+				continue;
+			}
+			try {
+				if (
+					globalShortcut.register(accelerator, () => {
+						focusForCommand();
+						islandWindow?.webContents.send(IPC.plugins.shortcut, companion.id);
+					})
+				) {
+					pluginShortcuts.set(companion.id, accelerator);
+					occupied.add(accelerator);
+				}
+			} catch {
+				/* invalid or unavailable accelerator: leave the app usable */
+			}
 		}
 	}
-}
+);
 
 // The latest raw dictation preference blob, kept so a command- or voice-shortcut
 // change can re-reconcile dictation (which defers to both) without a fresh read.
@@ -635,11 +632,16 @@ async function bootstrap(): Promise<void> {
 	// first, then register the summon accelerator (which reconciles push-to-talk
 	// against it), and keep both in sync with the desktop's Island settings
 	// (re-register on change). The command summon always wins a collision.
-	lastVoiceRaw = await getVoicePrefsRaw();
-	lastDictationRaw = await getPreferenceRaw(DICTATION_PREF_KEY);
+	const [voiceRaw, dictationRaw, commandShortcutRaw] = await Promise.all([
+		getVoicePrefsRaw(),
+		getPreferenceRaw(DICTATION_PREF_KEY),
+		getPreferenceRaw(COMMAND_SHORTCUT_PREF_KEY),
+	]);
+	lastVoiceRaw = voiceRaw;
+	lastDictationRaw = dictationRaw;
 	// Tab-cycling belongs to voice input; point the shared key hook at it once.
 	setTabCycle("voice", sendCycleAgent);
-	applyCommandShortcut(await getPreferenceRaw(COMMAND_SHORTCUT_PREF_KEY));
+	applyCommandShortcut(commandShortcutRaw);
 	subscribePreferenceChanges(COMMAND_SHORTCUT_PREF_KEY, (raw) =>
 		applyCommandShortcut(raw)
 	);

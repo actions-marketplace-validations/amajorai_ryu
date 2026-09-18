@@ -25,7 +25,13 @@
 // actionless "App not enabled" prose the catch-all would give. Same recovery
 // `SpacesPage` shows for Core's `503 app_disabled`.
 
-import { createElement, type ReactNode, useEffect, useState } from "react";
+import {
+	createElement,
+	lazy,
+	type ReactNode,
+	useEffect,
+	useState,
+} from "react";
 import { AppDisabledNotice } from "@/src/components/AppDisabledNotice.tsx";
 import { usePluginContributions } from "@/src/hooks/usePluginContributions.ts";
 import {
@@ -48,12 +54,15 @@ import {
 	WHATSAPP_DEFAULT_PATH,
 	WHATSAPP_PLUGIN_ID,
 } from "@/src/lib/whatsapp-app.ts";
-import ChannelsPage from "@/src/pages/ChannelsPage.tsx";
-import DraftsPage from "@/src/pages/DraftsPage.tsx";
-import HomePage from "@/src/pages/HomePage.tsx";
-import MissionControlPage from "@/src/pages/MissionControlPage.tsx";
 import { resolveAppShellPath } from "./app-shell-path.ts";
 import { contributionRegistry } from "./registry.ts";
+
+const ChannelsPage = lazy(() => import("@/src/pages/ChannelsPage.tsx"));
+const DraftsPage = lazy(() => import("@/src/pages/DraftsPage.tsx"));
+const HomePage = lazy(() => import("@/src/pages/HomePage.tsx"));
+const MissionControlPage = lazy(
+	() => import("@/src/pages/MissionControlPage.tsx")
+);
 
 /** A shell page whose route an app declares. */
 export interface AppShellPage {

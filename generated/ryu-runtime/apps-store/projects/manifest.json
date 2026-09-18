@@ -10,7 +10,7 @@
   "version": "0.1.0",
   "stability": "experimental",
   "category": "Productivity",
-  "description": "A focused local project board for turning commitments into owned tasks. Keep projects, owners, due dates, and next actions together without replacing Ryu's CRM, Calendar, or Workflows.",
+  "description": "A durable coordinator workspace for turning long-running work into owned tasks, shared context, delegated workers, and recurring signals without replacing Ryu's CRM, Calendar, or Workflows.",
   "tagline": "Keep the work moving",
   "keywords": ["projects", "tasks", "planning", "delivery", "operations"],
   "icon": "task-01",
@@ -36,9 +36,84 @@
         "ui_entry": "./dist/index.html",
         "ui_format": "html"
       }
+    },
+    {
+      "id": "projects-run",
+      "name": "Run Projects coordinator",
+      "kind": "tool",
+      "config": {
+        "slug": "projects.run",
+        "backend": "http",
+        "method": "POST",
+        "url": "core:/api/ext/@ryu/projects/tools/run",
+        "secret_headers": { "Authorization": "Bearer env:RYU_TOKEN" },
+        "fail_open": true,
+        "unwrap_body": true,
+        "description": "Dispatch one request to a durable Projects coordinator.",
+        "input_schema": {
+          "type": "object",
+          "required": ["projectId", "prompt"],
+          "properties": {
+            "projectId": { "type": "string" },
+            "prompt": { "type": "string" }
+          }
+        }
+      }
     }
   ],
-  "permission_grants": ["storage:kv", "shell:integrate", "ui:toast"],
+  "permission_grants": [
+    "app:http",
+    "tool:http-egress:127.0.0.1",
+    "chat.sendFollowUp",
+    "shell:integrate",
+    "spaces:docs",
+    "storage:kv",
+    "ui:toast"
+  ],
+  "sidecars": [
+    {
+      "name": "projects",
+      "process": {
+        "kind": "local",
+        "command": "ryu-projects",
+        "command_env": "RYU_PROJECTS_BIN",
+        "port_env": "RYU_PROJECTS_PORT"
+      },
+      "port": 8022,
+      "health_path": "/health",
+      "lazy": false,
+      "http": {
+        "mount": "/api/projects",
+        "public_mount": "/api/projects",
+        "max_body_bytes": 524288,
+        "routes": [
+          { "path": "/bootstrap", "method": "GET", "permission": "projects.view" },
+          { "path": "/tools/run", "method": "POST", "permission": "projects.edit" },
+          { "path": "/projects", "method": "GET", "permission": "projects.view" },
+          { "path": "/projects", "method": "POST", "permission": "projects.edit" },
+          { "path": "/projects/import", "method": "POST", "permission": "projects.edit" },
+          { "path": "/projects/:id", "method": "GET", "permission": "projects.view" },
+          { "path": "/projects/:id", "method": "PATCH", "permission": "projects.edit" },
+          { "path": "/projects/:id", "method": "DELETE", "permission": "projects.edit" },
+          { "path": "/projects/:id/run", "method": "POST", "permission": "projects.edit" },
+          { "path": "/projects/:id/context", "method": "GET", "permission": "projects.view" },
+          { "path": "/projects/:id/context", "method": "POST", "permission": "projects.edit" },
+          { "path": "/projects/:id/context/:context_id", "method": "PATCH", "permission": "projects.edit" },
+          { "path": "/projects/:id/context/:context_id", "method": "DELETE", "permission": "projects.edit" },
+          { "path": "/projects/:id/workers", "method": "GET", "permission": "projects.view" },
+          { "path": "/projects/:id/workers", "method": "POST", "permission": "projects.edit" },
+          { "path": "/projects/:id/subscriptions", "method": "GET", "permission": "projects.view" },
+          { "path": "/projects/:id/subscriptions", "method": "POST", "permission": "projects.edit" },
+          { "path": "/projects/:id/subscriptions/:subscription_id", "method": "PATCH", "permission": "projects.edit" },
+          { "path": "/projects/:id/subscriptions/:subscription_id", "method": "DELETE", "permission": "projects.edit" },
+          { "path": "/events/:source", "method": "POST", "permission": "projects.edit" }
+        ]
+      },
+      "host_api": {
+        "grants": ["chat.sendFollowUp"]
+      }
+    }
+  ],
   "permission_levels": [
     {
       "id": "projects.view",
@@ -48,7 +123,7 @@
     {
       "id": "projects.edit",
       "label": "Can edit",
-      "description": "Create projects, add tasks, and update delivery status.",
+      "description": "Create projects, add tasks, update delivery status, dispatch coordinator work, and manage subscriptions.",
       "implies": ["projects.view"]
     }
   ],

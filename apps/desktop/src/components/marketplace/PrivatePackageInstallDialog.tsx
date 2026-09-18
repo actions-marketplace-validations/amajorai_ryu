@@ -41,6 +41,7 @@ import {
 	redeemPrivatePackageShareCode,
 } from "@/src/lib/api/marketplace.ts";
 import type { ConnectionAccessLevel } from "@/src/lib/connection-permissions.ts";
+import { formatDate } from "@/src/lib/timezone.ts";
 import { useGatewayDialog } from "@/src/store/useGatewayDialog.ts";
 import { useNodeStore } from "@/src/store/useNodeStore.ts";
 
@@ -504,9 +505,7 @@ export default function PrivatePackageInstallDialog({
 										<span>Version {preview.version}</span>
 									) : null}
 									{preview.expiresAt ? (
-										<span>
-											Expires {new Date(preview.expiresAt).toLocaleDateString()}
-										</span>
+										<span>Expires {formatDate(preview.expiresAt)}</span>
 									) : null}
 								</div>
 								{preview.capabilities.length > 0 ? (

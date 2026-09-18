@@ -115,7 +115,18 @@ pub fn router(state: SharedState) -> Router {
         .route("/v1/concurrency", get(metrics::get_concurrency))
         // Evals — rolling scores + dataset runner
         .route("/v1/evals", get(evals::get_evals))
-        .route("/v1/evals/run", post(evals::run_evals))
+        .route(
+            "/v1/evals/score",
+            post(evals::score_online).layer(axum::extract::DefaultBodyLimit::max(
+                evals::MAX_ONLINE_SCORE_REQUEST_BYTES,
+            )),
+        )
+        .route(
+            "/v1/evals/run",
+            post(evals::run_evals).layer(axum::extract::DefaultBodyLimit::max(
+                evals::MAX_EVAL_REQUEST_BYTES,
+            )),
+        )
         // Unified evaluator catalog (P0): the full shared taxonomy for the
         // desktop catalog UI. Read-only over static seed data; ungated like
         // /v1/evals and /v1/firewall/check.
@@ -147,6 +158,7 @@ pub fn router(state: SharedState) -> Router {
         // Audit log (local query; master-key only)
         .route("/v1/audit", get(audit::query_audit))
         .route("/v1/audit/usage", get(audit::query_audit_usage))
+        .route("/v1/audit/prune", post(audit::prune_audit))
         // Gateway control activity ingest (admin-authenticated; no payloads).
         .route("/v1/audit/control", post(audit::record_control_change))
         // Exec audit ingest + pre-run budget gate (M6 / #192)
@@ -195,7 +207,10 @@ pub fn router(state: SharedState) -> Router {
         )
         // Health / meta
         .route("/health", get(health::health))
-        .route("/.well-known/security.txt", get(security_contact::security_txt))
+        .route(
+            "/.well-known/security.txt",
+            get(security_contact::security_txt),
+        )
         .route("/v1/health", get(health::health))
         .route("/v1/auth/status", get(health::auth_status))
         .route("/v1/auth/readiness", get(health::readiness))

@@ -24,8 +24,6 @@ if (root) {
 							title: "Research brief",
 						},
 					],
-					ingestContent: "",
-					ingestTitle: "",
 					searchQuery: "",
 					onExportPackage: () => undefined,
 					onImportPackage: () => undefined,

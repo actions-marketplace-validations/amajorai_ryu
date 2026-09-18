@@ -144,13 +144,15 @@ impl IntoResponse for GatewayError {
             GatewayError::NoProvider(msg) => {
                 (StatusCode::NOT_FOUND, "model_not_found", msg.as_str())
             }
-            GatewayError::ProviderError(msg) => {
-                (StatusCode::BAD_GATEWAY, "provider_error", msg.as_str())
-            }
-            GatewayError::ProviderPaymentRequired { message, .. } => (
+            GatewayError::ProviderError(_) => (
+                StatusCode::BAD_GATEWAY,
+                "provider_error",
+                "Upstream provider request failed.",
+            ),
+            GatewayError::ProviderPaymentRequired { .. } => (
                 StatusCode::PAYMENT_REQUIRED,
                 "provider_payment_required",
-                message.as_str(),
+                "Upstream provider payment is required.",
             ),
             GatewayError::ProviderRateLimited { .. } => (
                 StatusCode::TOO_MANY_REQUESTS,
@@ -182,10 +184,10 @@ impl IntoResponse for GatewayError {
                 "credit_accounting_unavailable",
                 "credit accounting is temporarily unavailable",
             ),
-            GatewayError::AllProvidersUnavailable(msg) => (
+            GatewayError::AllProvidersUnavailable(_) => (
                 StatusCode::SERVICE_UNAVAILABLE,
                 "all_providers_unavailable",
-                msg.as_str(),
+                "All configured providers are currently unavailable.",
             ),
             GatewayError::BadRequest(msg) => (
                 StatusCode::BAD_REQUEST,
@@ -356,6 +358,20 @@ mod tests {
         // Variants carrying a caller-facing string surface it verbatim in message.
         let (_, json) = body_json(GatewayError::Unauthorized("no header".into())).await;
         assert_eq!(json["error"]["message"], "no header");
+    }
+
+    #[tokio::test]
+    async fn provider_error_messages_are_generic_at_the_client_boundary() {
+        let secret = "gho_abcdefghijklmnopqrstuvwxyz0123456789";
+        let (_, json) = body_json(GatewayError::ProviderError(format!(
+            "upstream rejected request with {secret}"
+        )))
+        .await;
+        assert!(!json["error"]["message"].as_str().unwrap().contains(secret));
+        assert_eq!(
+            json["error"]["message"],
+            "Upstream provider request failed."
+        );
     }
 
     #[tokio::test]

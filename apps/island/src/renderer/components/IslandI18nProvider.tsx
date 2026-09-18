@@ -2,6 +2,7 @@ import type { LanguagePack } from "@ryu/i18n/core";
 import { I18nProvider } from "@ryu/i18n/react";
 import { I18nDirectionProvider } from "@ryu/ui/components/direction.tsx";
 import { useEffect, useState } from "react";
+import { watchLanguagePacks } from "../hooks/watch-language-packs.ts";
 
 /** The Island is a separate Electron renderer, so it needs its own provider
  * and a main-process catalog read rather than inheriting Desktop's context. */
@@ -12,27 +13,7 @@ export function IslandI18nProvider({
 }) {
 	const [packs, setPacks] = useState<LanguagePack[]>([]);
 
-	useEffect(() => {
-		let cancelled = false;
-		const refresh = () => {
-			void window.island.languagePacks
-				.get()
-				.then((result) => {
-					if (!cancelled && result.available) {
-						setPacks(result.packs);
-					}
-				})
-				.catch(() => undefined);
-		};
-		refresh();
-		window.addEventListener("focus", refresh);
-		const interval = window.setInterval(refresh, 30_000);
-		return () => {
-			cancelled = true;
-			window.removeEventListener("focus", refresh);
-			window.clearInterval(interval);
-		};
-	}, []);
+	useEffect(() => watchLanguagePacks(setPacks), []);
 
 	return (
 		<I18nProvider

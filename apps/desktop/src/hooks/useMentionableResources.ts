@@ -39,21 +39,28 @@ export function useMentionableResources(
 		spaces,
 	} = useSpacesContext();
 	const contributedSourceData = useSidebarSectionSources(sections);
-	const documentQueries = useQueries(
-		{
-			queries: spaces.map((space) => ({
+	const target = useMemo(
+		() => ({
+			token: activeNode.token ?? null,
+			url: activeNode.url,
+			userJwt: activeNode.userJwt ?? null,
+		}),
+		[activeNode.token, activeNode.url, activeNode.userJwt]
+	);
+	const documentQueryOptions = useMemo(
+		() =>
+			spaces.map((space) => ({
 				...spaceDocumentListQueryOptions(
-					{
-						url: activeNode.url,
-						token: activeNode.token ?? null,
-						userJwt: activeNode.userJwt ?? null,
-					},
+					target,
 					space.id,
 					documentRevisions.get(space.id) ?? 0
 				),
 				enabled: !(spacesLoading || spacesError),
 			})),
-		},
+		[documentRevisions, spaces, spacesError, spacesLoading, target]
+	);
+	const documentQueries = useQueries(
+		{ queries: documentQueryOptions },
 		queryClient
 	);
 	const { data: outputStyleData } = useQuery({

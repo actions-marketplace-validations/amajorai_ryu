@@ -1,3 +1,4 @@
+import { THEME_APPEARANCE_CHANGE_EVENT } from "@ryu/ui/theme/prefs";
 import { useEffect, useState } from "react";
 
 // Controls the drop/box shadows on the titlebar navigation + custom action
@@ -39,4 +40,5 @@ export function setChromeShadows(enabled: boolean) {
 	localStorage.setItem(KEY, String(enabled));
 	applyDataAttribute(enabled);
 	window.dispatchEvent(new Event("storage"));
+	window.dispatchEvent(new Event(THEME_APPEARANCE_CHANGE_EVENT));
 }

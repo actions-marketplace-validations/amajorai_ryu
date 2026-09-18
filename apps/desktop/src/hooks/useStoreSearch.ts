@@ -15,7 +15,7 @@
 
 import { ALL_SKILL_SOURCES_ID } from "@ryu/marketplace/catalog/types";
 import { useQuery } from "@tanstack/react-query";
-import { useMemo } from "react";
+import { useCallback, useMemo } from "react";
 import { fetchAgentCatalog } from "@/src/lib/api/agents.ts";
 import type { ApiTarget } from "@/src/lib/api/client.ts";
 import { searchMcpCatalog } from "@/src/lib/api/mcp.ts";
@@ -78,64 +78,89 @@ function matches(
 
 export function useStoreSearch(query: string): UseStoreSearchResult {
 	const activeNode = useActiveNode();
-	const target: ApiTarget = {
-		url: activeNode.url,
-		token: activeNode.token ?? null,
-		userJwt: activeNode.userJwt ?? null,
-	};
-	const { url, token, userJwt } = target;
+	const target = useMemo<ApiTarget>(
+		() => ({
+			url: activeNode.url,
+			token: activeNode.token ?? null,
+			userJwt: activeNode.userJwt ?? null,
+		}),
+		[activeNode.url, activeNode.token, activeNode.userJwt]
+	);
+	const { url } = target;
 
 	const debounced = useDebouncedValue(query.trim(), SEARCH_DEBOUNCE_MS);
 	const enabled = debounced.length > 0;
 	const lower = debounced.toLowerCase();
 
-	const modelsQuery = useQuery({
-		queryKey: ["store-search", "models", url, debounced],
-		queryFn: () =>
-			searchModels(
-				{ url, token, userJwt },
-				{ query: debounced, limit: PER_REALM_LIMIT }
-			),
-		enabled,
-	});
+	const modelsQuery = useQuery(
+		useMemo(
+			() => ({
+				queryKey: ["store-search", "models", url, debounced],
+				queryFn: () =>
+					searchModels(target, {
+						query: debounced,
+						limit: PER_REALM_LIMIT,
+					}),
+				enabled,
+			}),
+			[target, url, debounced, enabled]
+		)
+	);
 
-	const skillsQuery = useQuery({
-		queryKey: ["store-search", "skills", url, debounced],
-		queryFn: () =>
-			searchSkills(
-				{ url, token, userJwt },
-				{
-					query: debounced,
-					limit: PER_REALM_LIMIT,
-					source: ALL_SKILL_SOURCES_ID,
-				}
-			),
-		enabled,
-	});
+	const skillsQuery = useQuery(
+		useMemo(
+			() => ({
+				queryKey: ["store-search", "skills", url, debounced],
+				queryFn: () =>
+					searchSkills(target, {
+						query: debounced,
+						limit: PER_REALM_LIMIT,
+						source: ALL_SKILL_SOURCES_ID,
+					}),
+				enabled,
+			}),
+			[target, url, debounced, enabled]
+		)
+	);
 
-	const mcpQuery = useQuery({
-		queryKey: ["store-search", "mcp", url, debounced],
-		queryFn: () =>
-			searchMcpCatalog(
-				{ url, token, userJwt },
-				{ query: debounced, limit: PER_REALM_LIMIT }
-			),
-		enabled,
-	});
+	const mcpQuery = useQuery(
+		useMemo(
+			() => ({
+				queryKey: ["store-search", "mcp", url, debounced],
+				queryFn: () =>
+					searchMcpCatalog(target, {
+						query: debounced,
+						limit: PER_REALM_LIMIT,
+					}),
+				enabled,
+			}),
+			[target, url, debounced, enabled]
+		)
+	);
 
 	// Plugins + Agents have no search endpoint: fetch the full catalog once (shared
 	// query key with their sections → cache-deduped) and filter in-memory.
-	const appsQuery = useQuery({
-		queryKey: ["apps", "catalog", url],
-		queryFn: () => fetchAppsCatalog({ url, token, userJwt }),
-		enabled,
-	});
+	const appsQuery = useQuery(
+		useMemo(
+			() => ({
+				queryKey: ["apps", "catalog", url],
+				queryFn: () => fetchAppsCatalog(target),
+				enabled,
+			}),
+			[target, url, enabled]
+		)
+	);
 
-	const agentsQuery = useQuery({
-		queryKey: ["agents", "catalog", url],
-		queryFn: () => fetchAgentCatalog({ url, token, userJwt }),
-		enabled,
-	});
+	const agentsQuery = useQuery(
+		useMemo(
+			() => ({
+				queryKey: ["agents", "catalog", url],
+				queryFn: () => fetchAgentCatalog(target),
+				enabled,
+			}),
+			[target, url, enabled]
+		)
+	);
 
 	const groups = useMemo<StoreSearchGroup[]>(() => {
 		if (!enabled) {
@@ -275,14 +300,23 @@ export function useStoreSearch(query: string): UseStoreSearchResult {
 			appsQuery.isError ||
 			agentsQuery.isError);
 
-	const refetch = () =>
-		Promise.all([
-			modelsQuery.refetch(),
-			skillsQuery.refetch(),
-			mcpQuery.refetch(),
-			appsQuery.refetch(),
-			agentsQuery.refetch(),
-		]);
+	const refetch = useCallback(
+		() =>
+			Promise.all([
+				modelsQuery.refetch(),
+				skillsQuery.refetch(),
+				mcpQuery.refetch(),
+				appsQuery.refetch(),
+				agentsQuery.refetch(),
+			]),
+		[
+			modelsQuery.refetch,
+			skillsQuery.refetch,
+			mcpQuery.refetch,
+			appsQuery.refetch,
+			agentsQuery.refetch,
+		]
+	);
 
 	return {
 		groups,

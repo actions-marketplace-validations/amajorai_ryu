@@ -167,6 +167,26 @@ describe("every sandboxed frame re-announces until the port arrives", () => {
 	it("emits the versioned envelope from the shared snippet", () => {
 		expect(handshakeAnnounceScript()).toContain("hostApiVersion:");
 	});
+
+	it("seeds and listens for the complete appearance snapshot on Path A", () => {
+		const pathA = thirdPartyPluginSrcdoc(
+			"nonce-theme-a",
+			"",
+			"com.test.theme",
+			undefined,
+			{
+				"--background": "#101114",
+				"--ryu-theme-mode": "dark",
+				"--ryu-ui-scale": "1.25",
+			},
+			true
+		);
+		expect(pathA).toContain("--background: #101114;");
+		expect(pathA).toContain('"--ryu-theme-mode":"dark"');
+		expect(pathA).toContain('msg.kind !== "ryu-plugin-theme"');
+		expect(pathA).toContain("applyThemeTokens(msg.tokens)");
+		expect(pathA).toContain("html body{zoom:1 !important;}");
+	});
 });
 
 // sandbox_never_same_origin

@@ -18,6 +18,7 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::{Mutex, OnceLock};
 
 use anyhow::{bail, Context, Result};
 use axum::{
@@ -39,6 +40,60 @@ fn status(code: u16) -> StatusCode {
     StatusCode::from_u16(code).unwrap_or(StatusCode::BAD_GATEWAY)
 }
 
+/// Enforce the app-level generation permission on host-direct Canvas/Slides
+/// calls. The coarse `media:generate` grant protects the sandbox bridge, while
+/// this verified-caller check makes the manifest's human-facing permission level
+/// reach the Core data path as well. Direct Core callers without the host marker
+/// retain the existing node route policy; a malformed marker is denied rather
+/// than treated as a new app identity.
+pub(crate) async fn enforce_host_media_permission(
+    state: &super::ServerState,
+    caller: &Option<crate::identity_verify::VerifiedCaller>,
+    headers: &HeaderMap,
+) -> Result<(), Response> {
+    let Some(app_id) = headers
+        .get("x-ryu-app-id")
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return Ok(());
+    };
+    let Some(permission) = headers
+        .get("x-ryu-app-permission")
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return Err((StatusCode::FORBIDDEN, "missing app media permission").into_response());
+    };
+    let expected = match app_id {
+        "@ryu/canvas" => "canvas.generate",
+        "@ryu/slides" => "slides.generate",
+        _ => {
+            return Err((StatusCode::FORBIDDEN, "unsupported app media permission").into_response())
+        }
+    };
+    if permission != expected
+        || state
+            .app_store
+            .get(app_id)
+            .await
+            .ok()
+            .flatten()
+            .is_none_or(|app| !app.enabled)
+    {
+        return Err((StatusCode::FORBIDDEN, "app media permission denied").into_response());
+    }
+    if super::enforce_permission(state, caller, expected)
+        .await
+        .is_err()
+    {
+        return Err((StatusCode::FORBIDDEN, "app media permission denied").into_response());
+    }
+    Ok(())
+}
+
 // ── Local media storage (Notion editor image/file uploads) ──────────────────────
 //
 // Stores user-uploaded bytes (pasted/dropped editor images) on local disk under
@@ -50,6 +105,12 @@ fn status(code: u16) -> StatusCode {
 
 /// Maximum accepted upload size (32 MB).
 pub const MAX_MEDIA_BYTES: usize = 32 * 1024 * 1024;
+const MAX_MEDIA_STORE_BYTES: u64 = 512 * 1024 * 1024;
+
+fn media_write_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
 
 /// A stored media object. `url` is relative (`/api/media/<file>`); the desktop
 /// prepends the active Core base URL when rendering.
@@ -98,7 +159,9 @@ fn content_type_from_ext(ext: &str) -> &'static str {
         "jpg" | "jpeg" => "image/jpeg",
         "gif" => "image/gif",
         "webp" => "image/webp",
-        "svg" => "image/svg+xml",
+        // User-uploaded SVG is served as an attachment-compatible binary so
+        // active same-origin markup cannot execute in the Core origin.
+        "svg" => "application/octet-stream",
         "avif" => "image/avif",
         "pdf" => "application/pdf",
         _ => "application/octet-stream",
@@ -127,6 +190,9 @@ impl MediaStore {
         original_name: &str,
         content_type: Option<&str>,
     ) -> Result<MediaObject> {
+        let _guard = media_write_lock()
+            .lock()
+            .map_err(|_| anyhow::anyhow!("media store lock is poisoned"))?;
         if bytes.is_empty() {
             bail!("empty upload");
         }
@@ -135,6 +201,19 @@ impl MediaStore {
                 "upload too large: {} bytes (max {} MB)",
                 bytes.len(),
                 MAX_MEDIA_BYTES / (1024 * 1024)
+            );
+        }
+        let current_bytes = std::fs::read_dir(&self.base)
+            .with_context(|| format!("reading media dir {}", self.base.display()))?
+            .filter_map(|entry| entry.ok())
+            .filter_map(|entry| entry.metadata().ok())
+            .filter(|metadata| metadata.is_file())
+            .map(|metadata| metadata.len())
+            .sum::<u64>();
+        if current_bytes.saturating_add(bytes.len() as u64) > MAX_MEDIA_STORE_BYTES {
+            bail!(
+                "media store quota exceeded (maximum {} MiB)",
+                MAX_MEDIA_STORE_BYTES / (1024 * 1024)
             );
         }
         // Derive extension from the original name's extension, else content-type.
@@ -206,10 +285,22 @@ fn is_safe_filename(name: &str) -> bool {
 )]
 pub async fn upload_media(
     State(state): State<super::ServerState>,
+    axum::Extension(_caller): axum::Extension<Option<crate::identity_verify::VerifiedCaller>>,
     Query(params): Query<HashMap<String, String>>,
     headers: HeaderMap,
     body: Bytes,
 ) -> impl IntoResponse {
+    if crate::sidecar::control_plane::registered_org().is_some()
+        || crate::sidecar::control_plane::is_managed_node()
+    {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({
+                "error": "media objects require a personal node until per-object tenancy is enabled"
+            })),
+        )
+            .into_response();
+    }
     let name = headers
         .get("x-filename")
         .and_then(|v| v.to_str().ok())
@@ -258,8 +349,18 @@ pub async fn upload_media(
 )]
 pub async fn serve_media(
     State(state): State<super::ServerState>,
+    axum::Extension(_caller): axum::Extension<Option<crate::identity_verify::VerifiedCaller>>,
     Path(file): Path<String>,
 ) -> Response {
+    if crate::sidecar::control_plane::registered_org().is_some()
+        || crate::sidecar::control_plane::is_managed_node()
+    {
+        return (
+            StatusCode::FORBIDDEN,
+            "media objects require a personal node until per-object tenancy is enabled",
+        )
+            .into_response();
+    }
     // Run the fs read in spawn_blocking so we don't block the async runtime.
     let media = state.media.clone();
     let result = tokio::task::spawn_blocking(move || media.load(&file)).await;
@@ -269,10 +370,7 @@ pub async fn serve_media(
             StatusCode::OK,
             [
                 (header::CONTENT_TYPE, content_type),
-                (
-                    header::CACHE_CONTROL,
-                    "public, max-age=31536000, immutable".to_owned(),
-                ),
+                (header::CACHE_CONTROL, "private, no-store".to_owned()),
             ],
             bytes,
         )
@@ -299,11 +397,16 @@ pub async fn serve_media(
 )]
 pub async fn generate_image(
     State(state): State<super::ServerState>,
+    axum::Extension(caller): axum::Extension<Option<crate::identity_verify::VerifiedCaller>>,
+    headers: HeaderMap,
     Json(body): Json<Value>,
-) -> impl IntoResponse {
+) -> Response {
+    if let Err(response) = enforce_host_media_permission(&state, &caller, &headers).await {
+        return response;
+    }
     let host = CoreImageHost::new(state.manager.clone());
     let (code, value) = ryu_image::generate(&host, body).await;
-    (status(code), Json(value))
+    (status(code), Json(value)).into_response()
 }
 
 /// `POST /api/video/generate` — text/image-to-video via sd-server's native
@@ -324,8 +427,13 @@ pub async fn generate_image(
 )]
 pub async fn generate_video(
     State(state): State<super::ServerState>,
+    axum::Extension(caller): axum::Extension<Option<crate::identity_verify::VerifiedCaller>>,
+    headers: HeaderMap,
     Json(body): Json<Value>,
-) -> impl IntoResponse {
+) -> Response {
+    if let Err(response) = enforce_host_media_permission(&state, &caller, &headers).await {
+        return response;
+    }
     if body
         .get("prompt")
         .and_then(Value::as_str)
@@ -336,10 +444,11 @@ pub async fn generate_video(
         return (
             StatusCode::BAD_REQUEST,
             Json(json!({ "error": "missing `prompt` (the text to render)" })),
-        );
+        )
+            .into_response();
     }
     if let Err(error) = ryu_image::validate_media_provider(&body) {
-        return (StatusCode::BAD_REQUEST, Json(json!({"error": error})));
+        return (StatusCode::BAD_REQUEST, Json(json!({"error": error}))).into_response();
     }
     let host = CoreImageHost::new(state.manager.clone());
     // Cloud provider selected → submit a Gateway video job (job-based; poll via
@@ -353,10 +462,10 @@ pub async fn generate_video(
             body,
         )
         .await;
-        return (status(code), Json(value));
+        return (status(code), Json(value)).into_response();
     }
     let (code, value) = ryu_image::video::generate_local_video(&host, body).await;
-    (status(code), Json(value))
+    (status(code), Json(value)).into_response()
 }
 
 /// `GET /api/video/jobs/:id` — poll a cloud video-generation job submitted via

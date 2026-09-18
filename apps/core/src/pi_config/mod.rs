@@ -23,6 +23,7 @@ use std::fs;
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
+use futures_util::StreamExt;
 use ryu_kernel_contracts::schema::{ProviderRegistrationSpec, PROVIDER_OWNER_FIELD};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
@@ -71,6 +72,7 @@ pub const MANAGED_BEDROCK_ID: &str = "managed-bedrock";
 pub const CHATGPT_PROVIDER_ID: &str = "chatgpt";
 pub const CHATGPT_AUTH_KEY: &str = "openai-chatgpt";
 const CHATGPT_SUGGESTED_MODELS: &[&str] = &["gpt-5.5", "gpt-5.4", "gpt-5.4-mini"];
+const MAX_MODEL_DISCOVERY_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
 // `@earendil-works/pi-ai` extracts an account id from the Codex adapter's
 // `apiKey` before it sends a request. The actual ChatGPT bearer is intentionally
 // resolved inside Core, so this non-secret JWT-shaped sentinel satisfies that
@@ -394,9 +396,7 @@ fn chatgpt_provider_patch(model: Option<&str>) -> Map<String, Value> {
     let mut headers = Map::new();
     headers.insert(
         "x-ryu-node-token".to_owned(),
-        Value::String(
-            crate::node_token::active_token().unwrap_or_else(|| "ryu-local".to_owned()),
-        ),
+        Value::String(crate::node_token::active_token().unwrap_or_else(|| "ryu-local".to_owned())),
     );
     patch.insert("headers".to_owned(), Value::Object(headers));
 
@@ -557,8 +557,12 @@ fn gateway_model_entry(id: &str, existing: Option<&Value>) -> Value {
         .or_insert_with(|| Value::String("Gemma 4 E2B IT Q4_K_M".to_owned()));
     obj.entry("api".to_owned())
         .or_insert_with(|| Value::String("openai-completions".to_owned()));
-    obj.entry("input".to_owned())
-        .or_insert_with(|| json!(["text"]));
+    // The bundled Gemma 4 model is multimodal when its companion `mmproj`
+    // artifact is present. Keep that capability in Pi's model metadata even
+    // when an older settings file already declared the model as text-only;
+    // otherwise Pi replaces the image with an "image omitted" placeholder
+    // before the request reaches the local Gateway.
+    obj.insert("input".to_owned(), json!(["text", "image"]));
     obj.entry("cost".to_owned()).or_insert_with(|| {
         json!({
             "input": 0,
@@ -3599,7 +3603,10 @@ enum DiscoveryAuth {
     Bearer(String),
     /// ChatGPT/Codex model discovery requires the bearer plus the account id
     /// that the Login with ChatGPT session is bound to.
-    ChatGpt { access: String, account_id: String },
+    ChatGpt {
+        access: String,
+        account_id: String,
+    },
     /// Anthropic uses `x-api-key` + `anthropic-version` rather than a bearer token.
     Anthropic(String),
     None,
@@ -3779,8 +3786,7 @@ fn resolve_provider_discovery(
     if id == GATEWAY_PROVIDER_ID || id == MANAGED_OPENROUTER_ID {
         let base = crate::sidecar::gateway::gateway_url();
         let url = format!("{}/v1/models", base.trim_end_matches('/'));
-        let token =
-            crate::sidecar::gateway::gateway_token().unwrap_or_default();
+        let token = crate::sidecar::gateway::gateway_token().unwrap_or_default();
         return Some((url, DiscoveryAuth::Bearer(token)));
     }
 
@@ -3882,7 +3888,22 @@ async fn fetch_models(
     if !resp.status().is_success() {
         anyhow::bail!("discovery endpoint returned {}", resp.status());
     }
-    let body: Value = resp.json().await.context("parse discovery response")?;
+    if resp
+        .content_length()
+        .is_some_and(|length| length > MAX_MODEL_DISCOVERY_RESPONSE_BYTES as u64)
+    {
+        anyhow::bail!("discovery response exceeds {MAX_MODEL_DISCOVERY_RESPONSE_BYTES} bytes");
+    }
+    let mut stream = resp.bytes_stream();
+    let mut raw = Vec::new();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.context("read discovery response")?;
+        if raw.len().saturating_add(chunk.len()) > MAX_MODEL_DISCOVERY_RESPONSE_BYTES {
+            anyhow::bail!("discovery response exceeds {MAX_MODEL_DISCOVERY_RESPONSE_BYTES} bytes");
+        }
+        raw.extend_from_slice(&chunk);
+    }
+    let body: Value = serde_json::from_slice(&raw).context("parse discovery response")?;
     // OpenAI + Anthropic both use `{ data: [ { id, ... } ] }`; OpenRouter too.
     let mut items = body
         .get("data")
@@ -4636,6 +4657,15 @@ mod tests {
     }
 
     #[test]
+    fn bundled_local_model_preserves_vision_capability_on_existing_settings() {
+        let local_id = crate::registry::DEFAULT_LOCAL_CHAT_MODEL_ID;
+        let existing = json!({ "id": local_id, "input": ["text"] });
+        let entry = gateway_model_entry(local_id, Some(&existing));
+
+        assert_eq!(entry["input"], json!(["text", "image"]));
+    }
+
+    #[test]
     fn apply_cache_compat_preserves_caller_declared_compat() {
         // Do not clobber an existing compat block or a caller's own format.
         let mut entry = json!({
@@ -4699,7 +4729,11 @@ mod tests {
 
                 // BYOK keeps the local gateway even while managed is configured.
                 let local = gateway_openai_patch_for(Some("gpt-4o"), false);
-                assert_eq!(local.get("apiKey").and_then(Value::as_str), Some("${OPENAI_API_KEY}"), "shared Pi configuration must preserve the process-scoped bearer");
+                assert_eq!(
+                    local.get("apiKey").and_then(Value::as_str),
+                    Some("${OPENAI_API_KEY}"),
+                    "shared Pi configuration must preserve the process-scoped bearer"
+                );
                 let base = local.get("baseUrl").and_then(Value::as_str).unwrap();
                 assert!(
                     base.contains("127.0.0.1"),
@@ -4803,16 +4837,21 @@ mod tests {
             assert_eq!(entry["apiKey"], CHATGPT_PROXY_API_KEY);
             assert!(entry["headers"]["x-ryu-node-token"].is_string());
             assert_eq!(entry["models"][0]["id"], "gpt-5.5");
-            assert!(entry["models"].as_array().unwrap().iter().any(|model| {
-                model.get("id").and_then(Value::as_str) == Some("gpt-5.4")
-            }));
+            assert!(entry["models"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|model| { model.get("id").and_then(Value::as_str) == Some("gpt-5.4") }));
             assert!(
                 entry["baseUrl"]
                     .as_str()
                     .is_some_and(|url| url.ends_with("/api/pi-config/chatgpt")),
                 "native provider must point at Core's credential-resolving proxy"
             );
-            assert_eq!(read_settings().default_provider.as_deref(), Some(CHATGPT_PROVIDER_ID));
+            assert_eq!(
+                read_settings().default_provider.as_deref(),
+                Some(CHATGPT_PROVIDER_ID)
+            );
         });
     }
 

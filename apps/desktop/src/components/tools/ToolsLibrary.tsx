@@ -368,7 +368,7 @@ export default function ToolsLibrary() {
 								<SelectTrigger className="w-full" id="agent-filter" size="sm">
 									<SelectValue placeholder="All tools" />
 								</SelectTrigger>
-								<SelectContent>
+								<SelectContent alignItemWithTrigger={false}>
 									<SelectItem value={ALL_AGENTS}>All tools</SelectItem>
 									{agents.map((agent) => (
 										<SelectItem key={agent.id} value={agent.id}>

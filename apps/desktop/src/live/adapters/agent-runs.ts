@@ -10,16 +10,14 @@
 // opens the chat that owns the run.
 
 import type { LiveActivity } from "@ryu/app-host/live-activity";
-import { useEffect, useRef } from "react";
+import { useEffect } from "react";
 import { useActiveNode } from "@/src/hooks/useActiveNode.ts";
 import type { RunSummary } from "@/src/hooks/useRuns.ts";
 import { toTarget } from "@/src/lib/api/client.ts";
+import { subscribeRunFrames } from "@/src/lib/api/run-store.ts";
 import type { RunStreamFrame } from "@/src/lib/api/runStream.ts";
-import { streamRuns } from "@/src/lib/api/runStream.ts";
 import { useLiveActivityStore } from "@/src/store/useLiveActivityStore.ts";
 
-const INITIAL_BACKOFF_MS = 500;
-const MAX_BACKOFF_MS = 10_000;
 const TERMINAL_LINGER_MS = 8000;
 
 /** Split a run's folder path on either separator to show its basename. */
@@ -71,78 +69,58 @@ function runToActivity(run: RunSummary): LiveActivity {
 	};
 }
 
-/** Apply a run stream frame: snapshot replaces, a delta merges by id. */
-function applyFrame(frame: RunStreamFrame) {
-	const store = useLiveActivityStore.getState();
-	if (frame.type === "snapshot") {
-		store.applySnapshot(frame.runs.map(runToActivity));
-		return;
-	}
-	const activity = runToActivity(frame.run);
-	store.upsert(activity);
-	// Terminal cards auto-remove after a short linger so the dock shows
-	// "just finished" without accumulating settled runs.
-	if (activity.status === "done" || activity.status === "error") {
-		window.setTimeout(() => {
-			useLiveActivityStore.getState().remove(activity.id);
-		}, TERMINAL_LINGER_MS);
-	}
-}
-
-/** Pause that resolves early when the stream is torn down. */
-function delay(ms: number, signal: AbortSignal): Promise<void> {
-	return new Promise((resolve) => {
-		const timer = setTimeout(resolve, ms);
-		signal.addEventListener(
-			"abort",
-			() => {
-				clearTimeout(timer);
-				resolve();
-			},
-			{ once: true }
-		);
-	});
-}
-
-/** Mount ONE app-wide subscription to the runs stream feeding the live-activity
- *  store. Follows the active node and auto-reconnects, mirroring `useRuns`. */
+/** This producer owns only shell/agent-run cards and its own linger timers. */
 export function useAgentRunLiveActivities(): void {
-	const activeNode = useActiveNode();
-	const url = activeNode.url;
-	const token = activeNode.token ?? null;
-	const resetRef = useRef<(() => void) | null>(null);
-
+	const { url, token, userJwt } = useActiveNode();
 	useEffect(() => {
-		const controller = new AbortController();
-		const { signal } = controller;
-		const target = toTarget(activeNode);
-
-		// Drop the registry from any previous node; the snapshot event refills it.
-		useLiveActivityStore.getState().reset();
-		resetRef.current = () => useLiveActivityStore.getState().reset();
-
-		const connect = async () => {
-			let backoff = INITIAL_BACKOFF_MS;
-			while (!signal.aborted) {
-				try {
-					await streamRuns(target, applyFrame, signal);
-					backoff = INITIAL_BACKOFF_MS;
-				} catch {
-					// Connect/read failed (Core offline, transient drop) — reconnect.
-				}
-				if (signal.aborted) {
-					break;
-				}
-				await delay(backoff, signal);
-				backoff = Math.min(backoff * 2, MAX_BACKOFF_MS);
+		let stopped = false;
+		const timers = new Map<string, ReturnType<typeof setTimeout>>();
+		const clearTimers = () => {
+			for (const timer of timers.values()) {
+				clearTimeout(timer);
 			}
+			timers.clear();
 		};
-		connect().catch(() => undefined);
-
+		const replace = (runs: RunSummary[]) =>
+			useLiveActivityStore
+				.getState()
+				.applySourceSnapshot("shell", "agent-run", runs.map(runToActivity));
+		replace([]);
+		const stop = subscribeRunFrames(
+			toTarget({ url, token, userJwt }),
+			(frame: RunStreamFrame) => {
+				if (stopped) {
+					return;
+				}
+				if (frame.type === "snapshot") {
+					clearTimers();
+					replace(frame.runs);
+					return;
+				}
+				const activity = runToActivity(frame.run);
+				const previous = timers.get(activity.id);
+				if (previous !== undefined) {
+					clearTimeout(previous);
+					timers.delete(activity.id);
+				}
+				useLiveActivityStore.getState().upsert(activity);
+				if (activity.status === "done" || activity.status === "error") {
+					const timer = setTimeout(() => {
+						if (stopped || timers.get(activity.id) !== timer) {
+							return;
+						}
+						timers.delete(activity.id);
+						useLiveActivityStore.getState().remove(activity.id);
+					}, TERMINAL_LINGER_MS);
+					timers.set(activity.id, timer);
+				}
+			}
+		);
 		return () => {
-			controller.abort();
-			resetRef.current?.();
-			resetRef.current = null;
+			stopped = true;
+			stop();
+			clearTimers();
+			replace([]);
 		};
-	}, [activeNode, url, token]);
+	}, [url, token, userJwt]);
 }

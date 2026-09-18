@@ -29,7 +29,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 use tracing::{info, warn};
 
 /// How long an unapproved pairing code stays valid. After this the sender must
@@ -45,6 +45,55 @@ const CODE_ALPHABET: &[u8] = b"23456789ABCDEFGHJKLMNPQRSTUVWXYZ";
 
 /// Length of a generated pairing code.
 const CODE_LEN: usize = 6;
+
+/// How long a completed or failed provider delivery remains in the node-local
+/// ledger. Provider webhooks are at-least-once, and a redelivery after a
+/// restart must still converge on the original turn rather than create a second
+/// model call.
+const DELIVERY_RETENTION: Duration = Duration::from_secs(60 * 60 * 24 * 30);
+
+/// How long an in-flight delivery claim is kept before a later webhook may
+/// reclaim it. This covers normal model/media work while still allowing a
+/// process that died mid-turn to recover when the provider redelivers.
+const DELIVERY_LEASE: Duration = Duration::from_secs(60 * 30);
+
+/// Hard bound for the node-local provider delivery ledger. A full ledger fails
+/// closed at the webhook boundary so the provider retries instead of letting an
+/// unbounded attacker-controlled id set consume disk.
+const MAX_DELIVERY_RECORDS: usize = 8192;
+
+/// One durable provider delivery claim.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+enum DeliveryState {
+    /// The normalized message is being handled by the Gateway.
+    Processing,
+    /// The message was handled or intentionally refused and must not be run
+    /// again when the provider retries the callback.
+    Completed,
+    /// The Gateway exhausted its local retry budget. A later provider
+    /// redelivery may claim it again.
+    Failed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct DeliveryRecord {
+    state: DeliveryState,
+    updated_at: u64,
+    attempts: u32,
+}
+
+/// Result of claiming one provider delivery.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeliveryClaim {
+    /// This caller owns the delivery and may process it.
+    Claimed,
+    /// Another task is already processing the same delivery inside its lease.
+    InFlight,
+    /// The delivery completed previously, so the retry is safely acknowledged
+    /// without another model call or outbound message.
+    Completed,
+}
 
 /// How a channel treats a **direct message** from a sender it has not seen.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -122,8 +171,9 @@ struct ReplyLink {
     updated_at: u64,
 }
 
-/// The on-disk shape. A map of `"<platform>:<sender_id>"` → state, plus a version
-/// tag so a future format change can migrate rather than silently mis-parse.
+/// The on-disk shape. A map of `"<platform>:<sender_id>"` → state, provider
+/// message links, and bounded delivery claims, plus a version tag so a future
+/// format change can migrate rather than silently mis-parse.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 struct PairingFile {
     #[serde(default)]
@@ -132,6 +182,8 @@ struct PairingFile {
     entries: HashMap<String, PairState>,
     #[serde(default)]
     reply_links: HashMap<String, ReplyLink>,
+    #[serde(default)]
+    deliveries: HashMap<String, DeliveryRecord>,
 }
 
 /// Pairing state for every channel on this node, backed by a JSON file.
@@ -141,6 +193,7 @@ struct PairingFile {
 #[derive(Clone)]
 pub struct PairingStore {
     inner: Arc<RwLock<PairingFile>>,
+    persist_lock: Arc<Mutex<()>>,
     path: Option<PathBuf>,
 }
 
@@ -174,6 +227,7 @@ impl PairingStore {
         };
         Self {
             inner: Arc::new(RwLock::new(file)),
+            persist_lock: Arc::new(Mutex::new(())),
             path: Some(path),
         }
     }
@@ -183,25 +237,201 @@ impl PairingStore {
     pub fn ephemeral() -> Self {
         Self {
             inner: Arc::new(RwLock::new(PairingFile::default())),
+            persist_lock: Arc::new(Mutex::new(())),
             path: None,
         }
     }
 
-    /// Persist the current map. Best-effort: a write failure is logged, never
-    /// propagated, because losing durability must not drop a live message.
+    /// Persist the current map. Best-effort for pairing/reaction-link callers:
+    /// a write failure is logged, never propagated, because losing durability
+    /// must not drop a live message. Delivery claims use the same atomic writer
+    /// strictly, because acknowledging a webhook before its claim reaches disk
+    /// would turn a restart into a lost message.
     async fn persist(&self) {
         let Some(path) = &self.path else {
             return;
         };
+        let _persist_guard = self.persist_lock.lock().await;
         let snapshot = { self.inner.read().await.clone() };
-        let Ok(bytes) = serde_json::to_vec_pretty(&snapshot) else {
-            return;
-        };
-        if let Some(parent) = path.parent() {
-            let _ = tokio::fs::create_dir_all(parent).await;
-        }
-        if let Err(err) = tokio::fs::write(path, bytes).await {
+        if let Err(err) = self.persist_snapshot(path, &snapshot).await {
             warn!(path = %path.display(), %err, "failed to persist channel pairing store");
+        }
+    }
+
+    /// Atomically persist one snapshot. The temporary file is unique per
+    /// process/time slice so concurrent best-effort pairing writes cannot
+    /// truncate a delivery claim that is being committed at the same time.
+    async fn persist_snapshot(&self, path: &Path, snapshot: &PairingFile) -> anyhow::Result<()> {
+        let bytes = serde_json::to_vec_pretty(snapshot)?;
+        if let Some(parent) = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+        {
+            tokio::fs::create_dir_all(parent).await?;
+        }
+        let file_name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("channel-pairing.json");
+        let temporary = path.with_file_name(format!(
+            ".{file_name}.tmp-{}-{}",
+            std::process::id(),
+            unix_nanos()
+        ));
+        tokio::fs::write(&temporary, bytes).await?;
+        if let Err(error) = tokio::fs::rename(&temporary, path).await {
+            let _ = tokio::fs::remove_file(&temporary).await;
+            return Err(error.into());
+        }
+        Ok(())
+    }
+
+    /// Claim a provider delivery before spawning any model or outbound work.
+    ///
+    /// Provider callbacks are at-least-once. A completed claim is retained for
+    /// [`DELIVERY_RETENTION`], an in-flight claim suppresses concurrent retries
+    /// for [`DELIVERY_LEASE`], and a stale/failed claim can be reclaimed. The
+    /// claim is durably written before the webhook should return `200`.
+    pub async fn claim_delivery(
+        &self,
+        platform: &str,
+        delivery_id: &str,
+    ) -> anyhow::Result<DeliveryClaim> {
+        let key = delivery_key(platform, delivery_id)?;
+        let now = unix_now();
+        let cutoff = now.saturating_sub(DELIVERY_RETENTION.as_secs());
+        let _persist_guard = self.persist_lock.lock().await;
+        let mut file = self.inner.write().await;
+
+        file.deliveries.retain(|_, record| {
+            let live_processing = matches!(record.state, DeliveryState::Processing)
+                && now.saturating_sub(record.updated_at) < DELIVERY_LEASE.as_secs();
+            record.updated_at >= cutoff
+                && (live_processing || !matches!(record.state, DeliveryState::Processing))
+        });
+
+        if let Some(record) = file.deliveries.get(&key) {
+            match record.state {
+                DeliveryState::Completed => return Ok(DeliveryClaim::Completed),
+                DeliveryState::Processing
+                    if now.saturating_sub(record.updated_at) < DELIVERY_LEASE.as_secs() =>
+                {
+                    return Ok(DeliveryClaim::InFlight);
+                }
+                DeliveryState::Processing | DeliveryState::Failed => {}
+            }
+        }
+
+        let previous = file.deliveries.get(&key).cloned();
+        let mut evicted = None;
+        if previous.is_none() && file.deliveries.len() >= MAX_DELIVERY_RECORDS {
+            let oldest = file
+                .deliveries
+                .iter()
+                .filter(|(_, record)| {
+                    !matches!(record.state, DeliveryState::Processing)
+                        || now.saturating_sub(record.updated_at) >= DELIVERY_LEASE.as_secs()
+                })
+                .min_by_key(|(_, record)| record.updated_at)
+                .map(|(key, _)| key.clone());
+            let Some(oldest) = oldest else {
+                anyhow::bail!("channel delivery ledger is full of in-flight messages");
+            };
+            evicted = file
+                .deliveries
+                .remove(&oldest)
+                .map(|record| (oldest, record));
+        }
+
+        file.version = 1;
+        let attempts = previous
+            .as_ref()
+            .map_or(1, |record| record.attempts.saturating_add(1));
+        file.deliveries.insert(
+            key.clone(),
+            DeliveryRecord {
+                state: DeliveryState::Processing,
+                updated_at: now,
+                attempts,
+            },
+        );
+
+        if let Some(path) = &self.path {
+            if let Err(error) = self.persist_snapshot(path, &file).await {
+                if let Some(previous) = previous {
+                    file.deliveries.insert(key, previous);
+                } else {
+                    file.deliveries.remove(&key);
+                }
+                if let Some((evicted_key, evicted_record)) = evicted {
+                    file.deliveries.insert(evicted_key, evicted_record);
+                }
+                return Err(error);
+            }
+        }
+        Ok(DeliveryClaim::Claimed)
+    }
+
+    /// Extend an in-flight claim while the local retry budget is being used.
+    pub async fn touch_delivery(&self, platform: &str, delivery_id: &str) -> anyhow::Result<()> {
+        let key = delivery_key(platform, delivery_id)?;
+        let _persist_guard = self.persist_lock.lock().await;
+        let mut file = self.inner.write().await;
+        {
+            let Some(record) = file.deliveries.get_mut(&key) else {
+                return Ok(());
+            };
+            if !matches!(record.state, DeliveryState::Processing) {
+                return Ok(());
+            }
+            record.updated_at = unix_now();
+        }
+        if let Some(path) = &self.path {
+            self.persist_snapshot(path, &file).await
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Mark a claimed delivery complete after the shared turn has either sent
+    /// its reply or intentionally refused/dropped the message.
+    pub async fn complete_delivery(&self, platform: &str, delivery_id: &str) -> anyhow::Result<()> {
+        let key = delivery_key(platform, delivery_id)?;
+        let _persist_guard = self.persist_lock.lock().await;
+        let mut file = self.inner.write().await;
+        {
+            let Some(record) = file.deliveries.get_mut(&key) else {
+                return Ok(());
+            };
+            record.state = DeliveryState::Completed;
+            record.updated_at = unix_now();
+        }
+        if let Some(path) = &self.path {
+            self.persist_snapshot(path, &file).await
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Record a terminal local failure. The key remains reclaimable on a later
+    /// provider redelivery, while the failure itself is kept out of the durable
+    /// store so provider URLs, user text, and other transport diagnostics cannot
+    /// accidentally become long-lived pairing-state content.
+    pub async fn fail_delivery(&self, platform: &str, delivery_id: &str) -> anyhow::Result<()> {
+        let key = delivery_key(platform, delivery_id)?;
+        let _persist_guard = self.persist_lock.lock().await;
+        let mut file = self.inner.write().await;
+        {
+            let Some(record) = file.deliveries.get_mut(&key) else {
+                return Ok(());
+            };
+            record.state = DeliveryState::Failed;
+            record.updated_at = unix_now();
+        }
+        if let Some(path) = &self.path {
+            self.persist_snapshot(path, &file).await
+        } else {
+            Ok(())
         }
     }
 
@@ -478,11 +708,34 @@ fn reply_link_key(platform: &str, conversation_id: &str, provider_message_id: &s
     format!("{platform}\0{conversation_id}\0{provider_message_id}")
 }
 
+/// Scope one provider id to its channel type. The delimiter is not exposed to
+/// providers; it only prevents a Telegram update id from colliding with a
+/// WhatsApp message id in the shared node store.
+fn delivery_key(platform: &str, delivery_id: &str) -> anyhow::Result<String> {
+    let platform = platform.trim();
+    let delivery_id = delivery_id.trim();
+    if platform.is_empty() || delivery_id.is_empty() {
+        anyhow::bail!("channel delivery identity is empty");
+    }
+    if platform.len() > 80 || delivery_id.len() > 512 {
+        anyhow::bail!("channel delivery identity is too long");
+    }
+    Ok(format!("{platform}\0{delivery_id}"))
+}
+
 /// Seconds since the Unix epoch, saturating to 0 if the clock is before it.
 fn unix_now() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// Nanoseconds used only for unique temporary filenames during atomic writes.
+fn unix_nanos() -> u128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
         .unwrap_or(0)
 }
 
@@ -600,6 +853,98 @@ mod tests {
         }
 
         assert_eq!(store.inner.read().await.reply_links.len(), MAX_REPLY_LINKS);
+    }
+
+    #[tokio::test]
+    async fn delivery_claims_suppress_duplicates_until_completion() {
+        let store = PairingStore::ephemeral();
+        assert_eq!(
+            store
+                .claim_delivery("telegram", "bot-a:update-42")
+                .await
+                .unwrap(),
+            DeliveryClaim::Claimed
+        );
+        assert_eq!(
+            store
+                .claim_delivery("telegram", "bot-a:update-42")
+                .await
+                .unwrap(),
+            DeliveryClaim::InFlight
+        );
+
+        store
+            .complete_delivery("telegram", "bot-a:update-42")
+            .await
+            .unwrap();
+        assert_eq!(
+            store
+                .claim_delivery("telegram", "bot-a:update-42")
+                .await
+                .unwrap(),
+            DeliveryClaim::Completed
+        );
+
+        // Provider ids are scoped by platform, so equal-looking ids on two
+        // transports remain independent deliveries.
+        assert_eq!(
+            store
+                .claim_delivery("whatsapp", "bot-a:update-42")
+                .await
+                .unwrap(),
+            DeliveryClaim::Claimed
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_delivery_can_be_reclaimed_and_survives_restart() {
+        let path = std::env::temp_dir().join(format!(
+            "ryu-channel-deliveries-{}-{}.json",
+            std::process::id(),
+            unix_nanos()
+        ));
+        let store = PairingStore::load(&path).await;
+        store
+            .claim_delivery("whatsapp", "bot-a:wamid-1")
+            .await
+            .unwrap();
+        store
+            .fail_delivery("whatsapp", "bot-a:wamid-1")
+            .await
+            .unwrap();
+        assert_eq!(
+            store
+                .claim_delivery("whatsapp", "bot-a:wamid-1")
+                .await
+                .unwrap(),
+            DeliveryClaim::Claimed
+        );
+        store
+            .complete_delivery("whatsapp", "bot-a:wamid-1")
+            .await
+            .unwrap();
+        drop(store);
+
+        let restored = PairingStore::load(&path).await;
+        assert_eq!(
+            restored
+                .claim_delivery("whatsapp", "bot-a:wamid-1")
+                .await
+                .unwrap(),
+            DeliveryClaim::Completed
+        );
+        let _ = tokio::fs::remove_file(path).await;
+    }
+
+    #[test]
+    fn delivery_identity_rejects_empty_and_unbounded_provider_ids() {
+        assert!(delivery_key("telegram", "").is_err());
+        assert!(delivery_key("", "update-1").is_err());
+        assert!(delivery_key("telegram", &"x".repeat(513)).is_err());
+        assert_eq!(
+            delivery_key("telegram", "update-1").unwrap(),
+            "telegram\0update-1"
+        );
     }
 
     #[tokio::test]

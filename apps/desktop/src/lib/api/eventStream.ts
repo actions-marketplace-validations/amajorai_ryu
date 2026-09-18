@@ -12,6 +12,10 @@
 // subscribers. The connection is reference-counted: it opens on the first
 // subscriber and closes when the last one leaves, and reconnects with backoff.
 
+import { abortableDelay as waitForEventStreamRetry } from "../abortable-delay.ts";
+
+export { abortableDelay as waitForEventStreamRetry } from "../abortable-delay.ts";
+
 import { type ApiTarget, authenticatedFetch } from "./client.ts";
 
 /** The channels Core's `/api/events/all` tags events with (the SSE `event:`). */
@@ -42,23 +46,6 @@ interface MuxConnection {
 
 /** One shared connection per node URL and explicit credential scope. */
 const connections = new Map<string, MuxConnection>();
-
-/** Pause until retry, releasing its listener on timeout or teardown. */
-function delay(ms: number, signal: AbortSignal): Promise<void> {
-	return new Promise((resolve) => {
-		if (signal.aborted) {
-			resolve();
-			return;
-		}
-		const finish = () => {
-			clearTimeout(timer);
-			signal.removeEventListener("abort", finish);
-			resolve();
-		};
-		const timer = setTimeout(finish, ms);
-		signal.addEventListener("abort", finish, { once: true });
-	});
-}
 
 /** Parse one SSE frame and dispatch its payload to the channel's subscribers. */
 function dispatchFrame(mux: MuxConnection, frame: string): void {
@@ -151,7 +138,7 @@ async function runConnection(
 		if (mux.closed || mux.controller.signal.aborted) {
 			break;
 		}
-		await delay(backoff, mux.controller.signal);
+		await waitForEventStreamRetry(backoff, mux.controller.signal);
 		backoff = Math.min(backoff * 2, MAX_BACKOFF_MS);
 	}
 }

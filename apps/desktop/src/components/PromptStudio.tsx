@@ -19,13 +19,18 @@
 import { useChat } from "@ai-sdk/react";
 import {
 	Add01Icon,
+	ArrowDown01Icon,
+	ArrowUp01Icon,
 	Cancel01Icon,
+	Copy01Icon,
 	Delete02Icon,
+	Edit02Icon,
 	LockedIcon,
 	PlayIcon,
 	Square01Icon,
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
+import { Markdown } from "@ryu/blocks/desktop/agent-elements/markdown.tsx";
 import { Badge } from "@ryu/ui/components/badge";
 import { Button } from "@ryu/ui/components/button";
 import { Input } from "@ryu/ui/components/input";
@@ -34,6 +39,7 @@ import {
 	NativeSelect,
 	NativeSelectOption,
 } from "@ryu/ui/components/native-select";
+import { Switch } from "@ryu/ui/components/switch";
 import { Textarea } from "@ryu/ui/components/textarea";
 import {
 	Tooltip,
@@ -42,6 +48,7 @@ import {
 } from "@ryu/ui/components/tooltip";
 import { DefaultChatTransport } from "ai";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { stringify as stringifyYaml } from "yaml";
 import { MarkdownEditor } from "@/src/components/editor/MarkdownEditor.tsx";
 import { VersionHistory } from "@/src/components/versioning/VersionHistory.tsx";
 import {
@@ -56,6 +63,7 @@ import {
 	type Assertion,
 	type AssertionOptions,
 	type AssertionResult,
+	type CodeEvaluatorSpec,
 	type EvalCaseScore,
 	type EvalDatasetCase,
 	type EvalMessage,
@@ -65,13 +73,18 @@ import {
 } from "@/src/lib/api/gateway.ts";
 import {
 	createPromptSuite,
+	deletePromptRun,
+	duplicatePromptRun,
 	getPromptRun,
+	listPromptReviews,
 	listPromptRuns,
 	listPromptSuites,
 	listPromptSuiteVersions,
+	type PromptReview,
 	type PromptRunMeta,
 	type PromptSuiteRecord,
 	type PromptSuiteVersionMeta,
+	renamePromptRun,
 	restorePromptSuiteVersion,
 	savePromptReview,
 	savePromptRun,
@@ -82,6 +95,7 @@ import {
 	normalizePromptfooConfig,
 	type PromptfooConfig,
 	type PromptfooPrompt,
+	type PromptfooRelatedFiles,
 	type PromptfooTest,
 	parsePromptfooFile,
 	serializePromptfooConfig,
@@ -152,12 +166,39 @@ function scoreTone(score: number): string {
 	return "text-status-destructive";
 }
 
+function formatMicroUsd(value: number | null | undefined): string {
+	return value === null || value === undefined
+		? "unknown"
+		: `$${(value / 1_000_000).toFixed(4)}`;
+}
+
 function parseThreshold(value: string): number | undefined {
 	if (!value.trim()) {
 		return undefined;
 	}
 	const parsed = Number.parseFloat(value);
 	return Number.isFinite(parsed) ? Math.min(1, Math.max(0, parsed)) : undefined;
+}
+
+function parseRunTags(value: string): Record<string, string> {
+	const tags: Record<string, string> = {};
+	for (const item of value.split(",")) {
+		const [key, ...rest] = item.split("=");
+		const normalizedKey = key?.trim();
+		const normalizedValue = rest.join("=").trim();
+		if (normalizedKey && normalizedValue) {
+			tags[normalizedKey] = normalizedValue;
+		}
+	}
+	return tags;
+}
+
+function linkedPromptRunId(): string | null {
+	if (typeof window === "undefined") {
+		return null;
+	}
+	const queryString = window.location.hash.split("?")[1];
+	return queryString ? new URLSearchParams(queryString).get("run_id") : null;
 }
 
 // ── Assertion kinds (UI metadata) ──────────────────────────────────────────────
@@ -174,6 +215,13 @@ const ASSERTION_KINDS = [
 	"icontains_any",
 	"icontains_all",
 	"contains_json",
+	"contains_html",
+	"contains_xml",
+	"contains_sql",
+	"levenshtein",
+	"latency",
+	"cost",
+	"assert_set",
 	"is_html",
 	"is_xml",
 	"is_sql",
@@ -187,6 +235,7 @@ const ASSERTION_KINDS = [
 	"json_valid",
 	"llm_judge",
 	"llm_rubric",
+	"similar",
 	"factuality",
 	"context_faithfulness",
 	"answer_relevance",
@@ -206,6 +255,13 @@ const ASSERTION_LABELS: Record<AssertionKind, string> = {
 	icontains_any: "Contains any (case-insensitive)",
 	icontains_all: "Contains all (case-insensitive)",
 	contains_json: "Contains JSON",
+	contains_html: "Contains HTML",
+	contains_xml: "Contains XML",
+	contains_sql: "Contains SQL",
+	levenshtein: "Levenshtein",
+	latency: "Latency",
+	cost: "Cost",
+	assert_set: "Assertion set",
 	is_html: "HTML",
 	is_xml: "XML",
 	is_sql: "SQL",
@@ -219,6 +275,7 @@ const ASSERTION_LABELS: Record<AssertionKind, string> = {
 	json_valid: "Valid JSON",
 	llm_judge: "LLM judge",
 	llm_rubric: "LLM rubric",
+	similar: "Similar",
 	factuality: "Factuality",
 	context_faithfulness: "Context faithfulness",
 	answer_relevance: "Answer relevance",
@@ -234,14 +291,19 @@ function defaultAssertion(kind: AssertionKind): Assertion {
 			"is_xml",
 			"is_sql",
 			"is_refusal",
+			"assert_set",
 		].includes(kind)
 	) {
+		if (kind === "assert_set") {
+			return { assertions: [], kind } as Assertion;
+		}
 		return { kind } as Assertion;
 	}
 	if (
 		[
 			"llm_judge",
 			"llm_rubric",
+			"similar",
 			"factuality",
 			"context_faithfulness",
 			"answer_relevance",
@@ -262,20 +324,29 @@ function assertionText(a: Assertion): string {
 			"is_xml",
 			"is_sql",
 			"is_refusal",
+			"assert_set",
 		].includes(a.kind)
 	) {
+		if (a.kind === "assert_set" && "assertions" in a) {
+			return JSON.stringify(a.assertions);
+		}
 		return "";
 	}
 	if (
 		[
 			"llm_judge",
 			"llm_rubric",
+			"similar",
 			"factuality",
 			"context_faithfulness",
 			"answer_relevance",
 		].includes(a.kind)
 	) {
-		return "rubric" in a ? a.rubric : "";
+		return a.kind === "similar" && "value" in a
+			? a.value
+			: "rubric" in a
+				? a.rubric
+				: "";
 	}
 	return "value" in a ? a.value : "";
 }
@@ -290,19 +361,39 @@ function withAssertionText(a: Assertion, text: string): Assertion {
 			"is_xml",
 			"is_sql",
 			"is_refusal",
+			"assert_set",
 		].includes(a.kind)
 	) {
+		if (a.kind === "assert_set") {
+			try {
+				const parsed: unknown = JSON.parse(text);
+				if (Array.isArray(parsed)) {
+					return {
+						assertions: parsed.filter(isPersistedAssertion),
+						kind: "assert_set",
+						options: a.options,
+					};
+				}
+			} catch {
+				// Keep the last valid assertion set until the JSON is complete.
+			}
+			return a;
+		}
 		return a;
 	}
 	if (
 		[
 			"llm_judge",
 			"llm_rubric",
+			"similar",
 			"factuality",
 			"context_faithfulness",
 			"answer_relevance",
 		].includes(a.kind)
 	) {
+		if (a.kind === "similar") {
+			return { kind: a.kind, options: a.options, value: text } as Assertion;
+		}
 		return { kind: a.kind, options: a.options, rubric: text } as Assertion;
 	}
 	return { kind: a.kind, options: a.options, value: text } as Assertion;
@@ -320,9 +411,11 @@ function gatewayAssertion(assertion: Assertion): Assertion {
 
 interface TestCaseRow {
 	assertions: Assertion[];
+	context?: unknown;
 	/** Legacy convenience expected substring. */
 	expected: string;
 	id: string;
+	inheritDefaultTest?: boolean;
 	/** User message; may contain {{vars}}. */
 	input: string;
 	/** Ordered Promptfoo chat messages, when this case is multi-turn. */
@@ -330,6 +423,8 @@ interface TestCaseRow {
 	metadata: Record<string, unknown>;
 	name: string;
 	options: Record<string, unknown>;
+	provider?: string;
+	providerOutput?: unknown;
 	providers: string[];
 	/** Promptfoo-style mean assertion pass threshold, entered as 0..1. */
 	threshold: string;
@@ -352,10 +447,32 @@ function newTestCaseRow(): TestCaseRow {
 }
 
 interface PromptTestSuiteSnapshot {
+	codeEvaluators?: CodeEvaluatorSpec[];
+	defaultTest?: Record<string, unknown>;
 	evaluatorIds: string[];
 	extraModels: string[];
 	judgeModel: string;
+	maxConcurrency?: number;
+	repeat?: number;
 	rows: TestCaseRow[];
+	tags?: Record<string, string>;
+	timeoutMs?: number;
+}
+
+function parseCodeEvaluators(value: unknown): CodeEvaluatorSpec[] {
+	if (!Array.isArray(value)) {
+		return [];
+	}
+	return value.flatMap((item) => {
+		if (!isRecord(item)) {
+			return [];
+		}
+		const id = typeof item.id === "string" ? item.id.trim() : "";
+		const lang =
+			item.lang === "python" ? "python" : item.lang === "js" ? "js" : null;
+		const source = typeof item.source === "string" ? item.source : "";
+		return id && lang && source ? [{ id, lang, source }] : [];
+	});
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -374,20 +491,30 @@ function isPersistedAssertion(value: unknown): value is Assertion {
 			"is_xml",
 			"is_sql",
 			"is_refusal",
+			"assert_set",
 		].includes(value.kind)
 	) {
+		if (value.kind === "assert_set") {
+			return (
+				Array.isArray(value.assertions) &&
+				value.assertions.every(isPersistedAssertion)
+			);
+		}
 		return true;
 	}
 	if (
 		[
 			"llm_judge",
 			"llm_rubric",
+			"similar",
 			"factuality",
 			"context_faithfulness",
 			"answer_relevance",
 		].includes(value.kind)
 	) {
-		return typeof value.rubric === "string";
+		return value.kind === "similar"
+			? typeof value.value === "string"
+			: typeof value.rubric === "string";
 	}
 	return (
 		ASSERTION_KINDS.includes(value.kind as AssertionKind) &&
@@ -436,18 +563,37 @@ function testSuiteKey(agentId: string): string {
 
 function loadTestSuite(agentId: string | null): PromptTestSuiteSnapshot {
 	if (!agentId || typeof window === "undefined") {
-		return { evaluatorIds: [], extraModels: [], judgeModel: "", rows: [] };
+		return {
+			evaluatorIds: [],
+			extraModels: [],
+			judgeModel: "",
+			rows: [],
+		};
 	}
 	try {
 		const raw = window.localStorage.getItem(testSuiteKey(agentId));
 		if (!raw) {
-			return { evaluatorIds: [], extraModels: [], judgeModel: "", rows: [] };
+			return {
+				evaluatorIds: [],
+				extraModels: [],
+				judgeModel: "",
+				rows: [],
+			};
 		}
 		const parsed: unknown = JSON.parse(raw);
 		if (!isRecord(parsed)) {
-			return { evaluatorIds: [], extraModels: [], judgeModel: "", rows: [] };
+			return {
+				evaluatorIds: [],
+				extraModels: [],
+				judgeModel: "",
+				rows: [],
+			};
 		}
 		return {
+			codeEvaluators: parseCodeEvaluators(parsed.codeEvaluators),
+			defaultTest: isRecord(parsed.defaultTest)
+				? parsed.defaultTest
+				: undefined,
 			evaluatorIds: Array.isArray(parsed.evaluatorIds)
 				? parsed.evaluatorIds.filter(
 						(value): value is string => typeof value === "string"
@@ -460,12 +606,31 @@ function loadTestSuite(agentId: string | null): PromptTestSuiteSnapshot {
 				: [],
 			judgeModel:
 				typeof parsed.judgeModel === "string" ? parsed.judgeModel : "",
+			maxConcurrency:
+				typeof parsed.maxConcurrency === "number"
+					? parsed.maxConcurrency
+					: undefined,
+			repeat: typeof parsed.repeat === "number" ? parsed.repeat : undefined,
+			tags: isRecord(parsed.tags)
+				? Object.fromEntries(
+						Object.entries(parsed.tags).filter(
+							(entry): entry is [string, string] => typeof entry[1] === "string"
+						)
+					)
+				: undefined,
+			timeoutMs:
+				typeof parsed.timeoutMs === "number" ? parsed.timeoutMs : undefined,
 			rows: Array.isArray(parsed.rows)
 				? parsed.rows.filter(isPersistedRow).map(normalizeTestCaseRow)
 				: [],
 		};
 	} catch {
-		return { evaluatorIds: [], extraModels: [], judgeModel: "", rows: [] };
+		return {
+			evaluatorIds: [],
+			extraModels: [],
+			judgeModel: "",
+			rows: [],
+		};
 	}
 }
 
@@ -732,6 +897,78 @@ interface PromptTestCasesProps {
 	target: ApiTarget;
 }
 
+interface PendingPromptfooImport {
+	config: PromptfooConfig;
+	filename: string;
+	warnings: string[];
+}
+
+function promptfooImportWarnings(config: PromptfooConfig): string[] {
+	const warnings: string[] = [];
+	if (Array.isArray(config.functions) && config.functions.length > 0) {
+		warnings.push(
+			"Dynamic functions are retained as configuration but are not executed during import; use an explicit Core-sandbox code evaluator to run user code."
+		);
+	}
+	return warnings;
+}
+
+function promptfooConfigExtras(
+	config: PromptfooConfig
+): Record<string, unknown> {
+	const editorKeys = new Set([
+		"code_evaluators",
+		"defaultTest",
+		"evaluators",
+		"commandLineOptions",
+		"evaluateOptions",
+		"judge_model",
+		"prompt",
+		"prompts",
+		"providers",
+		"run_config",
+		"targets",
+		"tests",
+	]);
+	return Object.fromEntries(
+		Object.entries(config).filter(([key]) => !editorKeys.has(key))
+	);
+}
+
+function promptfooRunConfig(config: PromptfooConfig): Record<string, unknown> {
+	const merged: Record<string, unknown> = {};
+	for (const key of ["commandLineOptions", "evaluateOptions", "run_config"]) {
+		const source = config[key];
+		if (isRecord(source)) {
+			Object.assign(merged, source);
+		}
+	}
+	return merged;
+}
+
+function numericRunOption(
+	config: Record<string, unknown>,
+	...keys: string[]
+): number | undefined {
+	for (const key of keys) {
+		if (typeof config[key] === "number") {
+			return config[key];
+		}
+	}
+	return undefined;
+}
+
+function runTagsFromConfig(config: Record<string, unknown>): string {
+	return isRecord(config.tags)
+		? Object.entries(config.tags)
+				.filter(
+					(entry): entry is [string, string] => typeof entry[1] === "string"
+				)
+				.map(([key, value]) => `${key}=${value}`)
+				.join(", ")
+		: "";
+}
+
 interface PromptVariantRow {
 	content: string;
 	id: string;
@@ -759,13 +996,17 @@ function promptVariantFromConfig(prompt: PromptfooPrompt): PromptVariantRow {
 function promptfooTestToRow(test: PromptfooTest, index: number): TestCaseRow {
 	return {
 		assertions: test.assertions,
+		context: test.context,
 		expected: test.expected ?? "",
-		id: crypto.randomUUID(),
+		inheritDefaultTest: test.inheritDefaultTest,
+		id: test.id ?? crypto.randomUUID(),
 		input: test.prompt ?? "",
 		messages: test.messages,
 		metadata: test.metadata,
 		name: test.description || `Case ${index + 1}`,
 		options: test.options,
+		provider: test.provider,
+		providerOutput: test.providerOutput,
 		providers: test.providers,
 		threshold: test.threshold === undefined ? "" : String(test.threshold),
 		vars: test.vars,
@@ -775,13 +1016,18 @@ function promptfooTestToRow(test: PromptfooTest, index: number): TestCaseRow {
 function rowToPromptfooTest(row: TestCaseRow): PromptfooTest {
 	return {
 		assertions: row.assertions,
+		context: row.context,
 		description: row.name,
 		expected: row.expected.trim() || undefined,
+		inheritDefaultTest: row.inheritDefaultTest,
 		messages: row.messages,
 		metadata: row.metadata,
 		options: row.options,
 		prompt: row.input || undefined,
+		provider: row.provider,
+		providerOutput: row.providerOutput,
 		providers: row.providers,
+		id: row.id,
 		threshold: parseThreshold(row.threshold),
 		vars: row.vars,
 	};
@@ -793,7 +1039,11 @@ function suiteConfigFromEditor(
 	rows: TestCaseRow[],
 	providers: string[],
 	judgeModel: string,
-	evaluators: string[]
+	evaluators: string[],
+	codeEvaluators: CodeEvaluatorSpec[] = [],
+	defaultTest?: Record<string, unknown>,
+	runConfig?: Record<string, unknown>,
+	configExtras: Record<string, unknown> = {}
 ): PromptfooConfig {
 	const prompts: PromptfooPrompt[] = [
 		{
@@ -806,12 +1056,36 @@ function suiteConfigFromEditor(
 		...variants,
 	];
 	return normalizePromptfooConfig({
+		...configExtras,
+		...(defaultTest && Object.keys(defaultTest).length > 0
+			? { defaultTest }
+			: {}),
+		...(runConfig && Object.keys(runConfig).length > 0
+			? { run_config: runConfig }
+			: {}),
+		...(codeEvaluators.length > 0 ? { code_evaluators: codeEvaluators } : {}),
 		evaluators,
 		judge_model: judgeModel.trim() || undefined,
 		prompts,
 		providers,
 		tests: rows.map(rowToPromptfooTest),
 	});
+}
+
+function runConfigFromEditor(
+	maxConcurrency: number,
+	timeoutMs: number,
+	repeat: number,
+	cache: boolean,
+	tags: string
+): Record<string, unknown> {
+	return {
+		cache,
+		max_concurrency: maxConcurrency,
+		repeat,
+		tags: parseRunTags(tags),
+		timeout_ms: timeoutMs,
+	};
 }
 
 function PromptTestCases({
@@ -825,6 +1099,19 @@ function PromptTestCases({
 }: PromptTestCasesProps) {
 	const localSuite = useMemo(() => loadTestSuite(agentId), [agentId]);
 	const [rows, setRows] = useState<TestCaseRow[]>(() => localSuite.rows);
+	const [codeEvaluators, setCodeEvaluators] = useState<CodeEvaluatorSpec[]>(
+		() => localSuite.codeEvaluators ?? []
+	);
+	const [configExtras, setConfigExtras] = useState<Record<string, unknown>>({});
+	const [codeEvaluatorText, setCodeEvaluatorText] = useState(() =>
+		JSON.stringify(localSuite.codeEvaluators ?? [], null, 2)
+	);
+	const [defaultTest, setDefaultTest] = useState<Record<string, unknown>>(
+		() => localSuite.defaultTest ?? {}
+	);
+	const [defaultTestText, setDefaultTestText] = useState(() =>
+		JSON.stringify(localSuite.defaultTest ?? {}, null, 2)
+	);
 	const [extraModels, setExtraModels] = useState<string[]>(
 		() => localSuite.extraModels
 	);
@@ -833,6 +1120,21 @@ function PromptTestCases({
 	const [evaluatorIds, setEvaluatorIds] = useState<string[]>(
 		() => localSuite.evaluatorIds
 	);
+	const [maxConcurrency, setMaxConcurrency] = useState(
+		() => localSuite.maxConcurrency ?? 4
+	);
+	const [timeoutMs, setTimeoutMs] = useState(
+		() => localSuite.timeoutMs ?? 120_000
+	);
+	const [repeat, setRepeat] = useState(() => localSuite.repeat ?? 1);
+	const [cache, setCache] = useState(true);
+	const [runTags, setRunTags] = useState(() =>
+		Object.entries(localSuite.tags ?? {})
+			.map(([key, value]) => `${key}=${value}`)
+			.join(", ")
+	);
+	const [runPrefix, setRunPrefix] = useState("");
+	const [runSuffix, setRunSuffix] = useState("");
 	const [suite, setSuite] = useState<PromptSuiteRecord | null>(null);
 	const [suiteName, setSuiteName] = useState("Promptfoo regression suite");
 	const [suiteVersions, setSuiteVersions] = useState<PromptSuiteVersionMeta[]>(
@@ -842,6 +1144,8 @@ function PromptTestCases({
 	const [suiteLoading, setSuiteLoading] = useState(false);
 	const [suiteSaving, setSuiteSaving] = useState(false);
 	const [suiteError, setSuiteError] = useState<string | null>(null);
+	const [pendingImport, setPendingImport] =
+		useState<PendingPromptfooImport | null>(null);
 	const [saveLabel, setSaveLabel] = useState("");
 	const [exportFormat, setExportFormat] = useState<
 		"csv" | "json" | "jsonl" | "yaml"
@@ -850,6 +1154,17 @@ function PromptTestCases({
 	const [running, setRunning] = useState(false);
 	const [results, setResults] = useState<PromptVariantRun[] | null>(null);
 	const [activeRunId, setActiveRunId] = useState<string | null>(null);
+	const [reviews, setReviews] = useState<Record<string, PromptReview>>({});
+	const [comparisonResults, setComparisonResults] = useState<
+		PromptVariantRun[] | null
+	>(null);
+	const [comparisonRunId, setComparisonRunId] = useState<string | null>(null);
+	useEffect(() => {
+		setCodeEvaluatorText(JSON.stringify(codeEvaluators, null, 2));
+	}, [codeEvaluators]);
+	useEffect(() => {
+		setDefaultTestText(JSON.stringify(defaultTest, null, 2));
+	}, [defaultTest]);
 	const [error, setError] = useState<string | null>(null);
 	const abortRef = useRef<AbortController | null>(null);
 	const loadedSuiteAgentRef = useRef<string | null>(null);
@@ -864,6 +1179,9 @@ function PromptTestCases({
 			setSuiteError(null);
 			setResults(null);
 			setActiveRunId(null);
+			setReviews({});
+			setComparisonResults(null);
+			setComparisonRunId(null);
 			try {
 				if (!agentId) {
 					return;
@@ -876,19 +1194,35 @@ function PromptTestCases({
 				if (!nextSuite) {
 					const local = loadTestSuite(agentId);
 					setSuite(null);
+					setConfigExtras({});
 					setSuiteName("Promptfoo regression suite");
+					setCodeEvaluators(local.codeEvaluators ?? []);
+					setDefaultTest(local.defaultTest ?? {});
 					setRows(local.rows);
 					setExtraModels(local.extraModels);
 					setJudgeModel(local.judgeModel);
 					setEvaluatorIds(local.evaluatorIds);
+					setMaxConcurrency(local.maxConcurrency ?? 4);
+					setTimeoutMs(local.timeoutMs ?? 120_000);
+					setRepeat(local.repeat ?? 1);
+					setRunTags(
+						Object.entries(local.tags ?? {})
+							.map(([key, value]) => `${key}=${value}`)
+							.join(", ")
+					);
 					setVariants([]);
 					setSuiteVersions([]);
 					setSuiteRuns([]);
+					setComparisonResults(null);
+					setComparisonRunId(null);
 					return;
 				}
 				const config = normalizePromptfooConfig(nextSuite.config);
 				setSuite(nextSuite);
+				setConfigExtras(promptfooConfigExtras(config));
 				setSuiteName(nextSuite.name);
+				setCodeEvaluators(parseCodeEvaluators(config.code_evaluators));
+				setDefaultTest(config.defaultTest ?? {});
 				setRows(config.tests.map(promptfooTestToRow));
 				setExtraModels(config.providers);
 				setJudgeModel(
@@ -901,6 +1235,20 @@ function PromptTestCases({
 							)
 						: []
 				);
+				const savedRunConfig = promptfooRunConfig(config);
+				setMaxConcurrency(
+					numericRunOption(
+						savedRunConfig,
+						"max_concurrency",
+						"maxConcurrency"
+					) ?? 4
+				);
+				setTimeoutMs(
+					numericRunOption(savedRunConfig, "timeout_ms", "timeoutMs") ?? 120_000
+				);
+				setRepeat(numericRunOption(savedRunConfig, "repeat") ?? 1);
+				setCache(savedRunConfig.cache !== false);
+				setRunTags(runTagsFromConfig(savedRunConfig));
 				setVariants(config.prompts.slice(1).map(promptVariantFromConfig));
 				if (config.prompts[0]?.content) {
 					onPromptChange(config.prompts[0].content);
@@ -912,6 +1260,23 @@ function PromptTestCases({
 				if (!cancelled) {
 					setSuiteVersions(versions);
 					setSuiteRuns(runs);
+					const linkedRunId = linkedPromptRunId();
+					if (linkedRunId && runs.some((run) => run.id === linkedRunId)) {
+						const [linkedRun, linkedReviews] = await Promise.all([
+							getPromptRun(target, nextSuite.id, linkedRunId),
+							listPromptReviews(target, nextSuite.id, linkedRunId),
+						]);
+						const linkedResults = linkedRun.result.variants;
+						if (Array.isArray(linkedResults)) {
+							setResults(linkedResults as PromptVariantRun[]);
+							setActiveRunId(linkedRunId);
+							setReviews(
+								Object.fromEntries(
+									linkedReviews.map((review) => [review.resultKey, review])
+								)
+							);
+						}
+					}
 				}
 			} catch (loadError) {
 				if (!cancelled) {
@@ -920,9 +1285,19 @@ function PromptTestCases({
 					const local = agentId ? loadTestSuite(agentId) : null;
 					if (local) {
 						setRows(local.rows);
+						setCodeEvaluators(local.codeEvaluators ?? []);
+						setDefaultTest(local.defaultTest ?? {});
 						setExtraModels(local.extraModels);
 						setJudgeModel(local.judgeModel);
 						setEvaluatorIds(local.evaluatorIds);
+						setMaxConcurrency(local.maxConcurrency ?? 4);
+						setTimeoutMs(local.timeoutMs ?? 120_000);
+						setRepeat(local.repeat ?? 1);
+						setRunTags(
+							Object.entries(local.tags ?? {})
+								.map(([key, value]) => `${key}=${value}`)
+								.join(", ")
+						);
 					}
 					setSuiteError(
 						loadError instanceof Error
@@ -947,8 +1322,31 @@ function PromptTestCases({
 		if (!agentId || loadedSuiteAgentRef.current !== agentId) {
 			return;
 		}
-		persistTestSuite(agentId, { evaluatorIds, extraModels, judgeModel, rows });
-	}, [agentId, evaluatorIds, extraModels, judgeModel, rows]);
+		persistTestSuite(agentId, {
+			codeEvaluators,
+			defaultTest,
+			evaluatorIds,
+			extraModels,
+			judgeModel,
+			maxConcurrency,
+			repeat,
+			tags: parseRunTags(runTags),
+			timeoutMs,
+			rows,
+		});
+	}, [
+		agentId,
+		codeEvaluators,
+		defaultTest,
+		evaluatorIds,
+		extraModels,
+		judgeModel,
+		maxConcurrency,
+		repeat,
+		runTags,
+		timeoutMs,
+		rows,
+	]);
 
 	// The full model list for this run: the agent's model plus any extras.
 	const selectedModels = useMemo(() => {
@@ -988,6 +1386,46 @@ function PromptTestCases({
 		setRows((prev) => prev.map((r) => (r.id === id ? { ...r, ...patch } : r)));
 	}, []);
 
+	const moveRow = useCallback((id: string, direction: -1 | 1) => {
+		setRows((previous) => {
+			const index = previous.findIndex((row) => row.id === id);
+			const nextIndex = index + direction;
+			if (index < 0 || nextIndex < 0 || nextIndex >= previous.length) {
+				return previous;
+			}
+			const next = previous.slice();
+			[next[index], next[nextIndex]] = [next[nextIndex], next[index]];
+			return next;
+		});
+	}, []);
+
+	const duplicateRow = useCallback((id: string) => {
+		setRows((previous) => {
+			const index = previous.findIndex((row) => row.id === id);
+			const source = previous[index];
+			if (!source) {
+				return previous;
+			}
+			const duplicate = {
+				...source,
+				id: crypto.randomUUID(),
+				name: `${source.name || `Case ${index + 1}`} copy`,
+				metadata: { ...source.metadata },
+				options: { ...source.options },
+				providers: [...source.providers],
+				vars: { ...source.vars },
+				assertions: source.assertions.map((assertion) =>
+					structuredClone(assertion)
+				),
+			};
+			return [
+				...previous.slice(0, index + 1),
+				duplicate,
+				...previous.slice(index + 1),
+			];
+		});
+	}, []);
+
 	const addVariant = useCallback(() => {
 		setVariants((prev) => [
 			...prev,
@@ -1016,6 +1454,40 @@ function PromptTestCases({
 		setVariants((prev) => prev.filter((variant) => variant.id !== id));
 	}, []);
 
+	const moveVariant = useCallback((id: string, direction: -1 | 1) => {
+		setVariants((previous) => {
+			const index = previous.findIndex((variant) => variant.id === id);
+			const nextIndex = index + direction;
+			if (index < 0 || nextIndex < 0 || nextIndex >= previous.length) {
+				return previous;
+			}
+			const next = previous.slice();
+			[next[index], next[nextIndex]] = [next[nextIndex], next[index]];
+			return next;
+		});
+	}, []);
+
+	const duplicateVariant = useCallback((id: string) => {
+		setVariants((previous) => {
+			const index = previous.findIndex((variant) => variant.id === id);
+			const source = previous[index];
+			if (!source) {
+				return previous;
+			}
+			const duplicate = {
+				...source,
+				id: `prompt-${crypto.randomUUID()}`,
+				messages: source.messages.map((message) => ({ ...message })),
+				name: `${source.name || `Variant ${index + 1}`} copy`,
+			};
+			return [
+				...previous.slice(0, index + 1),
+				duplicate,
+				...previous.slice(index + 1),
+			];
+		});
+	}, []);
+
 	const addExtraModel = useCallback(() => {
 		const m = newModel.trim();
 		if (!m) {
@@ -1031,6 +1503,9 @@ function PromptTestCases({
 
 	const applyConfig = useCallback(
 		(config: PromptfooConfig) => {
+			setConfigExtras(promptfooConfigExtras(config));
+			setCodeEvaluators(parseCodeEvaluators(config.code_evaluators));
+			setDefaultTest(config.defaultTest ?? {});
 			setRows(config.tests.map(promptfooTestToRow));
 			setExtraModels(config.providers);
 			setJudgeModel(
@@ -1043,6 +1518,21 @@ function PromptTestCases({
 						)
 					: []
 			);
+			const importedRunConfig = promptfooRunConfig(config);
+			setMaxConcurrency(
+				numericRunOption(
+					importedRunConfig,
+					"max_concurrency",
+					"maxConcurrency"
+				) ?? 4
+			);
+			setTimeoutMs(
+				numericRunOption(importedRunConfig, "timeout_ms", "timeoutMs") ??
+					120_000
+			);
+			setRepeat(numericRunOption(importedRunConfig, "repeat") ?? 1);
+			setCache(importedRunConfig.cache !== false);
+			setRunTags(runTagsFromConfig(importedRunConfig));
 			setVariants(config.prompts.slice(1).map(promptVariantFromConfig));
 			if (config.prompts[0]?.content !== undefined) {
 				onPromptChange(config.prompts[0].content);
@@ -1053,18 +1543,30 @@ function PromptTestCases({
 
 	const importFile = useCallback(
 		async (event: React.ChangeEvent<HTMLInputElement>) => {
-			const file = event.target.files?.[0];
+			const files = Array.from(event.target.files ?? []);
+			const file = files[0];
 			event.target.value = "";
 			if (!file) {
 				return;
 			}
 			try {
-				const parsed = parsePromptfooFile(await file.text(), file.name);
-				applyConfig(parsed.config);
-				setSuiteName(file.name.replace(/\.[^.]+$/, "") || "Imported suite");
-				setSuite(null);
-				setSuiteVersions([]);
-				setSuiteRuns([]);
+				const relatedFiles: PromptfooRelatedFiles = Object.fromEntries(
+					await Promise.all(
+						files
+							.slice(1)
+							.map(async (related) => [related.name, await related.text()])
+					)
+				);
+				const parsed = parsePromptfooFile(
+					await file.text(),
+					file.name,
+					relatedFiles
+				);
+				setPendingImport({
+					config: parsed.config,
+					filename: file.name,
+					warnings: promptfooImportWarnings(parsed.config),
+				});
 				setSuiteError(null);
 			} catch (importError) {
 				setSuiteError(
@@ -1076,6 +1578,20 @@ function PromptTestCases({
 		},
 		[applyConfig]
 	);
+
+	const applyPendingImport = useCallback(() => {
+		if (!pendingImport) {
+			return;
+		}
+		applyConfig(pendingImport.config);
+		setSuiteName(
+			pendingImport.filename.replace(/\.[^.]+$/, "") || "Imported suite"
+		);
+		setSuite(null);
+		setSuiteVersions([]);
+		setSuiteRuns([]);
+		setPendingImport(null);
+	}, [applyConfig, pendingImport]);
 
 	const saveSuite = useCallback(async () => {
 		if (!agentId || locked) {
@@ -1090,7 +1606,11 @@ function PromptTestCases({
 				rows,
 				extraModels,
 				judgeModel,
-				evaluatorIds
+				evaluatorIds,
+				codeEvaluators,
+				defaultTest,
+				runConfigFromEditor(maxConcurrency, timeoutMs, repeat, cache, runTags),
+				configExtras
 			);
 			const response = suite
 				? await updatePromptSuite(target, suite.id, {
@@ -1123,8 +1643,16 @@ function PromptTestCases({
 	}, [
 		agentId,
 		extraModels,
+		configExtras,
 		judgeModel,
 		evaluatorIds,
+		codeEvaluators,
+		defaultTest,
+		maxConcurrency,
+		timeoutMs,
+		repeat,
+		cache,
+		runTags,
 		locked,
 		promptDraft,
 		rows,
@@ -1168,7 +1696,11 @@ function PromptTestCases({
 				rows,
 				extraModels,
 				judgeModel,
-				evaluatorIds
+				evaluatorIds,
+				codeEvaluators,
+				defaultTest,
+				runConfigFromEditor(maxConcurrency, timeoutMs, repeat, cache, runTags),
+				configExtras
 			);
 			const text = serializePromptfooConfig(config, format);
 			const link = document.createElement("a");
@@ -1185,6 +1717,14 @@ function PromptTestCases({
 			extraModels,
 			evaluatorIds,
 			judgeModel,
+			codeEvaluators,
+			configExtras,
+			defaultTest,
+			maxConcurrency,
+			timeoutMs,
+			repeat,
+			cache,
+			runTags,
 			promptDraft,
 			rows,
 			suiteName,
@@ -1204,12 +1744,41 @@ function PromptTestCases({
 		setError(null);
 		try {
 			const dataset: EvalDatasetCase[] = rows.map((r) => ({
+				description: r.name.trim() || undefined,
+				id: r.id,
 				messages: r.messages,
 				prompt: r.input,
 				vars: r.vars,
 				assertions: r.assertions.map(gatewayAssertion),
+				context: r.context,
 				expected: r.expected.trim() ? r.expected : undefined,
 				threshold: parseThreshold(r.threshold),
+				metadata: r.metadata,
+				options: {
+					cache:
+						typeof r.options.cache === "boolean" ? r.options.cache : undefined,
+					prefix:
+						typeof r.options.prefix === "string" ? r.options.prefix : undefined,
+					suffix:
+						typeof r.options.suffix === "string" ? r.options.suffix : undefined,
+					timeout_ms:
+						typeof r.options.timeout_ms === "number"
+							? r.options.timeout_ms
+							: undefined,
+					transform:
+						typeof r.options.transform === "string"
+							? r.options.transform
+							: undefined,
+					transform_vars:
+						typeof r.options.transform_vars === "string"
+							? r.options.transform_vars
+							: typeof r.options.transformVars === "string"
+								? r.options.transformVars
+								: undefined,
+				},
+				provider: r.provider,
+				providers: r.providers,
+				provider_output: r.providerOutput,
 			}));
 			const runResults: PromptVariantRun[] = [];
 			for (const variant of promptVariants) {
@@ -1228,7 +1797,16 @@ function PromptTestCases({
 							variant.type === "chat" ? variant.messages : undefined,
 						judge_model: judgeModel.trim() || undefined,
 						evaluators: evaluatorIds,
+						code_evaluators: codeEvaluators,
 						dataset,
+						max_concurrency: Math.max(1, Math.min(32, maxConcurrency)),
+						timeout_ms: Math.max(100, Math.min(120_000, timeoutMs)),
+						repeat: Math.max(1, Math.min(20, repeat)),
+						cache,
+						tags: parseRunTags(runTags),
+						prefix: runPrefix || undefined,
+						suffix: runSuffix || undefined,
+						prompt_id: variant.id,
 					},
 					controller.signal
 				);
@@ -1239,6 +1817,9 @@ function PromptTestCases({
 				});
 			}
 			setResults(runResults);
+			setReviews({});
+			setComparisonResults(null);
+			setComparisonRunId(null);
 			if (suite) {
 				const saved = await savePromptRun(target, suite.id, {
 					name: `${suiteName} · ${new Date().toLocaleString()}`,
@@ -1247,6 +1828,13 @@ function PromptTestCases({
 						judge_model: judgeModel,
 						models: selectedModels,
 						prompts: promptVariants,
+						run_config: runConfigFromEditor(
+							maxConcurrency,
+							timeoutMs,
+							repeat,
+							cache,
+							runTags
+						),
 					},
 					result: { variants: runResults },
 				});
@@ -1262,15 +1850,23 @@ function PromptTestCases({
 		}
 	}, [
 		agentId,
+		cache,
+		codeEvaluators,
 		judgeModel,
 		evaluatorIds,
+		maxConcurrency,
 		model,
 		promptVariants,
+		repeat,
 		rows,
+		runPrefix,
+		runSuffix,
+		runTags,
 		selectedModels,
 		suite,
 		suiteName,
 		target,
+		timeoutMs,
 	]);
 
 	const handleRun = useCallback(() => {
@@ -1278,6 +1874,134 @@ function PromptTestCases({
 			// errors are surfaced via setError inside run().
 		});
 	}, [run]);
+
+	const handleLoadRun = useCallback(
+		async (runId: string) => {
+			if (!suite) {
+				return;
+			}
+			try {
+				const [saved, savedReviews] = await Promise.all([
+					getPromptRun(target, suite.id, runId),
+					listPromptReviews(target, suite.id, runId),
+				]);
+				const savedResults = saved.result.variants;
+				if (Array.isArray(savedResults)) {
+					setResults(savedResults as PromptVariantRun[]);
+					setActiveRunId(runId);
+					setReviews(
+						Object.fromEntries(
+							savedReviews.map((review) => [review.resultKey, review])
+						)
+					);
+				}
+			} catch (loadError) {
+				setError(
+					loadError instanceof Error ? loadError.message : "Failed to load run"
+				);
+			}
+		},
+		[suite, target]
+	);
+
+	const handleRenameRun = useCallback(
+		async (runId: string, name: string) => {
+			if (!(suite && name.trim())) {
+				return;
+			}
+			try {
+				const updated = await renamePromptRun(
+					target,
+					suite.id,
+					runId,
+					name.trim()
+				);
+				setSuiteRuns((prev) =>
+					prev.map((run) => (run.id === runId ? updated : run))
+				);
+			} catch (renameError) {
+				setError(
+					renameError instanceof Error
+						? renameError.message
+						: "Failed to rename run"
+				);
+			}
+		},
+		[suite, target]
+	);
+
+	const handleDuplicateRun = useCallback(
+		async (runId: string) => {
+			if (!suite) {
+				return;
+			}
+			try {
+				const duplicate = await duplicatePromptRun(target, suite.id, runId);
+				setSuiteRuns((prev) => [duplicate, ...prev]);
+			} catch (duplicateError) {
+				setError(
+					duplicateError instanceof Error
+						? duplicateError.message
+						: "Failed to duplicate run"
+				);
+			}
+		},
+		[suite, target]
+	);
+
+	const handleDeleteRun = useCallback(
+		async (runId: string) => {
+			if (!suite) {
+				return;
+			}
+			try {
+				await deletePromptRun(target, suite.id, runId);
+				setSuiteRuns((prev) => prev.filter((run) => run.id !== runId));
+				if (comparisonRunId === runId) {
+					setComparisonResults(null);
+					setComparisonRunId(null);
+				}
+				if (activeRunId === runId) {
+					setActiveRunId(null);
+					setResults(null);
+					setReviews({});
+				}
+			} catch (deleteError) {
+				setError(
+					deleteError instanceof Error
+						? deleteError.message
+						: "Failed to delete run"
+				);
+			}
+		},
+		[activeRunId, comparisonRunId, suite, target]
+	);
+
+	const handleCompareRun = useCallback(
+		async (runId: string) => {
+			if (!(suite && activeRunId) || activeRunId === runId) {
+				setError(
+					"Select one run first, then choose a different run to compare."
+				);
+				return;
+			}
+			try {
+				const saved = await getPromptRun(target, suite.id, runId);
+				const savedResults = saved.result.variants;
+				if (Array.isArray(savedResults)) {
+					setComparisonResults(savedResults as PromptVariantRun[]);
+					setComparisonRunId(runId);
+				}
+			} catch (compareError) {
+				setError(
+					compareError instanceof Error
+						? compareError.message
+						: "Failed to compare run"
+				);
+			}
+		},
+		[activeRunId, suite, target]
+	);
 
 	return (
 		<section className="flex flex-col gap-3 rounded-xl border p-4">
@@ -1353,6 +2077,7 @@ function PromptTestCases({
 						accept=".csv,.json,.jsonl,.md,.txt,.yaml,.yml,.j2"
 						className="hidden"
 						disabled={locked}
+						multiple
 						onChange={(event) => importFile(event).catch(() => undefined)}
 						type="file"
 					/>
@@ -1385,10 +2110,50 @@ function PromptTestCases({
 			{suiteError ? (
 				<p className="text-status-destructive text-xs">{suiteError}</p>
 			) : null}
+			{pendingImport ? (
+				<div
+					aria-live="polite"
+					className="flex flex-col gap-2 rounded-lg border border-dashed bg-muted/20 p-3"
+					data-testid="promptfoo-import-preview"
+				>
+					<div>
+						<p className="font-medium text-xs">Import ready</p>
+						<p className="text-[11px] text-muted-foreground">
+							{pendingImport.filename} contains{" "}
+							{pendingImport.config.prompts.length} prompt
+							{pendingImport.config.prompts.length === 1 ? "" : "s"},{" "}
+							{pendingImport.config.tests.length} test
+							{pendingImport.config.tests.length === 1 ? "" : "s"}, and{" "}
+							{pendingImport.config.providers.length} provider
+							{pendingImport.config.providers.length === 1 ? "" : "s"}. Applying
+							it replaces the current draft.
+						</p>
+					</div>
+					{pendingImport.warnings.map((warning) => (
+						<p className="text-[11px] text-status-warning" key={warning}>
+							{warning}
+						</p>
+					))}
+					<div className="flex flex-wrap gap-2">
+						<Button onClick={applyPendingImport} size="sm">
+							Apply import
+						</Button>
+						<Button
+							onClick={() => setPendingImport(null)}
+							size="sm"
+							variant="ghost"
+						>
+							Cancel
+						</Button>
+					</div>
+				</div>
+			) : null}
 
 			<PromptVariantsEditor
 				locked={locked}
 				onAdd={addVariant}
+				onDuplicate={duplicateVariant}
+				onMove={moveVariant}
 				onRemove={removeVariant}
 				onUpdate={updateVariant}
 				variants={variants}
@@ -1396,7 +2161,10 @@ function PromptTestCases({
 
 			{/* Test-case table */}
 			<TestCaseTable
+				locked={locked}
 				onAddRow={addRow}
+				onDuplicateRow={duplicateRow}
+				onMoveRow={moveRow}
 				onRemoveRow={removeRow}
 				onUpdateRow={updateRow}
 				rows={rows}
@@ -1406,6 +2174,7 @@ function PromptTestCases({
 			<ModelControls
 				extraModels={extraModels}
 				judgeModel={judgeModel}
+				locked={locked}
 				newModel={newModel}
 				onAddModel={addExtraModel}
 				onJudgeChange={setJudgeModel}
@@ -1419,6 +2188,7 @@ function PromptTestCases({
 				</Label>
 				<Input
 					className="h-7 text-xs"
+					disabled={locked}
 					id="promptfoo-evaluators"
 					onChange={(event) =>
 						setEvaluatorIds(
@@ -1436,6 +2206,179 @@ function PromptTestCases({
 					assertions.
 				</p>
 			</div>
+
+			<details className="rounded-lg bg-muted/20 p-3" open>
+				<summary className="cursor-pointer font-medium text-xs">
+					Run options and Promptfoo defaults
+				</summary>
+				<div className="mt-3 flex flex-col gap-3">
+					<div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+						<div className="flex flex-col gap-1">
+							<Label className="text-[11px]" htmlFor="promptfoo-concurrency">
+								Concurrency
+							</Label>
+							<Input
+								className="h-7 text-xs"
+								disabled={locked}
+								id="promptfoo-concurrency"
+								max={32}
+								min={1}
+								onChange={(event) =>
+									setMaxConcurrency(
+										Math.max(1, Math.min(32, Number(event.target.value) || 1))
+									)
+								}
+								type="number"
+								value={maxConcurrency}
+							/>
+						</div>
+						<div className="flex flex-col gap-1">
+							<Label className="text-[11px]" htmlFor="promptfoo-timeout">
+								Timeout (ms)
+							</Label>
+							<Input
+								className="h-7 text-xs"
+								disabled={locked}
+								id="promptfoo-timeout"
+								max={120_000}
+								min={100}
+								onChange={(event) =>
+									setTimeoutMs(
+										Math.max(
+											100,
+											Math.min(120_000, Number(event.target.value) || 100)
+										)
+									)
+								}
+								type="number"
+								value={timeoutMs}
+							/>
+						</div>
+						<div className="flex flex-col gap-1">
+							<Label className="text-[11px]" htmlFor="promptfoo-repeat">
+								Repeat cases
+							</Label>
+							<Input
+								className="h-7 text-xs"
+								disabled={locked}
+								id="promptfoo-repeat"
+								max={20}
+								min={1}
+								onChange={(event) =>
+									setRepeat(
+										Math.max(1, Math.min(20, Number(event.target.value) || 1))
+									)
+								}
+								type="number"
+								value={repeat}
+							/>
+						</div>
+						<label className="flex items-center justify-between gap-2 rounded-md border px-2 text-[11px]">
+							<span>
+								Cache outputs
+								<span className="block text-[10px] text-muted-foreground">
+									Reuse identical inputs in this run
+								</span>
+							</span>
+							<Switch
+								checked={cache}
+								disabled={locked}
+								id="promptfoo-cache"
+								onCheckedChange={setCache}
+							/>
+						</label>
+					</div>
+					<div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+						<div className="flex flex-col gap-1">
+							<Label className="text-[11px]" htmlFor="promptfoo-tags">
+								Run tags (key=value, comma-separated)
+							</Label>
+							<Input
+								className="h-7 text-xs"
+								disabled={locked}
+								id="promptfoo-tags"
+								onChange={(event) => setRunTags(event.target.value)}
+								placeholder="branch=main, owner=evals"
+								value={runTags}
+							/>
+						</div>
+						<div className="flex flex-col gap-1">
+							<Label className="text-[11px]" htmlFor="promptfoo-prefix-suffix">
+								Prompt prefix / suffix
+							</Label>
+							<div className="flex gap-1">
+								<Input
+									aria-label="Prompt prefix"
+									className="h-7 text-xs"
+									disabled={locked}
+									onChange={(event) => setRunPrefix(event.target.value)}
+									placeholder="prefix"
+									value={runPrefix}
+								/>
+								<Input
+									aria-label="Prompt suffix"
+									className="h-7 text-xs"
+									disabled={locked}
+									onChange={(event) => setRunSuffix(event.target.value)}
+									placeholder="suffix"
+									value={runSuffix}
+								/>
+							</div>
+						</div>
+					</div>
+					<div className="flex flex-col gap-1">
+						<Label className="text-[11px]" htmlFor="promptfoo-default-test">
+							Default test JSON (inherited by imported cases)
+						</Label>
+						<Textarea
+							className="min-h-16 font-mono text-xs"
+							disabled={locked}
+							id="promptfoo-default-test"
+							onChange={(event) => {
+								setDefaultTestText(event.target.value);
+								try {
+									const parsed: unknown = JSON.parse(event.target.value);
+									if (isRecord(parsed)) {
+										setDefaultTest(parsed);
+									}
+								} catch {
+									// Keep the last valid object while editing JSON.
+								}
+							}}
+							placeholder='{"vars":{"locale":"en"},"assert":[{"type":"contains","value":"{{answer}}"}]}'
+							value={defaultTestText}
+						/>
+					</div>
+					<div className="flex flex-col gap-1">
+						<Label className="text-[11px]" htmlFor="promptfoo-code-evaluators">
+							Custom JS/Python evaluators (Core sandbox)
+						</Label>
+						<Textarea
+							className="min-h-20 font-mono text-xs"
+							disabled={locked}
+							id="promptfoo-code-evaluators"
+							onChange={(event) => {
+								setCodeEvaluatorText(event.target.value);
+								try {
+									setCodeEvaluators(
+										parseCodeEvaluators(
+											JSON.parse(event.target.value) as unknown
+										)
+									);
+								} catch {
+									// Keep the last valid evaluator list while editing JSON.
+								}
+							}}
+							placeholder='[{"id":"safe_output","lang":"js","source":"({ score: output.includes(\"safe\") ? 1 : 0 })"}]'
+							value={codeEvaluatorText}
+						/>
+						<p className="text-[10px] text-muted-foreground">
+							Code is never run in the renderer or Gateway; Core reports
+							unavailable sandbox runtimes as not executed.
+						</p>
+					</div>
+				</div>
+			</details>
 
 			{/* Run controls */}
 			<div className="flex flex-wrap items-center gap-2">
@@ -1466,25 +2409,11 @@ function PromptTestCases({
 			) : null}
 
 			<PromptRunHistory
-				onSelect={async (runId) => {
-					if (!suite) {
-						return;
-					}
-					try {
-						const saved = await getPromptRun(target, suite.id, runId);
-						const savedResults = saved.result.variants;
-						if (Array.isArray(savedResults)) {
-							setResults(savedResults as PromptVariantRun[]);
-							setActiveRunId(runId);
-						}
-					} catch (loadError) {
-						setError(
-							loadError instanceof Error
-								? loadError.message
-								: "Failed to load run"
-						);
-					}
-				}}
+				onCompare={handleCompareRun}
+				onDelete={handleDeleteRun}
+				onDuplicate={handleDuplicateRun}
+				onRename={handleRenameRun}
+				onSelect={handleLoadRun}
 				runs={suiteRuns}
 				selectedRunId={activeRunId}
 			/>
@@ -1492,8 +2421,17 @@ function PromptTestCases({
 			{/* Results matrix */}
 			{results ? (
 				<ResultsMatrix
+					comparisonResults={comparisonResults}
+					comparisonRunId={comparisonRunId}
 					model={model}
+					onReviewSaved={(review) =>
+						setReviews((previous) => ({
+							...previous,
+							[review.resultKey]: review,
+						}))
+					}
 					results={results}
+					reviews={reviews}
 					rows={rows}
 					runId={activeRunId}
 					suiteId={suite?.id ?? null}
@@ -1507,12 +2445,16 @@ function PromptTestCases({
 function PromptVariantsEditor({
 	locked,
 	onAdd,
+	onDuplicate,
+	onMove,
 	onRemove,
 	onUpdate,
 	variants,
 }: {
 	locked: boolean;
 	onAdd: () => void;
+	onDuplicate: (id: string) => void;
+	onMove: (id: string, direction: -1 | 1) => void;
 	onRemove: (id: string) => void;
 	onUpdate: (id: string, patch: Partial<PromptVariantRow>) => void;
 	variants: PromptVariantRow[];
@@ -1549,6 +2491,36 @@ function PromptVariantsEditor({
 							}
 							value={variant.name || `Variant ${index + 1}`}
 						/>
+						<Button
+							aria-label={`Move ${variant.name || `variant ${index + 1}`} up`}
+							className="size-7"
+							disabled={index === 0 || locked}
+							onClick={() => onMove(variant.id, -1)}
+							size="icon-sm"
+							variant="ghost"
+						>
+							<HugeiconsIcon className="size-3" icon={ArrowUp01Icon} />
+						</Button>
+						<Button
+							aria-label={`Move ${variant.name || `variant ${index + 1}`} down`}
+							className="size-7"
+							disabled={index === variants.length - 1 || locked}
+							onClick={() => onMove(variant.id, 1)}
+							size="icon-sm"
+							variant="ghost"
+						>
+							<HugeiconsIcon className="size-3" icon={ArrowDown01Icon} />
+						</Button>
+						<Button
+							aria-label={`Duplicate ${variant.name || `variant ${index + 1}`}`}
+							className="size-7"
+							disabled={locked}
+							onClick={() => onDuplicate(variant.id)}
+							size="icon-sm"
+							variant="ghost"
+						>
+							<HugeiconsIcon className="size-3" icon={Copy01Icon} />
+						</Button>
 						<NativeSelect
 							aria-label={`Prompt variant ${index + 1} type`}
 							className="h-7 w-24 text-xs"
@@ -1622,14 +2594,25 @@ function PromptVariantsEditor({
 }
 
 function PromptRunHistory({
+	onCompare,
+	onDelete,
+	onDuplicate,
+	onRename,
 	onSelect,
 	runs,
 	selectedRunId,
 }: {
-	onSelect: (runId: string) => void;
+	onCompare: (runId: string) => Promise<void>;
+	onDelete: (runId: string) => Promise<void>;
+	onDuplicate: (runId: string) => Promise<void>;
+	onRename: (runId: string, name: string) => Promise<void>;
+	onSelect: (runId: string) => Promise<void>;
 	runs: PromptRunMeta[];
 	selectedRunId: string | null;
 }) {
+	const [editingId, setEditingId] = useState<string | null>(null);
+	const [editingName, setEditingName] = useState("");
+	const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
 	if (runs.length === 0) {
 		return null;
 	}
@@ -1637,15 +2620,118 @@ function PromptRunHistory({
 		<div className="flex flex-wrap items-center gap-1.5 rounded-lg bg-muted/20 p-2">
 			<span className="mr-1 font-medium text-[11px]">Runs</span>
 			{runs.slice(0, 8).map((run) => (
-				<Button
-					className="h-7 text-[11px]"
-					key={run.id}
-					onClick={() => onSelect(run.id)}
-					size="sm"
-					variant={selectedRunId === run.id ? "secondary" : "ghost"}
-				>
-					{run.name}
-				</Button>
+				<div className="flex items-center gap-0.5" key={run.id}>
+					{editingId === run.id ? (
+						<>
+							<Input
+								aria-label={`Rename ${run.name}`}
+								className="h-7 w-44 text-[11px]"
+								onChange={(event) => setEditingName(event.target.value)}
+								onKeyDown={(event) => {
+									if (event.key === "Enter") {
+										onRename(run.id, editingName).catch(() => undefined);
+										setEditingId(null);
+									}
+									if (event.key === "Escape") {
+										setEditingId(null);
+									}
+								}}
+								value={editingName}
+							/>
+							<Button
+								aria-label={`Save name for ${run.name}`}
+								className="size-7"
+								disabled={!editingName.trim()}
+								onClick={() => {
+									onRename(run.id, editingName).catch(() => undefined);
+									setEditingId(null);
+								}}
+								size="icon-sm"
+								variant="ghost"
+							>
+								Save
+							</Button>
+						</>
+					) : (
+						<Button
+							className="h-7 max-w-56 text-[11px]"
+							onClick={() => onSelect(run.id).catch(() => undefined)}
+							size="sm"
+							variant={selectedRunId === run.id ? "secondary" : "ghost"}
+						>
+							<span className="truncate">{run.name}</span>
+						</Button>
+					)}
+					{editingId !== run.id && confirmDeleteId !== run.id ? (
+						<>
+							<Button
+								aria-label={`Rename ${run.name}`}
+								className="size-7"
+								onClick={() => {
+									setEditingId(run.id);
+									setEditingName(run.name);
+								}}
+								size="icon-sm"
+								variant="ghost"
+							>
+								<HugeiconsIcon className="size-3" icon={Edit02Icon} />
+							</Button>
+							<Button
+								aria-label={`Duplicate ${run.name}`}
+								className="size-7"
+								onClick={() => onDuplicate(run.id).catch(() => undefined)}
+								size="icon-sm"
+								variant="ghost"
+							>
+								<HugeiconsIcon className="size-3" icon={Copy01Icon} />
+							</Button>
+							<Button
+								aria-label={`Compare ${run.name}`}
+								className="h-7 px-1.5 text-[10px]"
+								onClick={() => onCompare(run.id).catch(() => undefined)}
+								size="sm"
+								variant="ghost"
+							>
+								Compare
+							</Button>
+							<Button
+								aria-label={`Delete ${run.name}`}
+								className="size-7"
+								onClick={() => setConfirmDeleteId(run.id)}
+								size="icon-sm"
+								variant="ghost"
+							>
+								<HugeiconsIcon className="size-3" icon={Delete02Icon} />
+							</Button>
+						</>
+					) : null}
+					{confirmDeleteId === run.id ? (
+						<>
+							<span className="text-[10px] text-status-destructive">
+								Delete?
+							</span>
+							<Button
+								className="h-7 px-1.5 text-[10px]"
+								onClick={() => {
+									onDelete(run.id).catch(() => undefined);
+									setConfirmDeleteId(null);
+								}}
+								size="sm"
+								variant="destructive"
+							>
+								Delete
+							</Button>
+							<Button
+								className="h-7 px-1.5 text-[10px]"
+								onClick={() => setConfirmDeleteId(null)}
+								size="sm"
+								variant="ghost"
+							>
+								Cancel
+							</Button>
+						</>
+					) : null}
+				</div>
 			))}
 		</div>
 	);
@@ -1654,20 +2740,26 @@ function PromptRunHistory({
 // ── Test-case table ────────────────────────────────────────────────────────────
 
 interface TestCaseTableProps {
+	locked: boolean;
 	onAddRow: () => void;
+	onDuplicateRow: (id: string) => void;
+	onMoveRow: (id: string, direction: -1 | 1) => void;
 	onRemoveRow: (id: string) => void;
 	onUpdateRow: (id: string, patch: Partial<TestCaseRow>) => void;
 	rows: TestCaseRow[];
 }
 
 function TestCaseTable({
+	locked,
 	rows,
 	onAddRow,
+	onDuplicateRow,
+	onMoveRow,
 	onRemoveRow,
 	onUpdateRow,
 }: TestCaseTableProps) {
 	return (
-		<div className="flex flex-col gap-2">
+		<fieldset className="flex flex-col gap-2" disabled={locked}>
 			{rows.length === 0 ? (
 				<p className="rounded-md border border-dashed p-3 text-center text-muted-foreground text-xs">
 					No test cases. Add one to evaluate the draft prompt with assertions.
@@ -1678,9 +2770,12 @@ function TestCaseTable({
 				<TestCaseRowEditor
 					index={i}
 					key={row.id}
+					onDuplicate={() => onDuplicateRow(row.id)}
+					onMove={(direction) => onMoveRow(row.id, direction)}
 					onRemove={onRemoveRow}
 					onUpdate={onUpdateRow}
 					row={row}
+					rowCount={rows.length}
 				/>
 			))}
 			<div>
@@ -1689,21 +2784,27 @@ function TestCaseTable({
 					Add test case
 				</Button>
 			</div>
-		</div>
+		</fieldset>
 	);
 }
 
 interface TestCaseRowEditorProps {
 	index: number;
+	onDuplicate: () => void;
+	onMove: (direction: -1 | 1) => void;
 	onRemove: (id: string) => void;
 	onUpdate: (id: string, patch: Partial<TestCaseRow>) => void;
 	row: TestCaseRow;
+	rowCount: number;
 }
 
 function TestCaseRowEditor({
 	row,
 	index,
+	onDuplicate,
+	onMove,
 	onRemove,
+	rowCount,
 	onUpdate,
 }: TestCaseRowEditorProps) {
 	// Var keys auto-suggested from the input + assertion text.
@@ -1750,6 +2851,13 @@ function TestCaseRowEditor({
 					Case {index + 1}
 				</span>
 				<Input
+					aria-label={`Case ${index + 1} id`}
+					className="h-7 max-w-36 font-mono text-[10px]"
+					onChange={(e) => onUpdate(row.id, { id: e.target.value })}
+					placeholder="Stable id"
+					value={row.id}
+				/>
+				<Input
 					autoComplete="off"
 					className="h-7 max-w-48 text-xs"
 					name={`test-case-name-${row.id}`}
@@ -1757,6 +2865,35 @@ function TestCaseRowEditor({
 					placeholder="Name (optional)"
 					value={row.name}
 				/>
+				<Button
+					aria-label={`Move case ${index + 1} up`}
+					className="size-7"
+					disabled={index === 0}
+					onClick={() => onMove(-1)}
+					size="icon-sm"
+					variant="ghost"
+				>
+					<HugeiconsIcon className="size-3" icon={ArrowUp01Icon} />
+				</Button>
+				<Button
+					aria-label={`Move case ${index + 1} down`}
+					className="size-7"
+					disabled={index === rowCount - 1}
+					onClick={() => onMove(1)}
+					size="icon-sm"
+					variant="ghost"
+				>
+					<HugeiconsIcon className="size-3" icon={ArrowDown01Icon} />
+				</Button>
+				<Button
+					aria-label={`Duplicate test case ${index + 1}`}
+					className="size-7"
+					onClick={onDuplicate}
+					size="icon-sm"
+					variant="ghost"
+				>
+					<HugeiconsIcon className="size-3" icon={Copy01Icon} />
+				</Button>
 				<Button
 					aria-label={`Remove test case ${index + 1}`}
 					className="ml-auto"
@@ -1849,6 +2986,35 @@ function TestCaseRowEditor({
 			</div>
 
 			<div className="flex flex-col gap-1">
+				<Label className="text-xs" htmlFor={`test-context-${row.id}`}>
+					Reference/context (optional JSON)
+				</Label>
+				<Textarea
+					className="min-h-16 font-mono text-xs"
+					id={`test-context-${row.id}`}
+					onChange={(event) => {
+						if (!event.target.value.trim()) {
+							onUpdate(row.id, { context: undefined });
+							return;
+						}
+						try {
+							onUpdate(row.id, {
+								context: JSON.parse(event.target.value) as unknown,
+							});
+						} catch {
+							// Keep the last valid context while the JSON is edited.
+						}
+					}}
+					placeholder='{"source":"...","facts":["..."]}'
+					value={
+						row.context === undefined
+							? ""
+							: JSON.stringify(row.context, null, 2)
+					}
+				/>
+			</div>
+
+			<div className="flex flex-col gap-1">
 				<Label className="text-xs" htmlFor={`test-threshold-${row.id}`}>
 					Assertion threshold (optional)
 				</Label>
@@ -1866,6 +3032,86 @@ function TestCaseRowEditor({
 					value={row.threshold}
 				/>
 			</div>
+			<label className="flex items-center justify-between gap-2 rounded-md border px-2 py-1 text-[11px]">
+				<span>
+					Inherit suite default test
+					<span className="block text-[10px] text-muted-foreground">
+						Disable for a standalone case
+					</span>
+				</span>
+				<Switch
+					aria-label={`Inherit default test for case ${index + 1}`}
+					checked={row.inheritDefaultTest !== false}
+					onCheckedChange={(checked) =>
+						onUpdate(row.id, { inheritDefaultTest: checked })
+					}
+				/>
+			</label>
+
+			<div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+				<div className="flex flex-col gap-1">
+					<Label className="text-[11px]" htmlFor={`test-provider-${row.id}`}>
+						Provider override (optional)
+					</Label>
+					<Input
+						className="h-7 text-xs"
+						id={`test-provider-${row.id}`}
+						onChange={(event) =>
+							onUpdate(row.id, {
+								provider: event.target.value.trim() || undefined,
+							})
+						}
+						placeholder="openai:gpt-4o"
+						value={row.provider ?? ""}
+					/>
+				</div>
+				<div className="flex flex-col gap-1">
+					<Label
+						className="text-[11px]"
+						htmlFor={`test-provider-output-${row.id}`}
+					>
+						Provider output fixture (optional JSON)
+					</Label>
+					<Input
+						className="h-7 font-mono text-xs"
+						id={`test-provider-output-${row.id}`}
+						onChange={(event) =>
+							onUpdate(row.id, {
+								providerOutput: event.target.value.trim()
+									? parseVariable(event.target.value)
+									: undefined,
+							})
+						}
+						placeholder='{"choices":[{"message":{"content":"fixture"}}]}'
+						value={
+							row.providerOutput === undefined
+								? ""
+								: displayVariable(row.providerOutput)
+						}
+					/>
+				</div>
+			</div>
+
+			<details className="rounded-md border border-dashed p-2">
+				<summary className="cursor-pointer text-[11px] text-muted-foreground">
+					Promptfoo case options (prefix, suffix, transform, timeout, cache)
+				</summary>
+				<Textarea
+					className="mt-2 min-h-16 font-mono text-xs"
+					onChange={(event) => {
+						try {
+							const parsed: unknown = JSON.parse(event.target.value);
+							if (isRecord(parsed)) {
+								onUpdate(row.id, { options: parsed });
+							}
+						} catch {
+							// Keep the last valid object while editing JSON.
+						}
+					}}
+					placeholder='{"prefix":"","suffix":"","transform":"trim","timeout_ms":30000,"cache":true}'
+					value={JSON.stringify(row.options, null, 2)}
+				/>
+			</details>
 
 			<div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
 				<div className="flex flex-col gap-1">
@@ -1950,6 +3196,7 @@ function AssertionEditor({
 		"is_xml",
 		"is_sql",
 		"is_refusal",
+		"assert_set",
 	].includes(assertion.kind);
 	const isJudge = [
 		"llm_judge",
@@ -2007,6 +3254,12 @@ function AssertionEditor({
 		assertion.kind === "icontains_all"
 	) {
 		placeholder = "Comma-separated values";
+	} else if (assertion.kind === "latency") {
+		placeholder = "Maximum latency in milliseconds";
+	} else if (assertion.kind === "cost") {
+		placeholder = "Maximum cost in micro-USD";
+	} else if (assertion.kind === "assert_set") {
+		placeholder = '[{"kind":"contains","value":"expected"}]';
 	}
 
 	return (
@@ -2034,7 +3287,9 @@ function AssertionEditor({
 					/>
 				) : (
 					<span className="flex-1 text-muted-foreground text-xs">
-						Passes when the response is valid JSON.
+						{assertion.kind === "assert_set"
+							? "JSON array of nested assertions."
+							: "Passes when the response matches this structural assertion."}
 					</span>
 				)}
 				<Button
@@ -2046,7 +3301,7 @@ function AssertionEditor({
 					<HugeiconsIcon className="size-3" icon={Cancel01Icon} />
 				</Button>
 			</div>
-			<div className="grid grid-cols-2 gap-1 sm:grid-cols-4">
+			<div className="grid grid-cols-2 gap-1 sm:grid-cols-5">
 				<Input
 					aria-label="Assertion threshold"
 					className="h-6 text-[10px]"
@@ -2095,6 +3350,14 @@ function AssertionEditor({
 					placeholder="Transform (exported)"
 					value={assertion.options?.transform ?? ""}
 				/>
+				<label className="flex items-center justify-between gap-1 rounded-md border px-2 text-[10px]">
+					<span>Negate</span>
+					<Switch
+						aria-label="Negate assertion"
+						checked={assertion.options?.not === true}
+						onCheckedChange={(checked) => updateOptions({ not: checked })}
+					/>
+				</label>
 			</div>
 		</div>
 	);
@@ -2105,6 +3368,7 @@ function AssertionEditor({
 interface ModelControlsProps {
 	extraModels: string[];
 	judgeModel: string;
+	locked: boolean;
 	newModel: string;
 	onAddModel: () => void;
 	onJudgeChange: (v: string) => void;
@@ -2118,6 +3382,7 @@ function ModelControls({
 	extraModels,
 	newModel,
 	judgeModel,
+	locked,
 	onNewModelChange,
 	onAddModel,
 	onRemoveModel,
@@ -2144,6 +3409,7 @@ function ModelControls({
 						<Button
 							aria-label={`Remove model ${m}`}
 							className="size-4"
+							disabled={locked}
 							onClick={() => onRemoveModel(m)}
 							size="icon-sm"
 							variant="ghost"
@@ -2161,6 +3427,7 @@ function ModelControls({
 					<div className="flex items-center gap-1">
 						<Input
 							className="h-7 w-48 text-xs"
+							disabled={locked}
 							id="ps-add-model"
 							onChange={(e) => onNewModelChange(e.target.value)}
 							onKeyDown={handleKeyDown}
@@ -2169,6 +3436,7 @@ function ModelControls({
 						/>
 						<Button
 							aria-label="Add model"
+							disabled={locked}
 							onClick={onAddModel}
 							size="icon-sm"
 							variant="ghost"
@@ -2183,6 +3451,7 @@ function ModelControls({
 					</Label>
 					<Input
 						className="h-7 w-48 text-xs"
+						disabled={locked}
 						id="ps-judge-model"
 						onChange={(e) => onJudgeChange(e.target.value)}
 						placeholder="defaults to the first model"
@@ -2230,112 +3499,517 @@ function RunHint({
 // ── Results matrix ─────────────────────────────────────────────────────────────
 
 interface ResultsMatrixProps {
+	comparisonResults: PromptVariantRun[] | null;
+	comparisonRunId: string | null;
 	model: string;
+	onReviewSaved: (review: PromptReview) => void;
 	results: PromptVariantRun[];
+	reviews: Record<string, PromptReview>;
 	rows: TestCaseRow[];
 	runId: string | null;
 	suiteId: string | null;
 	target: ApiTarget;
 }
 
-function resultCsv(
+type ResultFilter =
+	| "all"
+	| "pass"
+	| "fail"
+	| "error"
+	| "different"
+	| "highlighted";
+
+interface ResultExportRow {
+	caseIndex: number;
+	caseName: string;
+	model: string;
+	prompt: string;
+	promptName: string;
+	resultKey: string;
+	score: EvalCaseScore;
+}
+
+function resultModels(
+	promptResult: PromptVariantRun,
+	fallbackModel: string
+): ModelEvalResult[] {
+	return (
+		promptResult.result.models ?? [
+			{
+				model: fallbackModel,
+				cases: promptResult.result.cases,
+				aggregate: promptResult.result.aggregate,
+			},
+		]
+	);
+}
+
+function flattenResultRows(
 	results: PromptVariantRun[],
 	model: string,
 	rows: TestCaseRow[]
-): string {
+): ResultExportRow[] {
+	const output: ResultExportRow[] = [];
+	for (const promptResult of results) {
+		for (const entry of resultModels(promptResult, model)) {
+			for (const [caseIndex, score] of entry.cases.entries()) {
+				output.push({
+					caseIndex,
+					caseName: rows[caseIndex]?.name || `Case ${caseIndex + 1}`,
+					model: entry.model,
+					prompt: score.prompt,
+					promptName: promptResult.promptName,
+					resultKey: `${promptResult.promptId}:${entry.model}:${caseIndex}`,
+					score,
+				});
+			}
+		}
+	}
+	return output;
+}
+
+function exportRowsCsv(rows: ResultExportRow[]): string {
 	const cell = (value: unknown): string => {
 		const text =
 			typeof value === "string" ? value : JSON.stringify(value ?? "");
 		return /[",\r\n]/.test(text) ? `"${text.replaceAll('"', '""')}"` : text;
 	};
-	const output = [
-		"prompt,model,case,overall,assertion_score,assertions_pass,response",
-	];
-	for (const promptResult of results) {
-		const models = promptResult.result.models ?? [
-			{
+	return [
+		"prompt,model,case,overall,assertion_score,assertions_pass,error,response,latency_score,input_tokens,output_tokens,cost_micro_usd,metadata",
+		...rows.map(({ caseName, model, promptName, score }) =>
+			[
+				promptName,
 				model,
-				cases: promptResult.result.cases,
-				aggregate: promptResult.result.aggregate,
-			},
-		];
-		for (const entry of models) {
-			entry.cases.forEach((score, index) => {
-				output.push(
-					[
-						promptResult.promptName,
-						entry.model,
-						rows[index]?.name || `Case ${index + 1}`,
-						score.overall,
-						score.assertion_score,
-						score.assertions_pass,
-						score.response_text,
-					]
-						.map(cell)
-						.join(",")
-				);
-			});
-		}
+				caseName,
+				score.overall,
+				score.assertion_score,
+				score.assertions_pass,
+				score.error ?? "",
+				score.response_text,
+				score.latency_score,
+				score.input_tokens ?? "",
+				score.output_tokens ?? "",
+				score.cost_micro_usd ?? "",
+				score.metadata ?? {},
+			]
+				.map(cell)
+				.join(",")
+		),
+	].join("\n");
+}
+
+function exportDpoJsonl(rows: ResultExportRow[]): string {
+	const byPromptAndCase = new Map<string, ResultExportRow[]>();
+	for (const row of rows) {
+		const key = `${row.promptName}:${row.caseIndex}`;
+		const group = byPromptAndCase.get(key) ?? [];
+		group.push(row);
+		byPromptAndCase.set(key, group);
 	}
-	return output.join("\n");
+	const preferences: Record<string, unknown>[] = [];
+	for (const group of byPromptAndCase.values()) {
+		if (group.length < 2) {
+			continue;
+		}
+		const ranked = [...group].sort(
+			(left, right) => right.score.overall - left.score.overall
+		);
+		const chosen = ranked[0];
+		const rejected = ranked.at(-1);
+		if (!(chosen && rejected) || chosen.model === rejected.model) {
+			continue;
+		}
+		preferences.push({
+			chosen: chosen.score.response_text,
+			chosen_model: chosen.model,
+			metadata: chosen.score.metadata ?? {},
+			prompt: chosen.prompt,
+			rejected: rejected.score.response_text,
+			rejected_model: rejected.model,
+		});
+	}
+	return preferences.map((row) => JSON.stringify(row)).join("\n");
+}
+
+function exportHumanEvalYaml(
+	rows: ResultExportRow[],
+	reviews: Record<string, PromptReview>
+): string {
+	return stringifyYaml(
+		rows.map(({ caseName, model, prompt, promptName, resultKey, score }) => {
+			const review = reviews[resultKey];
+			return {
+				case: caseName,
+				comment: review?.comment ?? null,
+				highlighted: review?.highlighted ?? false,
+				input: prompt,
+				model,
+				output: score.response_text,
+				pass: review?.pass ?? null,
+				prompt: promptName,
+				score: review?.score ?? score.overall,
+			};
+		})
+	);
 }
 
 function ResultsMatrix({
+	comparisonResults,
+	comparisonRunId,
 	model,
+	onReviewSaved,
 	results,
+	reviews,
 	rows,
 	runId,
 	suiteId,
 	target,
 }: ResultsMatrixProps) {
-	const downloadResults = (format: "csv" | "json") => {
-		const text =
-			format === "csv"
-				? resultCsv(results, model, rows)
-				: JSON.stringify(results, null, 2);
+	const [filter, setFilter] = useState<ResultFilter>("all");
+	const [query, setQuery] = useState("");
+	const [metadataQuery, setMetadataQuery] = useState("");
+	const [regexQuery, setRegexQuery] = useState(false);
+	const [exportFormat, setExportFormat] = useState<
+		"csv" | "json" | "yaml" | "failed_json" | "dpo_jsonl" | "human_yaml"
+	>("json");
+	const [copyMessage, setCopyMessage] = useState<string | null>(null);
+	useEffect(() => {
+		if (typeof window === "undefined") {
+			return;
+		}
+		const queryString = window.location.hash.split("?")[1];
+		if (!queryString) {
+			return;
+		}
+		const params = new URLSearchParams(queryString);
+		const linkedFilter = params.get("filter");
+		if (
+			linkedFilter &&
+			["all", "pass", "fail", "error", "different", "highlighted"].includes(
+				linkedFilter
+			)
+		) {
+			setFilter(linkedFilter as ResultFilter);
+		}
+		setQuery(params.get("q") ?? "");
+		setMetadataQuery(params.get("metadata") ?? "");
+		setRegexQuery(params.get("regex") === "1");
+	}, []);
+
+	useEffect(() => {
+		if (typeof window === "undefined") {
+			return;
+		}
+		const params = new URLSearchParams();
+		if (runId) {
+			params.set("run_id", runId);
+		}
+		if (filter !== "all") {
+			params.set("filter", filter);
+		}
+		if (query) {
+			params.set("q", query);
+		}
+		if (metadataQuery) {
+			params.set("metadata", metadataQuery);
+		}
+		if (regexQuery) {
+			params.set("regex", "1");
+		}
+		const hash = params.size > 0 ? `#promptfoo-results?${params}` : "";
+		window.history.replaceState(
+			null,
+			"",
+			`${window.location.pathname}${window.location.search}${hash}`
+		);
+	}, [filter, metadataQuery, query, regexQuery, runId]);
+	const exportRows = useMemo(
+		() => flattenResultRows(results, model, rows),
+		[model, results, rows]
+	);
+	const isDifferent = useCallback(
+		(promptResult: PromptVariantRun, caseIndex: number) => {
+			const outputs = resultModels(promptResult, model)
+				.map((entry) => entry.cases[caseIndex]?.response_text)
+				.filter((value): value is string => value !== undefined);
+			return new Set(outputs).size > 1;
+		},
+		[model]
+	);
+	const matches = useCallback(
+		(
+			promptResult: PromptVariantRun,
+			entry: ModelEvalResult,
+			caseIndex: number,
+			score: EvalCaseScore | undefined
+		) => {
+			if (!score) {
+				return false;
+			}
+			const resultKey = `${promptResult.promptId}:${entry.model}:${caseIndex}`;
+			const row = rows[caseIndex];
+			const haystack = JSON.stringify({
+				case: row?.name,
+				metadata: score.metadata ?? row?.metadata,
+				model: entry.model,
+				prompt: score.prompt,
+				response: score.response_text,
+			});
+			if (query.trim()) {
+				if (regexQuery) {
+					try {
+						if (!new RegExp(query, "i").test(haystack)) {
+							return false;
+						}
+					} catch {
+						return false;
+					}
+				} else if (
+					!haystack.toLowerCase().includes(query.trim().toLowerCase())
+				) {
+					return false;
+				}
+			}
+			if (
+				metadataQuery.trim() &&
+				!JSON.stringify(score.metadata ?? row?.metadata ?? {})
+					.toLowerCase()
+					.includes(metadataQuery.trim().toLowerCase())
+			) {
+				return false;
+			}
+			if (filter === "pass" && !score.assertions_pass) {
+				return false;
+			}
+			if (filter === "fail" && (score.assertions_pass || score.error)) {
+				return false;
+			}
+			if (filter === "error" && !score.error) {
+				return false;
+			}
+			if (filter === "different" && !isDifferent(promptResult, caseIndex)) {
+				return false;
+			}
+			if (filter === "highlighted" && !reviews[resultKey]?.highlighted) {
+				return false;
+			}
+			return true;
+		},
+		[filter, isDifferent, metadataQuery, query, regexQuery, reviews, rows]
+	);
+
+	const copy = useCallback(async (text: string) => {
+		if (!navigator.clipboard) {
+			return;
+		}
+		await navigator.clipboard.writeText(text);
+		setCopyMessage("Copied");
+		window.setTimeout(() => setCopyMessage(null), 1500);
+	}, []);
+
+	const downloadResults = () => {
+		const filteredRows = exportRows.filter((row) => {
+			const promptResult = results.find(
+				(result) => result.promptId === row.resultKey.split(":")[0]
+			);
+			const entry = promptResult
+				? resultModels(promptResult, model).find(
+						(candidate) => candidate.model === row.model
+					)
+				: undefined;
+			return promptResult && entry
+				? matches(promptResult, entry, row.caseIndex, row.score)
+				: false;
+		});
+		let text: string;
+		let extension = exportFormat;
+		if (exportFormat === "csv") {
+			text = exportRowsCsv(filteredRows);
+		} else if (exportFormat === "yaml") {
+			text = stringifyYaml(filteredRows.map((row) => row.score));
+		} else if (exportFormat === "failed_json") {
+			text = JSON.stringify(
+				filteredRows.filter(
+					(row) => !row.score.assertions_pass || row.score.error
+				),
+				null,
+				2
+			);
+			extension = "json";
+		} else if (exportFormat === "dpo_jsonl") {
+			text = exportDpoJsonl(filteredRows);
+		} else if (exportFormat === "human_yaml") {
+			text = exportHumanEvalYaml(filteredRows, reviews);
+			extension = "yaml";
+		} else {
+			text = JSON.stringify(filteredRows, null, 2);
+		}
 		const link = document.createElement("a");
-		link.href = URL.createObjectURL(
+		const url = URL.createObjectURL(
 			new Blob([text], {
-				type: format === "csv" ? "text/csv" : "application/json",
+				type:
+					exportFormat === "csv"
+						? "text/csv"
+						: exportFormat === "yaml" || exportFormat === "human_yaml"
+							? "text/yaml"
+							: "application/json",
 			})
 		);
-		link.download = `promptfoo-results.${format}`;
+		link.href = url;
+		link.download = `promptfoo-results.${extension}`;
 		link.click();
-		URL.revokeObjectURL(link.href);
+		URL.revokeObjectURL(url);
 	};
+
+	const visibleCount = results.reduce(
+		(total, promptResult) =>
+			total +
+			resultModels(promptResult, model).reduce(
+				(entryTotal, entry) =>
+					entryTotal +
+					entry.cases.filter((score, caseIndex) =>
+						matches(promptResult, entry, caseIndex, score)
+					).length,
+				0
+			),
+		0
+	);
+	const runMean = useMemo(() => {
+		const values = results.flatMap((result) =>
+			resultModels(result, model).map((entry) => entry.aggregate.mean_overall)
+		);
+		return values.length > 0
+			? values.reduce((sum, value) => sum + value, 0) / values.length
+			: 0;
+	}, [model, results]);
+	const comparisonMean = useMemo(() => {
+		if (!comparisonResults) {
+			return null;
+		}
+		const values = comparisonResults.flatMap((result) =>
+			resultModels(result, model).map((entry) => entry.aggregate.mean_overall)
+		);
+		return values.length > 0
+			? values.reduce((sum, value) => sum + value, 0) / values.length
+			: 0;
+	}, [comparisonResults, model]);
+
 	return (
 		<div className="flex flex-col gap-3">
-			<div className="flex items-center gap-2">
-				<span className="font-medium text-xs">Results</span>
-				<span className="text-[10px] text-muted-foreground">
-					Download a reviewable report or reopen this run from history.
-				</span>
-				<div className="ml-auto flex items-center gap-1">
-					<Button
-						onClick={() => downloadResults("json")}
-						size="sm"
-						variant="ghost"
+			<div className="flex flex-col gap-2 rounded-lg bg-muted/20 p-3">
+				<div className="flex flex-wrap items-center gap-2">
+					<span className="font-medium text-xs">Results matrix</span>
+					<Badge variant="outline">{visibleCount} visible cells</Badge>
+					<span className="text-[10px] text-muted-foreground">
+						Search, facet, review, compare, and export this run.
+					</span>
+				</div>
+				<div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
+					<Input
+						aria-label="Search result matrix"
+						className="h-7 text-xs"
+						onChange={(event) => setQuery(event.target.value)}
+						placeholder="Search cases, prompts, outputs, models"
+						value={query}
+					/>
+					<Input
+						aria-label="Filter result metadata"
+						className="h-7 text-xs"
+						onChange={(event) => setMetadataQuery(event.target.value)}
+						placeholder="Metadata facet, e.g. team=support"
+						value={metadataQuery}
+					/>
+					<label className="flex items-center justify-between gap-2 rounded-md border px-2 text-[10px]">
+						<span>Regex search</span>
+						<Switch
+							aria-label="Regex result search"
+							checked={regexQuery}
+							onCheckedChange={setRegexQuery}
+						/>
+					</label>
+					<NativeSelect
+						aria-label="Result matrix filter"
+						className="h-7 text-xs"
+						onChange={(event) => setFilter(event.target.value as ResultFilter)}
+						value={filter}
 					>
-						JSON
-					</Button>
-					<Button
-						onClick={() => downloadResults("csv")}
-						size="sm"
-						variant="ghost"
+						<NativeSelectOption value="all">All cells</NativeSelectOption>
+						<NativeSelectOption value="pass">Passing</NativeSelectOption>
+						<NativeSelectOption value="fail">Failing</NativeSelectOption>
+						<NativeSelectOption value="error">Errors</NativeSelectOption>
+						<NativeSelectOption value="different">
+							Different outputs
+						</NativeSelectOption>
+						<NativeSelectOption value="highlighted">
+							Human highlighted
+						</NativeSelectOption>
+					</NativeSelect>
+				</div>
+				<div className="flex flex-wrap items-center gap-2">
+					<NativeSelect
+						aria-label="Results export format"
+						className="h-7 w-40 text-xs"
+						onChange={(event) =>
+							setExportFormat(event.target.value as typeof exportFormat)
+						}
+						value={exportFormat}
 					>
-						CSV
+						<NativeSelectOption value="json">JSON</NativeSelectOption>
+						<NativeSelectOption value="yaml">YAML</NativeSelectOption>
+						<NativeSelectOption value="csv">CSV</NativeSelectOption>
+						<NativeSelectOption value="failed_json">
+							Failed only (JSON)
+						</NativeSelectOption>
+						<NativeSelectOption value="dpo_jsonl">
+							DPO preferences (JSONL)
+						</NativeSelectOption>
+						<NativeSelectOption value="human_yaml">
+							Human eval (YAML)
+						</NativeSelectOption>
+					</NativeSelect>
+					<Button onClick={downloadResults} size="sm" variant="outline">
+						Export selected
 					</Button>
+					{copyMessage ? (
+						<span className="text-status-success text-xs" role="status">
+							{copyMessage}
+						</span>
+					) : null}
 				</div>
 			</div>
+			{comparisonResults && comparisonMean !== null ? (
+				<div className="flex flex-col gap-2 rounded-lg border border-dashed bg-muted/10 p-3">
+					<div className="flex flex-wrap items-center gap-2">
+						<span className="font-medium text-xs">Run comparison</span>
+						<Badge variant="outline">vs {comparisonRunId}</Badge>
+					</div>
+					<div className="grid grid-cols-2 gap-3 text-xs">
+						<div className="flex flex-col gap-1">
+							<span className="text-muted-foreground">Current run</span>
+							<div className="h-2 overflow-hidden rounded-full bg-muted">
+								<div
+									className="h-full rounded-full bg-primary"
+									style={{ width: `${Math.round(runMean * 100)}%` }}
+								/>
+							</div>
+							<span className="font-medium">{pct(runMean)}</span>
+						</div>
+						<div className="flex flex-col gap-1">
+							<span className="text-muted-foreground">Compared run</span>
+							<div className="h-2 overflow-hidden rounded-full bg-muted">
+								<div
+									className="h-full rounded-full bg-secondary-foreground"
+									style={{ width: `${Math.round(comparisonMean * 100)}%` }}
+								/>
+							</div>
+							<span className="font-medium">{pct(comparisonMean)}</span>
+						</div>
+					</div>
+				</div>
+			) : null}
 			{results.map((promptResult) => {
 				// Back-compat read path: single-model responses have no `models` key.
-				const models: ModelEvalResult[] = promptResult.result.models ?? [
-					{
-						model,
-						cases: promptResult.result.cases,
-						aggregate: promptResult.result.aggregate,
-					},
-				];
+				const models = resultModels(promptResult, model);
 				const caseCount = Math.max(
 					rows.length,
 					...models.map((entry) => entry.cases.length)
@@ -2359,6 +4033,70 @@ function ResultsMatrix({
 								<ModelStatCard key={entry.model} result={entry} />
 							))}
 						</div>
+						<div className="flex flex-col gap-1 rounded-lg border bg-muted/10 p-2">
+							<span className="text-[10px] text-muted-foreground uppercase tracking-wide">
+								Quality by model
+							</span>
+							{models.map((entry) => (
+								<div
+									className="flex items-center gap-2"
+									key={`bar-${entry.model}`}
+								>
+									<span className="w-28 truncate text-[10px]">
+										{entry.model}
+									</span>
+									<div className="h-2 min-w-0 flex-1 overflow-hidden rounded-full bg-muted">
+										<div
+											className="h-full rounded-full bg-primary"
+											style={{
+												width: `${Math.round(entry.aggregate.mean_overall * 100)}%`,
+											}}
+										/>
+									</div>
+									<span className="w-10 text-right text-[10px] tabular-nums">
+										{pct(entry.aggregate.mean_overall)}
+									</span>
+								</div>
+							))}
+						</div>
+						<div className="flex flex-col gap-1 rounded-lg border bg-muted/10 p-2">
+							<span className="text-[10px] text-muted-foreground uppercase tracking-wide">
+								Score distribution
+							</span>
+							{(() => {
+								const buckets = [0, 0, 0, 0];
+								for (const entry of models) {
+									for (const score of entry.cases) {
+										const bucket = Math.min(3, Math.floor(score.overall * 4));
+										buckets[bucket] = (buckets[bucket] ?? 0) + 1;
+									}
+								}
+								const maximum = Math.max(...buckets, 1);
+								return (
+									<div className="grid grid-cols-4 gap-2">
+										{buckets.map((count, index) => (
+											<div
+												className="flex flex-col gap-1"
+												key={`bucket-${index}`}
+											>
+												<div className="flex h-8 items-end rounded bg-muted">
+													<div
+														className="w-full rounded bg-primary/70"
+														style={{
+															height: `${Math.max(4, (count / maximum) * 100)}%`,
+														}}
+													/>
+												</div>
+												<span className="text-center text-[9px] text-muted-foreground">
+													{index * 25}–{index === 3 ? 100 : (index + 1) * 25}% ·{" "}
+													{count}
+												</span>
+											</div>
+										))}
+									</div>
+								);
+							})()}
+						</div>
 						<div className="overflow-auto rounded-lg border">
 							<table className="w-full text-left text-xs">
 								<thead className="bg-muted/50 text-muted-foreground">
@@ -2372,30 +4110,45 @@ function ResultsMatrix({
 									</tr>
 								</thead>
 								<tbody>
-									{caseIndices.map((idx) => (
-										<tr className="border-t align-top" key={`case-${idx}`}>
-											<td className="max-w-40 px-2 py-1.5">
-												<CaseLabel
-													fallback={models[0]?.cases[idx]?.prompt}
-													row={rows[idx]}
-												/>
-											</td>
-											{models.map((entry) => (
-												<td
-													className="min-w-48 max-w-72 px-2 py-1.5"
-													key={entry.model}
-												>
-													<MatrixCell
-														resultKey={`${promptResult.promptId}:${entry.model}:${idx}`}
-														runId={runId}
-														score={entry.cases[idx]}
-														suiteId={suiteId}
-														target={target}
+									{caseIndices.map((idx) => {
+										const visible = models.some((entry) =>
+											matches(promptResult, entry, idx, entry.cases[idx])
+										);
+										if (!visible) {
+											return null;
+										}
+										return (
+											<tr className="border-t align-top" key={`case-${idx}`}>
+												<td className="max-w-40 px-2 py-1.5">
+													<CaseLabel
+														fallback={models[0]?.cases[idx]?.prompt}
+														row={rows[idx]}
 													/>
 												</td>
-											))}
-										</tr>
-									))}
+												{models.map((entry) => (
+													<td
+														className="min-w-48 max-w-72 px-2 py-1.5"
+														key={entry.model}
+													>
+														<MatrixCell
+															onCopy={copy}
+															onReviewSaved={onReviewSaved}
+															resultKey={`${promptResult.promptId}:${entry.model}:${idx}`}
+															review={
+																reviews[
+																	`${promptResult.promptId}:${entry.model}:${idx}`
+																]
+															}
+															runId={runId}
+															score={entry.cases[idx]}
+															suiteId={suiteId}
+															target={target}
+														/>
+													</td>
+												))}
+											</tr>
+										);
+									})}
 								</tbody>
 							</table>
 						</div>
@@ -2428,7 +4181,7 @@ function ModelStatCard({ result }: { result: ModelEvalResult }) {
 	return (
 		<div className="flex flex-col gap-1 rounded-lg bg-muted/30 p-2">
 			<span className="font-medium text-xs">{result.model}</span>
-			<div className="grid grid-cols-3 gap-1">
+			<div className="grid grid-cols-2 gap-1 sm:grid-cols-5">
 				<StatCell
 					label="Overall"
 					tone={scoreTone(agg.mean_overall)}
@@ -2439,6 +4192,16 @@ function ModelStatCard({ result }: { result: ModelEvalResult }) {
 					label="Assert"
 					tone={scoreTone(assertionRate)}
 					value={pct(assertionRate)}
+				/>
+				<StatCell
+					label="Tokens"
+					value={String(
+						(agg.total_input_tokens ?? 0) + (agg.total_output_tokens ?? 0)
+					)}
+				/>
+				<StatCell
+					label="Spend"
+					value={formatMicroUsd(agg.total_cost_micro_usd)}
 				/>
 			</div>
 		</div>
@@ -2464,23 +4227,62 @@ function StatCell({
 	);
 }
 
+function jsonOutput(text: string): string {
+	try {
+		return JSON.stringify(JSON.parse(text) as unknown, null, 2);
+	} catch {
+		return text;
+	}
+}
+
 function MatrixCell({
 	resultKey,
 	runId,
+	review: persistedReview,
+	onCopy,
+	onReviewSaved,
 	score,
 	suiteId,
 	target,
 }: {
 	resultKey: string;
 	runId: string | null;
+	review?: PromptReview;
+	onCopy: (text: string) => Promise<void>;
+	onReviewSaved: (review: PromptReview) => void;
 	score: EvalCaseScore | undefined;
 	suiteId: string | null;
 	target: ApiTarget;
 }) {
 	const [reviewSaving, setReviewSaving] = useState(false);
-	const [reviewed, setReviewed] = useState<boolean | null>(null);
-	const [reviewComment, setReviewComment] = useState("");
-	const [reviewHighlighted, setReviewHighlighted] = useState(false);
+	const [reviewed, setReviewed] = useState<boolean | null>(
+		persistedReview?.pass ?? null
+	);
+	const [reviewComment, setReviewComment] = useState(
+		persistedReview?.comment ?? ""
+	);
+	const [reviewHighlighted, setReviewHighlighted] = useState(
+		persistedReview?.highlighted ?? false
+	);
+	const [reviewScore, setReviewScore] = useState(
+		persistedReview?.score === null || persistedReview?.score === undefined
+			? ""
+			: String(persistedReview.score)
+	);
+	const [renderMode, setRenderMode] = useState<"text" | "markdown" | "json">(
+		"text"
+	);
+
+	useEffect(() => {
+		setReviewed(persistedReview?.pass ?? null);
+		setReviewComment(persistedReview?.comment ?? "");
+		setReviewHighlighted(persistedReview?.highlighted ?? false);
+		setReviewScore(
+			persistedReview?.score === null || persistedReview?.score === undefined
+				? ""
+				: String(persistedReview.score)
+		);
+	}, [persistedReview]);
 	if (!score) {
 		return <span className="text-muted-foreground">—</span>;
 	}
@@ -2493,14 +4295,19 @@ function MatrixCell({
 		}
 		setReviewSaving(true);
 		try {
-			await savePromptReview(target, suiteId, runId, {
+			const parsedReviewScore = Number.parseFloat(reviewScore);
+			const savedReview = await savePromptReview(target, suiteId, runId, {
 				comment: reviewComment.trim() || undefined,
 				highlighted: options.highlighted ?? reviewHighlighted,
 				pass,
 				resultKey,
-				score: score.overall,
+				score: Number.isFinite(parsedReviewScore)
+					? Math.max(0, Math.min(1, parsedReviewScore))
+					: score.overall,
 			});
 			setReviewed(pass);
+			setReviewScore(String(savedReview.score ?? score.overall));
+			onReviewSaved(savedReview);
 		} finally {
 			setReviewSaving(false);
 		}
@@ -2535,6 +4342,83 @@ function MatrixCell({
 			<p className="line-clamp-4 whitespace-pre-wrap break-words text-muted-foreground">
 				{score.response_text}
 			</p>
+			<details className="rounded border border-dashed px-2 py-1 text-[10px]">
+				<summary className="cursor-pointer text-muted-foreground">
+					Inspect full cell
+				</summary>
+				<div className="mt-2 flex flex-col gap-1">
+					<div className="flex items-center justify-between gap-2">
+						<span className="text-muted-foreground">Rendered prompt</span>
+						<Button
+							className="h-6 px-1.5 text-[10px]"
+							onClick={() => onCopy(score.rendered_prompt ?? score.prompt)}
+							size="sm"
+							variant="ghost"
+						>
+							<HugeiconsIcon className="size-3" icon={Copy01Icon} />
+							Copy
+						</Button>
+					</div>
+					<pre className="max-h-28 overflow-auto whitespace-pre-wrap rounded bg-muted/30 p-1">
+						{score.rendered_prompt ?? score.prompt}
+					</pre>
+					<div className="flex items-center justify-between gap-2">
+						<span className="text-muted-foreground">Full output</span>
+						<Button
+							className="h-6 px-1.5 text-[10px]"
+							onClick={() => onCopy(score.response_text)}
+							size="sm"
+							variant="ghost"
+						>
+							<HugeiconsIcon className="size-3" icon={Copy01Icon} />
+							Copy
+						</Button>
+					</div>
+					<NativeSelect
+						aria-label="Cell output render mode"
+						className="h-7 w-28 text-[10px]"
+						onChange={(event) =>
+							setRenderMode(event.target.value as typeof renderMode)
+						}
+						value={renderMode}
+					>
+						<NativeSelectOption value="text">Text</NativeSelectOption>
+						<NativeSelectOption value="markdown">Markdown</NativeSelectOption>
+						<NativeSelectOption value="json">JSON</NativeSelectOption>
+					</NativeSelect>
+					{renderMode === "markdown" ? (
+						<div className="max-h-40 overflow-auto rounded bg-muted/30 p-1">
+							<Markdown
+								className="text-xs [&_p]:my-1"
+								content={score.response_text}
+							/>
+						</div>
+					) : (
+						<pre className="max-h-40 overflow-auto whitespace-pre-wrap rounded bg-muted/30 p-1">
+							{renderMode === "json"
+								? jsonOutput(score.response_text)
+								: score.response_text}
+						</pre>
+					)}
+					<div className="grid grid-cols-2 gap-1 text-muted-foreground">
+						<span>Latency score: {pct(score.latency_score)}</span>
+						<span>Tokens: {score.total_tokens ?? "—"}</span>
+						<span>Cost: {score.cost_micro_usd ?? "unknown"}µUSD</span>
+						<span>Cache: {score.cache_hit ? "hit" : "miss"}</span>
+					</div>
+					{score.error ? (
+						<p className="text-status-destructive">{score.error}</p>
+					) : null}
+					<pre className="max-h-24 overflow-auto whitespace-pre-wrap rounded bg-muted/30 p-1">
+						{JSON.stringify(score.metadata ?? {}, null, 2)}
+					</pre>
+					{score.context === undefined ? null : (
+						<pre className="max-h-24 overflow-auto whitespace-pre-wrap rounded bg-muted/30 p-1">
+							{JSON.stringify(score.context, null, 2)}
+						</pre>
+					)}
+				</div>
+			</details>
 			{runId && suiteId ? (
 				<div className="flex items-center gap-1">
 					<span className="mr-1 text-[10px] text-muted-foreground">Review</span>
@@ -2571,6 +4455,18 @@ function MatrixCell({
 					>
 						{reviewHighlighted ? "Highlighted" : "Highlight"}
 					</Button>
+					<Input
+						aria-label="Human review score"
+						className="h-6 w-16 text-[10px]"
+						disabled={reviewSaving}
+						max="1"
+						min="0"
+						onChange={(event) => setReviewScore(event.target.value)}
+						placeholder="0–1"
+						step="0.05"
+						type="number"
+						value={reviewScore}
+					/>
 					<Input
 						aria-label="Human review comment"
 						className="h-6 text-[10px]"

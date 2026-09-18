@@ -70,6 +70,14 @@ impl HfSource {
             Some(base) => HfEndpoint::from_base_url(base),
         }
     }
+
+    async fn guarded_client(&self) -> Result<reqwest::Client> {
+        let endpoint = self.endpoint();
+        let (client, _) = crate::server::guarded_client(&endpoint.api_base)
+            .await
+            .map_err(|error| anyhow::anyhow!(error))?;
+        Ok(client)
+    }
 }
 
 impl CatalogSource for HfSource {
@@ -83,7 +91,8 @@ impl CatalogSource for HfSource {
         CatalogKind::Model
     }
 
-    async fn search(&self, client: &reqwest::Client, q: &CatalogQuery) -> Result<Value> {
+    async fn search(&self, _client: &reqwest::Client, q: &CatalogQuery) -> Result<Value> {
+        let client = self.guarded_client().await?;
         // Per-kind params ride in `extra`: HF understands `task`, `author`, and
         // the weight `format` facet (defaults to GGUF).
         let task = q.extra_str("task");
@@ -91,7 +100,7 @@ impl CatalogSource for HfSource {
         let sort = crate::model_catalog::CatalogSort::parse(q.extra_str("sort"));
         let format = crate::model_format::ModelFormat::from_wire(q.extra_str("format"));
         crate::model_catalog::search_models_json(
-            client,
+            &client,
             &self.endpoint(),
             &q.query,
             sort,
@@ -105,11 +114,12 @@ impl CatalogSource for HfSource {
         .await
     }
 
-    async fn detail(&self, client: &reqwest::Client, id: &str) -> Result<Value> {
+    async fn detail(&self, _client: &reqwest::Client, id: &str) -> Result<Value> {
+        let client = self.guarded_client().await?;
         // The federated detail path stays GGUF (seam snapshots are out of scope);
         // the main /api/models route carries the format facet for snapshots.
         crate::model_catalog::model_detail_json(
-            client,
+            &client,
             &self.endpoint(),
             id,
             crate::model_format::ModelFormat::Gguf,

@@ -1040,7 +1040,13 @@ fn inject_ext_env(
 /// `api_token`), so spawn and clients always agree. The token is injected
 /// deliberately for sidecars that need direct Shadow access; it is never
 /// obtained through ambient environment inheritance.
-fn inject_shadow_env(env: &mut BTreeMap<String, String>) {
+fn inject_shadow_env(env: &mut BTreeMap<String, String>, plugin_id: &str) {
+    if !matches!(
+        plugin_id,
+        "@ryu/clips" | "clips" | "@ryu/meetings" | "meetings"
+    ) {
+        return;
+    }
     if env.contains_key("SHADOW_API_TOKEN") {
         return;
     }
@@ -1470,41 +1476,37 @@ async fn resolve_local_sidecar_program(
             tracing::warn!("app sidecar '{command}': refusing download url {url}: {e}");
             download_error = Some(format!("refused download url {url}: {e}"));
         } else {
-            // Integrity: verify against the sibling `<asset>.sha256` the release
-            // publishes. Best-effort — a missing/unreadable checksum downloads
-            // unverified (warned), matching the old desktop prefetch's
-            // warn-and-continue posture; when present, DownloadCenter fails the
-            // transfer on a mismatch.
-            let sha256 = fetch_release_sha256(&url).await;
-            if sha256.is_none() {
-                tracing::warn!(
-                    "app sidecar '{command}': no .sha256 published for {asset}; \
-                     downloading unverified"
-                );
-            }
-            match downloads
-                .download_blocking(crate::downloads::DownloadSpec {
-                    kind: crate::downloads::DownloadKind::Other,
-                    role: crate::downloads::DownloadRole::Plugin,
-                    label: format!("app sidecar: {command}"),
-                    url: url.clone(),
-                    dest: dest.clone(),
-                    sha256,
-                    version_record: None,
-                })
-                .await
-            {
-                Ok(path) => {
-                    make_executable(&path).await;
-                    // Stamp the version so a later Core self-update re-fetches a stale bin.
-                    let _ = tokio::fs::write(&marker, &current).await;
-                    clear_missing_sidecar_binary(name);
-                    return path.to_string_lossy().into_owned();
+            // Executable sidecars require a trusted sibling digest. DownloadCenter
+            // also verifies it again while streaming/resuming the artifact.
+            if let Some(sha256) = fetch_release_sha256(&url).await {
+                match downloads
+                    .download_blocking(crate::downloads::DownloadSpec {
+                        kind: crate::downloads::DownloadKind::Other,
+                        role: crate::downloads::DownloadRole::Plugin,
+                        label: format!("app sidecar: {command}"),
+                        url: url.clone(),
+                        dest: dest.clone(),
+                        sha256: Some(sha256),
+                        version_record: None,
+                    })
+                    .await
+                {
+                    Ok(path) => {
+                        make_executable(&path).await;
+                        // Stamp the version so a later Core self-update re-fetches a stale bin.
+                        let _ = tokio::fs::write(&marker, &current).await;
+                        clear_missing_sidecar_binary(name);
+                        return path.to_string_lossy().into_owned();
+                    }
+                    Err(e) => {
+                        tracing::warn!("app sidecar '{command}': download from {url} failed: {e}");
+                        download_error = Some(format!("download from {url} failed: {e}"));
+                    }
                 }
-                Err(e) => {
-                    tracing::warn!("app sidecar '{command}': download from {url} failed: {e}");
-                    download_error = Some(format!("download from {url} failed: {e}"));
-                }
+            } else {
+                download_error = Some(format!(
+                    "app sidecar '{command}' has no trusted .sha256 for {asset}; refusing to install"
+                ));
             }
         }
     }
@@ -2189,7 +2191,7 @@ impl Sidecar for ManifestSidecar {
                     // (applied last so a manifest can't override the injected secret).
                     let mut env = bin.env.clone();
                     inject_ext_env(&mut env, &plugin_id, &ext_token)?;
-                    inject_shadow_env(&mut env);
+                    inject_shadow_env(&mut env, &plugin_id);
                     inject_cap_shims(&mut env, &plugin_id, &plugin_dir).await;
                     spawn(&handle, &exe.to_string_lossy(), &bin.args, &env).await?;
                 }
@@ -2235,7 +2237,7 @@ impl Sidecar for ManifestSidecar {
                         );
                     }
                     inject_ext_env(&mut env, &plugin_id, &ext_token)?;
-                    inject_shadow_env(&mut env);
+                    inject_shadow_env(&mut env, &plugin_id);
                     inject_cap_shims(&mut env, &plugin_id, &plugin_dir).await;
                     spawn(&handle, &program, &local.args, &env).await?;
                 }
@@ -2267,7 +2269,7 @@ impl Sidecar for ManifestSidecar {
                         );
                     }
                     inject_ext_env(&mut env, &plugin_id, &ext_token)?;
-                    inject_shadow_env(&mut env);
+                    inject_shadow_env(&mut env, &plugin_id);
                     inject_cap_shims(&mut env, &plugin_id, &plugin_dir).await;
                     spawn(&handle, &python.to_string_lossy(), &args, &env).await?;
                 }

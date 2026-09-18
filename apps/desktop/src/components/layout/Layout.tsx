@@ -19,6 +19,8 @@ import type { CSSProperties, ReactNode } from "react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useLocation } from "react-router-dom";
 import { ChatDisplayPrefs } from "@/src/components/chat/ChatDisplayPrefsProvider.tsx";
+import { QuickPreview } from "@/src/components/chat/QuickPreview.tsx";
+import { QuickReplyComposer } from "@/src/components/chat/QuickReplyComposer.tsx";
 import { DeepLinkController } from "@/src/components/deeplink/DeepLinkController.tsx";
 import { AnimatedTitle } from "@/src/components/layout/animated-title.tsx";
 import { EmptyTabsState } from "@/src/components/layout/EmptyTabsState.tsx";
@@ -27,7 +29,6 @@ import { ScrollableTabsView } from "@/src/components/layout/ScrollableTabsView.t
 import { DesktopReportHost } from "@/src/components/marketplace/report-host.tsx";
 import { MediaPipDock } from "@/src/components/media/MediaPip.tsx";
 import { ProjectDockHost } from "@/src/components/panels/ProjectDockHost.tsx";
-import { PrivacyDisclosure } from "@/src/components/settings/privacy-disclosure.tsx";
 import { SupportAccessBanner } from "@/src/components/settings/support-access-banner.tsx";
 import { ConnectionStatusToast } from "@/src/components/shell/ConnectionStatusToast.tsx";
 import { ReconnectRetryBanner } from "@/src/components/shell/ReconnectRetryBanner.tsx";
@@ -111,7 +112,9 @@ import { windowChromeLayout } from "@/src/lib/window-chrome-layout.ts";
 import { useLiveActivities } from "@/src/live/useLiveActivities.ts";
 import { useAssistantStore } from "@/src/store/useAssistantStore.ts";
 import { useChatHotkeyTargets } from "@/src/store/useChatHotkeyTargets.ts";
+import { useConversationFlagsStore } from "@/src/store/useConversationFlagsStore.ts";
 import { useGatewayDialog } from "@/src/store/useGatewayDialog.ts";
+import { useQuickReplyStore } from "@/src/store/useQuickReplyStore.ts";
 import { useSettingsDialog } from "@/src/store/useSettingsDialog.ts";
 import { useWorkspaceStore } from "@/src/store/useWorkspaceStore.ts";
 import { AssistantDock } from "../assistant/AssistantDock.tsx";
@@ -131,8 +134,8 @@ import {
 	SplitGutters,
 } from "./SplitView.tsx";
 import { TabGlyph, TitleBar, useTabBusy } from "./TitleBar.tsx";
+import { TitlebarPage } from "./TitlebarPage.tsx";
 import { TabDndProvider } from "./tabDnd.tsx";
-import { pathScrollsUnderTitlebar } from "./titlebarScroll.ts";
 import { WindowNavigationCluster } from "./WindowNavigationCluster.tsx";
 
 // Populate the contribution registry with every built-in route BEFORE first
@@ -141,6 +144,7 @@ import { WindowNavigationCluster } from "./WindowNavigationCluster.tsx";
 seedBuiltinRoutes();
 
 const isMac = navigator.userAgent.includes("Mac");
+const EMPTY_OS_WINDOWS: OsWindow[] = [];
 
 /** Docked-sidebar resize bounds. */
 const SIDEBAR_MIN_WIDTH = 180;
@@ -282,6 +286,8 @@ function LayoutContent({
 	const { canUpdateDesktopApp } = useAppSurface();
 	const {
 		activeConversationId,
+		conversations,
+		loadMessages,
 		setActiveConversationId,
 		deleteConversation,
 		createConversation,
@@ -403,6 +409,55 @@ function LayoutContent({
 		canGoBack,
 		canGoForward,
 	} = useTabsContext();
+	const quickReplyRequest = useQuickReplyStore((state) => state.request);
+	const openQuickReply = useQuickReplyStore((state) => state.open);
+	const closeQuickReply = useQuickReplyStore((state) => state.close);
+	const submitQuickReply = useQuickReplyStore((state) => state.submit);
+	const [quickPreviewConversationId, setQuickPreviewConversationId] = useState<
+		string | null
+	>(null);
+	const quickPreviewConversation = quickPreviewConversationId
+		? conversations.find((item) => item.id === quickPreviewConversationId)
+		: undefined;
+	const unreadIds = useConversationFlagsStore((state) => state.unreadIds);
+	const markRead = useConversationFlagsStore((state) => state.markRead);
+	const markUnread = useConversationFlagsStore((state) => state.markUnread);
+
+	const handleOpenQuickPreview = useCallback((conversationId: string) => {
+		setQuickPreviewConversationId(conversationId);
+	}, []);
+
+	const handleOpenQuickReply = useCallback(
+		(conversationId: string) => {
+			const conversation = conversations.find(
+				(item) => item.id === conversationId
+			);
+			openQuickReply({
+				conversationId,
+				targetUrl: activeNode.url,
+				title: conversation?.title ?? "Chat",
+			});
+		},
+		[activeNode.url, conversations, openQuickReply]
+	);
+
+	const handleSubmitQuickReply = useCallback(
+		(content: string) => {
+			const request = useQuickReplyStore.getState().request;
+			if (!request) {
+				return;
+			}
+			// Ensure a ChatPage owns the target even when the conversation was not already
+			// open. Its registration drains this request after the tab mounts.
+			openTab("/chat", {
+				conversationId: request.conversationId,
+				title: request.title,
+			});
+			submitQuickReply(request.targetUrl, request.conversationId, content);
+			closeQuickReply();
+		},
+		[closeQuickReply, openTab, submitQuickReply]
+	);
 	const { actions: titleBarActions } = useTitleBarContext();
 	const tabLayout = useTabLayout();
 	// Auto-hide frees the top clearance so content fills the window; the bar
@@ -636,7 +691,7 @@ function LayoutContent({
 		}, 200);
 	};
 
-	const handleNewConversation = () => {
+	const handleNewConversation = useCallback(() => {
 		const id = `conv-${Date.now()}`;
 		// Born under whatever project is open, so the sidebar nests it right away.
 		// Read at call time (not subscribed) — this handler is a one-shot action,
@@ -646,19 +701,25 @@ function LayoutContent({
 		});
 		setActiveConversationId(id);
 		openTab("/chat", { forceNew: true, conversationId: id, title: "New chat" });
-	};
+	}, [createConversation, openTab, setActiveConversationId]);
 
-	const handleSelectConversation = (id: string) => {
-		setActiveConversationId(id);
-		openTab("/chat", { conversationId: id });
-	};
+	const handleSelectConversation = useCallback(
+		(id: string) => {
+			setActiveConversationId(id);
+			openTab("/chat", { conversationId: id });
+		},
+		[openTab, setActiveConversationId]
+	);
 
-	const handleDeleteConversation = (id: string) => {
-		deleteConversation(id);
-		if (activeConversationId === id) {
-			setActiveConversationId(null);
-		}
-	};
+	const handleDeleteConversation = useCallback(
+		(id: string) => {
+			deleteConversation(id);
+			if (activeConversationId === id) {
+				setActiveConversationId(null);
+			}
+		},
+		[activeConversationId, deleteConversation, setActiveConversationId]
+	);
 
 	// App-level shortcuts whose handlers live here (sidebar, settings, new chat,
 	// route jumps). Everything routes through the unified hotkey registry, so all
@@ -773,22 +834,27 @@ function LayoutContent({
 			isMobile,
 			nativeWindowChrome,
 		});
-	const osWindows: OsWindow[] = tabs.map((tab) => ({
-		content: (
-			<IsActiveTabProvider isActive={tab.id === activeTabId}>
-				<CurrentTabIdProvider tabId={tab.id}>
-					{tab.unloaded ? null : (
-						<div className="flex size-full flex-col overflow-hidden">
-							<RouteOutlet onClose={() => closeTab(tab.id)} tab={tab} />
-						</div>
-					)}
-				</CurrentTabIdProvider>
-			</IsActiveTabProvider>
-		),
-		id: tab.id,
-		path: tab.path,
-		title: tab.title,
-	}));
+	// The OS desktop surface consumes this adapter; normal Console renders never
+	// do. Avoid allocating one React subtree per retained tab on every shell render
+	// when the array cannot reach a consumer.
+	const osWindows: OsWindow[] = osProduct
+		? tabs.map((tab) => ({
+				content: (
+					<IsActiveTabProvider isActive={tab.id === activeTabId}>
+						<CurrentTabIdProvider tabId={tab.id}>
+							{tab.unloaded ? null : (
+								<div className="flex size-full flex-col overflow-hidden">
+									<RouteOutlet onClose={() => closeTab(tab.id)} tab={tab} />
+								</div>
+							)}
+						</CurrentTabIdProvider>
+					</IsActiveTabProvider>
+				),
+				id: tab.id,
+				path: tab.path,
+				title: tab.title,
+			}))
+		: EMPTY_OS_WINDOWS;
 
 	return (
 		<TabDndProvider>
@@ -800,7 +866,6 @@ function LayoutContent({
 			<SaveSplitPresetDialog />
 			<DeepLinkController />
 			<MediaPipDock />
-			<PrivacyDisclosure />
 			{!(botProduct || osProduct) && <SupportAccessBanner />}
 			<ConnectionStatusToast />
 			{!osProduct && <ReconnectRetryBanner state={reconnectRetryState} />}
@@ -813,6 +878,8 @@ function LayoutContent({
 					activeConversationId={activeConversationId}
 					onDeleteConversation={handleDeleteConversation}
 					onNewConversation={handleNewConversation}
+					onOpenQuickPreview={handleOpenQuickPreview}
+					onOpenQuickReply={handleOpenQuickReply}
 					onSelectConversation={handleSelectConversation}
 				/>
 			)}
@@ -887,6 +954,8 @@ function LayoutContent({
 							activeConversationId={activeConversationId}
 							onDeleteConversation={handleDeleteConversation}
 							onNewConversation={handleNewConversation}
+							onOpenQuickPreview={handleOpenQuickPreview}
+							onOpenQuickReply={handleOpenQuickReply}
 							onSelectConversation={handleSelectConversation}
 						/>
 						<div
@@ -944,6 +1013,15 @@ function LayoutContent({
 						<div
 							className="relative min-h-0 flex-1 overflow-hidden"
 							ref={contentRef}
+							style={
+								{
+									"--ryu-titlebar-inset": titleBarClearsContent
+										? sidebarVariant === "floating"
+											? "calc(var(--spacing) * 20)"
+											: "calc(var(--spacing) * 18)"
+										: "0px",
+								} as CSSProperties
+							}
 						>
 							{tabs.length === 0 ? (
 								<EmptyTabsState />
@@ -973,17 +1051,13 @@ function LayoutContent({
 									} else {
 										style = { display: "none" };
 									}
-									// Scroll-under panes (chat + the store / marketplace family)
-									// manage their own top clearance internally so their content sits
-									// UNDER the frosted titlebar. Every other page reserves the bar's
-									// height so its header sits cleanly below the solid tab bar.
-									const scrollsUnderTitlebar = pathScrollsUnderTitlebar(
-										tab.path
-									);
-									const needsClearance =
+									const titlebarInset =
 										titleBarClearsContent &&
-										!scrollsUnderTitlebar &&
-										(paneRect ? paneNeedsTopClearance(paneRect) : true);
+										(paneRect ? paneNeedsTopClearance(paneRect) : true)
+											? sidebarVariant === "floating"
+												? 80
+												: 72
+											: 0;
 									return (
 										<IsActiveTabProvider
 											isActive={focused}
@@ -992,10 +1066,7 @@ function LayoutContent({
 											<CurrentTabIdProvider tabId={tab.id}>
 												{tab.unloaded ? null : (
 													<div
-														className={cn(
-															"flex flex-col overflow-hidden",
-															needsClearance && "pt-12"
-														)}
+														className="flex flex-col overflow-hidden"
 														// Clicking anywhere in a non-focused pane focuses it
 														// (no nav-history entry) before the inner UI reacts.
 														onMouseDownCapture={
@@ -1005,10 +1076,18 @@ function LayoutContent({
 														}
 														style={style}
 													>
-														<RouteOutlet
-															onClose={() => closeTab(tab.id)}
-															tab={tab}
-														/>
+														<TitlebarPage
+															inset={titlebarInset}
+															selfInset={
+																tab.path === "/chat" ||
+																tab.path.startsWith("/chat/")
+															}
+														>
+															<RouteOutlet
+																onClose={() => closeTab(tab.id)}
+																tab={tab}
+															/>
+														</TitlebarPage>
 														<PaneBadge
 															actions={focused ? titleBarActions : undefined}
 															activeSplit={!!activeSplit && visible}
@@ -1067,6 +1146,29 @@ function LayoutContent({
 			    survives close/reopen because its id lives in the assistant store. */}
 			{assistantMode === "sidebar" && <AssistantPanel />}
 			{showAssistantDock && !chatPaneVisible && <AssistantDock />}
+			<QuickPreview
+				conversationId={quickPreviewConversationId ?? ""}
+				isUnread={
+					quickPreviewConversationId
+						? unreadIds.has(quickPreviewConversationId)
+						: false
+				}
+				loadMessages={loadMessages}
+				onMarkRead={markRead}
+				onMarkUnread={markUnread}
+				onOpenChange={(open) => {
+					if (!open) {
+						setQuickPreviewConversationId(null);
+					}
+				}}
+				open={quickPreviewConversationId !== null}
+				title={quickPreviewConversation?.title ?? "Chat preview"}
+			/>
+			<QuickReplyComposer
+				onClose={closeQuickReply}
+				onSubmit={handleSubmitQuickReply}
+				request={quickReplyRequest}
+			/>
 		</TabDndProvider>
 	);
 }
@@ -1130,14 +1232,14 @@ export default function Layout() {
 					onboardingInitialTab(location.state))
 	);
 	const [sidebarWidth, setSidebarWidth] = useState(getSavedSidebarWidth);
-	const handleSidebarWidthChange = (w: number) => {
+	const handleSidebarWidthChange = useCallback((w: number) => {
 		setSidebarWidth(w);
 		try {
 			localStorage.setItem(SIDEBAR_WIDTH_KEY, String(w));
 		} catch {
 			// Persisting the width is best-effort; ignore storage failures.
 		}
-	};
+	}, []);
 
 	useEffect(() => {
 		const handler = (e: Event) => {

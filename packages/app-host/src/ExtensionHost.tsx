@@ -208,6 +208,21 @@ export function ExtensionHost({
 		// `agent.cancel` can abort the matching in-flight stream and unmount can abort
 		// all of them.
 		const activeStreams = new Map<number, AbortController>();
+		// Every valid unary and streaming request consumes the same per-frame
+		// in-flight budget. This is intentionally owned by the host instance, so
+		// one app cannot turn a valid grant into unbounded promise/service work.
+		const MAX_IN_FLIGHT_CALLS = 32;
+		let inFlightCalls = 0;
+		const tryAcquireCall = (): boolean => {
+			if (inFlightCalls >= MAX_IN_FLIGHT_CALLS) {
+				return false;
+			}
+			inFlightCalls += 1;
+			return true;
+		};
+		const releaseCall = (): void => {
+			inFlightCalls = Math.max(0, inFlightCalls - 1);
+		};
 		const readLifetime = new AbortController();
 
 		// Post the terminal reply that ends a request (unary or streaming).
@@ -368,6 +383,14 @@ export function ExtensionHost({
 					);
 					return;
 				}
+				if (!tryAcquireCall()) {
+					postResult(
+						req.id,
+						undefined,
+						new CodedRpcError("server_error", "too many in-flight app calls")
+					);
+					return;
+				}
 				const controller = new AbortController();
 				activeStreams.set(req.id, controller);
 				const emit = (delta: string) => {
@@ -378,13 +401,25 @@ export function ExtensionHost({
 					};
 					port?.postMessage(chunk);
 				};
-				start(emit, controller.signal)
+				void Promise.resolve()
+					.then(() => start?.(emit, controller.signal))
 					.then(() => postResult(req.id, null))
 					.catch((err: unknown) => postResult(req.id, undefined, err))
-					.finally(() => activeStreams.delete(req.id));
+					.finally(() => {
+						activeStreams.delete(req.id);
+						releaseCall();
+					});
 				return;
 			}
 
+			if (!tryAcquireCall()) {
+				postResult(
+					req.id,
+					undefined,
+					new CodedRpcError("server_error", "too many in-flight app calls")
+				);
+				return;
+			}
 			dispatchRpc(
 				req.method,
 				req.args,
@@ -409,7 +444,8 @@ export function ExtensionHost({
 						error: toRpcError(err),
 					};
 					port?.postMessage(reply);
-				});
+				})
+				.finally(releaseCall);
 		};
 
 		// Handshake: accept the "ready" ONLY from THIS frame (event.source identity)
@@ -498,6 +534,12 @@ export function ExtensionHost({
 			// allow-scripts WITHOUT allow-same-origin → null origin, no Tauri IPC.
 			sandbox={IFRAME_SANDBOX}
 			srcDoc={srcdoc}
+			style={{
+				border: 0,
+				display: "block",
+				height: "100%",
+				width: "100%",
+			}}
 			title={title}
 		/>
 	);

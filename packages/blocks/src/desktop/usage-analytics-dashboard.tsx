@@ -15,6 +15,7 @@ import {
 	CardTitle,
 } from "@ryu/ui/components/card";
 import {
+	type ChartConfig,
 	ChartContainer,
 	ChartTooltip,
 	ChartTooltipContent,
@@ -43,7 +44,7 @@ import {
 import { Spinner } from "@ryu/ui/components/spinner";
 import { ToggleGroup, ToggleGroupItem } from "@ryu/ui/components/toggle-group";
 import { formatCount } from "@ryu/ui/lib/number-format.ts";
-import { useState } from "react";
+import { useId, useState } from "react";
 import {
 	Area,
 	AreaChart,
@@ -64,6 +65,7 @@ import {
 	type UsageDateRange,
 	type UsageGranularity,
 	type UsageScope,
+	type UsageTrendPoint,
 } from "./usage-analytics.ts";
 
 const SCOPE_LABELS: Record<UsageScope, string> = {
@@ -103,6 +105,19 @@ const KPI_COLORS = {
 	tokens: "oklch(0.62 0.19 306)",
 } as const;
 
+type TrendMetric = "requests" | "tokens" | "errors" | "spend";
+
+const TREND_METRICS: readonly {
+	color: string;
+	key: TrendMetric;
+	label: string;
+}[] = [
+	{ color: KPI_COLORS.requests, key: "requests", label: "Requests" },
+	{ color: KPI_COLORS.tokens, key: "tokens", label: "Tokens" },
+	{ color: KPI_COLORS.errors, key: "errors", label: "Errors" },
+	{ color: KPI_COLORS["credit spend"], key: "spend", label: "Credit spend" },
+];
+
 function startOfDay(date: Date): Date {
 	return new Date(date.getFullYear(), date.getMonth(), date.getDate());
 }
@@ -133,6 +148,30 @@ function formatMilliseconds(value: number | null): string {
 
 function formatSpend(value: number | null): string {
 	return value === null ? "Not billed" : formatMicroUsd(value);
+}
+
+function trendPointValue(point: UsageTrendPoint, metric: TrendMetric): number {
+	return metric === "spend" ? (point.spend ?? 0) : point[metric];
+}
+
+function trendMetricTotal(
+	data: UsageAnalyticsData,
+	metric: TrendMetric
+): number | null {
+	switch (metric) {
+		case "errors":
+			return data.totals.errors;
+		case "requests":
+			return data.totals.requests;
+		case "spend":
+			return data.totals.spendMicroUsd;
+		case "tokens":
+			return data.totals.inputTokens + data.totals.outputTokens;
+	}
+}
+
+function formatTrendValue(metric: TrendMetric, value: number): string {
+	return metric === "spend" ? formatMicroUsd(value) : formatCompact(value);
 }
 
 function formatBreakdownValue(entry: UsageBreakdownRow): string {
@@ -183,14 +222,18 @@ function KpiCard({
 function MetricTile({
 	color,
 	label,
+	selected = false,
 	value,
 }: {
 	color: string;
 	label: string;
+	selected?: boolean;
 	value: string;
 }) {
 	return (
-		<div className="flex min-w-0 flex-col gap-1 rounded-2xl border border-border/50 bg-muted/35 px-3 py-2.5">
+		<div
+			className={`flex min-w-0 flex-col gap-1 rounded-2xl border border-border/50 bg-muted/35 px-3 py-2.5 ${selected ? "bg-primary/5 ring-1 ring-primary/25" : ""}`}
+		>
 			<div className="flex min-w-0 items-center gap-2 text-muted-foreground text-xs">
 				<span
 					aria-hidden="true"
@@ -205,6 +248,8 @@ function MetricTile({
 }
 
 function UsageTrend({ data }: { data: UsageAnalyticsData }) {
+	const [selectedMetric, setSelectedMetric] = useState<TrendMetric>("requests");
+	const gradientId = `usage-trend-fill-${useId().replace(/:/g, "")}`;
 	const chartData = compactUsageTrendPoints(
 		data.buckets.map((bucket) => ({
 			errors: bucket.errors,
@@ -214,31 +259,40 @@ function UsageTrend({ data }: { data: UsageAnalyticsData }) {
 			tokens: bucket.inputTokens + bucket.outputTokens,
 		}))
 	);
-	const config = {
-		errors: { color: KPI_COLORS.errors, label: "Errors" },
-		requests: { color: KPI_COLORS.requests, label: "Requests" },
-		spend: { color: KPI_COLORS["credit spend"], label: "Credit spend" },
-		tokens: { color: KPI_COLORS.tokens, label: "Tokens" },
+	const metricDefinition =
+		TREND_METRICS.find(({ key }) => key === selectedMetric) ?? TREND_METRICS[0];
+	const config: ChartConfig = {
+		[selectedMetric]: {
+			color: metricDefinition.color,
+			label: metricDefinition.label,
+		},
 	};
-	const hasSpend = data.buckets.some((bucket) => bucket.spendMicroUsd !== null);
+	const hasSelectedData = chartData.some(
+		(point) => trendPointValue(point, selectedMetric) > 0
+	);
+	const selectedTotal = trendMetricTotal(data, selectedMetric);
 	const metricTiles = [
 		{
 			color: KPI_COLORS.requests,
+			key: "requests" as const,
 			label: "Requests",
 			value: formatCompact(data.totals.requests),
 		},
 		{
 			color: KPI_COLORS.tokens,
+			key: "tokens" as const,
 			label: "Tokens",
 			value: formatCompact(data.totals.inputTokens + data.totals.outputTokens),
 		},
 		{
 			color: KPI_COLORS.errors,
+			key: "errors" as const,
 			label: "Errors",
 			value: formatCompact(data.totals.errors),
 		},
 		{
 			color: KPI_COLORS["credit spend"],
+			key: "spend" as const,
 			label: "Credit spend",
 			value: formatSpend(data.totals.spendMicroUsd),
 		},
@@ -249,50 +303,85 @@ function UsageTrend({ data }: { data: UsageAnalyticsData }) {
 			className={`${ANALYTICS_CARD_CLASS} min-w-0`}
 			data-testid="usage-analytics-chart-trend"
 		>
-			<CardHeader className="flex flex-row items-start justify-between gap-4">
-				<div className="min-w-0">
-					<CardTitle>Activity over time</CardTitle>
-					<CardDescription>
-						Requests, tokens, errors, and billed spend at{" "}
-						{GRANULARITY_LABELS[data.granularity].toLowerCase()} resolution.
-					</CardDescription>
-				</div>
-				<CardAction className="ml-auto shrink-0 text-right">
-					<div className="font-medium text-xl tabular-nums">
-						{formatCompact(data.totals.requests)}
+			<CardHeader className="gap-3">
+				<div className="flex items-start justify-between gap-4">
+					<div className="min-w-0">
+						<CardTitle>Activity over time</CardTitle>
+						<CardDescription>
+							{metricDefinition.label} at{" "}
+							{GRANULARITY_LABELS[data.granularity].toLowerCase()} resolution.
+						</CardDescription>
 					</div>
-					<div className="text-muted-foreground text-xs">requests in range</div>
-				</CardAction>
+					<CardAction className="ml-auto shrink-0 text-right">
+						<div
+							className="font-medium text-xl tabular-nums"
+							data-testid="usage-trend-selected"
+						>
+							{selectedTotal === null
+								? "Not billed"
+								: formatTrendValue(selectedMetric, selectedTotal)}
+						</div>
+						<div className="text-muted-foreground text-xs">
+							{metricDefinition.label.toLowerCase()} in range
+						</div>
+					</CardAction>
+				</div>
+				<div
+					className="flex flex-wrap items-center justify-between gap-2 rounded-2xl bg-muted/35 p-1.5"
+					data-testid="usage-trend-metric"
+				>
+					<span className="px-2 font-medium text-muted-foreground text-xs">
+						Show
+					</span>
+					<ToggleGroup
+						aria-label="Usage trend metric"
+						className="bg-transparent"
+						multiple={false}
+						onValueChange={(values: string[]) => {
+							const [value] = values;
+							if (TREND_METRICS.some(({ key }) => key === value)) {
+								setSelectedMetric(value as TrendMetric);
+							}
+						}}
+						spacing={0}
+						value={[selectedMetric]}
+						variant="default"
+					>
+						{TREND_METRICS.map((metric) => (
+							<ToggleGroupItem
+								className="h-8 px-2.5 text-xs"
+								key={metric.key}
+								value={metric.key}
+							>
+								<span
+									aria-hidden="true"
+									className="mr-1.5 size-1.5 rounded-full"
+									style={{ backgroundColor: metric.color }}
+								/>
+								{metric.label}
+							</ToggleGroupItem>
+						))}
+					</ToggleGroup>
+				</div>
 			</CardHeader>
 			<CardContent className="flex flex-col gap-4">
-				{chartData.some(
-					(bucket) =>
-						bucket.requests > 0 ||
-						bucket.tokens > 0 ||
-						(bucket.spend !== null && bucket.spend > 0)
-				) ? (
+				{hasSelectedData ? (
 					<ChartContainer className="h-[280px] w-full" config={config}>
 						<AreaChart
 							accessibilityLayer
 							data={chartData}
-							margin={{ left: 4, right: 8 }}
+							margin={{ left: 4, right: 8, top: 8 }}
 						>
 							<defs>
-								<linearGradient
-									id="usage-trend-requests"
-									x1="0"
-									x2="0"
-									y1="0"
-									y2="1"
-								>
+								<linearGradient id={gradientId} x1="0" x2="0" y1="0" y2="1">
 									<stop
 										offset="5%"
-										stopColor="var(--color-requests)"
+										stopColor={`var(--color-${selectedMetric})`}
 										stopOpacity={0.35}
 									/>
 									<stop
 										offset="95%"
-										stopColor="var(--color-requests)"
+										stopColor={`var(--color-${selectedMetric})`}
 										stopOpacity={0.02}
 									/>
 								</linearGradient>
@@ -307,30 +396,19 @@ function UsageTrend({ data }: { data: UsageAnalyticsData }) {
 							/>
 							<YAxis
 								axisLine={false}
-								tickFormatter={formatCompact}
+								tickFormatter={(value) =>
+									formatTrendValue(selectedMetric, Number(value))
+								}
 								tickLine={false}
 								width={36}
-								yAxisId="activity"
 							/>
-							{hasSpend ? (
-								<YAxis
-									axisLine={false}
-									orientation="right"
-									tickFormatter={(value) => formatMicroUsd(Number(value))}
-									tickLine={false}
-									width={52}
-									yAxisId="spend"
-								/>
-							) : null}
 							<ChartTooltip
 								content={
 									<ChartTooltipContent
-										formatter={(value, name) => [
-											name === "spend"
-												? formatMicroUsd(Number(value))
-												: formatCompact(Number(value)),
-											name,
-										]}
+										formatter={(value) =>
+											formatTrendValue(selectedMetric, Number(value))
+										}
+										indicator="line"
 									/>
 								}
 								cursor={{
@@ -339,52 +417,28 @@ function UsageTrend({ data }: { data: UsageAnalyticsData }) {
 								}}
 							/>
 							<Area
-								dataKey="requests"
-								fill="url(#usage-trend-requests)"
+								connectNulls={selectedMetric === "spend"}
+								dataKey={selectedMetric}
+								fill={`url(#${gradientId})`}
 								fillOpacity={0.9}
-								stroke="var(--color-requests)"
+								stroke={`var(--color-${selectedMetric})`}
 								strokeWidth={2}
 								type="monotone"
-								yAxisId="activity"
 							/>
-							<Area
-								dataKey="tokens"
-								fill="none"
-								stroke="var(--color-tokens)"
-								strokeDasharray="4 4"
-								strokeWidth={2}
-								type="monotone"
-								yAxisId="activity"
-							/>
-							<Area
-								dataKey="errors"
-								fill="none"
-								stroke="var(--color-errors)"
-								strokeWidth={2}
-								type="monotone"
-								yAxisId="activity"
-							/>
-							{hasSpend ? (
-								<Area
-									connectNulls
-									dataKey="spend"
-									fill="none"
-									stroke="var(--color-spend)"
-									strokeWidth={2}
-									type="monotone"
-									yAxisId="spend"
-								/>
-							) : null}
 						</AreaChart>
 					</ChartContainer>
 				) : (
 					<div className="flex h-[280px] items-center justify-center text-muted-foreground text-sm">
-						No activity in this range.
+						No {metricDefinition.label.toLowerCase()} in this range.
 					</div>
 				)}
 				<div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
-					{metricTiles.map((tile) => (
-						<MetricTile key={tile.label} {...tile} />
+					{metricTiles.map(({ key: metricKey, ...tile }) => (
+						<MetricTile
+							key={tile.label}
+							selected={metricKey === selectedMetric}
+							{...tile}
+						/>
 					))}
 				</div>
 			</CardContent>
@@ -422,7 +476,7 @@ function UsageDonut({
 		(sum, entry) => sum + (entry.spendMicroUsd ?? 0),
 		0
 	);
-	const config = Object.fromEntries(
+	const config: ChartConfig = Object.fromEntries(
 		chartData.map((entry, index) => [
 			`item${index}`,
 			{ color: entry.color, label: entry.label },

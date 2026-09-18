@@ -60,6 +60,25 @@ describe("hydrateHistoryMessage", () => {
 		expect(out.widgetInstanceId).toBe("instance-1");
 	});
 
+	it("preserves a verified human author for a shared chat reload", () => {
+		const out = hydrateHistoryMessage(
+			{
+				author: { id: "user-ada", name: "Ada Lovelace" },
+				content: "I reviewed the plan",
+				id: "shared-message",
+				persisted: true,
+				role: "user",
+				timestamp: JUST_NOW,
+			},
+			NOW
+		);
+		expect(out.metadata).toEqual({
+			author: { id: "user-ada", name: "Ada Lovelace" },
+			ryuPersisted: true,
+		});
+		expect(out.persisted).toBe(true);
+	});
+
 	it("flags a truncated reply without touching the text that survived", () => {
 		const out = hydrateHistoryMessage(
 			{

@@ -21,11 +21,15 @@ export function hydrateToolSelection(
 	available: readonly string[],
 	isNew: boolean
 ): Set<string> {
-	if (isNew || configured.length === 0 || configured.includes(ALL_MCP_TOOLS)) {
-		return new Set(available);
-	}
-	if (configured.includes(NO_AGENT_CAPABILITIES)) {
+	if (
+		isNew ||
+		configured.length === 0 ||
+		configured.includes(NO_AGENT_CAPABILITIES)
+	) {
 		return new Set();
+	}
+	if (configured.includes(ALL_MCP_TOOLS)) {
+		return new Set(available);
 	}
 	return new Set(configured);
 }
@@ -54,7 +58,7 @@ export function encodeToolAllowlist(
 		available.length > 0 &&
 		selected.size === available.length &&
 		available.every((tool) => selected.has(tool));
-	if (allSelected || available.length === 0) {
+	if (allSelected) {
 		return [ALL_MCP_TOOLS];
 	}
 	if (selected.size === 0) {

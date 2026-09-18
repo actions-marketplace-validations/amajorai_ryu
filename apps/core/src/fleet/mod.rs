@@ -591,6 +591,75 @@ fn artifact_disposition(id: &str) -> Option<String> {
         .map(str::to_owned)
 }
 
+fn agent_allowed_by_assignments(agent_id: &str, assignments: &[Value]) -> bool {
+    if agent_id.trim().is_empty() {
+        return false;
+    }
+
+    let policies: Vec<&Value> = assignments
+        .iter()
+        .filter(|assignment| {
+            assignment
+                .get("artifact")
+                .and_then(|artifact| artifact.get("kind"))
+                .and_then(Value::as_str)
+                == Some("agent")
+        })
+        .collect();
+    if policies.is_empty() {
+        return true;
+    }
+
+    policies.iter().any(|assignment| {
+        assignment
+            .get("artifact")
+            .and_then(|artifact| artifact.get("artifactId"))
+            .and_then(Value::as_str)
+            == Some(agent_id)
+            && assignment.get("disposition").and_then(Value::as_str) != Some("blocked")
+    })
+}
+
+fn managed_agent_assignments() -> Option<Vec<Value>> {
+    if let Ok(assignments) = active_assignments_cache().read() {
+        if let Some(value) = assignments.as_ref() {
+            return value.as_array().cloned();
+        }
+    }
+
+    if let Ok(snapshot) = load_json::<SignedSnapshot>(&snapshot_path()) {
+        if let Some(assignments) = snapshot
+            .payload
+            .get("assignments")
+            .and_then(Value::as_array)
+        {
+            return Some(assignments.clone());
+        }
+    }
+
+    load_json::<Value>(&enforcement_path())
+        .ok()
+        .and_then(|enforcement| enforcement.get("agentAssignments").cloned())
+        .and_then(|assignments| assignments.as_array().cloned())
+}
+
+/// Whether an agent may be discovered or entered on this node.
+///
+/// Fleet agent assignments are an availability policy, not a replacement for
+/// the agent's exact resource ACL. With no `agent` assignments, legacy/local
+/// behavior remains unchanged. Once an administrator assigns one or more agent
+/// artifacts, only assigned non-blocked ids are available; a blocked assignment
+/// always wins because the control plane sends one effective assignment per
+/// artifact. The same decision is used after a restart from the signed
+/// last-known-good state and from the durable fail-closed enforcement record.
+pub fn is_agent_available(agent_id: &str) -> bool {
+    managed_agent_assignments()
+        .as_deref()
+        .map_or(true, |assignments| {
+            agent_allowed_by_assignments(agent_id, assignments)
+        })
+}
+
 static ACTIVE_ASSIGNMENTS: OnceLock<RwLock<Option<Value>>> = OnceLock::new();
 
 fn active_assignments_cache() -> &'static RwLock<Option<Value>> {
@@ -604,14 +673,29 @@ fn use_verified_assignments(snapshot: &SignedSnapshot) {
 }
 
 fn persist_fail_closed_enforcement(snapshot: &SignedSnapshot) -> anyhow::Result<()> {
-    let assignments: Vec<Value> = snapshot
+    let all_assignments: Vec<Value> = snapshot
         .payload
         .get("assignments")
         .and_then(Value::as_array)
         .into_iter()
         .flatten()
+        .cloned()
+        .collect();
+    let assignments: Vec<Value> = all_assignments
+        .iter()
         .filter(|assignment| {
             assignment.get("disposition").and_then(Value::as_str) == Some("blocked")
+        })
+        .cloned()
+        .collect();
+    let agent_assignments: Vec<Value> = all_assignments
+        .iter()
+        .filter(|assignment| {
+            assignment
+                .get("artifact")
+                .and_then(|artifact| artifact.get("kind"))
+                .and_then(Value::as_str)
+                == Some("agent")
         })
         .cloned()
         .collect();
@@ -634,6 +718,7 @@ fn persist_fail_closed_enforcement(snapshot: &SignedSnapshot) -> anyhow::Result<
     atomic_json(
         &enforcement_path(),
         &json!({
+            "agentAssignments": agent_assignments,
             "assignments": assignments,
             "revision": snapshot.payload.get("revision"),
             "rules": rules,
@@ -1116,6 +1201,18 @@ async fn apply_artifacts(
                     Err(error) => Err(error),
                 }
             }
+            // Agent definitions remain Core-owned and versioned records. A Fleet
+            // agent artifact is deliberately a policy reference to an existing
+            // stable agent id; it controls discovery/entry without overwriting
+            // the definition or its immutable history. Required references report
+            // a setup error when the node does not have that agent yet.
+            ("agent", _) => match state.agent_store.get(artifact_id).await {
+                Ok(Some(_)) => Ok(()),
+                Ok(None) => Err(format!(
+                    "managed agent '{artifact_id}' is not installed on this node"
+                )),
+                Err(error) => Err(error.to_string()),
+            },
             _ => Err(format!("unsupported managed artifact kind '{kind}'")),
         };
         observed.push(json!({
@@ -2478,14 +2575,15 @@ pub fn routes() -> Router<ServerState> {
 #[cfg(test)]
 mod tests {
     use super::{
-        atomic_json, canonicalize_json, enrolled_control_plane_url_from,
-        enrolled_control_token_from, enrolled_managed_fleet_from, enrollment_claim_bytes,
-        enrollment_claim_proof, enrollment_operation_lock, enrollment_token_hash, fleet_skill_dir,
-        load_enrolled_bundle_from, load_fleet_identity_from, normalized_service_url,
-        pending_attempt_for_request, project_for_cwd, registration_refresh_required,
-        valid_enrollment_token, validate_insert, validate_organization_binding, verify_snapshot,
-        EnrollResponse, EnrolledNodeBundle, EnrollmentOrganizationBinding, FleetIdentity,
-        ProjectMapping, SignedSnapshot, ENROLLMENT_CLAIM_DOMAIN,
+        agent_allowed_by_assignments, atomic_json, canonicalize_json,
+        enrolled_control_plane_url_from, enrolled_control_token_from, enrolled_managed_fleet_from,
+        enrollment_claim_bytes, enrollment_claim_proof, enrollment_operation_lock,
+        enrollment_token_hash, fleet_skill_dir, load_enrolled_bundle_from,
+        load_fleet_identity_from, normalized_service_url, pending_attempt_for_request,
+        project_for_cwd, registration_refresh_required, valid_enrollment_token, validate_insert,
+        validate_organization_binding, verify_snapshot, EnrollResponse, EnrolledNodeBundle,
+        EnrollmentOrganizationBinding, FleetIdentity, ProjectMapping, SignedSnapshot,
+        ENROLLMENT_CLAIM_DOMAIN,
     };
     use base64::Engine;
     use chrono::{Duration, Utc};
@@ -2534,6 +2632,28 @@ mod tests {
         assert!(fleet_skill_dir("../escape").is_err());
         assert!(fleet_skill_dir("nested/skill").is_err());
         assert!(fleet_skill_dir("skill name").is_err());
+    }
+
+    #[test]
+    fn agent_assignments_become_an_allowlist_and_blocked_ids_stay_denied() {
+        let assignments = vec![
+            json!({
+                "disposition": "required",
+                "artifact": { "artifactId": "agent-a", "kind": "agent" }
+            }),
+            json!({
+                "disposition": "blocked",
+                "artifact": { "artifactId": "agent-b", "kind": "agent" }
+            }),
+        ];
+        assert!(agent_allowed_by_assignments("agent-a", &assignments));
+        assert!(!agent_allowed_by_assignments("agent-b", &assignments));
+        assert!(!agent_allowed_by_assignments("agent-c", &assignments));
+    }
+
+    #[test]
+    fn no_agent_assignment_preserves_local_availability() {
+        assert!(agent_allowed_by_assignments("agent-a", &[]));
     }
 
     fn signed_snapshot(node_id: &str, expires_at: String) -> (FleetIdentity, SignedSnapshot) {

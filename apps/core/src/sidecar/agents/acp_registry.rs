@@ -444,6 +444,11 @@ pub struct RegistrySpawnPlan {
 /// Build spawn/install metadata from a registry distribution block.
 pub fn spawn_plan_for(agent: &RegistryAgent) -> Option<RegistrySpawnPlan> {
     if let Some(npx) = &agent.distribution.npx {
+        if !safe_registry_argument(&npx.package)
+            || npx.args.iter().any(|arg| !safe_registry_argument(arg))
+        {
+            return None;
+        }
         let pkg_base = npm_package_name(&npx.package);
         // Unpinned `@latest` so npx auto-updates the bridge on install/spawn.
         let spawn_pkg = format!("{pkg_base}@latest");
@@ -454,6 +459,11 @@ pub fn spawn_plan_for(agent: &RegistryAgent) -> Option<RegistrySpawnPlan> {
         });
     }
     if let Some(uvx) = &agent.distribution.uvx {
+        if !safe_registry_argument(&uvx.package)
+            || uvx.args.iter().any(|arg| !safe_registry_argument(arg))
+        {
+            return None;
+        }
         let pkg_base = npm_package_name(&uvx.package);
         // Unpinned name so `uvx` resolves the latest release on each fetch.
         return Some(RegistrySpawnPlan {
@@ -463,6 +473,11 @@ pub fn spawn_plan_for(agent: &RegistryAgent) -> Option<RegistrySpawnPlan> {
         });
     }
     if let Some(dist) = direct_archive_for_agent(agent) {
+        if safe_archive_command(&dist.cmd).is_none()
+            || dist.args.iter().any(|arg| !safe_registry_argument(arg))
+        {
+            return None;
+        }
         return Some(RegistrySpawnPlan {
             spawn_cmd: spawn_cmd_for_direct_archive(&dist),
             direct_archive: Some(dist),
@@ -470,6 +485,17 @@ pub fn spawn_plan_for(agent: &RegistryAgent) -> Option<RegistrySpawnPlan> {
         });
     }
     None
+}
+
+fn safe_registry_argument(value: &str) -> bool {
+    !value.trim().is_empty()
+        && !value.chars().any(|ch| {
+            ch.is_control()
+                || matches!(
+                    ch,
+                    '&' | '|' | ';' | '<' | '>' | '`' | '$' | '(' | ')' | '^' | '%' | '!' | '"'
+                )
+        })
 }
 
 /// Absolute spawn command for a direct-archive agent (runs from `install_dir`),
@@ -495,10 +521,11 @@ pub fn spawn_plan_for(agent: &RegistryAgent) -> Option<RegistrySpawnPlan> {
 /// Falling all the way back to the archive path when neither exists is
 /// deliberate: the failure then names the path the install flow will fill.
 pub fn spawn_cmd_for_direct_archive(dist: &DirectArchiveDist) -> String {
-    let cmd_rel = dist
-        .cmd
-        .trim_start_matches("./")
-        .replace('/', std::path::MAIN_SEPARATOR_STR);
+    let cmd_rel = safe_archive_command(&dist.cmd).unwrap_or_else(|| {
+        // Keep an invalid registry row inside the Ryu-owned install directory so
+        // a malicious absolute/parent path can only produce a failed spawn.
+        "__invalid_registry_command__".to_owned()
+    });
     let bin = dist.install_dir.join(&cmd_rel);
     let program = if bin.is_file() {
         bin.display().to_string()
@@ -512,6 +539,22 @@ pub fn spawn_cmd_for_direct_archive(dist: &DirectArchiveDist) -> String {
     parts.extend(dist.args.clone());
     let joined = parts.join(" ");
     shell_wrap_npx(&joined)
+}
+
+fn safe_archive_command(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() || std::path::Path::new(trimmed).is_absolute() {
+        return None;
+    }
+    let normalized = trimmed.trim_start_matches("./").replace('\\', "/");
+    if normalized.is_empty()
+        || normalized
+            .split('/')
+            .any(|segment| segment.is_empty() || segment == "..")
+    {
+        return None;
+    }
+    Some(normalized.replace('/', std::path::MAIN_SEPARATOR_STR))
 }
 
 /// Optional underlying agent CLI to probe (`binary`, npm package name).
@@ -578,60 +621,15 @@ pub async fn ensure_direct_archive(
     dist: &DirectArchiveDist,
     downloads: &crate::downloads::DownloadCenter,
 ) -> Result<()> {
-    use crate::sidecar::download_manager::{
-        build_http_client, extract_tar_bz2_to_dir, extract_tar_gz_to_dir, extract_zip_to_dir,
-        retry_download, ryu_dir,
-    };
-
     let marker = dist.install_dir.join(".installed");
     if marker.exists() {
         return Ok(());
     }
-
-    std::fs::create_dir_all(&dist.install_dir)?;
-    let url = dist.archive_url.clone();
-    let id = dist.registry_id.clone();
-    let client = build_http_client();
-    let archive_data = retry_download(&id, 3, || {
-        let client = client.clone();
-        let url = url.clone();
-        async move {
-            client
-                .get(&url)
-                .send()
-                .await
-                .context("GET agent archive")?
-                .error_for_status()
-                .context("agent archive HTTP error")?
-                .bytes()
-                .await
-                .context("reading agent archive bytes")
-                .map(|b| b.to_vec())
-        }
-    })
-    .await
-    .with_context(|| format!("downloading {} archive", dist.registry_id))?;
-
-    let dest = dist.install_dir.clone();
-    let url_for_kind = dist.archive_url.clone();
-    tokio::task::spawn_blocking(move || {
-        if url_for_kind.ends_with(".tar.bz2") || url_for_kind.ends_with(".tbz2") {
-            extract_tar_bz2_to_dir(&archive_data, &dest, None)
-        } else if url_for_kind.ends_with(".tar.gz") || url_for_kind.ends_with(".tgz") {
-            extract_tar_gz_to_dir(&archive_data, &dest, None)
-        } else if url_for_kind.ends_with(".zip") {
-            extract_zip_to_dir(&archive_data, &dest, None)
-        } else {
-            anyhow::bail!("unsupported archive format: {url_for_kind}");
-        }
-    })
-    .await
-    .context("extract archive task")??;
-
-    std::fs::write(&marker, dist.archive_url.as_bytes())?;
-    let _ = ryu_dir(); // ensure ryu dir exists
     let _ = downloads;
-    Ok(())
+    anyhow::bail!(
+        "registry agent archive {} has no trusted digest; refusing to download or execute it",
+        dist.registry_id
+    )
 }
 
 /// Look up a registry row by id from cache/CDN.
@@ -770,6 +768,37 @@ mod tests {
     }
 
     #[test]
+    fn registry_shell_metadata_with_metacharacters_is_rejected() {
+        let agent = agent_with(
+            "evil",
+            RegistryDistribution {
+                npx: Some(RegistryNpx {
+                    package: "evil".to_owned(),
+                    args: vec!["--ok".to_owned(), ";touch-pwned".to_owned()],
+                    env: HashMap::new(),
+                }),
+                ..Default::default()
+            },
+        );
+        assert!(spawn_plan_for(&agent).is_none());
+
+        for arg in ["%PATH%", "^&whoami", "!COMSPEC!", "\"quoted\""] {
+            let agent = agent_with(
+                "evil",
+                RegistryDistribution {
+                    npx: Some(RegistryNpx {
+                        package: "evil".to_owned(),
+                        args: vec![arg.to_owned()],
+                        env: HashMap::new(),
+                    }),
+                    ..Default::default()
+                },
+            );
+            assert!(spawn_plan_for(&agent).is_none(), "accepted {arg:?}");
+        }
+    }
+
+    #[test]
     fn direct_archive_resolves_only_for_the_host_platform() {
         // A binary map covering every platform key resolves on any host.
         let mut all_platforms = HashMap::new();
@@ -821,6 +850,20 @@ mod tests {
         assert!(
             direct_archive_for_agent(&agent_with("x", RegistryDistribution::default())).is_none()
         );
+    }
+
+    #[test]
+    fn direct_archive_commands_cannot_escape_install_root() {
+        let dist = DirectArchiveDist {
+            registry_id: "evil".to_owned(),
+            archive_url: "https://dl.example.com/evil.zip".to_owned(),
+            cmd: "../../tmp/evil".to_owned(),
+            args: Vec::new(),
+            install_dir: PathBuf::from("/tmp/ryu/agents/evil"),
+        };
+        let command = spawn_cmd_for_direct_archive(&dist);
+        assert!(command.contains("__invalid_registry_command__"));
+        assert!(!command.contains("../../tmp/evil"));
     }
 
     #[test]

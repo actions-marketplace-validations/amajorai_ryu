@@ -61,7 +61,11 @@ fn bridge_path_for(method: &str) -> Option<&'static str> {
         "agent.run" => Some("host.runAgent"),
         "agent.runFanout" => Some("host.runFanout"),
         "storage.get" => Some("host.storage_get"),
-        "backups.destinations" | "backups.create" | "backups.list" | "backups.get" | "backups.restore" => crate::plugin_host::dispatch_path_for(method),
+        "backups.destinations"
+        | "backups.create"
+        | "backups.list"
+        | "backups.get"
+        | "backups.restore" => crate::plugin_host::dispatch_path_for(method),
         "storage.set" => Some("host.storage_set"),
         "storage.delete" => Some("host.storage_delete"),
         "storage.keys" => Some("host.storage_keys"),
@@ -84,6 +88,7 @@ fn bridge_path_for(method: &str) -> Option<&'static str> {
         "finetune.adapters" => Some("host.finetune_adapters"),
         "finetune.merge" => Some("host.finetune_merge"),
         "conversation.setTitle" => Some("host.setConversationTitle"),
+        "conversation.addReaction" => Some("host.addMessageReaction"),
         "preferences.get" => Some("host.getPreference"),
         "background.list" => Some("host.background_list"),
         "background.stop" => Some("host.background_stop"),
@@ -358,6 +363,7 @@ fn stream_frame_allowed(frame: &str) -> bool {
 )]
 pub async fn plugin_bridge_stream(
     State(state): State<ServerState>,
+    Extension(caller): Extension<Option<crate::identity_verify::VerifiedCaller>>,
     Path(plugin_id): Path<String>,
     Json(body): Json<HostDispatchBody>,
 ) -> axum::response::Response {
@@ -396,11 +402,28 @@ pub async fn plugin_bridge_stream(
     // state — not another agent's internals, so no governance filter is applied).
     // Gated on `finetune:runs`.
     if body.method == "finetune.stream" {
+        if plugin_id != crate::plugin_manifest::FINETUNE_PLUGIN_ID {
+            return err_response(
+                StatusCode::FORBIDDEN,
+                "denied",
+                "fine-tune capabilities are reserved for the owning app".to_owned(),
+            );
+        }
         if !grants.contains("finetune:runs") {
             return err_response(
                 StatusCode::FORBIDDEN,
                 "denied",
                 "capability 'finetune:runs' not granted to this app".to_owned(),
+            );
+        }
+        if crate::server::enforce_permission(&state, &caller, "finetune.view")
+            .await
+            .is_err()
+        {
+            return err_response(
+                StatusCode::FORBIDDEN,
+                "denied",
+                "finetune.view is not authorized for this caller".to_owned(),
             );
         }
         let id = body
@@ -417,7 +440,7 @@ pub async fn plugin_bridge_stream(
                 "finetune.stream requires a non-empty 'id'".to_owned(),
             );
         }
-        return state.finetune.stream(&id).await;
+        return state.finetune.stream_for(&id, caller.as_ref()).await;
     }
 
     if !grants.contains("hook:run-agent") {
@@ -449,6 +472,26 @@ pub async fn plugin_bridge_stream(
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .map(str::to_owned);
+
+    if let Some(agent_id) = agent_id.as_deref() {
+        if !crate::fleet::is_agent_available(agent_id) {
+            return err_response(
+                StatusCode::FORBIDDEN,
+                "denied",
+                "agent is unavailable under organization policy".to_owned(),
+            );
+        }
+        if let Err(status) = crate::server::enforce_agent_resource_permission(
+            &state,
+            &caller,
+            crate::identity_verify::permissions::AGENT_RUN,
+            agent_id,
+        )
+        .await
+        {
+            return status;
+        }
+    }
 
     // Hold the per-plugin spawn permit for the WHOLE stream lifetime.
     let permit = match run_agent_gate(&plugin_id).try_acquire_owned() {
@@ -614,6 +657,10 @@ mod tests {
             Some("host.setConversationTitle")
         );
         assert_eq!(
+            bridge_path_for("conversation.addReaction"),
+            Some("host.addMessageReaction")
+        );
+        assert_eq!(
             bridge_path_for("preferences.get"),
             Some("host.getPreference")
         );
@@ -629,10 +676,7 @@ mod tests {
             bridge_path_for("gateway.budgetSpend"),
             Some("host.gatewayBudgetSpend")
         );
-        assert_eq!(
-            bridge_path_for("gateway.audit"),
-            Some("host.gatewayAudit")
-        );
+        assert_eq!(bridge_path_for("gateway.audit"), Some("host.gatewayAudit"));
         // `finetune.stream` is a STREAMING method — it has a required grant but no
         // unary bridge path (it's handled by the stream endpoint, not dispatch).
         assert_eq!(bridge_path_for("finetune.stream"), None);
@@ -674,6 +718,10 @@ mod tests {
         assert_eq!(
             required_grant_for("conversation.setTitle"),
             Some("conversation:set-title")
+        );
+        assert_eq!(
+            required_grant_for("conversation.addReaction"),
+            Some("conversation:reactions")
         );
         assert_eq!(
             required_grant_for("preferences.get"),

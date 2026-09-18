@@ -4,6 +4,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { ThemeProvider } from "next-themes";
 import { useState } from "react";
 import { createRoot } from "react-dom/client";
+import { QuickPreview } from "../../src/components/chat/QuickPreview.tsx";
 import {
 	AgentThreadList,
 	MessagingAgentRowBody,
@@ -103,6 +104,21 @@ const GROUPED_DIRECT_THREADS =
 		}),
 	]).get("builder") ?? [];
 
+const PREVIEW_MESSAGES = [
+	{
+		content: "The branch keeps the main chat untouched.",
+		id: "preview-user",
+		role: "user" as const,
+		timestamp: NOW - MINUTE,
+	},
+	{
+		content: "That makes this session safe to preview before opening it.",
+		id: "preview-assistant",
+		role: "assistant" as const,
+		timestamp: NOW,
+	},
+];
+
 const CONTRIBUTIONS = {
 	context_menu_items: [],
 };
@@ -159,6 +175,7 @@ const handlers = {
 	onJumpToMessage: () => undefined,
 	onMarkRead: () => undefined,
 	onMarkUnread: () => undefined,
+	onOpenQuickReply: (id: string) => opened(`Quick reply ${id}`),
 	onOpenInNewTab: () => undefined,
 	onOpenSideChat: () => undefined,
 	onRenameConversation: () => undefined,
@@ -177,6 +194,10 @@ const messageContext: AgentMessageContext = {
 };
 
 function Story() {
+	const [unreadThreadIds, setUnreadThreadIds] = useState<Set<string>>(
+		new Set()
+	);
+	const [previewId, setPreviewId] = useState<string | null>(null);
 	const [threadsExpanded, setThreadsExpanded] = useState(false);
 	return (
 		<ThemeProvider
@@ -219,9 +240,25 @@ function Story() {
 										</div>
 										{threadsExpanded ? (
 											<AgentThreadList
+												loadMessages={() => Promise.resolve(PREVIEW_MESSAGES)}
+												onMarkRead={(id) =>
+													setUnreadThreadIds((current) => {
+														const next = new Set(current);
+														next.delete(id);
+														return next;
+													})
+												}
+												onMarkUnread={(id) =>
+													setUnreadThreadIds((current) =>
+														new Set(current).add(id)
+													)
+												}
 												onOpen={(id) => opened(`Opened ${id}`)}
+												onOpenQuickPreview={setPreviewId}
+												onOpenQuickReply={(id) => opened(`Quick reply ${id}`)}
 												pageSize={1}
 												threads={GROUPED_DIRECT_THREADS}
+												unreadIds={unreadThreadIds}
 											/>
 										) : null}
 									</div>
@@ -270,6 +307,31 @@ function Story() {
 								/>
 							</section>
 						</div>
+						<QuickPreview
+							conversationId={previewId ?? ""}
+							isUnread={previewId ? unreadThreadIds.has(previewId) : false}
+							loadMessages={() => Promise.resolve(PREVIEW_MESSAGES)}
+							onMarkRead={(id) =>
+								setUnreadThreadIds((current) => {
+									const next = new Set(current);
+									next.delete(id);
+									return next;
+								})
+							}
+							onMarkUnread={(id) =>
+								setUnreadThreadIds((current) => new Set(current).add(id))
+							}
+							onOpenChange={(open) => {
+								if (!open) {
+									setPreviewId(null);
+								}
+							}}
+							open={previewId !== null}
+							title={
+								GROUPED_DIRECT_THREADS.find((thread) => thread.id === previewId)
+									?.title ?? "Session preview"
+							}
+						/>
 						<output className="sr-only" data-testid="opened-thread" />
 					</main>
 				</TabsContext.Provider>

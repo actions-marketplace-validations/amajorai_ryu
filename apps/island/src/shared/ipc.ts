@@ -547,6 +547,7 @@ export interface PluginHostStreamEndEvent {
 export interface IslandPluginsApi {
 	/** Abort an in-flight host stream by id. */
 	abortHostStream(streamId: string): Promise<void>;
+	abortUiBundle(requestId: string): Promise<void>;
 	/** Enabled-plugin companion contributions. Never rejects. */
 	contributions(): Promise<PluginContributionsResult>;
 	/** Authenticated Core HTTP for a declarative view (http actions + `source`
@@ -570,7 +571,7 @@ export interface IslandPluginsApi {
 		req: PluginHostStreamStartRequest
 	): Promise<PluginHostStreamHandle>;
 	/** Fetch an enabled plugin's bundled UI code. Never rejects. */
-	uiBundle(pluginId: string): Promise<PluginUiBundleResult>;
+	uiBundle(pluginId: string, requestId?: string): Promise<PluginUiBundleResult>;
 }
 
 // ── Core: marketplace catalog (skills + MCP) ─────────────────────────────────
@@ -986,6 +987,7 @@ export const IPC = {
 	plugins: {
 		contributions: "plugins:contributions",
 		uiBundle: "plugins:uiBundle",
+		uiBundleAbort: "plugins:uiBundleAbort",
 		hostInvoke: "plugins:hostInvoke",
 		coreHttp: "plugins:coreHttp",
 		hostStreamStart: "plugins:hostStreamStart",

@@ -162,11 +162,14 @@ export function AgentAccessPanel({ agentId, target }: AgentAccessPanelProps) {
 		if (!agent) {
 			return new Set<string>();
 		}
-		if (agent.tools.includes(ALL_MCP_TOOLS) || agent.tools.length === 0) {
-			return new Set(tools.map((tool) => tool.id));
-		}
-		if (agent.tools.includes(NO_AGENT_CAPABILITIES)) {
+		if (
+			agent.tools.length === 0 ||
+			agent.tools.includes(NO_AGENT_CAPABILITIES)
+		) {
 			return new Set<string>();
+		}
+		if (agent.tools.includes(ALL_MCP_TOOLS)) {
+			return new Set(tools.map((tool) => tool.id));
 		}
 		return new Set(agent.tools);
 	}, [agent, tools]);

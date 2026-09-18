@@ -84,6 +84,17 @@ describe("formatters", () => {
 		).toContain("15");
 	});
 
+	it("keeps date-only values on their calendar day in every display zone", () => {
+		setTimezonePreference("America/Los_Angeles");
+		expect(
+			formatDate("2026-01-15", {
+				year: "numeric",
+				month: "2-digit",
+				day: "2-digit",
+			})
+		).toContain("15");
+	});
+
 	it("returns an empty string for an unparseable value instead of 'Invalid Date'", () => {
 		expect(formatDateTime("not a date")).toBe("");
 		expect(formatDate(Number.NaN)).toBe("");

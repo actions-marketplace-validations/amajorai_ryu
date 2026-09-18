@@ -141,6 +141,7 @@ const handlers: ChatRowHandlers = {
 	onJumpToMessage: noOp,
 	onMarkRead: noOp,
 	onMarkUnread: noOp,
+	onOpenQuickReply: noOp,
 	onOpenInNewTab: noOp,
 	onOpenInNewWindow: noOp,
 	onOpenNewSideChat: noOp,

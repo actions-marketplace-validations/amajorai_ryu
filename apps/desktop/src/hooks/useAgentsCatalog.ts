@@ -11,7 +11,7 @@
 // revalidate the list in place, mirroring the useMcpCatalog / useAppsCatalog shape.
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useCallback } from "react";
+import { useCallback, useMemo } from "react";
 import {
 	type AgentCatalogEntry,
 	fetchAgentCatalog,
@@ -44,15 +44,20 @@ export function agentCatalogQuery(target: ApiTarget) {
 
 export function useAgentsCatalog(): UseAgentsCatalogResult {
 	const activeNode = useActiveNode();
-	const target: ApiTarget = {
-		url: activeNode.url,
-		token: activeNode.token ?? null,
-		userJwt: activeNode.userJwt ?? null,
-	};
+	const target = useMemo<ApiTarget>(
+		() => ({
+			url: activeNode.url,
+			token: activeNode.token ?? null,
+			userJwt: activeNode.userJwt ?? null,
+		}),
+		[activeNode.url, activeNode.token, activeNode.userJwt]
+	);
 	const { url, token, userJwt } = target;
 	const qc = useQueryClient();
 
-	const catalogQuery = useQuery(agentCatalogQuery(target));
+	const catalogQuery = useQuery(
+		useMemo(() => agentCatalogQuery(target), [target])
+	);
 
 	// Install/uninstall changes two things: the catalog's `added` flag (this
 	// query) and the node's agent roster (`GET /api/agents`, read by the

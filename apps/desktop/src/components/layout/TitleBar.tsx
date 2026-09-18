@@ -108,7 +108,7 @@ import {
 	findSplit,
 	shellRoute,
 	TAB_GROUP_COLORS,
-	useTabsContext,
+	useTabSelector,
 } from "@/src/contexts/TabsContext.tsx";
 import { useTitleBarContext } from "@/src/contexts/TitleBarContext.tsx";
 import {
@@ -139,7 +139,6 @@ import { SplitPresetMenuItems } from "./SplitPresetMenu.tsx";
 import { TabEntityMenuSection } from "./tab-entity-menu.tsx";
 import { TabRenameInput, useTabRename } from "./tab-rename.tsx";
 import { useTabDnd, useTabDragProps } from "./tabDnd.tsx";
-import { pathScrollsUnderTitlebar } from "./titlebarScroll.ts";
 
 // Radio value used for the "follow the default node" choice in the per-tab node
 // picker, distinct from any real node name.
@@ -483,8 +482,12 @@ function NodeSubmenu({ tabId }: { tabId: string }) {
 
 // Shared "Add to group" submenu used by regular tabs.
 function GroupSubmenu({ tab }: { tab: Tab }) {
-	const { groups, createGroup, addTabToGroup, removeTabFromGroup } =
-		useTabsContext();
+	const groups = useTabSelector((state) => state.groups);
+	const createGroup = useTabSelector((state) => state.createGroup);
+	const addTabToGroup = useTabSelector((state) => state.addTabToGroup);
+	const removeTabFromGroup = useTabSelector(
+		(state) => state.removeTabFromGroup
+	);
 
 	return (
 		<ContextMenuSub>
@@ -532,16 +535,16 @@ function GroupSubmenu({ tab }: { tab: Tab }) {
 // dissolve the whole split. Pinned tabs are excluded as split partners.
 function SplitSubmenu({ tab }: { tab: Tab }) {
 	const { t } = useI18n();
-	const {
-		tabs,
-		splits,
-		openTab,
-		splitTabs,
-		addTabToSplit,
-		removeFromSplit,
-		unsplit,
-		setSplitOrientation,
-	} = useTabsContext();
+	const tabs = useTabSelector((state) => state.tabs);
+	const splits = useTabSelector((state) => state.splits);
+	const openTab = useTabSelector((state) => state.openTab);
+	const splitTabs = useTabSelector((state) => state.splitTabs);
+	const addTabToSplit = useTabSelector((state) => state.addTabToSplit);
+	const removeFromSplit = useTabSelector((state) => state.removeFromSplit);
+	const unsplit = useTabSelector((state) => state.unsplit);
+	const setSplitOrientation = useTabSelector(
+		(state) => state.setSplitOrientation
+	);
 	const split = findSplit(tabs, splits, tab.id);
 	// Tabs that can join a split: not this tab, not pinned, not already split.
 	const candidates = tabs.filter(
@@ -662,7 +665,8 @@ function SplitSubmenu({ tab }: { tab: Tab }) {
 function OpenInSidePanelItem({ tab }: { tab: Tab }) {
 	const { t } = useI18n();
 	const openPath = useSidePanelRouteStore((s) => s.openPath);
-	const { tabs, activeTabId } = useTabsContext();
+	const tabs = useTabSelector((state) => state.tabs);
+	const activeTabId = useTabSelector((state) => state.activeTabId);
 	if (!isDockableRoutePath(tab.path)) {
 		return null;
 	}
@@ -771,8 +775,12 @@ async function openTabInNewWindow(tab: Tab) {
 
 // Compact, icon-only chip for a pinned tab (Chrome-style — no title, no X).
 function PinnedTab({ tab, isActive }: { tab: Tab; isActive: boolean }) {
-	const { activateTab, closeTab, togglePin, openTab, tabs, unloadTab } =
-		useTabsContext();
+	const activateTab = useTabSelector((state) => state.activateTab);
+	const closeTab = useTabSelector((state) => state.closeTab);
+	const togglePin = useTabSelector((state) => state.togglePin);
+	const openTab = useTabSelector((state) => state.openTab);
+	const tabs = useTabSelector((state) => state.tabs);
+	const unloadTab = useTabSelector((state) => state.unloadTab);
 	const [floatingTabs] = useFloatingTabs();
 	const tabLayout = useTabLayout();
 	const { isDragging, showBefore, showAfter, dragHandlers } = useTabDragProps(
@@ -901,18 +909,16 @@ function RegularTab({
 	inGroup: boolean;
 }) {
 	const { t } = useI18n();
-	const {
-		tabs,
-		splits,
-		activeTabId,
-		activateTab,
-		closeTab,
-		openTab,
-		restoreTab,
-		hasClosedTabs,
-		togglePin,
-		unloadTab,
-	} = useTabsContext();
+	const tabs = useTabSelector((state) => state.tabs);
+	const splits = useTabSelector((state) => state.splits);
+	const activeTabId = useTabSelector((state) => state.activeTabId);
+	const activateTab = useTabSelector((state) => state.activateTab);
+	const closeTab = useTabSelector((state) => state.closeTab);
+	const openTab = useTabSelector((state) => state.openTab);
+	const restoreTab = useTabSelector((state) => state.restoreTab);
+	const hasClosedTabs = useTabSelector((state) => state.hasClosedTabs);
+	const togglePin = useTabSelector((state) => state.togglePin);
+	const unloadTab = useTabSelector((state) => state.unloadTab);
 	const [floatingTabs] = useFloatingTabs();
 	const { isDragging, showBefore, showAfter, dragHandlers } = useTabDragProps(
 		tab.id
@@ -1154,14 +1160,14 @@ function RegularTab({
 // The colored pill that brackets a group — click to collapse/expand, double-click
 // or right-click for rename, and right-click for color/ungroup/close.
 export function GroupHeaderPill({ group }: { group: TabGroup }) {
-	const {
-		tabs,
-		toggleGroupCollapsed,
-		renameGroup,
-		setGroupColor,
-		ungroup,
-		closeGroup,
-	} = useTabsContext();
+	const tabs = useTabSelector((state) => state.tabs);
+	const toggleGroupCollapsed = useTabSelector(
+		(state) => state.toggleGroupCollapsed
+	);
+	const renameGroup = useTabSelector((state) => state.renameGroup);
+	const setGroupColor = useTabSelector((state) => state.setGroupColor);
+	const ungroup = useTabSelector((state) => state.ungroup);
+	const closeGroup = useTabSelector((state) => state.closeGroup);
 	const [editing, setEditing] = useState(false);
 	const [draft, setDraft] = useState(group.name);
 	const memberCount = tabs.filter((t) => t.groupId === group.id).length;
@@ -1313,8 +1319,12 @@ function SplitBracketHeader({
 	split: Split;
 	anyMemberId: string;
 }) {
-	const { tabs, setSplitOrientation, unsplit, addTabToSplit } =
-		useTabsContext();
+	const tabs = useTabSelector((state) => state.tabs);
+	const setSplitOrientation = useTabSelector(
+		(state) => state.setSplitOrientation
+	);
+	const unsplit = useTabSelector((state) => state.unsplit);
+	const addTabToSplit = useTabSelector((state) => state.addTabToSplit);
 	const dnd = useTabDnd();
 	const [joinHover, setJoinHover] = useState(false);
 	// Any dragged tab that isn't already a member can join by dropping here.
@@ -1461,21 +1471,19 @@ export function TitleBar({
 	// reservation.
 	const isMobile = useIsMobile();
 	const { actions } = useTitleBarContext();
-	const {
-		activateTab,
-		tabs,
-		groups,
-		activeTabId,
-		openTab,
-		closeTab,
-		restoreTab,
-		hasClosedTabs,
-		goBack,
-		goForward,
-		splits,
-		splitTabs,
-		unsplit,
-	} = useTabsContext();
+	const activateTab = useTabSelector((state) => state.activateTab);
+	const tabs = useTabSelector((state) => state.tabs);
+	const groups = useTabSelector((state) => state.groups);
+	const activeTabId = useTabSelector((state) => state.activeTabId);
+	const openTab = useTabSelector((state) => state.openTab);
+	const closeTab = useTabSelector((state) => state.closeTab);
+	const restoreTab = useTabSelector((state) => state.restoreTab);
+	const hasClosedTabs = useTabSelector((state) => state.hasClosedTabs);
+	const goBack = useTabSelector((state) => state.goBack);
+	const goForward = useTabSelector((state) => state.goForward);
+	const splits = useTabSelector((state) => state.splits);
+	const splitTabs = useTabSelector((state) => state.splitTabs);
+	const unsplit = useTabSelector((state) => state.unsplit);
 	const scrollRef = useRef<HTMLDivElement>(null);
 	// Only the compact horizontal mode owns a title-bar tab strip. Vertical tabs
 	// move the list into the sidebar; scroll and canvas modes own the live center
@@ -1626,14 +1634,7 @@ export function TitleBar({
 		? !!findSplit(tabs, splits, activeTabId)
 		: false;
 
-	// The frosted scroll-under titlebar is used by the chat page, the empty
-	// no-tab launchpad, and the store / marketplace family — all let their
-	// content sit UNDER a continuous glass bar; every other page gets a solid bar
-	// (see the blur/solid branch in the render below).
 	const activeTab = tabs.find((t) => t.id === activeTabId);
-	const activePath = activeTab?.path ?? "";
-	const isChatActive =
-		tabs.length === 0 || pathScrollsUnderTitlebar(activePath);
 
 	// The Tauri decorum titlebar fix lives in App.tsx now — it runs permanently
 	// (a MutationObserver + window focus/resize) from the always-mounted root, so
@@ -1756,33 +1757,14 @@ export function TitleBar({
 						: undefined
 				}
 			>
-				{/* On the chat page the content scrolls UNDER the titlebar, so it gets
-				    the frosted "liquid glass" gradient that blurs + fades whatever
-				    scrolls beneath it. Every other page sits cleanly below the bar, so
-				    it gets a plain solid background instead (no pointless blur over the
-				    reserved gap). Both sit behind the z-10 controls.
-
-				    The wrapper now starts at the true window top in BOTH modes (floating
-				    mode pads instead of offsetting, so the drag region covers the top
-				    band), so neither layer needs to be pulled back up any more — they
-				    only grow by the same 8px in floating mode so the fade still ends
-				    where it did. */}
-				{isChatActive ? (
-					<ProgressiveBlur
-						backgroundColor="var(--background)"
-						blurAmount="12px"
-						height={floatingChromeOffset ? "80px" : "72px"}
-						position="top"
-					/>
-				) : (
-					<div
-						aria-hidden
-						className={cn(
-							"pointer-events-none absolute top-0 left-0 w-full bg-background",
-							floatingChromeOffset ? "h-14" : "h-12"
-						)}
-					/>
-				)}
+				{/* The shared page inset includes this short fade below the controls.
+				    Resting content starts clear; scrolling content fades under the glass. */}
+				<ProgressiveBlur
+					backgroundColor="var(--background)"
+					blurAmount="16px"
+					height="calc(100% + var(--spacing) * 6)"
+					position="top"
+				/>
 				{/* Seasonal particles drift down the bar on holidays. They sit ABOVE
 				    the background layer and BELOW the z-10 controls row, so they never
 				    cover a tab label, and they fade out towards the bottom edge so the

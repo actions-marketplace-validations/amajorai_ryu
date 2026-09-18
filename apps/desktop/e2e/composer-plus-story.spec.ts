@@ -115,6 +115,28 @@ test.describe("composer + menu — real InputBar in isolation", () => {
 		await expect(page.getByTestId("attach-count")).toHaveText("1");
 	});
 
+	test("the workspace footer is a distinct bottom strip", async ({ page }) => {
+		await page.goto(STORY_URL);
+		const mount = page.getByTestId("minimal");
+		const footer = mount.getByTestId("workspace-bar");
+		const frame = footer.locator("xpath=../..");
+
+		await expect(footer).toContainText("codex/simple-ui");
+		await expect(frame).toHaveClass(/bg-muted\/40/);
+	});
+
+	test("keeps the placeholder compact and uses the arrow send affordance", async ({
+		page,
+	}) => {
+		await page.goto(STORY_URL);
+		const mount = page.getByTestId("minimal");
+
+		await expect(mount.locator("textarea")).toHaveClass(/text-\[14px\]/);
+		await expect(
+			mount.getByRole("button", { name: "Send" }).locator("svg")
+		).toHaveClass(/tabler-icon-arrow-up/);
+	});
+
 	test("an attachment-only turn uses Send instead of live voice mode", async ({
 		page,
 	}) => {
@@ -377,6 +399,29 @@ test.describe("composer + menu — real InputBar in isolation", () => {
 			path: testInfo.outputPath("compact-composer-morph-proof.png"),
 			fullPage: true,
 		});
+	});
+
+	test("a prompt suggestion does not paint over the real placeholder", async ({
+		page,
+	}) => {
+		await page.goto(STORY_URL);
+		const mount = page.getByTestId("compact");
+		const textarea = mount.locator("textarea");
+
+		await expect(
+			mount.locator('[data-slot="composer-placeholder-suggestion"]')
+		).toContainText("Review the shared chat");
+		await expect(textarea).toHaveAttribute(
+			"placeholder",
+			"What do you want to do?"
+		);
+		await expect(textarea).toHaveClass(/placeholder:text-transparent/);
+
+		await textarea.fill("A real prompt");
+		await expect(
+			mount.locator('[data-slot="composer-placeholder-suggestion"]')
+		).toHaveCount(0);
+		await expect(textarea).not.toHaveClass(/placeholder:text-transparent/);
 	});
 
 	test("compact layout changes respect reduced motion", async ({ page }) => {

@@ -50,8 +50,11 @@
 // load (before first render) so the registry is populated before `RouteOutlet`
 // resolves. Kept as JSX-free `createElement` calls so the file is `.ts` (no
 // `.tsx`) and carries no JSX-runtime assumptions.
+// The retained Chat, Library and Store surfaces stay in the entry chunk for fast
+// first navigation. Long-tail editors, settings and secondary pages below are
+// lazy components; `RouteOutlet` owns the shared loading boundary.
 
-import { createElement, type ReactNode } from "react";
+import { createElement, lazy, type ReactNode } from "react";
 import type { AttachedImage } from "@/components/agent-elements/input-bar.tsx";
 import { CrashBoundary } from "@/src/components/CrashBoundary.tsx";
 import {
@@ -60,34 +63,12 @@ import {
 } from "@/src/components/memory/MemoryLibrary.tsx";
 import { PANE_CHOOSER_PATH } from "@/src/lib/splitPresets.ts";
 import { WHITEBOARD_PLUGIN_ID } from "@/src/lib/whiteboard/app.ts";
-import AgentEditPage from "@/src/pages/AgentEditPage.tsx";
-import ArtifactViewPage from "@/src/pages/ArtifactViewPage.tsx";
-import ChannelsPage from "@/src/pages/ChannelsPage.tsx";
 import ChatPage from "@/src/pages/ChatPage.tsx";
-import ComputePage from "@/src/pages/ComputePage.tsx";
-import DownloadsPage from "@/src/pages/DownloadsPage.tsx";
-import FileEditorPage from "@/src/pages/FileEditorPage.tsx";
-import IdentitiesPage from "@/src/pages/IdentitiesPage.tsx";
 import LibraryPage from "@/src/pages/LibraryPage.tsx";
-import { PaneChooserPage } from "@/src/pages/PaneChooserPage.tsx";
 import PluginCompanionPage, {
 	CompanionUnavailable,
 } from "@/src/pages/PluginCompanionPage.tsx";
-import ProjectDiffPage from "@/src/pages/ProjectDiffPage.tsx";
-import ProjectFilesPage from "@/src/pages/ProjectFilesPage.tsx";
-import ProjectGitGraphPage from "@/src/pages/ProjectGitGraphPage.tsx";
-import ReviewPage from "@/src/pages/ReviewPage.tsx";
-import SettingsPage from "@/src/pages/SettingsPage.tsx";
-import SharePage from "@/src/pages/SharePage.tsx";
-import SpaceAppDocPage from "@/src/pages/SpaceAppDocPage.tsx";
-import SpaceDatabaseEditorPage from "@/src/pages/SpaceDatabaseEditorPage.tsx";
-import SpaceDatabaseRowPage from "@/src/pages/SpaceDatabaseRowPage.tsx";
-import SpaceDocEditorPage from "@/src/pages/SpaceDocEditorPage.tsx";
-import SpaceFileViewerPage from "@/src/pages/SpaceFileViewerPage.tsx";
-import SpacesPage from "@/src/pages/SpacesPage.tsx";
 import StorePage from "@/src/pages/StorePage.tsx";
-import VaultPage from "@/src/pages/VaultPage.tsx";
-import WorkflowsPage from "@/src/pages/WorkflowsPage.tsx";
 import {
 	APPROVALS_ALIAS,
 	SKILL_EDITOR_ALIAS,
@@ -95,6 +76,43 @@ import {
 } from "./companion-alias.ts";
 import { contributionRegistry, type RouteTab } from "./registry.ts";
 import { useCompanionAlias } from "./use-companion-alias.ts";
+
+const AgentEditPage = lazy(() => import("@/src/pages/AgentEditPage.tsx"));
+const ArtifactViewPage = lazy(() => import("@/src/pages/ArtifactViewPage.tsx"));
+const ChannelsPage = lazy(() => import("@/src/pages/ChannelsPage.tsx"));
+const ComputePage = lazy(() => import("@/src/pages/ComputePage.tsx"));
+const DownloadsPage = lazy(() => import("@/src/pages/DownloadsPage.tsx"));
+const FileEditorPage = lazy(() => import("@/src/pages/FileEditorPage.tsx"));
+const IdentitiesPage = lazy(() => import("@/src/pages/IdentitiesPage.tsx"));
+const PaneChooserPage = lazy(() =>
+	import("@/src/pages/PaneChooserPage.tsx").then((module) => ({
+		default: module.PaneChooserPage,
+	}))
+);
+const ProjectDiffPage = lazy(() => import("@/src/pages/ProjectDiffPage.tsx"));
+const ProjectFilesPage = lazy(() => import("@/src/pages/ProjectFilesPage.tsx"));
+const ProjectGitGraphPage = lazy(
+	() => import("@/src/pages/ProjectGitGraphPage.tsx")
+);
+const ReviewPage = lazy(() => import("@/src/pages/ReviewPage.tsx"));
+const SettingsPage = lazy(() => import("@/src/pages/SettingsPage.tsx"));
+const SharePage = lazy(() => import("@/src/pages/SharePage.tsx"));
+const SpaceAppDocPage = lazy(() => import("@/src/pages/SpaceAppDocPage.tsx"));
+const SpaceDatabaseEditorPage = lazy(
+	() => import("@/src/pages/SpaceDatabaseEditorPage.tsx")
+);
+const SpaceDatabaseRowPage = lazy(
+	() => import("@/src/pages/SpaceDatabaseRowPage.tsx")
+);
+const SpaceDocEditorPage = lazy(
+	() => import("@/src/pages/SpaceDocEditorPage.tsx")
+);
+const SpaceFileViewerPage = lazy(
+	() => import("@/src/pages/SpaceFileViewerPage.tsx")
+);
+const SpacesPage = lazy(() => import("@/src/pages/SpacesPage.tsx"));
+const VaultPage = lazy(() => import("@/src/pages/VaultPage.tsx"));
+const WorkflowsPage = lazy(() => import("@/src/pages/WorkflowsPage.tsx"));
 
 // /channels/:id — manage a channel bot ("new" opens create mode).
 const CHANNEL_DETAIL = /^\/channels\/[^/]+$/;

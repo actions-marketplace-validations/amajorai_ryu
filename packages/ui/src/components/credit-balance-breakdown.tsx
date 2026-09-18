@@ -31,6 +31,8 @@ export interface CreditBalanceBreakdownProps {
 	/** Use the denser settings-card presentation. */
 	compact?: boolean;
 	currency?: string;
+	/** Remaining redeemed gift balance; credit gifts expire and cards do not. */
+	giftCreditsMicroUsd?: number | null;
 	/** Remaining purchased credit; this balance rolls over. */
 	onDemandCreditsMicroUsd: number | null;
 	/** Full included plan allowance for the current billing period. */
@@ -141,6 +143,7 @@ export function CreditBalanceBreakdown({
 	planCreditsMicroUsd,
 	planAllowanceMicroUsd = null,
 	onDemandCreditsMicroUsd,
+	giftCreditsMicroUsd = null,
 	providerAllocations = [],
 	compact = false,
 	className,
@@ -195,7 +198,7 @@ export function CreditBalanceBreakdown({
 								</p>
 								<InfoTooltip label="About available credits">
 									{balanceBreakdownAvailable
-										? "Available now is the total of your remaining plan credits, on-demand credits, and provider-specific allocations. A provider-specific allocation only pays for its assigned provider."
+										? "Available now is the total of your remaining plan credits, gift credits, on-demand credits, and provider-specific allocations. A provider-specific allocation only pays for its assigned provider."
 										: "Available now is the total of Polar's shared meter and provider-specific meters. Each provider-specific allocation only pays for its assigned provider."}
 								</InfoTooltip>
 							</div>
@@ -211,10 +214,10 @@ export function CreditBalanceBreakdown({
 						<>
 							<p className="mt-2 max-w-2xl text-muted-foreground text-xs leading-relaxed">
 								Matching provider-specific credit is spent first. Plan credit is
-								next, then on-demand credit.
+								next, then gift balance, then on-demand credit.
 							</p>
 
-							<div className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+							<div className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
 								<BucketCard
 									amount={
 										providerDataAvailable
@@ -236,6 +239,12 @@ export function CreditBalanceBreakdown({
 									detail={planDetail}
 									label="Plan credits"
 									tooltip="Plan credits come from the active plan. Use them for managed provider usage beyond a free-provider allocation. They reset at the next billing period and unused plan credit does not roll over."
+								/>
+								<BucketCard
+									amount={amountLabel(giftCreditsMicroUsd, currency)}
+									detail="Redeemed gift balance · expires on its gift window"
+									label="Gift balance"
+									tooltip="Gift balance is redeemed to your personal workspace. Credit gifts expire on their stated date; gift cards do not. It is spent before paid rollover credits."
 								/>
 								<BucketCard
 									amount={amountLabel(onDemandCreditsMicroUsd, currency)}

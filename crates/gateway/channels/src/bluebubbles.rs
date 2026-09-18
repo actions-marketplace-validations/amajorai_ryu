@@ -74,13 +74,15 @@ use sha2::{Digest, Sha256};
 use tracing::{debug, info, warn};
 
 use crate::{
+    claim_inbound_delivery,
     commands::{parse_command, ChannelCommand},
-    handle_turn,
+    handle_turn_with_delivery,
     media::{self, Attachment, AttachmentKind, VoiceDelivery},
     pairing::PairingStore,
+    run_claimed_delivery_with_permit,
     status::StatusReporter,
-    BlueBubblesChannelConfig, Channel, ChannelCaps, ChannelHost, ChannelRuntime, GroupReplyMode,
-    InboundMessage,
+    try_reserve_delivery, BlueBubblesChannelConfig, Channel, ChannelCaps, ChannelHost,
+    ChannelRuntime, ChannelTurnOutcome, GroupReplyMode, InboundMessage,
 };
 
 /// Timeout for one call to the BlueBubbles Server. Generous because the Mac is on
@@ -257,8 +259,10 @@ impl BlueBubblesChannel {
         let body: Value = self
             .request(Method::GET, "ping")
             .send()
-            .await?
-            .error_for_status()?
+            .await
+            .map_err(reqwest::Error::without_url)?
+            .error_for_status()
+            .map_err(reqwest::Error::without_url)?
             .json()
             .await?;
         check_envelope(&body)?;
@@ -357,7 +361,7 @@ impl BlueBubblesChannel {
     /// Typing indicators, read receipts and tapbacks are all decoration: if the
     /// helper is missing or the endpoint has moved, the conversation still works.
     async fn best_effort(&self, what: &str, req: reqwest::RequestBuilder) {
-        match req.send().await {
+        match req.send().await.map_err(reqwest::Error::without_url) {
             Ok(resp) if resp.status().is_success() => {}
             Ok(resp) => debug!(
                 channel = "bluebubbles",
@@ -439,8 +443,10 @@ impl Channel for BlueBubblesChannel {
             .request(Method::POST, "message/text")
             .json(&payload)
             .send()
-            .await?
-            .error_for_status()?
+            .await
+            .map_err(reqwest::Error::without_url)?
+            .error_for_status()
+            .map_err(reqwest::Error::without_url)?
             .json()
             .await?;
         check_envelope(&body)?;
@@ -484,8 +490,10 @@ impl Channel for BlueBubblesChannel {
         self.request(Method::POST, "message/attachment")
             .multipart(form)
             .send()
-            .await?
-            .error_for_status()?;
+            .await
+            .map_err(reqwest::Error::without_url)?
+            .error_for_status()
+            .map_err(reqwest::Error::without_url)?;
         self.clear_typing(&chat_guid).await;
         Ok(())
     }
@@ -556,8 +564,10 @@ impl Channel for BlueBubblesChannel {
         let chat_guid = self.target_chat_guid(chat_id)?;
         self.request(Method::POST, &format!("chat/{chat_guid}/typing"))
             .send()
-            .await?
-            .error_for_status()?;
+            .await
+            .map_err(reqwest::Error::without_url)?
+            .error_for_status()
+            .map_err(reqwest::Error::without_url)?;
         Ok(())
     }
 
@@ -704,10 +714,11 @@ fn header_token(headers: &HeaderMap) -> Option<String> {
 
 /// Authenticate, parse, and dispatch one webhook delivery.
 ///
-/// Always answers quickly — the turn runs on its own task — so BlueBubbles does not
-/// retry a delivery it already made. Unknown event types are a 200, not an error:
-/// the server emits typing, read-status and message-update events on the same hook
-/// and treating those as failures would make the operator's log useless.
+/// Always answers quickly after a durable claim — the turn runs on its own task —
+/// so BlueBubbles does not retry a delivery that is already being handled.
+/// Unknown event types are a 200, not an error: the server emits typing, read-status
+/// and message-update events on the same hook and treating those as failures would
+/// make the operator's log useless.
 async fn ingest(state: WebhookState, presented: &str, body: &[u8]) -> StatusCode {
     if !token_ok(&state.channel.webhook_secret, presented) {
         warn!(
@@ -727,55 +738,119 @@ async fn ingest(state: WebhookState, presented: &str, body: &[u8]) -> StatusCode
         return StatusCode::OK;
     };
 
+    let provider_id = inbound_delivery_id(&message, body);
+    let (delivery_id, claim) = match claim_inbound_delivery(&*state.channel, &provider_id).await {
+        Ok(result) => result,
+        Err(error) => {
+            warn!(%error, "bluebubbles webhook delivery could not be durably claimed");
+            return StatusCode::SERVICE_UNAVAILABLE;
+        }
+    };
+    if !matches!(claim, crate::pairing::DeliveryClaim::Claimed) {
+        debug!(
+            delivery_id = %delivery_id,
+            ?claim,
+            "duplicate bluebubbles webhook delivery suppressed"
+        );
+        return StatusCode::OK;
+    }
+    let Some(permit) = try_reserve_delivery(&*state.channel) else {
+        if let Err(error) = state
+            .channel
+            .runtime
+            .pairing
+            .fail_delivery("bluebubbles", &delivery_id)
+            .await
+        {
+            warn!(%error, "bluebubbles webhook capacity failure could not be persisted");
+        }
+        warn!("bluebubbles webhook capacity is exhausted; asking the bridge to retry");
+        return StatusCode::SERVICE_UNAVAILABLE;
+    };
+
     let channel = Arc::clone(&state.channel);
     let host = Arc::clone(&state.host);
     tokio::spawn(async move {
         let mut message = message;
-
-        // Transcribe before any text-based decision below: a voice note in a group
-        // has no text to check for a command or an address until it is transcribed.
-        // Only fetch and transcribe for a sender the gate would admit. The webhook
-        // is unauthenticated by design (BlueBubbles does not sign its posts), so
-        // without this a forged payload could spend the operator's STT budget.
-        // `already_admitted` is the read-only twin of `handle_turn`'s gate.
-        if channel
-            .runtime
-            .already_admitted(channel.name(), &message)
-            .await
-        {
-            let downloaded = channel.download_speech(&message).await;
-            if !downloaded.is_empty() {
-                channel.runtime.ingest_media(&mut message, downloaded).await;
-            }
-        }
-
-        if message.is_group
-            && !should_reply_in_group(
-                channel.runtime.cfg.group_reply_mode,
-                &message.text,
-                &channel.mention_patterns,
-            )
-        {
-            debug!(
-                channel = "bluebubbles",
-                chat_id = %message.chat_id,
-                "group message not addressed to the bot; staying quiet"
-            );
-            return;
-        }
-
-        // iMessage has no native command menu, so `/help` is answered here rather
-        // than being registered with the platform.
-        if let Some(reply) = local_command_reply(&channel.runtime.commands().await, &message.text) {
-            if let Err(err) = channel.send_message(&message.chat_id, &reply).await {
-                warn!(channel = "bluebubbles", %err, "failed to deliver command list");
-            }
-            return;
-        }
-
-        handle_turn(channel, host, message).await;
+        prepare_message(&channel, &mut message).await;
+        let work_channel = Arc::clone(&channel);
+        let work_host = Arc::clone(&host);
+        let work_delivery_id = delivery_id.clone();
+        run_claimed_delivery_with_permit(channel, delivery_id, permit, move || {
+            let channel = Arc::clone(&work_channel);
+            let host = Arc::clone(&work_host);
+            let message = message.clone();
+            let delivery_id = work_delivery_id.clone();
+            async move { dispatch(channel, host, message, &delivery_id).await }
+        })
+        .await;
     });
     StatusCode::OK
+}
+
+async fn dispatch(
+    channel: Arc<BlueBubblesChannel>,
+    host: Arc<dyn ChannelHost>,
+    message: InboundMessage,
+    delivery_id: &str,
+) -> ChannelTurnOutcome {
+    if message.is_group
+        && !should_reply_in_group(
+            channel.runtime.cfg.group_reply_mode,
+            &message.text,
+            &channel.mention_patterns,
+        )
+    {
+        debug!(
+            channel = "bluebubbles",
+            chat_id = %message.chat_id,
+            "group message not addressed to the bot; staying quiet"
+        );
+        return ChannelTurnOutcome::Completed;
+    }
+
+    // iMessage has no native command menu, so `/help` is answered here rather
+    // than being registered with the platform.
+    if let Some(reply) = local_command_reply(&channel.runtime.commands().await, &message.text) {
+        return match channel.send_message(&message.chat_id, &reply).await {
+            Ok(()) => ChannelTurnOutcome::Completed,
+            Err(err) => {
+                warn!(channel = "bluebubbles", %err, "failed to deliver command list");
+                ChannelTurnOutcome::Failed
+            }
+        };
+    }
+
+    handle_turn_with_delivery(channel, host, message, Some(delivery_id)).await
+}
+
+async fn prepare_message(channel: &BlueBubblesChannel, message: &mut InboundMessage) {
+    // Transcribe before any text-based decision below: a voice note in a group
+    // has no text to check for a command or an address until it is transcribed.
+    // Only fetch and transcribe for a sender the gate would admit. The webhook is
+    // unauthenticated by design (BlueBubbles does not sign its posts), so without
+    // this a forged payload could spend the operator's STT budget.
+    if channel
+        .runtime
+        .already_admitted(channel.name(), message)
+        .await
+    {
+        let downloaded = channel.download_speech(message).await;
+        if !downloaded.is_empty() {
+            channel.runtime.ingest_media(message, downloaded).await;
+        }
+    }
+}
+
+fn inbound_delivery_id(message: &InboundMessage, body: &[u8]) -> String {
+    message
+        .message_id
+        .as_deref()
+        .filter(|message_id| !message_id.trim().is_empty())
+        .map_or_else(
+            || format!("payload:{}", hex::encode(Sha256::digest(body))),
+            |message_id| format!("message:{message_id}"),
+        )
 }
 
 // ─── Pure helpers (payloads, parsing, decisions) ────────────────────────────

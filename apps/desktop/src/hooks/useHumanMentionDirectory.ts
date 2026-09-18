@@ -16,6 +16,7 @@ export interface UseHumanMentionDirectoryResult {
 
 function toMentionSource(user: MentionTargetUser): MentionSourceItem {
 	return {
+		avatarUrl: user.image ?? undefined,
 		description: user.email ?? undefined,
 		id: user.id,
 		name: user.name,

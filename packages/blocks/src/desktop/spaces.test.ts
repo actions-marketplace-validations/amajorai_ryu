@@ -366,9 +366,9 @@ describe("the four states carry four different actions", () => {
 		// to the Store to fix a problem they do not have.
 		expect(UNATTEMPTED).not.toMatch(/install/i);
 		expect(UNATTEMPTED).toMatch(/nothing has tried to read these yet/i);
-		// The remedy that works from this screen with no download: the Ingest card
-		// directly above the list really does chunk and embed pasted text.
-		expect(UNATTEMPTED).toMatch(/Ingest a document/);
+		// The remedy that works from this screen is the shared file drop zone above
+		// the table, which sends the file through Core's extraction path.
+		expect(UNATTEMPTED).toMatch(/Drop files here/);
 	});
 
 	it("failed points at the per-file reason rather than guessing at one", () => {
@@ -484,5 +484,45 @@ describe("the retrieval copy, now that files are in the list", () => {
 		expect(RENDERED).not.toMatch(
 			/search (inside|within) (your |uploaded )?files/i
 		);
+	});
+});
+
+describe("the shared-context Space home", () => {
+	it("keeps recent Markdown previews above the files table", () => {
+		expect(RENDERED).toContain('data-testid="spaces-home"');
+		expect(RENDERED).toContain('data-testid="spaces-recent-pages"');
+		expect(RENDERED).toContain('data-testid="spaces-files-table"');
+		expect(RENDERED).toContain("New");
+		expect(RENDERED).toContain("Recent");
+		expect(RENDERED).toContain("Pinned");
+		expect(RENDERED).toContain("Shared with Me");
+		expect(RENDERED).toContain("Files");
+		expect(RENDERED).toContain("<Table");
+		expect(RENDERED).toContain("Drop files here");
+		expect(RENDERED).not.toContain("Ingest a document");
+	});
+
+	it("limits paper previews to first-party Markdown pages", () => {
+		expect(RENDERED).toMatch(
+			/function isMarkdownPage\(doc: SpaceDocumentRow\)[\s\S]{0,180}rawKind/
+		);
+		expect(RENDERED).toContain(".filter(isMarkdownPage)");
+		expect(RENDERED).toContain("previewLoading");
+		expect(RENDERED).toContain('label="Blank document"');
+	});
+
+	it("does not add decorative copy to the primary home chrome", () => {
+		expect(RENDERED).not.toContain("The archive");
+		expect(RENDERED).not.toContain("One calm index for every page");
+		expect(RENDERED).not.toContain("Start from scratch");
+		expect(RENDERED).not.toContain("A guided note");
+		expect(RENDERED).not.toContain("Local shared context");
+	});
+
+	it("gives the files table its own local search", () => {
+		expect(RENDERED).toContain('aria-label="Search files"');
+		expect(RENDERED).toContain('placeholder="Search files"');
+		expect(RENDERED).toContain("filteredDocuments");
+		expect(RENDERED).toContain('aria-label="Files in this Space"');
 	});
 });

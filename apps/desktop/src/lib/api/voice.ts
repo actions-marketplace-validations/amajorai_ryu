@@ -267,6 +267,10 @@ export async function installTtsModel(
 
 /** Options for {@link speakText}. */
 export interface SpeakOptions {
+	/** Host attribution for app-level generation ACLs. */
+	appId?: string;
+	/** Human-facing app permission required for this host-direct call. */
+	appPermission?: string;
 	/** Engine id; omit (or `"outetts"`) for the built-in default. */
 	engine?: string;
 	/** Language hint for multilingual engines. */
@@ -291,6 +295,13 @@ export async function speakText(
 ): Promise<Blob> {
 	const resp = await authenticatedFetch(target, "/api/voice/speak", {
 		method: "POST",
+		headers:
+			options.appId && options.appPermission
+				? {
+						"x-ryu-app-id": options.appId,
+						"x-ryu-app-permission": options.appPermission,
+					}
+				: undefined,
 		body: JSON.stringify({
 			text,
 			request_id: options.requestId,

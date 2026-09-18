@@ -194,6 +194,76 @@ html[data-ryu-bg-active] [data-slot="sidebar-inset"] {
 	isolation: isolate;
 }
 
+/* Native window surface transparency. Tauri keeps the actual window clear and
+   macOS installs an NSVisualEffectView below the webview. These two attributes
+   only change which React surfaces reveal that backdrop, so either surface can
+   be enabled without forcing the other one to become translucent. */
+:root {
+	--ryu-sidebar-surface-opacity: 1;
+	--ryu-window-surface-opacity: 1;
+}
+
+html[data-ryu-sidebar-transparency="true"] {
+	--ryu-sidebar-surface-opacity: 0.68;
+}
+
+html[data-ryu-window-transparency="true"] {
+	--ryu-window-surface-opacity: 0.7;
+}
+
+html[data-ryu-sidebar-transparency="true"]:not([data-ryu-bg-active])
+	[data-slot="sidebar-inner"],
+html[data-ryu-sidebar-transparency="true"]:not([data-ryu-bg-active])
+	[data-mobile="true"][data-slot="sidebar"],
+html[data-ryu-sidebar-transparency="true"]:not([data-ryu-bg-active])
+	.ryu-sidebar-surface {
+	background-color: color-mix(
+		in oklab,
+		var(--sidebar) 68%,
+		transparent
+	) !important;
+	-webkit-backdrop-filter: saturate(1.25) blur(24px);
+	backdrop-filter: saturate(1.25) blur(24px);
+}
+
+html[data-ryu-sidebar-transparency="true"] [data-slot="sidebar-wrapper"] {
+	background-color: transparent !important;
+}
+
+html[data-ryu-window-transparency="true"] [data-ryu-window-root],
+html[data-ryu-window-transparency="true"] [data-slot="sidebar-wrapper"] {
+	background-color: transparent !important;
+}
+
+html[data-ryu-window-transparency="true"]:not([data-ryu-bg-active])
+	[data-slot="sidebar-inset"] {
+	background-color: color-mix(
+		in oklab,
+		var(--background) 70%,
+		transparent
+	) !important;
+	-webkit-backdrop-filter: saturate(1.2) blur(28px);
+	backdrop-filter: saturate(1.2) blur(28px);
+}
+
+/* Custom gradients/images render on their own ::before layer. Lower that
+   layer's opacity under the corresponding switch so the native backdrop still
+   reads through it while preserving the user's background customization. */
+html[data-ryu-sidebar-transparency="true"] [data-slot="sidebar-inner"]::before,
+html[data-ryu-sidebar-transparency="true"] .ryu-sidebar-surface::before {
+	opacity: calc(
+		var(--ryu-sidebar-bg-opacity, 1) *
+		var(--ryu-sidebar-surface-opacity)
+	);
+}
+
+html[data-ryu-window-transparency="true"] [data-slot="sidebar-inset"]::before {
+	opacity: calc(
+		var(--ryu-page-bg-opacity, 1) *
+		var(--ryu-window-surface-opacity)
+	);
+}
+
 @layer utilities {
 	.scrollbar-hide {
 		-ms-overflow-style: none;

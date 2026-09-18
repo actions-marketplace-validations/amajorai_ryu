@@ -24,6 +24,7 @@ import {
 	type JournalStat,
 	type WeeklyReview,
 } from "@/src/lib/api/shadow.ts";
+import { formatDate } from "@/src/lib/timezone.ts";
 
 const RANGE_OPTIONS = [
 	{ value: "7", label: "Last 7 days" },
@@ -37,7 +38,7 @@ function weekdayLabel(day: string): string {
 	if (Number.isNaN(date.getTime())) {
 		return day;
 	}
-	return date.toLocaleDateString(undefined, { weekday: "short" });
+	return formatDate(day, { weekday: "short" });
 }
 
 export default function ReviewPage() {

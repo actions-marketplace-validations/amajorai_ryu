@@ -213,4 +213,20 @@ describe("searchSettings", () => {
 			"general.chats.send-shortcut"
 		);
 	});
+
+	it("keeps native transparency settings desktop-only", () => {
+		const desktopResults = visibleSettingsEntries(
+			searchSettings("transparent window"),
+			true
+		);
+		const browserResults = visibleSettingsEntries(
+			searchSettings("transparent window"),
+			false
+		);
+
+		expect(desktopResults.map((entry) => entry.id)).toContain(
+			"appearance.interface.transparent-window"
+		);
+		expect(browserResults).toEqual([]);
+	});
 });

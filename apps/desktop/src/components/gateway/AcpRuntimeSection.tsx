@@ -11,7 +11,7 @@ import {
 import { Spinner } from "@ryu/ui/components/spinner.tsx";
 import { Switch } from "@ryu/ui/components/switch.tsx";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useEffect, useState } from "react";
+import { useEffect, useId, useState } from "react";
 import { sileo } from "sileo";
 import {
 	SettingsCard,
@@ -20,12 +20,12 @@ import {
 import type { ApiTarget } from "@/src/lib/api/client.ts";
 import {
 	DEFAULT_GATEWAY_ACP,
-	fetchGatewayConfig,
 	type GatewayAcpConfig,
 	type GatewayAcpSettings,
 	type GatewayConfig,
 	updateGatewayConfig,
 } from "@/src/lib/api/gateway.ts";
+import { gatewayAcpQueryOptions } from "@/src/lib/gateway-acp-query.ts";
 
 const MIN_IDLE_MINUTES = 1;
 const MAX_IDLE_MINUTES = 24 * 60;
@@ -59,12 +59,10 @@ export function AcpRuntimeSection({
 	canConfigure: boolean;
 	target: ApiTarget;
 }) {
+	const controlId = useId();
 	const queryClient = useQueryClient();
-	const configQuery = useQuery({
-		queryKey: ["gateway-acp-runtime", target.url],
-		queryFn: () => fetchGatewayConfig(target),
-		refetchOnWindowFocus: false,
-	});
+	const options = gatewayAcpQueryOptions(target);
+	const configQuery = useQuery(options);
 	const config = runtimeConfig(configQuery.data);
 	const [idleDraft, setIdleDraft] = useState(
 		String(config.idle_timeout_minutes)
@@ -79,7 +77,7 @@ export function AcpRuntimeSection({
 			updateGatewayConfig(target, { acp: next }),
 		onSuccess: async () => {
 			await queryClient.invalidateQueries({
-				queryKey: ["gateway-acp-runtime", target.url],
+				queryKey: options.queryKey,
 			});
 		},
 		onError: (error: Error) => {
@@ -142,7 +140,7 @@ export function AcpRuntimeSection({
 					<SettingsCard>
 						<div className="flex items-start justify-between gap-4">
 							<div className="min-w-0 space-y-1">
-								<Label htmlFor="acp-idle-timeout">
+								<Label htmlFor={`${controlId}-acp-idle-timeout`}>
 									{"Stop idle ACP sessions after"}
 								</Label>
 								<p className="text-muted-foreground text-xs">
@@ -156,7 +154,7 @@ export function AcpRuntimeSection({
 									aria-label="ACP idle timeout in minutes"
 									className="w-20 text-right tabular-nums"
 									disabled={disabled}
-									id="acp-idle-timeout"
+									id={`${controlId}-acp-idle-timeout`}
 									inputMode="numeric"
 									max={MAX_IDLE_MINUTES}
 									min={MIN_IDLE_MINUTES}
@@ -178,7 +176,7 @@ export function AcpRuntimeSection({
 					<SettingsCard>
 						<div className="flex items-start justify-between gap-4">
 							<div className="min-w-0 space-y-1">
-								<Label htmlFor="acp-max-parallel">
+								<Label htmlFor={`${controlId}-acp-max-parallel`}>
 									{"Maximum parallel ACP agents"}
 								</Label>
 								<p className="text-muted-foreground text-xs">
@@ -203,7 +201,7 @@ export function AcpRuntimeSection({
 								<SelectTrigger
 									aria-label="Maximum parallel ACP agents"
 									className="w-32"
-									id="acp-max-parallel"
+									id={`${controlId}-acp-max-parallel`}
 								>
 									<SelectValue />
 								</SelectTrigger>
@@ -235,7 +233,7 @@ export function AcpRuntimeSection({
 					<SettingsCard>
 						<div className="flex items-center justify-between gap-3">
 							<div className="space-y-1">
-								<Label htmlFor="acp-keep-awake">
+								<Label htmlFor={`${controlId}-acp-keep-awake`}>
 									{"Keep this device awake while agents run"}
 								</Label>
 								<p className="text-muted-foreground text-xs">
@@ -247,7 +245,7 @@ export function AcpRuntimeSection({
 								aria-label="Keep this device awake while ACP agents run"
 								checked={config.keep_computer_awake}
 								disabled={disabled}
-								id="acp-keep-awake"
+								id={`${controlId}-acp-keep-awake`}
 								onCheckedChange={(keep_computer_awake) =>
 									commit({ keep_computer_awake })
 								}

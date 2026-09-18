@@ -411,3 +411,23 @@ describe("friendly-names global (widget bootstrap)", () => {
 		expect(BOOTSTRAP).toContain("friendly: (G.friendly !== false)");
 	});
 });
+
+describe("appearance snapshot (widget bootstrap)", () => {
+	const BOOTSTRAP = readFileSync(
+		join(import.meta.dir, "widget-bootstrap.ts"),
+		"utf8"
+	);
+
+	it("applies the complete initial token map before widget code runs", () => {
+		expect(BOOTSTRAP).toContain("applyThemeTokens(G.themeTokens)");
+		expect(BOOTSTRAP).toContain("themeTokens: G.themeTokens");
+		expect(BOOTSTRAP).toContain("buildCompanionThemeLayoutCss");
+	});
+
+	it("accepts only a nonce-bound parent theme push", () => {
+		expect(BOOTSTRAP).toContain(
+			'ev.source === window.parent && msg && msg.kind === "ryu-plugin-theme"'
+		);
+		expect(BOOTSTRAP).toContain("applyThemeTokens(msg.tokens)");
+	});
+});

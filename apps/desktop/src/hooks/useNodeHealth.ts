@@ -14,19 +14,22 @@ export type NodeHealth = HealthResult & {
  * compatibility banner and capability-based feature gating.
  */
 export function useNodeHealth() {
-	const getActiveNode = useNodeStore((s) => s.getActiveNode);
-	const node = getActiveNode();
+	const node = useNodeStore((state) => state.getActiveNode());
 
 	return useQuery<NodeHealth>({
-		queryKey: ["node-health", node?.url],
+		// Health uses the node bearer but deliberately skips caller-JWT auth.
+		queryKey: ["node-health", node?.url, node?.token ?? null],
 		enabled: Boolean(node?.url),
 		refetchInterval: 30_000,
-		queryFn: async () => {
-			const health = await fetchHealth({
-				url: node.url,
-				token: node.token ?? null,
-				userJwt: node.userJwt ?? null,
-			});
+		queryFn: async ({ signal }) => {
+			const health = await fetchHealth(
+				{
+					url: node.url,
+					token: node.token ?? null,
+					userJwt: node.userJwt ?? null,
+				},
+				signal
+			);
 			return { ...health, compatible: isNodeCompatible(health.version) };
 		},
 	});

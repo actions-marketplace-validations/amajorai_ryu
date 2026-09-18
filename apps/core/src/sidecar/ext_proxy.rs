@@ -47,7 +47,9 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{any, get, post};
 use axum::{Extension, Json, Router};
+use hmac::{Hmac, Mac};
 use serde_json::json;
+use sha2::Sha256;
 use std::collections::{HashMap, HashSet};
 
 use crate::plugin_manifest::schema::{HttpProxySpec, RouteAuth, SidecarSpec};
@@ -68,6 +70,45 @@ pub(crate) const HDR_PLUGIN_ID: &str = "x-ryu-plugin-id";
 /// Internal hop header used only to carry a caller's MPP credential alongside the
 /// sidecar bearer. It is stripped from caller input and upstream responses.
 const HDR_FORWARDED_AUTHORIZATION: &str = "x-ryu-forwarded-authorization";
+const HDR_CALLER_USER_ID: &str = "x-ryu-caller-user-id";
+const HDR_CALLER_ORG_ID: &str = "x-ryu-caller-org-id";
+pub(crate) const HDR_CALLER_AGENT_ID: &str = "x-ryu-caller-agent-id";
+pub(crate) const HDR_CALLER_AGENT_PROOF: &str = "x-ryu-caller-agent-proof";
+const AGENT_LANE_PROOF_DOMAIN: &str = "ryu-agent-lane-v1";
+
+type AgentLaneMac = Hmac<Sha256>;
+
+fn agent_lane_payload(agent_id: &str, method: &str, path_and_query: &str) -> String {
+    format!("{AGENT_LANE_PROOF_DOMAIN}\n{method}\n{path_and_query}\n{agent_id}")
+}
+
+/// Stamp a Core-generated agent-lane request. The proof is tied to the active
+/// node bearer and the exact method/path/query, so a sidecar never trusts a
+/// caller-supplied lane query on its own.
+pub(crate) fn sign_agent_lane(
+    agent_id: &str,
+    method: &str,
+    path_and_query: &str,
+) -> Option<String> {
+    let token = crate::node_token::active_token()?;
+    let mut mac = AgentLaneMac::new_from_slice(token.trim().as_bytes()).ok()?;
+    mac.update(agent_lane_payload(agent_id, method, path_and_query).as_bytes());
+    Some(hex::encode(mac.finalize().into_bytes()))
+}
+
+fn verify_agent_lane(agent_id: &str, method: &str, path_and_query: &str, proof: &str) -> bool {
+    let Some(token) = crate::node_token::active_token() else {
+        return false;
+    };
+    let Ok(bytes) = hex::decode(proof.trim()) else {
+        return false;
+    };
+    let Ok(mut mac) = AgentLaneMac::new_from_slice(token.trim().as_bytes()) else {
+        return false;
+    };
+    mac.update(agent_lane_payload(agent_id, method, path_and_query).as_bytes());
+    mac.verify_slice(&bytes).is_ok()
+}
 
 /// Default max request body Core buffers + forwards when a sidecar's
 /// [`HttpProxySpec::max_body_bytes`] is unset (10 MiB).
@@ -268,6 +309,50 @@ fn required_permission_for(
     Some((permission, resource_id))
 }
 
+/// Browser managed-Bot lanes are an internal Core capability, not a public
+/// query selector. Accept the query only when the Core HTTP-tool seam supplied
+/// a proof tied to the exact request; direct ext-proxy callers are refused.
+fn verified_agent_lane(req: &Request, plugin_id: &str) -> Result<Option<String>, Response> {
+    if plugin_id != "@ryu/browser" {
+        return Ok(None);
+    }
+    let query = req.uri().query().unwrap_or_default();
+    let agent_ids: Vec<String> = url::form_urlencoded::parse(query.as_bytes())
+        .filter(|(name, _)| name == "agent_id")
+        .map(|(_, value)| value.into_owned())
+        .collect();
+    let Some(agent_id) = agent_ids.first() else {
+        return Ok(None);
+    };
+    if agent_ids.len() != 1 || agent_id.trim().is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "browser agent_id must be supplied exactly once",
+        )
+            .into_response());
+    }
+    let Some(proof) = req
+        .headers()
+        .get(HDR_CALLER_AGENT_PROOF)
+        .and_then(|value| value.to_str().ok())
+    else {
+        return Err((
+            StatusCode::FORBIDDEN,
+            "browser agent lanes require a Core-issued capability proof",
+        )
+            .into_response());
+    };
+    let path_and_query = req
+        .uri()
+        .path_and_query()
+        .map(|value| value.as_str())
+        .unwrap_or_else(|| req.uri().path());
+    if !verify_agent_lane(agent_id, req.method().as_str(), path_and_query, proof) {
+        return Err((StatusCode::FORBIDDEN, "browser agent lane proof is invalid").into_response());
+    }
+    Ok(Some(agent_id.clone()))
+}
+
 /// Find the most-specific declared route on `manifest` that matches `sub_path`,
 /// returning the matched sidecar spec, its http spec, and the matched route. Equal
 /// specificity is rejected so auth posture never depends on declaration order.
@@ -338,13 +423,65 @@ fn is_browser_context(name: &str) -> bool {
     matches!(name.to_ascii_lowercase().as_str(), "origin" | "referer")
 }
 
-fn copy_headers(src: &HeaderMap, dst: &mut reqwest::header::HeaderMap) {
+fn is_caller_credential(name: &str) -> bool {
+    matches!(
+        name.to_ascii_lowercase().as_str(),
+        "x-ryu-user-jwt" | "x-ryu-node-token" | "cookie"
+    )
+}
+
+/// Return only the app-owned cookies a manifest explicitly opted into.
+///
+/// Core authentication cookies never cross the process boundary. A sidecar can
+/// still use an HttpOnly browser session, but only by declaring the cookie name in
+/// its own manifest namespace; unknown names and malformed cookie fragments are
+/// discarded before the loopback hop is built.
+fn forwarded_cookie_header(
+    src: &HeaderMap,
+    allowed_cookie_names: &[String],
+) -> Option<reqwest::header::HeaderValue> {
+    if allowed_cookie_names.is_empty() {
+        return None;
+    }
+    let allowed: HashSet<&str> = allowed_cookie_names.iter().map(String::as_str).collect();
+    let mut seen = HashSet::new();
+    let mut pairs = Vec::new();
+    for value in src.get_all("cookie").iter() {
+        let Ok(raw) = value.to_str() else { continue };
+        for fragment in raw.split(';') {
+            let pair = fragment.trim();
+            let Some((name, _cookie_value)) = pair.split_once('=') else {
+                continue;
+            };
+            let name = name.trim();
+            if allowed.contains(name) && seen.insert(name.to_owned()) {
+                pairs.push(pair.to_owned());
+            }
+        }
+    }
+    if pairs.is_empty() {
+        return None;
+    }
+    reqwest::header::HeaderValue::from_str(&pairs.join("; ")).ok()
+}
+
+fn copy_headers(
+    src: &HeaderMap,
+    dst: &mut reqwest::header::HeaderMap,
+    allowed_cookie_names: &[String],
+) {
+    let forwarded_cookie = forwarded_cookie_header(src, allowed_cookie_names);
     for (name, value) in src.iter() {
         if is_hop_by_hop(name.as_str())
             || is_browser_context(name.as_str())
+            || is_caller_credential(name.as_str())
             || name
                 .as_str()
                 .eq_ignore_ascii_case(HDR_FORWARDED_AUTHORIZATION)
+            || name.as_str().eq_ignore_ascii_case(HDR_CALLER_USER_ID)
+            || name.as_str().eq_ignore_ascii_case(HDR_CALLER_ORG_ID)
+            || name.as_str().eq_ignore_ascii_case(HDR_CALLER_AGENT_ID)
+            || name.as_str().eq_ignore_ascii_case(HDR_CALLER_AGENT_PROOF)
         {
             continue;
         }
@@ -354,6 +491,9 @@ fn copy_headers(src: &HeaderMap, dst: &mut reqwest::header::HeaderMap) {
         ) {
             dst.append(n, v);
         }
+    }
+    if let Some(cookie) = forwarded_cookie {
+        dst.insert(reqwest::header::HeaderName::from_static("cookie"), cookie);
     }
 }
 
@@ -603,6 +743,23 @@ async fn proxy_for_plugin(
     // Resolved while the manifest guard is still held, since the gate below runs
     // after it is dropped.
     let required = required_permission_for(route, sub_path, plugin_id);
+    let caller_agent_id = match verified_agent_lane(&req, plugin_id) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    let caller = crate::server::verified_caller_from_headers(req.headers()).await;
+    if crate::sidecar::control_plane::is_managed_node()
+        && matches!(
+            plugin_id,
+            "@ryu/docling" | "@ryu/markitdown" | "@ryu/mineru" | "@ryu/unstructured"
+        )
+    {
+        return (
+            StatusCode::FORBIDDEN,
+            "document sidecar jobs require per-job tenant binding on managed nodes",
+        )
+            .into_response();
+    }
     // NOTE: the manifest supplies mount, routes, auth, permission and max_body_bytes —
     // everything EXCEPT the port. The port comes from the manager's claim registry
     // (`forward_target`, below), never from `spec.port`: see [`ForwardTarget`] for why
@@ -613,6 +770,7 @@ async fn proxy_for_plugin(
         .map(|m| m.trim_end_matches('/').to_owned())
         .unwrap_or_default();
     let max_body = http.max_body_bytes.unwrap_or(DEFAULT_MAX_PROXY_BYTES);
+    let forward_cookie_names = http.forward_cookie_names.clone();
     // The manager key for this sidecar.
     let sidecar_name = crate::sidecar::manifest_sidecar::namespaced_name(plugin_id, &spec.name);
     drop(manifests);
@@ -631,7 +789,10 @@ async fn proxy_for_plugin(
                 .get("authorization")
                 .and_then(|v| v.to_str().ok())
                 .and_then(|v| v.strip_prefix("Bearer "));
-            if provided != Some(expected) {
+            if provided
+                .as_deref()
+                .is_none_or(|candidate| !crate::server::ct_eq(candidate, expected))
+            {
                 return StatusCode::UNAUTHORIZED.into_response();
             }
         }
@@ -649,7 +810,6 @@ async fn proxy_for_plugin(
     // A route the app did not annotate never reaches this branch — no permission
     // lookup, no JWT verification, no behaviour change for any app shipping today.
     if let Some((permission, resource_id)) = required {
-        let caller = crate::server::verified_caller_from_headers(req.headers()).await;
         // The plugin id is the resource KIND, so an app's resource ids live in their
         // own keyspace and can never be confused with the kernel's (`space:abc`) or
         // another app's.
@@ -789,6 +949,9 @@ async fn proxy_for_plugin(
         body: body_bytes.to_vec(),
         hop_plugin_id: plugin_id,
         forward_payment_authorization: auth == RouteAuth::Public,
+        forward_cookie_names: &forward_cookie_names,
+        caller: caller.as_ref(),
+        caller_agent_id: caller_agent_id.as_deref(),
     })
     .await
 }
@@ -846,6 +1009,27 @@ struct ForwardArgs<'a> {
     /// Whether a caller-supplied `Authorization: Payment` credential may cross this
     /// hop in the reserved internal header. Enabled only for manifest-public routes.
     forward_payment_authorization: bool,
+    /// App-owned browser cookie names explicitly declared by the manifest. Core
+    /// forwards only these names; all other cookies remain hop-local.
+    forward_cookie_names: &'a [String],
+    /// Verified human identity, if Core resolved one. Caller-controlled copies
+    /// of the corresponding headers are stripped before this is stamped.
+    caller: Option<&'a crate::identity_verify::VerifiedCaller>,
+    /// Core-verified agent lane for the Browser sidecar. Caller-controlled lane
+    /// headers are stripped before this value is stamped.
+    caller_agent_id: Option<&'a str>,
+}
+
+/// Reuse connection pools across proxy hops; credentials stay on each request.
+fn proxy_http_client() -> &'static reqwest::Client {
+    static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+    CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .connect_timeout(PROXY_CONNECT_TIMEOUT)
+            .pool_max_idle_per_host(8)
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new())
+    })
 }
 
 /// Forward one buffered request to a sidecar on loopback, re-stamping the hop
@@ -862,6 +1046,9 @@ async fn forward_to_sidecar(args: ForwardArgs<'_>) -> Response {
         body,
         hop_plugin_id,
         forward_payment_authorization,
+        forward_cookie_names,
+        caller,
+        caller_agent_id,
     } = args;
 
     let hop_token = ext_token(node_token().as_deref(), hop_plugin_id);
@@ -870,14 +1057,26 @@ async fn forward_to_sidecar(args: ForwardArgs<'_>) -> Response {
 
     // Connect-timeout only — NO total-request timeout: the response body may be a
     // long-lived SSE stream that never completes (see [`PROXY_CONNECT_TIMEOUT`]).
-    let client = reqwest::Client::builder()
-        .connect_timeout(PROXY_CONNECT_TIMEOUT)
-        .build()
-        .unwrap_or_else(|_| reqwest::Client::new());
+    let client = proxy_http_client();
     let mut headers = reqwest::header::HeaderMap::new();
     let payment_authorization =
         forwarded_payment_authorization(src_headers, forward_payment_authorization);
-    copy_headers(src_headers, &mut headers);
+    copy_headers(src_headers, &mut headers, forward_cookie_names);
+    if let Some(caller) = caller {
+        if let Ok(value) = reqwest::header::HeaderValue::from_str(&caller.user_id) {
+            headers.insert(HDR_CALLER_USER_ID, value);
+        }
+        if let Some(org_id) = caller.org_id.as_deref() {
+            if let Ok(value) = reqwest::header::HeaderValue::from_str(org_id) {
+                headers.insert(HDR_CALLER_ORG_ID, value);
+            }
+        }
+    }
+    if let Some(agent_id) = caller_agent_id {
+        if let Ok(value) = reqwest::header::HeaderValue::from_str(agent_id) {
+            headers.insert(HDR_CALLER_AGENT_ID, value);
+        }
+    }
     if let Ok(val) = reqwest::header::HeaderValue::from_str(&format!("Bearer {hop_token}")) {
         headers.insert(reqwest::header::AUTHORIZATION, val);
     }
@@ -945,9 +1144,9 @@ async fn forward_to_sidecar(args: ForwardArgs<'_>) -> Response {
 // (the `@ryu/desktop` sidecar) a self-contained satellite: Core is a dumb pipe that
 // knows nothing about VNC, exactly like the HTTP lane.
 
-/// Query param the client may present the node token on (browsers cannot set custom
-/// headers on a WS upgrade — mirrors `realtime_ws`/`voice_ws`).
-const WS_TOKEN_PARAM: &str = "token";
+/// Query param carrying the opaque one-use ticket minted by Core's HTTP issuer.
+/// Node and user credentials are deliberately rejected on this WebSocket lane.
+const WS_TICKET_PARAM: &str = "ticket";
 
 /// The tungstenite message type used by the WS tunnel's upstream hop. Aliased once
 /// at module scope so both the bridge and the two converters name the same type.
@@ -967,7 +1166,6 @@ async fn ext_ws_proxy(
     Path((plugin_id, rest)): Path<(String, String)>,
     Extension(expected_node_token): Extension<Option<String>>,
     Query(query): Query<HashMap<String, String>>,
-    headers: HeaderMap,
     ws: WebSocketUpgrade,
 ) -> Response {
     let (plugin_id, rest) = split_scoped_plugin_path(plugin_id, rest);
@@ -977,7 +1175,6 @@ async fn ext_ws_proxy(
         &format!("/{rest}"),
         expected_node_token,
         &query,
-        &headers,
         ws,
     )
     .await
@@ -990,19 +1187,9 @@ async fn ext_ws_root_proxy(
     Path(plugin_id): Path<String>,
     Extension(expected_node_token): Extension<Option<String>>,
     Query(query): Query<HashMap<String, String>>,
-    headers: HeaderMap,
     ws: WebSocketUpgrade,
 ) -> Response {
-    ext_ws_tunnel(
-        &state,
-        &plugin_id,
-        "/",
-        expected_node_token,
-        &query,
-        &headers,
-        ws,
-    )
-    .await
+    ext_ws_tunnel(&state, &plugin_id, "/", expected_node_token, &query, ws).await
 }
 
 /// Shared core of the two WS handlers: enabled-gate → route-allowlist → node-token →
@@ -1014,7 +1201,6 @@ async fn ext_ws_tunnel(
     sub_path: &str,
     _startup_node_token: Option<String>,
     query: &HashMap<String, String>,
-    headers: &HeaderMap,
     ws: WebSocketUpgrade,
 ) -> Response {
     // Enabled gate (secrecy: a disabled/absent plugin's proxied surface must not exist).
@@ -1046,38 +1232,29 @@ async fn ext_ws_tunnel(
     let sidecar_name = crate::sidecar::manifest_sidecar::namespaced_name(plugin_id, &spec.name);
     drop(manifests);
 
-    // Node-token gate, mirroring `require_auth` + `realtime_ws`. A protected route
-    // requires the node bearer; browsers present it via `?token=` (the query), and
-    // non-browser clients may use the Authorization header instead. None configured
-    // (loopback dev) ⇒ allow.
-    if auth == RouteAuth::Protected {
-        let active_node_token = crate::node_token::active_token();
-        if let Some(expected) = active_node_token.as_deref() {
-            let provided = query.get(WS_TOKEN_PARAM).map(String::as_str).or_else(|| {
-                headers
-                    .get("authorization")
-                    .and_then(|v| v.to_str().ok())
-                    .and_then(|v| v.strip_prefix("Bearer "))
-            });
-            if provided != Some(expected) {
-                return StatusCode::UNAUTHORIZED.into_response();
-            }
-        }
+    if query.contains_key("token") || query.contains_key("jwt") {
+        return StatusCode::UNAUTHORIZED.into_response();
     }
 
-    // WebSocket upgrades cannot carry the REST user-JWT header from a browser,
-    // so accept the same verified JWT in `?jwt=` that the realtime socket uses.
-    // The route permission must be checked before waking the sidecar or accepting
-    // the upgrade; otherwise a view-only caller could reach the control stream.
+    let ticket = if auth == RouteAuth::Protected {
+        let expected_path = format!("/api/ext/ws/{plugin_id}{sub_path}");
+        match crate::server::ws_ticket::consume(
+            query.get(WS_TICKET_PARAM).map(String::as_str),
+            crate::server::ws_ticket::WsTicketRoute::Extension,
+            Some(&expected_path),
+        ) {
+            Some(ticket) => Some(ticket),
+            None => return StatusCode::UNAUTHORIZED.into_response(),
+        }
+    } else {
+        None
+    };
+
+    // The ticket carries the verified caller from the HTTP exchange. The route
+    // permission must be checked before waking the sidecar or accepting the
+    // upgrade; otherwise a view-only caller could reach the control stream.
     if let Some((permission, resource_id)) = required {
-        let caller = match query
-            .get("jwt")
-            .map(String::as_str)
-            .filter(|token| !token.trim().is_empty())
-        {
-            Some(token) => crate::server::verified_caller_from_token(token).await,
-            None => crate::server::verified_caller_from_headers(headers).await,
-        };
+        let caller = ticket.as_ref().and_then(|ticket| ticket.caller.clone());
         if let Err(status) = crate::server::enforce_permission_on(
             state,
             &caller,
@@ -1294,7 +1471,12 @@ pub fn host_routes() -> Router<ServerState> {
             "/api/host/model/stream",
             post(crate::server::model_stream::host_model_stream),
         )
-        .route("/api/host/rpc", post(host_rpc).layer(axum::extract::DefaultBodyLimit::max(crate::backups::MAX_APP_BYTES + 64 * 1024)))
+        .route(
+            "/api/host/rpc",
+            post(host_rpc).layer(axum::extract::DefaultBodyLimit::max(
+                crate::backups::MAX_APP_BYTES + 64 * 1024,
+            )),
+        )
         .route("/api/host/capability/:cap", post(host_capability))
 }
 
@@ -1460,7 +1642,9 @@ async fn host_rpc(
     };
 
     let caller = crate::server::verified_caller_from_headers(&headers).await;
-    let bridge = crate::plugin_host::PluginHookBridge::new_for_request(plugin_id, grants, state, caller, None);
+    let bridge = crate::plugin_host::PluginHookBridge::new_for_request(
+        plugin_id, grants, state, caller, None,
+    );
     use crate::tool_exec::{InvokeOutcome, SandboxBridge};
     match bridge.handle(bridge_path.to_owned(), body.args).await {
         InvokeOutcome::Result(r) if r.is_error => {
@@ -2307,6 +2491,9 @@ async fn host_capability(
         body: body_bytes,
         hop_plugin_id: &provider_id,
         forward_payment_authorization: false,
+        forward_cookie_names: &[],
+        caller: None,
+        caller_agent_id: None,
     })
     .await
 }
@@ -2747,6 +2934,85 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn sequential_proxy_requests_reuse_connections_and_keep_headers_per_request() {
+        use axum::extract::ConnectInfo;
+        use std::net::SocketAddr;
+        use std::sync::Arc;
+
+        let seen = Arc::new(tokio::sync::Mutex::new(Vec::<(SocketAddr, String)>::new()));
+        let captured = seen.clone();
+        let app = Router::new().route(
+            "/pool",
+            get(
+                move |ConnectInfo(peer): ConnectInfo<SocketAddr>, headers: HeaderMap| {
+                    let captured = captured.clone();
+                    async move {
+                        let bearer = headers
+                            .get("authorization")
+                            .and_then(|v| v.to_str().ok())
+                            .unwrap_or_default()
+                            .to_owned();
+                        captured.lock().await.push((peer, bearer));
+                        headers
+                            .get("x-request-case")
+                            .and_then(|v| v.to_str().ok())
+                            .unwrap_or_default()
+                            .to_owned()
+                    }
+                },
+            ),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                app.into_make_service_with_connect_info::<SocketAddr>(),
+            )
+            .await
+            .unwrap();
+        });
+        for (plugin, value) in [
+            ("com.test.pool-one", "first"),
+            ("com.test.pool-two", "second"),
+        ] {
+            let mut headers = HeaderMap::new();
+            headers.insert("x-request-case", value.parse().unwrap());
+            let response = forward_to_sidecar(ForwardArgs {
+                target: ForwardTarget::for_test(port),
+                upstream_path: "/pool",
+                query: "",
+                method: reqwest::Method::GET,
+                src_headers: &headers,
+                body: Vec::new(),
+                hop_plugin_id: plugin,
+                forward_payment_authorization: false,
+                forward_cookie_names: &[],
+                caller: None,
+                caller_agent_id: None,
+            })
+            .await;
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = axum::body::to_bytes(response.into_body(), 1024)
+                .await
+                .unwrap();
+            assert_eq!(body.as_ref(), value.as_bytes());
+            tokio::task::yield_now().await;
+        }
+        let captured = seen.lock().await;
+        assert_eq!(captured.len(), 2);
+        assert_eq!(
+            captured[0].0, captured[1].0,
+            "sequential hops should reuse one TCP connection"
+        );
+        assert!(
+            captured[0].1 != captured[1].1,
+            "hop credentials must remain request-specific"
+        );
+        server.abort();
+    }
+
     // ── Kill-isolation (the behavioral seam test) ───────────────────────────────
 
     /// A live sidecar's route works; when the sidecar dies, the SAME route 502s and
@@ -2785,6 +3051,9 @@ mod tests {
                 body: Vec::new(),
                 hop_plugin_id: "com.test.app",
                 forward_payment_authorization: false,
+                forward_cookie_names: &[],
+                caller: None,
+                caller_agent_id: None,
             })
             .await
         };
@@ -2843,6 +3112,9 @@ mod tests {
             body: Vec::new(),
             hop_plugin_id: "com.test.sse",
             forward_payment_authorization: false,
+            forward_cookie_names: &[],
+            caller: None,
+            caller_agent_id: None,
         });
         // Headers must arrive well before the body finishes (buffering ⇒ >3s ⇒ timeout).
         let resp = tokio::time::timeout(Duration::from_secs(1), fut)
@@ -2884,6 +3156,7 @@ mod tests {
                 http: Some(HttpProxySpec {
                     mount: mount.map(str::to_owned),
                     public_mount: None,
+                    forward_cookie_names: Vec::new(),
                     routes: vec![RouteSpec {
                         path: "/query".to_owned(),
                         method: None,
@@ -3044,9 +3317,37 @@ mod tests {
                 "bootstrap manifest {id} must be available when the router is built"
             );
         }
+        assert!(
+            manifests.iter().any(|manifest| manifest.id == "@ryu/rooms"),
+            "compiled Rooms manifest must register its opt-in public guest mount"
+        );
 
         // Build the actual public-mount router: these manifests must reach route
         // construction even when production BUILTIN_MANIFESTS is system-only.
+        let _router: Router<ServerState> =
+            public_mount_routes(&manifests, Some("tok".to_owned())).expect("unique mounts");
+    }
+
+    #[test]
+    fn public_mount_routes_include_compiled_opt_in_sidecars() {
+        let installed = Vec::new();
+        let bootstrap = crate::plugin_manifest::PluginManifestLoader::load_bootstrap();
+        let manifests =
+            crate::plugin_manifest::PluginManifestLoader::for_router(&installed, &bootstrap);
+
+        for id in [
+            "@ryu/finetune",
+            "@ryu/healing",
+            "@ryu/research",
+            "@ryu/clips",
+            "@ryu/recipes",
+        ] {
+            assert!(
+                manifests.iter().any(|manifest| manifest.id == id),
+                "compiled opt-in sidecar {id} must be available when the router is built"
+            );
+        }
+
         let _router: Router<ServerState> =
             public_mount_routes(&manifests, Some("tok".to_owned())).expect("unique mounts");
     }
@@ -3099,6 +3400,9 @@ mod tests {
             body: Vec::new(),
             hop_plugin_id: "com.test.root",
             forward_payment_authorization: false,
+            forward_cookie_names: &[],
+            caller: None,
+            caller_agent_id: None,
         })
         .await;
         assert_eq!(resp.status(), StatusCode::OK);
@@ -3230,6 +3534,8 @@ mod tests {
         src.insert("content-type", "application/json".parse().unwrap());
         src.insert("origin", "https://evil.example".parse().unwrap());
         src.insert("referer", "https://evil.example/p".parse().unwrap());
+        src.insert("x-ryu-user-jwt", "user-jwt-secret".parse().unwrap());
+        src.insert("cookie", "better-auth.session=secret".parse().unwrap());
         src.insert("host", "127.0.0.1:9999".parse().unwrap());
         src.insert("connection", "keep-alive".parse().unwrap());
         src.insert("x-ryu-plugin-id", "com.acme.app".parse().unwrap());
@@ -3239,7 +3545,7 @@ mod tests {
         );
 
         let mut dst = reqwest::header::HeaderMap::new();
-        copy_headers(&src, &mut dst);
+        copy_headers(&src, &mut dst, &[]);
 
         // End-to-end app headers are forwarded.
         assert_eq!(
@@ -3250,6 +3556,8 @@ mod tests {
             dst.get("x-ryu-plugin-id").map(|v| v.to_str().unwrap()),
             Some("com.acme.app")
         );
+        assert!(dst.get("x-ryu-user-jwt").is_none());
+        assert!(dst.get("cookie").is_none());
         // Browser-context + hop-by-hop headers are dropped.
         assert!(dst.get("origin").is_none(), "Origin must be stripped");
         assert!(dst.get("referer").is_none(), "Referer must be stripped");
@@ -3262,6 +3570,31 @@ mod tests {
             dst.get("connection").is_none(),
             "Connection must be stripped"
         );
+    }
+
+    #[test]
+    fn copy_headers_forwards_only_manifest_declared_app_cookies() {
+        let mut src = HeaderMap::new();
+        src.insert(
+            "cookie",
+            "better-auth.session=secret; com.acme.app_session=app-secret; unknown=drop"
+                .parse()
+                .unwrap(),
+        );
+
+        let allowed = vec!["com.acme.app_session".to_owned()];
+        let mut dst = reqwest::header::HeaderMap::new();
+        copy_headers(&src, &mut dst, &allowed);
+
+        assert_eq!(
+            dst.get("cookie").and_then(|value| value.to_str().ok()),
+            Some("com.acme.app_session=app-secret")
+        );
+
+        // No declaration means no browser cookie crosses the process boundary.
+        let mut empty = reqwest::header::HeaderMap::new();
+        copy_headers(&src, &mut empty, &[]);
+        assert!(empty.get("cookie").is_none());
     }
 
     #[test]

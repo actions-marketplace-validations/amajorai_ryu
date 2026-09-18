@@ -290,8 +290,8 @@ pub fn spawn(client: MonitorsClient) {
 
 // ── Host callbacks (sidecar → Core) ───────────────────────────────────────────────
 
-/// `POST /api/host/capability/mcp.callTool` — run `spider.crawl` (or any MCP tool the
-/// monitor engine requests) through Core's [`McpRegistry`](crate::sidecar::mcp::McpRegistry) on
+/// `POST /api/host/capability/mcp.callTool` — run the monitor-owned `spider.crawl`
+/// command through Core's [`McpRegistry`](crate::sidecar::mcp::McpRegistry) on
 /// the sidecar's behalf. Registered on the PUBLIC router (the sidecar holds only its
 /// minted ext token, not the node bearer); [`authenticate_sidecar`] does the token +
 /// enabled check in-handler, and we additionally assert the caller IS the monitors app.
@@ -300,8 +300,8 @@ pub(crate) async fn host_spider_crawl(
     headers: HeaderMap,
     Json(body): Json<Value>,
 ) -> Response {
-    let plugin_id = match authenticate_sidecar(&state, &headers).await {
-        Ok((id, _grants)) => id,
+    let (plugin_id, grants) = match authenticate_sidecar(&state, &headers).await {
+        Ok(value) => value,
         Err((status, msg)) => return (status, Json(json!({ "error": msg }))).into_response(),
     };
     if plugin_id != MONITORS_PLUGIN_ID {
@@ -312,11 +312,19 @@ pub(crate) async fn host_spider_crawl(
             .into_response();
     }
 
-    let tool = body.get("tool").and_then(Value::as_str).unwrap_or("");
-    if tool.is_empty() {
+    if !grants.contains("tools.invoke") {
         return (
-            StatusCode::BAD_REQUEST,
-            Json(json!({ "error": "missing tool" })),
+            StatusCode::FORBIDDEN,
+            Json(json!({ "error": "tools.invoke is not granted" })),
+        )
+            .into_response();
+    }
+
+    let tool = body.get("tool").and_then(Value::as_str).unwrap_or("");
+    if tool != "spider.crawl" {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({ "error": "monitors may invoke only spider.crawl" })),
         )
             .into_response();
     }

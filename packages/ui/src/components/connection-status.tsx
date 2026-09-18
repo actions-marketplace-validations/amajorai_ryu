@@ -1,14 +1,51 @@
 "use client";
 
-import {
-	type ConnectionPhase,
-	isConnectionUnavailable,
-} from "@ryuhq/protocol/connection-status";
-import { Check, ServerOff, WifiOff } from "lucide-react";
+import type { ConnectionPhase } from "@ryuhq/protocol/connection-status";
+import { Check, RefreshCw, ServerOff, WifiOff } from "lucide-react";
 import type { ReactNode } from "react";
 import { cn } from "../lib/utils.ts";
 import { Button } from "./button.tsx";
 import { Spinner } from "./spinner.tsx";
+
+/** The compact connection states used by status dots in host navigation. */
+export type ConnectionDotState = "checking" | "offline" | "online";
+
+/**
+ * A small, accessible connection indicator for dense navigation rows.
+ *
+ * The host supplies the state and accessible label; this primitive owns the
+ * semantic colors so a sidebar, node picker, or app row does not grow its own
+ * status palette.
+ */
+export function ConnectionStatusDot({
+	className,
+	label,
+	state,
+}: {
+	className?: string;
+	label: string;
+	state: ConnectionDotState;
+}) {
+	const tone =
+		state === "online"
+			? "bg-success"
+			: state === "offline"
+				? "bg-destructive"
+				: "bg-muted-foreground/40";
+	return (
+		<span
+			aria-label={label}
+			className={cn(
+				"inline-block size-2 shrink-0 rounded-full",
+				tone,
+				className
+			)}
+			data-connection-dot-state={state}
+			role="img"
+			title={label}
+		/>
+	);
+}
 
 interface ConnectionStatusCopy {
 	detail: string;
@@ -63,15 +100,28 @@ function copyForPhase(
 
 function phaseIcon(phase: ConnectionPhase, restored: boolean): ReactNode {
 	if (restored) {
-		return <Check aria-hidden="true" className="size-4" />;
+		return <Check aria-hidden="true" className="size-3.5" />;
 	}
 	if (phase === "offline") {
-		return <WifiOff aria-hidden="true" className="size-4" />;
+		return <WifiOff aria-hidden="true" className="size-3.5" />;
 	}
 	if (phase === "node-unreachable") {
-		return <ServerOff aria-hidden="true" className="size-4" />;
+		return <ServerOff aria-hidden="true" className="size-3.5" />;
 	}
-	return <Spinner aria-hidden="true" className="size-4" />;
+	return <Spinner aria-hidden="true" className="size-3.5" />;
+}
+
+function phaseIconClass(phase: ConnectionPhase, restored: boolean): string {
+	if (restored) {
+		return "bg-emerald-400/15 text-emerald-300 ring-emerald-300/25";
+	}
+	if (phase === "checking") {
+		return "bg-sky-400/15 text-sky-300 ring-sky-300/25";
+	}
+	if (phase === "offline") {
+		return "bg-sky-400/15 text-sky-300 ring-sky-300/25";
+	}
+	return "bg-amber-400/15 text-amber-200 ring-amber-300/25";
 }
 
 /**
@@ -94,12 +144,11 @@ export function ConnectionStatusToast({
 	}
 
 	const copy = copyForPhase(phase, nodeName, restored);
-	const isWarning = isConnectionUnavailable(phase) && !restored;
 
 	return (
 		<div
 			className={cn(
-				"pointer-events-none fixed inset-x-0 top-12 z-[100] flex justify-center px-3 sm:px-4",
+				"fade-in-0 slide-in-from-top-1 pointer-events-none fixed inset-x-0 top-12 z-[100] flex animate-in justify-center px-4 duration-200 motion-reduce:animate-none sm:px-6",
 				className
 			)}
 			data-connection-phase={phase}
@@ -108,32 +157,51 @@ export function ConnectionStatusToast({
 		>
 			<div
 				aria-live="polite"
-				className="pointer-events-auto flex w-full max-w-[34rem] items-center gap-2.5 rounded-full border border-border/70 bg-popover/95 px-3 py-2 text-popover-foreground shadow-black/10 shadow-lg backdrop-blur-xl"
+				className="pointer-events-auto relative flex w-fit max-w-[calc(100vw-2rem)] items-center gap-2 rounded-full border border-white/15 bg-zinc-900/90 px-2 py-1.5 text-white shadow-[0_14px_35px_-16px_rgba(0,0,0,0.72)] ring-1 ring-white/10 ring-inset backdrop-blur-2xl backdrop-saturate-150"
+				data-slot="connection-status-surface"
 				role="status"
 			>
 				<span
 					aria-hidden="true"
-					className={
-						isWarning
-							? "flex size-7 shrink-0 items-center justify-center rounded-full bg-warning/15 text-status-warning"
-							: "flex size-7 shrink-0 items-center justify-center rounded-full bg-success/15 text-status-success"
-					}
+					className={cn(
+						"flex size-7 shrink-0 items-center justify-center rounded-full ring-1 ring-inset",
+						phaseIconClass(phase, restored)
+					)}
 				>
 					{phaseIcon(phase, restored)}
 				</span>
-				<span className="min-w-0 flex-1 truncate text-xs leading-5">
-					<span className="font-medium">{copy.title}</span>
-					<span className="ml-1.5 text-muted-foreground">{copy.detail}</span>
+				<span className="min-w-0 flex-1 py-0.5">
+					<span
+						className="block truncate text-center font-medium text-[11px] leading-[1.2] tracking-[-0.01em]"
+						data-slot="connection-status-title"
+					>
+						{copy.title}
+					</span>
+					<span
+						className="block truncate text-center text-[10px] text-white/60 leading-[1.25]"
+						data-slot="connection-status-detail"
+					>
+						{copy.detail}
+					</span>
 				</span>
 				{phase === "node-unreachable" && onRetry ? (
 					<Button
-						className="h-7 shrink-0 rounded-full px-3 text-xs"
+						aria-label={retrying ? "Checking connection" : "Retry"}
+						className="corner-round size-7 shrink-0 rounded-full border border-white/10 bg-white/10 p-0 text-white/90 shadow-none hover:bg-white/15 hover:text-white focus-visible:border-white/30 focus-visible:ring-white/30"
+						data-slot="connection-status-retry"
 						disabled={retrying}
 						onClick={onRetry}
-						size="sm"
+						size="icon-xs"
+						title={retrying ? "Checking connection" : "Retry connection"}
 						variant="ghost"
 					>
-						{retrying ? "Checking…" : "Retry"}
+						<RefreshCw
+							aria-hidden="true"
+							className={cn("size-3.5", retrying && "animate-spin")}
+						/>
+						<span className="sr-only">
+							{retrying ? "Checking connection" : "Retry"}
+						</span>
 					</Button>
 				) : null}
 			</div>

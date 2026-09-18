@@ -38,14 +38,14 @@ test("Ryu OS exposes the dock and App Launcher entry point", () => {
 	expect(topbar).not.toContain("border-b");
 	expect(html).toContain("aspect-square");
 	expect(html).toContain('data-testid="os-dock-app-launcher"');
-	expect(html).toContain("hugeicons/dashboard-square-01.svg");
-	expect(html).toContain("hugeicons/radar-01.svg");
 	expect(html).toContain("App Launcher");
 	expect(html).toContain("Mission Control");
 	expect(OS_APPS.every((app) => app.iconBackground == null)).toBe(true);
+	expect(OS_APPS.every((app) => app.iconId)).toBe(true);
+	expect(html).toContain('data-app-icon="layered"');
+	expect(html).toContain("ryu--mission-control-dark.png");
 	for (const app of OS_APPS) {
 		expect(html).toContain(`data-testid="os-dock-${app.id}"`);
-		expect(html).toContain(`hugeicons/${app.iconId}.svg`);
 	}
 });
 
@@ -77,7 +77,23 @@ test("OS app tiles use manifest presentation when an app record is available", (
 		from: 123,
 		to: "transparent",
 	});
-	expect(resolved.iconId).toBe("manifest-radar");
+	expect(resolved.iconId).toBe("manifest-icon");
 	expect(resolved.iconPadding).toBe("md");
 	expect(resolved.iconUrl).toBe("https://cdn.example.test/manifest-icon.png");
+});
+
+test("dock and launcher both render canonical package artwork without an installed record", () => {
+	const html = renderToStaticMarkup(
+		<OsDesktopSurface
+			activeWindowId=""
+			onActivateWindow={() => undefined}
+			onCloseWindow={() => undefined}
+			onOpenApp={() => undefined}
+			windows={[]}
+		/>
+	);
+	expect(html).toContain("ryu--mission-control-dark.png");
+	expect(html).toContain("ryu--mission-control-light.png");
+	expect(html).toContain("Customize desktop");
+	expect(html).toContain('data-testid="os-home-clock"');
 });

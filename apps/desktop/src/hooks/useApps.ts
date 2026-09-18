@@ -75,6 +75,11 @@ function dependencyErrorOf(e: unknown): DependencyError | null {
 }
 
 const EMPTY_APPS: AppInfo[] = [];
+const APP_ROSTER_NOTIFY_PROPS: ("data" | "error" | "isPending")[] = [
+	"data",
+	"error",
+	"isPending",
+];
 
 /** Load all Apps and expose enable/disable toggle with optimistic update. */
 export function useApps(): UseAppsResult {
@@ -90,10 +95,19 @@ export function useApps(): UseAppsResult {
 		() => ["desktop-app-roster", url, token, userJwt],
 		[url, token, userJwt]
 	);
+	const fetchRoster = useCallback(
+		({ signal }: { signal: AbortSignal }) =>
+			fetchApps({ url, token, userJwt }, { signal }),
+		[url, token, userJwt]
+	);
 	const query = useQuery(
 		{
 			queryKey,
-			queryFn: () => fetchApps({ url, token, userJwt }),
+			queryFn: fetchRoster,
+			// App consumers need the roster, initial pending state and terminal errors;
+			// a background refetch's `isFetching` transition should not rebuild every
+			// mounted app section when the records themselves are unchanged.
+			notifyOnChangeProps: APP_ROSTER_NOTIFY_PROPS,
 			staleTime: 30_000,
 		},
 		queryClient

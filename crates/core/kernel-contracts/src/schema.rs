@@ -869,6 +869,10 @@ fn default_runtime_kind() -> String {
     "python".to_owned()
 }
 
+fn is_default_runtime_kind(kind: &str) -> bool {
+    kind == "python"
+}
+
 /// code surface the Gateway must permit before it runs.
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize, JsonSchema)]
 pub struct ExternalRuntimeConfig {
@@ -880,7 +884,10 @@ pub struct ExternalRuntimeConfig {
     /// outer enum consumes the `"kind"` key as its discriminant, so the inner field
     /// would otherwise be reported missing — the classic internally-tagged collision.
     /// Standalone use still round-trips an explicit `kind`.
-    #[serde(default = "default_runtime_kind")]
+    #[serde(
+        default = "default_runtime_kind",
+        skip_serializing_if = "is_default_runtime_kind"
+    )]
     pub kind: String,
 
     /// The module/entrypoint to run (e.g. `"ryu_tts"` → `python -m ryu_tts`).
@@ -1241,6 +1248,14 @@ pub struct HttpProxySpec {
     /// [`routes`]: HttpProxySpec::routes
     #[serde(default)]
     pub public_mount: Option<String>,
+
+    /// Cookie names Core may forward to this sidecar. Browser cookies are stripped
+    /// from every proxy hop by default; an app must explicitly declare its own
+    /// namespaced session cookies when a public route needs an HttpOnly session.
+    /// The manifest-level validator requires each name to use the plugin's cookie
+    /// namespace, so a sidecar cannot opt into Core's Better Auth cookie.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub forward_cookie_names: Vec<String>,
 
     /// The exact set of proxied routes. Each entry's [`RouteSpec::path`] is matched
     /// against the incoming sub-path (the segment after `/api/ext/<plugin_id>`),
@@ -1732,6 +1747,7 @@ pub fn capability_label(grant: &str) -> String {
         "hook:run-agent" => "Runs sub-agents".to_string(),
         "hook:storage" => "Local storage".to_string(),
         "conversation:set-title" => "Renames chats".to_string(),
+        "conversation:reactions" => "Adds message reactions".to_string(),
         "preferences:read" => "Reads preferences".to_string(),
         "background:control" => "Controls background processes".to_string(),
         // Spaces + media capabilities (full-page companion apps).
@@ -2621,6 +2637,29 @@ mod tests {
         let back: SidecarSpec =
             serde_json::from_str(&serde_json::to_string(&spec).unwrap()).unwrap();
         assert_eq!(spec, back);
+    }
+
+    #[test]
+    fn python_sidecar_serialization_emits_one_process_discriminator() {
+        let raw = r#"{
+            "name": "trainer",
+            "process": {
+                "kind": "python",
+                "entry": "worker",
+                "port_env": "RYU_WORKER_PORT"
+            },
+            "port": 8086
+        }"#;
+        let spec: SidecarSpec = serde_json::from_str(raw).expect("python sidecar parses");
+        let serialized = serde_json::to_string(&spec).expect("python sidecar serializes");
+        assert_eq!(
+            serialized.matches("\"kind\"").count(),
+            1,
+            "the internally tagged process must not emit duplicate kind fields: {serialized}"
+        );
+        let round_trip: SidecarSpec =
+            serde_json::from_str(&serialized).expect("serialized python sidecar re-parses");
+        assert_eq!(spec, round_trip);
     }
 
     #[test]

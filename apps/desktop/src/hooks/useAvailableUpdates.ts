@@ -21,7 +21,7 @@
 // runs*, i.e. which build). No Gateway policy is evaluated here.
 
 import { useMutation, useQueries, useQueryClient } from "@tanstack/react-query";
-import { useCallback } from "react";
+import { useCallback, useMemo } from "react";
 import { sileo } from "sileo";
 import { applyReleaseUpdate } from "@/src/components/updater/AutoUpdater.tsx";
 import { fetchAgentCatalog, runAgentUpdate } from "@/src/lib/api/agents.ts";
@@ -139,72 +139,78 @@ export interface UseAvailableUpdatesResult {
 export function useAvailableUpdates(): UseAvailableUpdatesResult {
 	const getNode = useNodeStore((s) => s.getActiveNode);
 	const node = getNode();
-	const target: ApiTarget = toTarget(node);
+	const target: ApiTarget = useMemo(
+		() => toTarget(node),
+		[node.token, node.url, node.userJwt]
+	);
 	const url = node.url;
 	const token = node.token ?? null;
 	const qc = useQueryClient();
 
-	const results = useQueries({
-		queries: [
-			{
-				queryKey: APP_KEY(url),
-				// Throw on a FAILED check (rate limit, network) instead of accepting
-				// the fail-open sentinel: react-query then keeps the last good
-				// verdict, so an available-update row doesn't silently vanish the
-				// moment one background re-check hits GitHub's rate limit.
-				queryFn: async () => {
-					const verdict = await checkForUpdate(target);
-					if (updateCheckFailed(verdict)) {
-						throw new Error(verdict.error ?? "update check failed");
-					}
-					return verdict;
+	const queries = useMemo(
+		() =>
+			[
+				{
+					queryKey: APP_KEY(url),
+					// Throw on a FAILED check (rate limit, network) instead of accepting
+					// the fail-open sentinel: react-query then keeps the last good
+					// verdict, so an available-update row doesn't silently vanish the
+					// moment one background re-check hits GitHub's rate limit.
+					queryFn: async () => {
+						const verdict = await checkForUpdate(target);
+						if (updateCheckFailed(verdict)) {
+							throw new Error(verdict.error ?? "update check failed");
+						}
+						return verdict;
+					},
+					staleTime: UPDATES_STALE_MS,
 				},
-				staleTime: UPDATES_STALE_MS,
-			},
-			{
-				queryKey: AGENT_CATALOG_KEY(url),
-				queryFn: () => fetchAgentCatalog(target),
-				staleTime: UPDATES_STALE_MS,
-			},
-			{
-				queryKey: SIDECAR_CATALOG_KEY(url),
-				queryFn: () => fetchCatalog(url, token, undefined, target.userJwt),
-				staleTime: UPDATES_STALE_MS,
-			},
-			{
-				queryKey: APPS_KEY(url),
-				queryFn: () => fetchApps(target),
-				staleTime: UPDATES_STALE_MS,
-			},
-			{
-				queryKey: PLUGINS_CATALOG_KEY(url),
-				queryFn: () => fetchAppsCatalog(target),
-				staleTime: UPDATES_STALE_MS,
-			},
-			{
-				queryKey: MODEL_UPDATES_KEY(url),
-				queryFn: () => listModelUpdates(target),
-				staleTime: UPDATES_STALE_MS,
-			},
-			{
-				queryKey: SKILL_UPDATES_KEY(url),
-				queryFn: () => listSkillUpdates(target),
-				staleTime: UPDATES_STALE_MS,
-			},
-			{
-				queryKey: MCP_UPDATES_KEY(url),
-				queryFn: () => listMcpUpdates(target),
-				staleTime: UPDATES_STALE_MS,
-			},
-			{
-				// Not node-scoped and it cannot change while the app runs, so it is
-				// keyed globally and never refetched.
-				queryKey: APP_VERSION_KEY,
-				queryFn: () => getAppVersion(),
-				staleTime: Number.POSITIVE_INFINITY,
-			},
-		],
-	});
+				{
+					queryKey: AGENT_CATALOG_KEY(url),
+					queryFn: () => fetchAgentCatalog(target),
+					staleTime: UPDATES_STALE_MS,
+				},
+				{
+					queryKey: SIDECAR_CATALOG_KEY(url),
+					queryFn: () => fetchCatalog(url, token, undefined, target.userJwt),
+					staleTime: UPDATES_STALE_MS,
+				},
+				{
+					queryKey: APPS_KEY(url),
+					queryFn: () => fetchApps(target),
+					staleTime: UPDATES_STALE_MS,
+				},
+				{
+					queryKey: PLUGINS_CATALOG_KEY(url),
+					queryFn: () => fetchAppsCatalog(target),
+					staleTime: UPDATES_STALE_MS,
+				},
+				{
+					queryKey: MODEL_UPDATES_KEY(url),
+					queryFn: () => listModelUpdates(target),
+					staleTime: UPDATES_STALE_MS,
+				},
+				{
+					queryKey: SKILL_UPDATES_KEY(url),
+					queryFn: () => listSkillUpdates(target),
+					staleTime: UPDATES_STALE_MS,
+				},
+				{
+					queryKey: MCP_UPDATES_KEY(url),
+					queryFn: () => listMcpUpdates(target),
+					staleTime: UPDATES_STALE_MS,
+				},
+				{
+					// Not node-scoped and it cannot change while the app runs, so it is
+					// keyed globally and never refetched.
+					queryKey: APP_VERSION_KEY,
+					queryFn: () => getAppVersion(),
+					staleTime: Number.POSITIVE_INFINITY,
+				},
+			] as const,
+		[target, url, token]
+	);
+	const results = useQueries({ queries });
 
 	const [
 		appQ,

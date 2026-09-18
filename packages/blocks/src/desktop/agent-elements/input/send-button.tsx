@@ -5,7 +5,6 @@ import { cn } from "@ryu/ui/lib/utils.ts";
 import {
 	IconArrowUp,
 	IconMicrophone,
-	IconPlayerPlayFilled,
 	IconPlayerStopFilled,
 } from "@tabler/icons-react";
 
@@ -167,7 +166,7 @@ export function SendButton({
 			{isTyping ? (
 				<IconArrowUp className="size-4" />
 			) : (
-				<IconPlayerPlayFilled className="size-4" />
+				<IconArrowUp className="size-4" />
 			)}
 		</Button>
 	);

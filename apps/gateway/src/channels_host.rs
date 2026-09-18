@@ -323,6 +323,7 @@ fn channel_context(channel_name: &str) -> RequestContext {
     RequestContext {
         request_id: Uuid::new_v4().to_string(),
         api_key: format!("channel:{channel_name}"),
+        owner_binding: ryu_gw_credentials::fingerprint(&format!("channel:{channel_name}")),
         is_master_key: false,
         org_id: None,
         team_id: None,

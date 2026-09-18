@@ -4,12 +4,10 @@
 // is also used by lifecycle-aware surfaces such as the Meetings event stream;
 // it is not a billing or plan entitlement check.
 
-import { useQuery } from "@tanstack/react-query";
 import { useMemo } from "react";
-import { useActiveNode } from "@/src/hooks/useActiveNode.ts";
-import { fetchApps } from "@/src/lib/api/plugins.ts";
+import { useApps } from "@/src/hooks/useApps.ts";
 
-/** Stable empty set so an in-flight or failed fetch yields one reference. */
+/** Stable empty set when the loaded roster has no enabled apps. */
 const NONE: ReadonlySet<string> = new Set<string>();
 
 /**
@@ -17,23 +15,12 @@ const NONE: ReadonlySet<string> = new Set<string>();
  * unknown (first fetch in flight, or Core unreachable).
  */
 export function useEnabledApps(): ReadonlySet<string> | undefined {
-	const node = useActiveNode();
-	const { data } = useQuery({
-		queryKey: ["gating-enabled-apps", node.url, node.token],
-		queryFn: () =>
-			fetchApps({
-				url: node.url,
-				token: node.token,
-				userJwt: node.userJwt ?? null,
-			}),
-		staleTime: 60_000,
-		retry: false,
-	});
+	const { apps, loading, error } = useApps();
 	return useMemo(() => {
-		if (!data) {
+		if (loading || error) {
 			return undefined;
 		}
-		const enabled = data.filter((app) => app.enabled).map((app) => app.id);
+		const enabled = apps.filter((app) => app.enabled).map((app) => app.id);
 		return enabled.length > 0 ? new Set(enabled) : NONE;
-	}, [data]);
+	}, [apps, loading, error]);
 }

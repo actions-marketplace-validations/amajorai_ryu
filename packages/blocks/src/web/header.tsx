@@ -71,7 +71,7 @@ const [MAIN_PRODUCT_LINKS, SERVICE_API_LINKS, CAPACITY_AND_APP_LINKS] =
 
 const CAPACITY_AND_APP_LINKS_WITH_APPS = [
 	...CAPACITY_AND_APP_LINKS.links,
-	{ href: "/marketplace/apps", label: "Apps" },
+	{ href: "/products/apps", label: "Apps" },
 ];
 
 const PLATFORM_LINKS = [
@@ -138,32 +138,32 @@ function PrimaryProductLinks() {
 	return (
 		<div>
 			<div className="grid w-[760px] grid-cols-3 gap-x-6 gap-y-7 p-2">
-				<div className="space-y-6">
-					<ProductLinkGroup
-						links={MAIN_PRODUCT_LINKS.links}
-						title={MAIN_PRODUCT_LINKS.title}
-					/>
-					<ProductLinkGroup
-						links={SERVICE_API_LINKS.links}
-						title={SERVICE_API_LINKS.title}
-					/>
-					<ProductLinkGroup
-						links={CAPACITY_AND_APP_LINKS_WITH_APPS}
-						title={CAPACITY_AND_APP_LINKS.title}
-					/>
+				<ProductLinkGroup
+					links={MAIN_PRODUCT_LINKS.links}
+					title={MAIN_PRODUCT_LINKS.title}
+				/>
+				<ProductLinkGroup
+					links={SERVICE_API_LINKS.links}
+					title={SERVICE_API_LINKS.title}
+				/>
+				<ProductLinkGroup
+					links={CAPACITY_AND_APP_LINKS_WITH_APPS}
+					title={CAPACITY_AND_APP_LINKS.title}
+				/>
+				<div className="col-span-3 grid grid-cols-3 gap-x-6">
+					<ProductLinkGroup links={PLATFORM_LINKS} title="Platform" />
+					<ProductLinkGroup links={INFRA_LINKS} title="Infrastructure" />
+					<div className="pt-7" data-testid="product-menu-explore">
+						<MotionNavigationMenuLink
+							className="px-3 py-1"
+							render={<Link data-cuelume-hover="tick" href="/platform" />}
+						>
+							<span className="font-medium text-foreground text-xl tracking-tight">
+								{exploreLabel}
+							</span>
+						</MotionNavigationMenuLink>
+					</div>
 				</div>
-				<ProductLinkGroup links={PLATFORM_LINKS} title="Platform" />
-				<ProductLinkGroup links={INFRA_LINKS} title="Infrastructure" />
-			</div>
-			<div className="mt-1 border-border/60 border-t px-3 pt-2.5">
-				<MotionNavigationMenuLink
-					className="px-3"
-					render={<Link data-cuelume-hover="tick" href="/platform" />}
-				>
-					<span className="font-medium text-foreground text-sm">
-						{exploreLabel}
-					</span>
-				</MotionNavigationMenuLink>
 			</div>
 		</div>
 	);
@@ -180,7 +180,7 @@ function ProductsMenu({ pathname }: { pathname: string }) {
 						pathname === "/console" ||
 						pathname === "/build" ||
 						pathname === "/platform" ||
-						pathname.startsWith("/marketplace/apps")) &&
+						pathname.startsWith("/products/apps")) &&
 						"bg-muted"
 				)}
 			>

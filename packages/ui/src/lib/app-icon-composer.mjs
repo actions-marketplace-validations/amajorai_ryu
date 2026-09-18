@@ -23,70 +23,69 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
 */
-
-import icon133dark from "../assets/app-icons/example--research-assistant-dark.png";
-import icon133light from "../assets/app-icons/example--research-assistant-light.png";
-import icon133mono from "../assets/app-icons/example--research-assistant-mono.png";
-import icon83dark from "../assets/app-icons/ryu--action-summary-dark.png";
-import icon83light from "../assets/app-icons/ryu--action-summary-light.png";
-import icon83mono from "../assets/app-icons/ryu--action-summary-mono.png";
+import icon136dark from "../assets/app-icons/example--research-assistant-dark.png";
+import icon136light from "../assets/app-icons/example--research-assistant-light.png";
+import icon136mono from "../assets/app-icons/example--research-assistant-mono.png";
+import icon86dark from "../assets/app-icons/ryu--action-summary-dark.png";
+import icon86light from "../assets/app-icons/ryu--action-summary-light.png";
+import icon86mono from "../assets/app-icons/ryu--action-summary-mono.png";
 import icon0dark from "../assets/app-icons/ryu--activity-dark.png";
 import icon0light from "../assets/app-icons/ryu--activity-light.png";
 import icon0mono from "../assets/app-icons/ryu--activity-mono.png";
-import icon84dark from "../assets/app-icons/ryu--advisor-dark.png";
-import icon84light from "../assets/app-icons/ryu--advisor-light.png";
-import icon84mono from "../assets/app-icons/ryu--advisor-mono.png";
-import icon85dark from "../assets/app-icons/ryu--agent-comms-dark.png";
-import icon85light from "../assets/app-icons/ryu--agent-comms-light.png";
-import icon85mono from "../assets/app-icons/ryu--agent-comms-mono.png";
+import icon87dark from "../assets/app-icons/ryu--advisor-dark.png";
+import icon87light from "../assets/app-icons/ryu--advisor-light.png";
+import icon87mono from "../assets/app-icons/ryu--advisor-mono.png";
+import icon88dark from "../assets/app-icons/ryu--agent-comms-dark.png";
+import icon88light from "../assets/app-icons/ryu--agent-comms-light.png";
+import icon88mono from "../assets/app-icons/ryu--agent-comms-mono.png";
 import icon1dark from "../assets/app-icons/ryu--agent-status-dark.png";
 import icon1light from "../assets/app-icons/ryu--agent-status-light.png";
 import icon1mono from "../assets/app-icons/ryu--agent-status-mono.png";
-import icon86dark from "../assets/app-icons/ryu--agentation-dark.png";
-import icon86light from "../assets/app-icons/ryu--agentation-light.png";
-import icon86mono from "../assets/app-icons/ryu--agentation-mono.png";
-import icon87dark from "../assets/app-icons/ryu--agentbrowser-dark.png";
-import icon87light from "../assets/app-icons/ryu--agentbrowser-light.png";
-import icon87mono from "../assets/app-icons/ryu--agentbrowser-mono.png";
-import icon88dark from "../assets/app-icons/ryu--agents-md-tail-dark.png";
-import icon88light from "../assets/app-icons/ryu--agents-md-tail-light.png";
-import icon88mono from "../assets/app-icons/ryu--agents-md-tail-mono.png";
-import icon89dark from "../assets/app-icons/ryu--ambient-elevator-dark.png";
-import icon89light from "../assets/app-icons/ryu--ambient-elevator-light.png";
-import icon89mono from "../assets/app-icons/ryu--ambient-elevator-mono.png";
+import icon89dark from "../assets/app-icons/ryu--agentation-dark.png";
+import icon89light from "../assets/app-icons/ryu--agentation-light.png";
+import icon89mono from "../assets/app-icons/ryu--agentation-mono.png";
+import icon90dark from "../assets/app-icons/ryu--agentbrowser-dark.png";
+import icon90light from "../assets/app-icons/ryu--agentbrowser-light.png";
+import icon90mono from "../assets/app-icons/ryu--agentbrowser-mono.png";
+import icon91dark from "../assets/app-icons/ryu--agents-md-tail-dark.png";
+import icon91light from "../assets/app-icons/ryu--agents-md-tail-light.png";
+import icon91mono from "../assets/app-icons/ryu--agents-md-tail-mono.png";
+import icon92dark from "../assets/app-icons/ryu--ambient-elevator-dark.png";
+import icon92light from "../assets/app-icons/ryu--ambient-elevator-light.png";
+import icon92mono from "../assets/app-icons/ryu--ambient-elevator-mono.png";
 import icon2dark from "../assets/app-icons/ryu--anydoc-dark.png";
 import icon2light from "../assets/app-icons/ryu--anydoc-light.png";
 import icon2mono from "../assets/app-icons/ryu--anydoc-mono.png";
 import icon3dark from "../assets/app-icons/ryu--approvals-dark.png";
 import icon3light from "../assets/app-icons/ryu--approvals-light.png";
 import icon3mono from "../assets/app-icons/ryu--approvals-mono.png";
-import icon90dark from "../assets/app-icons/ryu--auto-continue-dark.png";
-import icon90light from "../assets/app-icons/ryu--auto-continue-light.png";
-import icon90mono from "../assets/app-icons/ryu--auto-continue-mono.png";
+import icon93dark from "../assets/app-icons/ryu--auto-continue-dark.png";
+import icon93light from "../assets/app-icons/ryu--auto-continue-light.png";
+import icon93mono from "../assets/app-icons/ryu--auto-continue-mono.png";
 import icon4dark from "../assets/app-icons/ryu--autopilot-dark.png";
 import icon4light from "../assets/app-icons/ryu--autopilot-light.png";
 import icon4mono from "../assets/app-icons/ryu--autopilot-mono.png";
 import icon5dark from "../assets/app-icons/ryu--backstage-dark.png";
 import icon5light from "../assets/app-icons/ryu--backstage-light.png";
 import icon5mono from "../assets/app-icons/ryu--backstage-mono.png";
-import icon91dark from "../assets/app-icons/ryu--bitwarden-dark.png";
-import icon91light from "../assets/app-icons/ryu--bitwarden-light.png";
-import icon91mono from "../assets/app-icons/ryu--bitwarden-mono.png";
+import icon94dark from "../assets/app-icons/ryu--bitwarden-dark.png";
+import icon94light from "../assets/app-icons/ryu--bitwarden-light.png";
+import icon94mono from "../assets/app-icons/ryu--bitwarden-mono.png";
 import icon6dark from "../assets/app-icons/ryu--blueprint-dark.png";
 import icon6light from "../assets/app-icons/ryu--blueprint-light.png";
 import icon6mono from "../assets/app-icons/ryu--blueprint-mono.png";
 import icon7dark from "../assets/app-icons/ryu--bookmarks-dark.png";
 import icon7light from "../assets/app-icons/ryu--bookmarks-light.png";
 import icon7mono from "../assets/app-icons/ryu--bookmarks-mono.png";
-import icon92dark from "../assets/app-icons/ryu--brave-dark.png";
-import icon92light from "../assets/app-icons/ryu--brave-light.png";
-import icon92mono from "../assets/app-icons/ryu--brave-mono.png";
+import icon95dark from "../assets/app-icons/ryu--brave-dark.png";
+import icon95light from "../assets/app-icons/ryu--brave-light.png";
+import icon95mono from "../assets/app-icons/ryu--brave-mono.png";
 import icon8dark from "../assets/app-icons/ryu--browser-dark.png";
 import icon8light from "../assets/app-icons/ryu--browser-light.png";
 import icon8mono from "../assets/app-icons/ryu--browser-mono.png";
-import icon93dark from "../assets/app-icons/ryu--bytebot-dark.png";
-import icon93light from "../assets/app-icons/ryu--bytebot-light.png";
-import icon93mono from "../assets/app-icons/ryu--bytebot-mono.png";
+import icon96dark from "../assets/app-icons/ryu--bytebot-dark.png";
+import icon96light from "../assets/app-icons/ryu--bytebot-light.png";
+import icon96mono from "../assets/app-icons/ryu--bytebot-mono.png";
 import icon9dark from "../assets/app-icons/ryu--calendar-dark.png";
 import icon9light from "../assets/app-icons/ryu--calendar-light.png";
 import icon9mono from "../assets/app-icons/ryu--calendar-mono.png";
@@ -96,384 +95,396 @@ import icon10mono from "../assets/app-icons/ryu--canvas-mono.png";
 import icon11dark from "../assets/app-icons/ryu--chat-broadcast-dark.png";
 import icon11light from "../assets/app-icons/ryu--chat-broadcast-light.png";
 import icon11mono from "../assets/app-icons/ryu--chat-broadcast-mono.png";
-import icon94dark from "../assets/app-icons/ryu--chat-title-dark.png";
-import icon94light from "../assets/app-icons/ryu--chat-title-light.png";
-import icon94mono from "../assets/app-icons/ryu--chat-title-mono.png";
-import icon95dark from "../assets/app-icons/ryu--chatgpt-web-dark.png";
-import icon95light from "../assets/app-icons/ryu--chatgpt-web-light.png";
-import icon95mono from "../assets/app-icons/ryu--chatgpt-web-mono.png";
+import icon97dark from "../assets/app-icons/ryu--chat-title-dark.png";
+import icon97light from "../assets/app-icons/ryu--chat-title-light.png";
+import icon97mono from "../assets/app-icons/ryu--chat-title-mono.png";
+import icon98dark from "../assets/app-icons/ryu--chatgpt-web-dark.png";
+import icon98light from "../assets/app-icons/ryu--chatgpt-web-light.png";
+import icon98mono from "../assets/app-icons/ryu--chatgpt-web-mono.png";
 import icon12dark from "../assets/app-icons/ryu--checks-dark.png";
 import icon12light from "../assets/app-icons/ryu--checks-light.png";
 import icon12mono from "../assets/app-icons/ryu--checks-mono.png";
-import icon71dark from "../assets/app-icons/ryu--clangd-lsp-dark.png";
-import icon71light from "../assets/app-icons/ryu--clangd-lsp-light.png";
-import icon71mono from "../assets/app-icons/ryu--clangd-lsp-mono.png";
+import icon74dark from "../assets/app-icons/ryu--clangd-lsp-dark.png";
+import icon74light from "../assets/app-icons/ryu--clangd-lsp-light.png";
+import icon74mono from "../assets/app-icons/ryu--clangd-lsp-mono.png";
 import icon13dark from "../assets/app-icons/ryu--clips-dark.png";
 import icon13light from "../assets/app-icons/ryu--clips-light.png";
 import icon13mono from "../assets/app-icons/ryu--clips-mono.png";
-import icon69dark from "../assets/app-icons/ryu--cloudflare-browser-run-dark.png";
-import icon69light from "../assets/app-icons/ryu--cloudflare-browser-run-light.png";
-import icon69mono from "../assets/app-icons/ryu--cloudflare-browser-run-mono.png";
-import icon70dark from "../assets/app-icons/ryu--composio-connect-dark.png";
-import icon70light from "../assets/app-icons/ryu--composio-connect-light.png";
-import icon70mono from "../assets/app-icons/ryu--composio-connect-mono.png";
+import icon72dark from "../assets/app-icons/ryu--cloudflare-browser-run-dark.png";
+import icon72light from "../assets/app-icons/ryu--cloudflare-browser-run-light.png";
+import icon72mono from "../assets/app-icons/ryu--cloudflare-browser-run-mono.png";
+import icon73dark from "../assets/app-icons/ryu--composio-connect-dark.png";
+import icon73light from "../assets/app-icons/ryu--composio-connect-light.png";
+import icon73mono from "../assets/app-icons/ryu--composio-connect-mono.png";
 import icon14dark from "../assets/app-icons/ryu--content-dark.png";
 import icon14light from "../assets/app-icons/ryu--content-light.png";
 import icon14mono from "../assets/app-icons/ryu--content-mono.png";
-import icon15dark from "../assets/app-icons/ryu--crm-dark.png";
-import icon15light from "../assets/app-icons/ryu--crm-light.png";
-import icon15mono from "../assets/app-icons/ryu--crm-mono.png";
-import icon72dark from "../assets/app-icons/ryu--csharp-lsp-dark.png";
-import icon72light from "../assets/app-icons/ryu--csharp-lsp-light.png";
-import icon72mono from "../assets/app-icons/ryu--csharp-lsp-mono.png";
-import icon16dark from "../assets/app-icons/ryu--dashboards-dark.png";
-import icon16light from "../assets/app-icons/ryu--dashboards-light.png";
-import icon16mono from "../assets/app-icons/ryu--dashboards-mono.png";
-import icon17dark from "../assets/app-icons/ryu--desktop-dark.png";
-import icon17light from "../assets/app-icons/ryu--desktop-light.png";
-import icon17mono from "../assets/app-icons/ryu--desktop-mono.png";
-import icon18dark from "../assets/app-icons/ryu--dictation-dark.png";
-import icon18light from "../assets/app-icons/ryu--dictation-light.png";
-import icon18mono from "../assets/app-icons/ryu--dictation-mono.png";
-import icon19dark from "../assets/app-icons/ryu--docling-dark.png";
-import icon19light from "../assets/app-icons/ryu--docling-light.png";
-import icon19mono from "../assets/app-icons/ryu--docling-mono.png";
-import icon96dark from "../assets/app-icons/ryu--docs-dark.png";
-import icon96light from "../assets/app-icons/ryu--docs-light.png";
-import icon96mono from "../assets/app-icons/ryu--docs-mono.png";
-import icon97dark from "../assets/app-icons/ryu--double-check-dark.png";
-import icon97light from "../assets/app-icons/ryu--double-check-light.png";
-import icon97mono from "../assets/app-icons/ryu--double-check-mono.png";
-import icon20dark from "../assets/app-icons/ryu--drafts-dark.png";
-import icon20light from "../assets/app-icons/ryu--drafts-light.png";
-import icon20mono from "../assets/app-icons/ryu--drafts-mono.png";
-import icon21dark from "../assets/app-icons/ryu--drawesome-dark.png";
-import icon21light from "../assets/app-icons/ryu--drawesome-light.png";
-import icon21mono from "../assets/app-icons/ryu--drawesome-mono.png";
-import icon98dark from "../assets/app-icons/ryu--dynamic-workflows-dark.png";
-import icon98light from "../assets/app-icons/ryu--dynamic-workflows-light.png";
-import icon98mono from "../assets/app-icons/ryu--dynamic-workflows-mono.png";
-import icon99dark from "../assets/app-icons/ryu--effort-escalator-dark.png";
-import icon99light from "../assets/app-icons/ryu--effort-escalator-light.png";
-import icon99mono from "../assets/app-icons/ryu--effort-escalator-mono.png";
-import icon100dark from "../assets/app-icons/ryu--ego-browser-dark.png";
-import icon100light from "../assets/app-icons/ryu--ego-browser-light.png";
-import icon100mono from "../assets/app-icons/ryu--ego-browser-mono.png";
-import icon101dark from "../assets/app-icons/ryu--exa-dark.png";
-import icon101light from "../assets/app-icons/ryu--exa-light.png";
-import icon101mono from "../assets/app-icons/ryu--exa-mono.png";
-import icon102dark from "../assets/app-icons/ryu--expanded-composer-dark.png";
-import icon102light from "../assets/app-icons/ryu--expanded-composer-light.png";
-import icon102mono from "../assets/app-icons/ryu--expanded-composer-mono.png";
-import icon103dark from "../assets/app-icons/ryu--expect-dark.png";
-import icon103light from "../assets/app-icons/ryu--expect-light.png";
-import icon103mono from "../assets/app-icons/ryu--expect-mono.png";
-import icon22dark from "../assets/app-icons/ryu--expenses-dark.png";
-import icon22light from "../assets/app-icons/ryu--expenses-light.png";
-import icon22mono from "../assets/app-icons/ryu--expenses-mono.png";
-import icon23dark from "../assets/app-icons/ryu--feedback-board-dark.png";
-import icon23light from "../assets/app-icons/ryu--feedback-board-light.png";
-import icon23mono from "../assets/app-icons/ryu--feedback-board-mono.png";
-import icon24dark from "../assets/app-icons/ryu--finetune-dark.png";
-import icon24light from "../assets/app-icons/ryu--finetune-light.png";
-import icon24mono from "../assets/app-icons/ryu--finetune-mono.png";
-import icon104dark from "../assets/app-icons/ryu--firecrawl-dark.png";
-import icon104light from "../assets/app-icons/ryu--firecrawl-light.png";
-import icon104mono from "../assets/app-icons/ryu--firecrawl-mono.png";
-import icon105dark from "../assets/app-icons/ryu--firewall-dark.png";
-import icon105light from "../assets/app-icons/ryu--firewall-light.png";
-import icon105mono from "../assets/app-icons/ryu--firewall-mono.png";
-import icon107dark from "../assets/app-icons/ryu--ghost-chats-dark.png";
-import icon107light from "../assets/app-icons/ryu--ghost-chats-light.png";
-import icon107mono from "../assets/app-icons/ryu--ghost-chats-mono.png";
-import icon106dark from "../assets/app-icons/ryu--ghost-dark.png";
-import icon106light from "../assets/app-icons/ryu--ghost-light.png";
-import icon106mono from "../assets/app-icons/ryu--ghost-mono.png";
-import icon108dark from "../assets/app-icons/ryu--goal-dark.png";
-import icon108light from "../assets/app-icons/ryu--goal-light.png";
-import icon108mono from "../assets/app-icons/ryu--goal-mono.png";
-import icon73dark from "../assets/app-icons/ryu--gopls-lsp-dark.png";
-import icon73light from "../assets/app-icons/ryu--gopls-lsp-light.png";
-import icon73mono from "../assets/app-icons/ryu--gopls-lsp-mono.png";
-import icon109dark from "../assets/app-icons/ryu--headroom-dark.png";
-import icon109light from "../assets/app-icons/ryu--headroom-light.png";
-import icon109mono from "../assets/app-icons/ryu--headroom-mono.png";
-import icon25dark from "../assets/app-icons/ryu--healing-dark.png";
-import icon25light from "../assets/app-icons/ryu--healing-light.png";
-import icon25mono from "../assets/app-icons/ryu--healing-mono.png";
-import icon26dark from "../assets/app-icons/ryu--help-center-dark.png";
-import icon26light from "../assets/app-icons/ryu--help-center-light.png";
-import icon26mono from "../assets/app-icons/ryu--help-center-mono.png";
-import icon110dark from "../assets/app-icons/ryu--honcho-dark.png";
-import icon110light from "../assets/app-icons/ryu--honcho-light.png";
-import icon110mono from "../assets/app-icons/ryu--honcho-mono.png";
-import icon111dark from "../assets/app-icons/ryu--hook-observers-dark.png";
-import icon111light from "../assets/app-icons/ryu--hook-observers-light.png";
-import icon111mono from "../assets/app-icons/ryu--hook-observers-mono.png";
-import icon27dark from "../assets/app-icons/ryu--invoices-dark.png";
-import icon27light from "../assets/app-icons/ryu--invoices-light.png";
-import icon27mono from "../assets/app-icons/ryu--invoices-mono.png";
-import icon74dark from "../assets/app-icons/ryu--jdtls-lsp-dark.png";
-import icon74light from "../assets/app-icons/ryu--jdtls-lsp-light.png";
-import icon74mono from "../assets/app-icons/ryu--jdtls-lsp-mono.png";
-import icon75dark from "../assets/app-icons/ryu--kotlin-lsp-dark.png";
-import icon75light from "../assets/app-icons/ryu--kotlin-lsp-light.png";
-import icon75mono from "../assets/app-icons/ryu--kotlin-lsp-mono.png";
-import icon28dark from "../assets/app-icons/ryu--learning-dark.png";
-import icon28light from "../assets/app-icons/ryu--learning-light.png";
-import icon28mono from "../assets/app-icons/ryu--learning-mono.png";
-import icon76dark from "../assets/app-icons/ryu--lua-lsp-dark.png";
-import icon76light from "../assets/app-icons/ryu--lua-lsp-light.png";
-import icon76mono from "../assets/app-icons/ryu--lua-lsp-mono.png";
-import icon29dark from "../assets/app-icons/ryu--mail-dark.png";
-import icon29light from "../assets/app-icons/ryu--mail-light.png";
-import icon29mono from "../assets/app-icons/ryu--mail-mono.png";
-import icon30dark from "../assets/app-icons/ryu--markitdown-dark.png";
-import icon30light from "../assets/app-icons/ryu--markitdown-light.png";
-import icon30mono from "../assets/app-icons/ryu--markitdown-mono.png";
-import icon31dark from "../assets/app-icons/ryu--meetings-dark.png";
-import icon31light from "../assets/app-icons/ryu--meetings-light.png";
-import icon31mono from "../assets/app-icons/ryu--meetings-mono.png";
-import icon113dark from "../assets/app-icons/ryu--mem0-dark.png";
-import icon113light from "../assets/app-icons/ryu--mem0-light.png";
-import icon113mono from "../assets/app-icons/ryu--mem0-mono.png";
-import icon32dark from "../assets/app-icons/ryu--mineru-dark.png";
-import icon32light from "../assets/app-icons/ryu--mineru-light.png";
-import icon32mono from "../assets/app-icons/ryu--mineru-mono.png";
-import icon33dark from "../assets/app-icons/ryu--mission-control-dark.png";
-import icon33light from "../assets/app-icons/ryu--mission-control-light.png";
-import icon33mono from "../assets/app-icons/ryu--mission-control-mono.png";
-import icon34dark from "../assets/app-icons/ryu--monitors-dark.png";
-import icon34light from "../assets/app-icons/ryu--monitors-light.png";
-import icon34mono from "../assets/app-icons/ryu--monitors-mono.png";
-import icon35dark from "../assets/app-icons/ryu--mpp-dark.png";
-import icon35light from "../assets/app-icons/ryu--mpp-light.png";
-import icon35mono from "../assets/app-icons/ryu--mpp-mono.png";
-import icon36dark from "../assets/app-icons/ryu--news-dark.png";
-import icon36light from "../assets/app-icons/ryu--news-light.png";
-import icon36mono from "../assets/app-icons/ryu--news-mono.png";
-import icon114dark from "../assets/app-icons/ryu--no-ai-slop-dark.png";
-import icon114light from "../assets/app-icons/ryu--no-ai-slop-light.png";
-import icon114mono from "../assets/app-icons/ryu--no-ai-slop-mono.png";
-import icon115dark from "../assets/app-icons/ryu--no-more-mistakes-dark.png";
-import icon115light from "../assets/app-icons/ryu--no-more-mistakes-light.png";
-import icon115mono from "../assets/app-icons/ryu--no-more-mistakes-mono.png";
-import icon116dark from "../assets/app-icons/ryu--observer-agents-dark.png";
-import icon116light from "../assets/app-icons/ryu--observer-agents-light.png";
-import icon116mono from "../assets/app-icons/ryu--observer-agents-mono.png";
-import icon117dark from "../assets/app-icons/ryu--output-styles-dark.png";
-import icon117light from "../assets/app-icons/ryu--output-styles-light.png";
-import icon117mono from "../assets/app-icons/ryu--output-styles-mono.png";
-import icon37dark from "../assets/app-icons/ryu--outreach-dark.png";
-import icon37light from "../assets/app-icons/ryu--outreach-light.png";
-import icon37mono from "../assets/app-icons/ryu--outreach-mono.png";
-import icon118dark from "../assets/app-icons/ryu--parallel-dark.png";
-import icon118light from "../assets/app-icons/ryu--parallel-light.png";
-import icon118mono from "../assets/app-icons/ryu--parallel-mono.png";
-import icon38dark from "../assets/app-icons/ryu--people-dark.png";
-import icon38light from "../assets/app-icons/ryu--people-light.png";
-import icon38mono from "../assets/app-icons/ryu--people-mono.png";
-import icon77dark from "../assets/app-icons/ryu--php-lsp-dark.png";
-import icon77light from "../assets/app-icons/ryu--php-lsp-light.png";
-import icon77mono from "../assets/app-icons/ryu--php-lsp-mono.png";
-import icon119dark from "../assets/app-icons/ryu--pi-monitor-dark.png";
-import icon119light from "../assets/app-icons/ryu--pi-monitor-light.png";
-import icon119mono from "../assets/app-icons/ryu--pi-monitor-mono.png";
-import icon120dark from "../assets/app-icons/ryu--pi-shell-dark.png";
-import icon120light from "../assets/app-icons/ryu--pi-shell-light.png";
-import icon120mono from "../assets/app-icons/ryu--pi-shell-mono.png";
-import icon121dark from "../assets/app-icons/ryu--pi-subagent-dark.png";
-import icon121light from "../assets/app-icons/ryu--pi-subagent-light.png";
-import icon121mono from "../assets/app-icons/ryu--pi-subagent-mono.png";
-import icon122dark from "../assets/app-icons/ryu--plan-continue-dark.png";
-import icon122light from "../assets/app-icons/ryu--plan-continue-light.png";
-import icon122mono from "../assets/app-icons/ryu--plan-continue-mono.png";
-import icon39dark from "../assets/app-icons/ryu--predict-dark.png";
-import icon39light from "../assets/app-icons/ryu--predict-light.png";
-import icon39mono from "../assets/app-icons/ryu--predict-mono.png";
-import icon40dark from "../assets/app-icons/ryu--projects-dark.png";
-import icon40light from "../assets/app-icons/ryu--projects-light.png";
-import icon40mono from "../assets/app-icons/ryu--projects-mono.png";
-import icon123dark from "../assets/app-icons/ryu--prompt-suggestions-dark.png";
-import icon123light from "../assets/app-icons/ryu--prompt-suggestions-light.png";
-import icon123mono from "../assets/app-icons/ryu--prompt-suggestions-mono.png";
-import icon124dark from "../assets/app-icons/ryu--proof-dark.png";
-import icon124light from "../assets/app-icons/ryu--proof-light.png";
-import icon124mono from "../assets/app-icons/ryu--proof-mono.png";
-import icon41dark from "../assets/app-icons/ryu--pull-requests-dark.png";
-import icon41light from "../assets/app-icons/ryu--pull-requests-light.png";
-import icon41mono from "../assets/app-icons/ryu--pull-requests-mono.png";
-import icon125dark from "../assets/app-icons/ryu--pxpipe-dark.png";
-import icon125light from "../assets/app-icons/ryu--pxpipe-light.png";
-import icon125mono from "../assets/app-icons/ryu--pxpipe-mono.png";
-import icon78dark from "../assets/app-icons/ryu--pyright-lsp-dark.png";
-import icon78light from "../assets/app-icons/ryu--pyright-lsp-light.png";
-import icon78mono from "../assets/app-icons/ryu--pyright-lsp-mono.png";
-import icon42dark from "../assets/app-icons/ryu--quests-dark.png";
-import icon42light from "../assets/app-icons/ryu--quests-light.png";
-import icon42mono from "../assets/app-icons/ryu--quests-mono.png";
-import icon126dark from "../assets/app-icons/ryu--reactions-dark.png";
-import icon126light from "../assets/app-icons/ryu--reactions-light.png";
-import icon126mono from "../assets/app-icons/ryu--reactions-mono.png";
-import icon43dark from "../assets/app-icons/ryu--reasoning-dark.png";
-import icon43light from "../assets/app-icons/ryu--reasoning-light.png";
-import icon43mono from "../assets/app-icons/ryu--reasoning-mono.png";
-import icon127dark from "../assets/app-icons/ryu--recap-dark.png";
-import icon127light from "../assets/app-icons/ryu--recap-light.png";
-import icon127mono from "../assets/app-icons/ryu--recap-mono.png";
-import icon128dark from "../assets/app-icons/ryu--receipts-dark.png";
-import icon128light from "../assets/app-icons/ryu--receipts-light.png";
-import icon128mono from "../assets/app-icons/ryu--receipts-mono.png";
-import icon44dark from "../assets/app-icons/ryu--recipes-dark.png";
-import icon44light from "../assets/app-icons/ryu--recipes-light.png";
-import icon44mono from "../assets/app-icons/ryu--recipes-mono.png";
-import icon129dark from "../assets/app-icons/ryu--reconnect-retry-dark.png";
-import icon129light from "../assets/app-icons/ryu--reconnect-retry-light.png";
-import icon129mono from "../assets/app-icons/ryu--reconnect-retry-mono.png";
-import icon45dark from "../assets/app-icons/ryu--reelfarm-dark.png";
-import icon45light from "../assets/app-icons/ryu--reelfarm-light.png";
-import icon45mono from "../assets/app-icons/ryu--reelfarm-mono.png";
-import icon46dark from "../assets/app-icons/ryu--research-dark.png";
-import icon46light from "../assets/app-icons/ryu--research-light.png";
-import icon46mono from "../assets/app-icons/ryu--research-mono.png";
-import icon130dark from "../assets/app-icons/ryu--ripgrep-dark.png";
-import icon130light from "../assets/app-icons/ryu--ripgrep-light.png";
-import icon130mono from "../assets/app-icons/ryu--ripgrep-mono.png";
-import icon47dark from "../assets/app-icons/ryu--rlm-dark.png";
-import icon47light from "../assets/app-icons/ryu--rlm-light.png";
-import icon47mono from "../assets/app-icons/ryu--rlm-mono.png";
-import icon48dark from "../assets/app-icons/ryu--rooms-dark.png";
-import icon48light from "../assets/app-icons/ryu--rooms-light.png";
-import icon48mono from "../assets/app-icons/ryu--rooms-mono.png";
-import icon131dark from "../assets/app-icons/ryu--rtk-dark.png";
-import icon131light from "../assets/app-icons/ryu--rtk-light.png";
-import icon131mono from "../assets/app-icons/ryu--rtk-mono.png";
-import icon79dark from "../assets/app-icons/ryu--ruby-lsp-dark.png";
-import icon79light from "../assets/app-icons/ryu--ruby-lsp-light.png";
-import icon79mono from "../assets/app-icons/ryu--ruby-lsp-mono.png";
-import icon132dark from "../assets/app-icons/ryu--rules-dark.png";
-import icon132light from "../assets/app-icons/ryu--rules-light.png";
-import icon132mono from "../assets/app-icons/ryu--rules-mono.png";
-import icon80dark from "../assets/app-icons/ryu--rust-analyzer-lsp-dark.png";
-import icon80light from "../assets/app-icons/ryu--rust-analyzer-lsp-light.png";
-import icon80mono from "../assets/app-icons/ryu--rust-analyzer-lsp-mono.png";
-import icon49dark from "../assets/app-icons/ryu--safe-actions-dark.png";
-import icon49light from "../assets/app-icons/ryu--safe-actions-light.png";
-import icon49mono from "../assets/app-icons/ryu--safe-actions-mono.png";
-import icon134dark from "../assets/app-icons/ryu--sample-widget-dark.png";
-import icon134light from "../assets/app-icons/ryu--sample-widget-light.png";
-import icon134mono from "../assets/app-icons/ryu--sample-widget-mono.png";
-import icon135dark from "../assets/app-icons/ryu--scrapling-dark.png";
-import icon135light from "../assets/app-icons/ryu--scrapling-light.png";
-import icon135mono from "../assets/app-icons/ryu--scrapling-mono.png";
-import icon136dark from "../assets/app-icons/ryu--security-guidance-dark.png";
-import icon136light from "../assets/app-icons/ryu--security-guidance-light.png";
-import icon136mono from "../assets/app-icons/ryu--security-guidance-mono.png";
-import icon137dark from "../assets/app-icons/ryu--security-scanner-dark.png";
-import icon137light from "../assets/app-icons/ryu--security-scanner-light.png";
-import icon137mono from "../assets/app-icons/ryu--security-scanner-mono.png";
-import icon138dark from "../assets/app-icons/ryu--serper-dark.png";
-import icon138light from "../assets/app-icons/ryu--serper-light.png";
-import icon138mono from "../assets/app-icons/ryu--serper-mono.png";
-import icon112dark from "../assets/app-icons/ryu--session-context-dark.png";
-import icon112light from "../assets/app-icons/ryu--session-context-light.png";
-import icon112mono from "../assets/app-icons/ryu--session-context-mono.png";
-import icon139dark from "../assets/app-icons/ryu--shadow-dark.png";
-import icon139light from "../assets/app-icons/ryu--shadow-light.png";
-import icon139mono from "../assets/app-icons/ryu--shadow-mono.png";
-import icon140dark from "../assets/app-icons/ryu--side-chats-dark.png";
-import icon140light from "../assets/app-icons/ryu--side-chats-light.png";
-import icon140mono from "../assets/app-icons/ryu--side-chats-mono.png";
-import icon50dark from "../assets/app-icons/ryu--simulator-dark.png";
-import icon50light from "../assets/app-icons/ryu--simulator-light.png";
-import icon50mono from "../assets/app-icons/ryu--simulator-mono.png";
-import icon51dark from "../assets/app-icons/ryu--sites-dark.png";
-import icon51light from "../assets/app-icons/ryu--sites-light.png";
-import icon51mono from "../assets/app-icons/ryu--sites-mono.png";
-import icon52dark from "../assets/app-icons/ryu--skill-editor-dark.png";
-import icon52light from "../assets/app-icons/ryu--skill-editor-light.png";
-import icon52mono from "../assets/app-icons/ryu--skill-editor-mono.png";
-import icon53dark from "../assets/app-icons/ryu--slides-dark.png";
-import icon53light from "../assets/app-icons/ryu--slides-light.png";
-import icon53mono from "../assets/app-icons/ryu--slides-mono.png";
-import icon54dark from "../assets/app-icons/ryu--social-dark.png";
-import icon54light from "../assets/app-icons/ryu--social-light.png";
-import icon54mono from "../assets/app-icons/ryu--social-mono.png";
-import icon141dark from "../assets/app-icons/ryu--spider-dark.png";
-import icon141light from "../assets/app-icons/ryu--spider-light.png";
-import icon141mono from "../assets/app-icons/ryu--spider-mono.png";
-import icon142dark from "../assets/app-icons/ryu--spidercloud-dark.png";
-import icon142light from "../assets/app-icons/ryu--spidercloud-light.png";
-import icon142mono from "../assets/app-icons/ryu--spidercloud-mono.png";
-import icon143dark from "../assets/app-icons/ryu--stats-dark.png";
-import icon143light from "../assets/app-icons/ryu--stats-light.png";
-import icon143mono from "../assets/app-icons/ryu--stats-mono.png";
-import icon55dark from "../assets/app-icons/ryu--subtitles-dark.png";
-import icon55light from "../assets/app-icons/ryu--subtitles-light.png";
-import icon55mono from "../assets/app-icons/ryu--subtitles-mono.png";
-import icon81dark from "../assets/app-icons/ryu--swift-lsp-dark.png";
-import icon81light from "../assets/app-icons/ryu--swift-lsp-light.png";
-import icon81mono from "../assets/app-icons/ryu--swift-lsp-mono.png";
-import icon144dark from "../assets/app-icons/ryu--tavily-dark.png";
-import icon144light from "../assets/app-icons/ryu--tavily-light.png";
-import icon144mono from "../assets/app-icons/ryu--tavily-mono.png";
-import icon56dark from "../assets/app-icons/ryu--teams-dark.png";
-import icon56light from "../assets/app-icons/ryu--teams-light.png";
-import icon56mono from "../assets/app-icons/ryu--teams-mono.png";
-import icon57dark from "../assets/app-icons/ryu--timeline-dark.png";
-import icon57light from "../assets/app-icons/ryu--timeline-light.png";
-import icon57mono from "../assets/app-icons/ryu--timeline-mono.png";
-import icon58dark from "../assets/app-icons/ryu--token-table-dark.png";
-import icon58light from "../assets/app-icons/ryu--token-table-light.png";
-import icon58mono from "../assets/app-icons/ryu--token-table-mono.png";
-import icon145dark from "../assets/app-icons/ryu--tokenmaxxing-dark.png";
-import icon145light from "../assets/app-icons/ryu--tokenmaxxing-light.png";
-import icon145mono from "../assets/app-icons/ryu--tokenmaxxing-mono.png";
-import icon146dark from "../assets/app-icons/ryu--tool-firewall-dark.png";
-import icon146light from "../assets/app-icons/ryu--tool-firewall-light.png";
-import icon146mono from "../assets/app-icons/ryu--tool-firewall-mono.png";
-import icon147dark from "../assets/app-icons/ryu--toolsmith-example-dark.png";
-import icon147light from "../assets/app-icons/ryu--toolsmith-example-light.png";
-import icon147mono from "../assets/app-icons/ryu--toolsmith-example-mono.png";
-import icon59dark from "../assets/app-icons/ryu--tuition-dark.png";
-import icon59light from "../assets/app-icons/ryu--tuition-light.png";
-import icon59mono from "../assets/app-icons/ryu--tuition-mono.png";
-import icon82dark from "../assets/app-icons/ryu--typescript-lsp-dark.png";
-import icon82light from "../assets/app-icons/ryu--typescript-lsp-light.png";
-import icon82mono from "../assets/app-icons/ryu--typescript-lsp-mono.png";
-import icon60dark from "../assets/app-icons/ryu--ugc-dark.png";
-import icon60light from "../assets/app-icons/ryu--ugc-light.png";
-import icon60mono from "../assets/app-icons/ryu--ugc-mono.png";
-import icon61dark from "../assets/app-icons/ryu--unstructured-dark.png";
-import icon61light from "../assets/app-icons/ryu--unstructured-light.png";
-import icon61mono from "../assets/app-icons/ryu--unstructured-mono.png";
-import icon148dark from "../assets/app-icons/ryu--usage-pacer-dark.png";
-import icon148light from "../assets/app-icons/ryu--usage-pacer-light.png";
-import icon148mono from "../assets/app-icons/ryu--usage-pacer-mono.png";
-import icon62dark from "../assets/app-icons/ryu--video-studio-dark.png";
-import icon62light from "../assets/app-icons/ryu--video-studio-light.png";
-import icon62mono from "../assets/app-icons/ryu--video-studio-mono.png";
-import icon63dark from "../assets/app-icons/ryu--voice-dark.png";
-import icon63light from "../assets/app-icons/ryu--voice-light.png";
-import icon63mono from "../assets/app-icons/ryu--voice-mono.png";
-import icon64dark from "../assets/app-icons/ryu--warmup-dark.png";
-import icon64light from "../assets/app-icons/ryu--warmup-light.png";
-import icon64mono from "../assets/app-icons/ryu--warmup-mono.png";
-import icon65dark from "../assets/app-icons/ryu--webhooks-dark.png";
-import icon65light from "../assets/app-icons/ryu--webhooks-light.png";
-import icon65mono from "../assets/app-icons/ryu--webhooks-mono.png";
-import icon66dark from "../assets/app-icons/ryu--whatsapp-dark.png";
-import icon66light from "../assets/app-icons/ryu--whatsapp-light.png";
-import icon66mono from "../assets/app-icons/ryu--whatsapp-mono.png";
-import icon67dark from "../assets/app-icons/ryu--whiteboard-dark.png";
-import icon67light from "../assets/app-icons/ryu--whiteboard-light.png";
-import icon67mono from "../assets/app-icons/ryu--whiteboard-mono.png";
-import icon68dark from "../assets/app-icons/ryu--workflows-dark.png";
-import icon68light from "../assets/app-icons/ryu--workflows-light.png";
-import icon68mono from "../assets/app-icons/ryu--workflows-mono.png";
-import icon149dark from "../assets/app-icons/ryu--zvec-grep-dark.png";
-import icon149light from "../assets/app-icons/ryu--zvec-grep-light.png";
-import icon149mono from "../assets/app-icons/ryu--zvec-grep-mono.png";
+import icon15dark from "../assets/app-icons/ryu--convert-dark.png";
+import icon15light from "../assets/app-icons/ryu--convert-light.png";
+import icon15mono from "../assets/app-icons/ryu--convert-mono.png";
+import icon16dark from "../assets/app-icons/ryu--crm-dark.png";
+import icon16light from "../assets/app-icons/ryu--crm-light.png";
+import icon16mono from "../assets/app-icons/ryu--crm-mono.png";
+import icon75dark from "../assets/app-icons/ryu--csharp-lsp-dark.png";
+import icon75light from "../assets/app-icons/ryu--csharp-lsp-light.png";
+import icon75mono from "../assets/app-icons/ryu--csharp-lsp-mono.png";
+import icon17dark from "../assets/app-icons/ryu--dashboards-dark.png";
+import icon17light from "../assets/app-icons/ryu--dashboards-light.png";
+import icon17mono from "../assets/app-icons/ryu--dashboards-mono.png";
+import icon18dark from "../assets/app-icons/ryu--desktop-dark.png";
+import icon18light from "../assets/app-icons/ryu--desktop-light.png";
+import icon18mono from "../assets/app-icons/ryu--desktop-mono.png";
+import icon19dark from "../assets/app-icons/ryu--dictation-dark.png";
+import icon19light from "../assets/app-icons/ryu--dictation-light.png";
+import icon19mono from "../assets/app-icons/ryu--dictation-mono.png";
+import icon20dark from "../assets/app-icons/ryu--docling-dark.png";
+import icon20light from "../assets/app-icons/ryu--docling-light.png";
+import icon20mono from "../assets/app-icons/ryu--docling-mono.png";
+import icon99dark from "../assets/app-icons/ryu--docs-dark.png";
+import icon99light from "../assets/app-icons/ryu--docs-light.png";
+import icon99mono from "../assets/app-icons/ryu--docs-mono.png";
+import icon100dark from "../assets/app-icons/ryu--double-check-dark.png";
+import icon100light from "../assets/app-icons/ryu--double-check-light.png";
+import icon100mono from "../assets/app-icons/ryu--double-check-mono.png";
+import icon21dark from "../assets/app-icons/ryu--drafts-dark.png";
+import icon21light from "../assets/app-icons/ryu--drafts-light.png";
+import icon21mono from "../assets/app-icons/ryu--drafts-mono.png";
+import icon22dark from "../assets/app-icons/ryu--drawesome-dark.png";
+import icon22light from "../assets/app-icons/ryu--drawesome-light.png";
+import icon22mono from "../assets/app-icons/ryu--drawesome-mono.png";
+import icon101dark from "../assets/app-icons/ryu--dynamic-workflows-dark.png";
+import icon101light from "../assets/app-icons/ryu--dynamic-workflows-light.png";
+import icon101mono from "../assets/app-icons/ryu--dynamic-workflows-mono.png";
+import icon102dark from "../assets/app-icons/ryu--effort-escalator-dark.png";
+import icon102light from "../assets/app-icons/ryu--effort-escalator-light.png";
+import icon102mono from "../assets/app-icons/ryu--effort-escalator-mono.png";
+import icon103dark from "../assets/app-icons/ryu--ego-browser-dark.png";
+import icon103light from "../assets/app-icons/ryu--ego-browser-light.png";
+import icon103mono from "../assets/app-icons/ryu--ego-browser-mono.png";
+import icon104dark from "../assets/app-icons/ryu--exa-dark.png";
+import icon104light from "../assets/app-icons/ryu--exa-light.png";
+import icon104mono from "../assets/app-icons/ryu--exa-mono.png";
+import icon105dark from "../assets/app-icons/ryu--expanded-composer-dark.png";
+import icon105light from "../assets/app-icons/ryu--expanded-composer-light.png";
+import icon105mono from "../assets/app-icons/ryu--expanded-composer-mono.png";
+import icon106dark from "../assets/app-icons/ryu--expect-dark.png";
+import icon106light from "../assets/app-icons/ryu--expect-light.png";
+import icon106mono from "../assets/app-icons/ryu--expect-mono.png";
+import icon23dark from "../assets/app-icons/ryu--expenses-dark.png";
+import icon23light from "../assets/app-icons/ryu--expenses-light.png";
+import icon23mono from "../assets/app-icons/ryu--expenses-mono.png";
+import icon24dark from "../assets/app-icons/ryu--feedback-board-dark.png";
+import icon24light from "../assets/app-icons/ryu--feedback-board-light.png";
+import icon24mono from "../assets/app-icons/ryu--feedback-board-mono.png";
+import icon25dark from "../assets/app-icons/ryu--finetune-dark.png";
+import icon25light from "../assets/app-icons/ryu--finetune-light.png";
+import icon25mono from "../assets/app-icons/ryu--finetune-mono.png";
+import icon107dark from "../assets/app-icons/ryu--firecrawl-dark.png";
+import icon107light from "../assets/app-icons/ryu--firecrawl-light.png";
+import icon107mono from "../assets/app-icons/ryu--firecrawl-mono.png";
+import icon108dark from "../assets/app-icons/ryu--firewall-dark.png";
+import icon108light from "../assets/app-icons/ryu--firewall-light.png";
+import icon108mono from "../assets/app-icons/ryu--firewall-mono.png";
+import icon110dark from "../assets/app-icons/ryu--ghost-chats-dark.png";
+import icon110light from "../assets/app-icons/ryu--ghost-chats-light.png";
+import icon110mono from "../assets/app-icons/ryu--ghost-chats-mono.png";
+import icon109dark from "../assets/app-icons/ryu--ghost-dark.png";
+import icon109light from "../assets/app-icons/ryu--ghost-light.png";
+import icon109mono from "../assets/app-icons/ryu--ghost-mono.png";
+import icon111dark from "../assets/app-icons/ryu--goal-dark.png";
+import icon111light from "../assets/app-icons/ryu--goal-light.png";
+import icon111mono from "../assets/app-icons/ryu--goal-mono.png";
+import icon76dark from "../assets/app-icons/ryu--gopls-lsp-dark.png";
+import icon76light from "../assets/app-icons/ryu--gopls-lsp-light.png";
+import icon76mono from "../assets/app-icons/ryu--gopls-lsp-mono.png";
+import icon112dark from "../assets/app-icons/ryu--headroom-dark.png";
+import icon112light from "../assets/app-icons/ryu--headroom-light.png";
+import icon112mono from "../assets/app-icons/ryu--headroom-mono.png";
+import icon26dark from "../assets/app-icons/ryu--healing-dark.png";
+import icon26light from "../assets/app-icons/ryu--healing-light.png";
+import icon26mono from "../assets/app-icons/ryu--healing-mono.png";
+import icon27dark from "../assets/app-icons/ryu--help-center-dark.png";
+import icon27light from "../assets/app-icons/ryu--help-center-light.png";
+import icon27mono from "../assets/app-icons/ryu--help-center-mono.png";
+import icon113dark from "../assets/app-icons/ryu--honcho-dark.png";
+import icon113light from "../assets/app-icons/ryu--honcho-light.png";
+import icon113mono from "../assets/app-icons/ryu--honcho-mono.png";
+import icon114dark from "../assets/app-icons/ryu--hook-observers-dark.png";
+import icon114light from "../assets/app-icons/ryu--hook-observers-light.png";
+import icon114mono from "../assets/app-icons/ryu--hook-observers-mono.png";
+import icon28dark from "../assets/app-icons/ryu--invoices-dark.png";
+import icon28light from "../assets/app-icons/ryu--invoices-light.png";
+import icon28mono from "../assets/app-icons/ryu--invoices-mono.png";
+import icon77dark from "../assets/app-icons/ryu--jdtls-lsp-dark.png";
+import icon77light from "../assets/app-icons/ryu--jdtls-lsp-light.png";
+import icon77mono from "../assets/app-icons/ryu--jdtls-lsp-mono.png";
+import icon78dark from "../assets/app-icons/ryu--kotlin-lsp-dark.png";
+import icon78light from "../assets/app-icons/ryu--kotlin-lsp-light.png";
+import icon78mono from "../assets/app-icons/ryu--kotlin-lsp-mono.png";
+import icon29dark from "../assets/app-icons/ryu--learning-dark.png";
+import icon29light from "../assets/app-icons/ryu--learning-light.png";
+import icon29mono from "../assets/app-icons/ryu--learning-mono.png";
+import icon30dark from "../assets/app-icons/ryu--life-recorder-dark.png";
+import icon30light from "../assets/app-icons/ryu--life-recorder-light.png";
+import icon30mono from "../assets/app-icons/ryu--life-recorder-mono.png";
+import icon79dark from "../assets/app-icons/ryu--lua-lsp-dark.png";
+import icon79light from "../assets/app-icons/ryu--lua-lsp-light.png";
+import icon79mono from "../assets/app-icons/ryu--lua-lsp-mono.png";
+import icon31dark from "../assets/app-icons/ryu--mail-dark.png";
+import icon31light from "../assets/app-icons/ryu--mail-light.png";
+import icon31mono from "../assets/app-icons/ryu--mail-mono.png";
+import icon32dark from "../assets/app-icons/ryu--markitdown-dark.png";
+import icon32light from "../assets/app-icons/ryu--markitdown-light.png";
+import icon32mono from "../assets/app-icons/ryu--markitdown-mono.png";
+import icon33dark from "../assets/app-icons/ryu--meetings-dark.png";
+import icon33light from "../assets/app-icons/ryu--meetings-light.png";
+import icon33mono from "../assets/app-icons/ryu--meetings-mono.png";
+import icon116dark from "../assets/app-icons/ryu--mem0-dark.png";
+import icon116light from "../assets/app-icons/ryu--mem0-light.png";
+import icon116mono from "../assets/app-icons/ryu--mem0-mono.png";
+import icon34dark from "../assets/app-icons/ryu--mineru-dark.png";
+import icon34light from "../assets/app-icons/ryu--mineru-light.png";
+import icon34mono from "../assets/app-icons/ryu--mineru-mono.png";
+import icon35dark from "../assets/app-icons/ryu--mission-control-dark.png";
+import icon35light from "../assets/app-icons/ryu--mission-control-light.png";
+import icon35mono from "../assets/app-icons/ryu--mission-control-mono.png";
+import icon36dark from "../assets/app-icons/ryu--monitors-dark.png";
+import icon36light from "../assets/app-icons/ryu--monitors-light.png";
+import icon36mono from "../assets/app-icons/ryu--monitors-mono.png";
+import icon37dark from "../assets/app-icons/ryu--mpp-dark.png";
+import icon37light from "../assets/app-icons/ryu--mpp-light.png";
+import icon37mono from "../assets/app-icons/ryu--mpp-mono.png";
+import icon38dark from "../assets/app-icons/ryu--news-dark.png";
+import icon38light from "../assets/app-icons/ryu--news-light.png";
+import icon38mono from "../assets/app-icons/ryu--news-mono.png";
+import icon117dark from "../assets/app-icons/ryu--no-ai-slop-dark.png";
+import icon117light from "../assets/app-icons/ryu--no-ai-slop-light.png";
+import icon117mono from "../assets/app-icons/ryu--no-ai-slop-mono.png";
+import icon118dark from "../assets/app-icons/ryu--no-more-mistakes-dark.png";
+import icon118light from "../assets/app-icons/ryu--no-more-mistakes-light.png";
+import icon118mono from "../assets/app-icons/ryu--no-more-mistakes-mono.png";
+import icon119dark from "../assets/app-icons/ryu--observer-agents-dark.png";
+import icon119light from "../assets/app-icons/ryu--observer-agents-light.png";
+import icon119mono from "../assets/app-icons/ryu--observer-agents-mono.png";
+import icon120dark from "../assets/app-icons/ryu--output-styles-dark.png";
+import icon120light from "../assets/app-icons/ryu--output-styles-light.png";
+import icon120mono from "../assets/app-icons/ryu--output-styles-mono.png";
+import icon39dark from "../assets/app-icons/ryu--outreach-dark.png";
+import icon39light from "../assets/app-icons/ryu--outreach-light.png";
+import icon39mono from "../assets/app-icons/ryu--outreach-mono.png";
+import icon121dark from "../assets/app-icons/ryu--parallel-dark.png";
+import icon121light from "../assets/app-icons/ryu--parallel-light.png";
+import icon121mono from "../assets/app-icons/ryu--parallel-mono.png";
+import icon40dark from "../assets/app-icons/ryu--people-dark.png";
+import icon40light from "../assets/app-icons/ryu--people-light.png";
+import icon40mono from "../assets/app-icons/ryu--people-mono.png";
+import icon80dark from "../assets/app-icons/ryu--php-lsp-dark.png";
+import icon80light from "../assets/app-icons/ryu--php-lsp-light.png";
+import icon80mono from "../assets/app-icons/ryu--php-lsp-mono.png";
+import icon122dark from "../assets/app-icons/ryu--pi-monitor-dark.png";
+import icon122light from "../assets/app-icons/ryu--pi-monitor-light.png";
+import icon122mono from "../assets/app-icons/ryu--pi-monitor-mono.png";
+import icon123dark from "../assets/app-icons/ryu--pi-shell-dark.png";
+import icon123light from "../assets/app-icons/ryu--pi-shell-light.png";
+import icon123mono from "../assets/app-icons/ryu--pi-shell-mono.png";
+import icon124dark from "../assets/app-icons/ryu--pi-subagent-dark.png";
+import icon124light from "../assets/app-icons/ryu--pi-subagent-light.png";
+import icon124mono from "../assets/app-icons/ryu--pi-subagent-mono.png";
+import icon125dark from "../assets/app-icons/ryu--plan-continue-dark.png";
+import icon125light from "../assets/app-icons/ryu--plan-continue-light.png";
+import icon125mono from "../assets/app-icons/ryu--plan-continue-mono.png";
+import icon41dark from "../assets/app-icons/ryu--predict-dark.png";
+import icon41light from "../assets/app-icons/ryu--predict-light.png";
+import icon41mono from "../assets/app-icons/ryu--predict-mono.png";
+import icon42dark from "../assets/app-icons/ryu--projects-dark.png";
+import icon42light from "../assets/app-icons/ryu--projects-light.png";
+import icon42mono from "../assets/app-icons/ryu--projects-mono.png";
+import icon126dark from "../assets/app-icons/ryu--prompt-suggestions-dark.png";
+import icon126light from "../assets/app-icons/ryu--prompt-suggestions-light.png";
+import icon126mono from "../assets/app-icons/ryu--prompt-suggestions-mono.png";
+import icon127dark from "../assets/app-icons/ryu--proof-dark.png";
+import icon127light from "../assets/app-icons/ryu--proof-light.png";
+import icon127mono from "../assets/app-icons/ryu--proof-mono.png";
+import icon43dark from "../assets/app-icons/ryu--pull-requests-dark.png";
+import icon43light from "../assets/app-icons/ryu--pull-requests-light.png";
+import icon43mono from "../assets/app-icons/ryu--pull-requests-mono.png";
+import icon128dark from "../assets/app-icons/ryu--pxpipe-dark.png";
+import icon128light from "../assets/app-icons/ryu--pxpipe-light.png";
+import icon128mono from "../assets/app-icons/ryu--pxpipe-mono.png";
+import icon81dark from "../assets/app-icons/ryu--pyright-lsp-dark.png";
+import icon81light from "../assets/app-icons/ryu--pyright-lsp-light.png";
+import icon81mono from "../assets/app-icons/ryu--pyright-lsp-mono.png";
+import icon44dark from "../assets/app-icons/ryu--quests-dark.png";
+import icon44light from "../assets/app-icons/ryu--quests-light.png";
+import icon44mono from "../assets/app-icons/ryu--quests-mono.png";
+import icon129dark from "../assets/app-icons/ryu--reactions-dark.png";
+import icon129light from "../assets/app-icons/ryu--reactions-light.png";
+import icon129mono from "../assets/app-icons/ryu--reactions-mono.png";
+import icon45dark from "../assets/app-icons/ryu--reasoning-dark.png";
+import icon45light from "../assets/app-icons/ryu--reasoning-light.png";
+import icon45mono from "../assets/app-icons/ryu--reasoning-mono.png";
+import icon130dark from "../assets/app-icons/ryu--recap-dark.png";
+import icon130light from "../assets/app-icons/ryu--recap-light.png";
+import icon130mono from "../assets/app-icons/ryu--recap-mono.png";
+import icon131dark from "../assets/app-icons/ryu--receipts-dark.png";
+import icon131light from "../assets/app-icons/ryu--receipts-light.png";
+import icon131mono from "../assets/app-icons/ryu--receipts-mono.png";
+import icon46dark from "../assets/app-icons/ryu--recipes-dark.png";
+import icon46light from "../assets/app-icons/ryu--recipes-light.png";
+import icon46mono from "../assets/app-icons/ryu--recipes-mono.png";
+import icon132dark from "../assets/app-icons/ryu--reconnect-retry-dark.png";
+import icon132light from "../assets/app-icons/ryu--reconnect-retry-light.png";
+import icon132mono from "../assets/app-icons/ryu--reconnect-retry-mono.png";
+import icon48dark from "../assets/app-icons/ryu--research-dark.png";
+import icon48light from "../assets/app-icons/ryu--research-light.png";
+import icon48mono from "../assets/app-icons/ryu--research-mono.png";
+import icon133dark from "../assets/app-icons/ryu--ripgrep-dark.png";
+import icon133light from "../assets/app-icons/ryu--ripgrep-light.png";
+import icon133mono from "../assets/app-icons/ryu--ripgrep-mono.png";
+import icon49dark from "../assets/app-icons/ryu--rlm-dark.png";
+import icon49light from "../assets/app-icons/ryu--rlm-light.png";
+import icon49mono from "../assets/app-icons/ryu--rlm-mono.png";
+import icon50dark from "../assets/app-icons/ryu--rooms-dark.png";
+import icon50light from "../assets/app-icons/ryu--rooms-light.png";
+import icon50mono from "../assets/app-icons/ryu--rooms-mono.png";
+import icon134dark from "../assets/app-icons/ryu--rtk-dark.png";
+import icon134light from "../assets/app-icons/ryu--rtk-light.png";
+import icon134mono from "../assets/app-icons/ryu--rtk-mono.png";
+import icon82dark from "../assets/app-icons/ryu--ruby-lsp-dark.png";
+import icon82light from "../assets/app-icons/ryu--ruby-lsp-light.png";
+import icon82mono from "../assets/app-icons/ryu--ruby-lsp-mono.png";
+import icon135dark from "../assets/app-icons/ryu--rules-dark.png";
+import icon135light from "../assets/app-icons/ryu--rules-light.png";
+import icon135mono from "../assets/app-icons/ryu--rules-mono.png";
+import icon83dark from "../assets/app-icons/ryu--rust-analyzer-lsp-dark.png";
+import icon83light from "../assets/app-icons/ryu--rust-analyzer-lsp-light.png";
+import icon83mono from "../assets/app-icons/ryu--rust-analyzer-lsp-mono.png";
+import icon51dark from "../assets/app-icons/ryu--safe-actions-dark.png";
+import icon51light from "../assets/app-icons/ryu--safe-actions-light.png";
+import icon51mono from "../assets/app-icons/ryu--safe-actions-mono.png";
+import icon137dark from "../assets/app-icons/ryu--sample-widget-dark.png";
+import icon137light from "../assets/app-icons/ryu--sample-widget-light.png";
+import icon137mono from "../assets/app-icons/ryu--sample-widget-mono.png";
+import icon138dark from "../assets/app-icons/ryu--scrapling-dark.png";
+import icon138light from "../assets/app-icons/ryu--scrapling-light.png";
+import icon138mono from "../assets/app-icons/ryu--scrapling-mono.png";
+import icon52dark from "../assets/app-icons/ryu--security-dark.png";
+import icon139dark from "../assets/app-icons/ryu--security-guidance-dark.png";
+import icon139light from "../assets/app-icons/ryu--security-guidance-light.png";
+import icon139mono from "../assets/app-icons/ryu--security-guidance-mono.png";
+import icon52light from "../assets/app-icons/ryu--security-light.png";
+import icon52mono from "../assets/app-icons/ryu--security-mono.png";
+import icon140dark from "../assets/app-icons/ryu--security-scanner-dark.png";
+import icon140light from "../assets/app-icons/ryu--security-scanner-light.png";
+import icon140mono from "../assets/app-icons/ryu--security-scanner-mono.png";
+import icon141dark from "../assets/app-icons/ryu--serper-dark.png";
+import icon141light from "../assets/app-icons/ryu--serper-light.png";
+import icon141mono from "../assets/app-icons/ryu--serper-mono.png";
+import icon115dark from "../assets/app-icons/ryu--session-context-dark.png";
+import icon115light from "../assets/app-icons/ryu--session-context-light.png";
+import icon115mono from "../assets/app-icons/ryu--session-context-mono.png";
+import icon142dark from "../assets/app-icons/ryu--shadow-dark.png";
+import icon142light from "../assets/app-icons/ryu--shadow-light.png";
+import icon142mono from "../assets/app-icons/ryu--shadow-mono.png";
+import icon143dark from "../assets/app-icons/ryu--side-chats-dark.png";
+import icon143light from "../assets/app-icons/ryu--side-chats-light.png";
+import icon143mono from "../assets/app-icons/ryu--side-chats-mono.png";
+import icon53dark from "../assets/app-icons/ryu--simulator-dark.png";
+import icon53light from "../assets/app-icons/ryu--simulator-light.png";
+import icon53mono from "../assets/app-icons/ryu--simulator-mono.png";
+import icon54dark from "../assets/app-icons/ryu--sites-dark.png";
+import icon54light from "../assets/app-icons/ryu--sites-light.png";
+import icon54mono from "../assets/app-icons/ryu--sites-mono.png";
+import icon55dark from "../assets/app-icons/ryu--skill-editor-dark.png";
+import icon55light from "../assets/app-icons/ryu--skill-editor-light.png";
+import icon55mono from "../assets/app-icons/ryu--skill-editor-mono.png";
+import icon56dark from "../assets/app-icons/ryu--slides-dark.png";
+import icon56light from "../assets/app-icons/ryu--slides-light.png";
+import icon56mono from "../assets/app-icons/ryu--slides-mono.png";
+import icon57dark from "../assets/app-icons/ryu--social-dark.png";
+import icon57light from "../assets/app-icons/ryu--social-light.png";
+import icon57mono from "../assets/app-icons/ryu--social-mono.png";
+import icon144dark from "../assets/app-icons/ryu--spider-dark.png";
+import icon144light from "../assets/app-icons/ryu--spider-light.png";
+import icon144mono from "../assets/app-icons/ryu--spider-mono.png";
+import icon145dark from "../assets/app-icons/ryu--spidercloud-dark.png";
+import icon145light from "../assets/app-icons/ryu--spidercloud-light.png";
+import icon145mono from "../assets/app-icons/ryu--spidercloud-mono.png";
+import icon146dark from "../assets/app-icons/ryu--stats-dark.png";
+import icon146light from "../assets/app-icons/ryu--stats-light.png";
+import icon146mono from "../assets/app-icons/ryu--stats-mono.png";
+import icon47dark from "../assets/app-icons/ryu--studio-dark.png";
+import icon47light from "../assets/app-icons/ryu--studio-light.png";
+import icon47mono from "../assets/app-icons/ryu--studio-mono.png";
+import icon58dark from "../assets/app-icons/ryu--subtitles-dark.png";
+import icon58light from "../assets/app-icons/ryu--subtitles-light.png";
+import icon58mono from "../assets/app-icons/ryu--subtitles-mono.png";
+import icon84dark from "../assets/app-icons/ryu--swift-lsp-dark.png";
+import icon84light from "../assets/app-icons/ryu--swift-lsp-light.png";
+import icon84mono from "../assets/app-icons/ryu--swift-lsp-mono.png";
+import icon147dark from "../assets/app-icons/ryu--tavily-dark.png";
+import icon147light from "../assets/app-icons/ryu--tavily-light.png";
+import icon147mono from "../assets/app-icons/ryu--tavily-mono.png";
+import icon59dark from "../assets/app-icons/ryu--teams-dark.png";
+import icon59light from "../assets/app-icons/ryu--teams-light.png";
+import icon59mono from "../assets/app-icons/ryu--teams-mono.png";
+import icon60dark from "../assets/app-icons/ryu--timeline-dark.png";
+import icon60light from "../assets/app-icons/ryu--timeline-light.png";
+import icon60mono from "../assets/app-icons/ryu--timeline-mono.png";
+import icon61dark from "../assets/app-icons/ryu--token-table-dark.png";
+import icon61light from "../assets/app-icons/ryu--token-table-light.png";
+import icon61mono from "../assets/app-icons/ryu--token-table-mono.png";
+import icon148dark from "../assets/app-icons/ryu--tokenmaxxing-dark.png";
+import icon148light from "../assets/app-icons/ryu--tokenmaxxing-light.png";
+import icon148mono from "../assets/app-icons/ryu--tokenmaxxing-mono.png";
+import icon149dark from "../assets/app-icons/ryu--tool-firewall-dark.png";
+import icon149light from "../assets/app-icons/ryu--tool-firewall-light.png";
+import icon149mono from "../assets/app-icons/ryu--tool-firewall-mono.png";
+import icon150dark from "../assets/app-icons/ryu--toolsmith-example-dark.png";
+import icon150light from "../assets/app-icons/ryu--toolsmith-example-light.png";
+import icon150mono from "../assets/app-icons/ryu--toolsmith-example-mono.png";
+import icon62dark from "../assets/app-icons/ryu--tuition-dark.png";
+import icon62light from "../assets/app-icons/ryu--tuition-light.png";
+import icon62mono from "../assets/app-icons/ryu--tuition-mono.png";
+import icon85dark from "../assets/app-icons/ryu--typescript-lsp-dark.png";
+import icon85light from "../assets/app-icons/ryu--typescript-lsp-light.png";
+import icon85mono from "../assets/app-icons/ryu--typescript-lsp-mono.png";
+import icon63dark from "../assets/app-icons/ryu--ugc-dark.png";
+import icon63light from "../assets/app-icons/ryu--ugc-light.png";
+import icon63mono from "../assets/app-icons/ryu--ugc-mono.png";
+import icon64dark from "../assets/app-icons/ryu--unstructured-dark.png";
+import icon64light from "../assets/app-icons/ryu--unstructured-light.png";
+import icon64mono from "../assets/app-icons/ryu--unstructured-mono.png";
+import icon151dark from "../assets/app-icons/ryu--usage-pacer-dark.png";
+import icon151light from "../assets/app-icons/ryu--usage-pacer-light.png";
+import icon151mono from "../assets/app-icons/ryu--usage-pacer-mono.png";
+import icon65dark from "../assets/app-icons/ryu--video-studio-dark.png";
+import icon65light from "../assets/app-icons/ryu--video-studio-light.png";
+import icon65mono from "../assets/app-icons/ryu--video-studio-mono.png";
+import icon66dark from "../assets/app-icons/ryu--voice-dark.png";
+import icon66light from "../assets/app-icons/ryu--voice-light.png";
+import icon66mono from "../assets/app-icons/ryu--voice-mono.png";
+import icon67dark from "../assets/app-icons/ryu--warmup-dark.png";
+import icon67light from "../assets/app-icons/ryu--warmup-light.png";
+import icon67mono from "../assets/app-icons/ryu--warmup-mono.png";
+import icon68dark from "../assets/app-icons/ryu--webhooks-dark.png";
+import icon68light from "../assets/app-icons/ryu--webhooks-light.png";
+import icon68mono from "../assets/app-icons/ryu--webhooks-mono.png";
+import icon69dark from "../assets/app-icons/ryu--whatsapp-dark.png";
+import icon69light from "../assets/app-icons/ryu--whatsapp-light.png";
+import icon69mono from "../assets/app-icons/ryu--whatsapp-mono.png";
+import icon70dark from "../assets/app-icons/ryu--whiteboard-dark.png";
+import icon70light from "../assets/app-icons/ryu--whiteboard-light.png";
+import icon70mono from "../assets/app-icons/ryu--whiteboard-mono.png";
+import icon71dark from "../assets/app-icons/ryu--workflows-dark.png";
+import icon71light from "../assets/app-icons/ryu--workflows-light.png";
+import icon71mono from "../assets/app-icons/ryu--workflows-mono.png";
+import icon152dark from "../assets/app-icons/ryu--writing-style-dark.png";
+import icon152light from "../assets/app-icons/ryu--writing-style-light.png";
+import icon152mono from "../assets/app-icons/ryu--writing-style-mono.png";
+import icon153dark from "../assets/app-icons/ryu--zvec-grep-dark.png";
+import icon153light from "../assets/app-icons/ryu--zvec-grep-light.png";
+import icon153mono from "../assets/app-icons/ryu--zvec-grep-mono.png";
 
 /** @param {string | {src: string}} image */
 function url(image) {
@@ -555,679 +566,699 @@ export const COMPOSER_ICONS = {
 		dark: url(icon14dark),
 		mono: url(icon14mono),
 	},
-	"@ryu/crm": {
+	"@ryu/convert": {
 		light: url(icon15light),
 		dark: url(icon15dark),
 		mono: url(icon15mono),
 	},
-	"@ryu/dashboards": {
+	"@ryu/crm": {
 		light: url(icon16light),
 		dark: url(icon16dark),
 		mono: url(icon16mono),
 	},
-	"@ryu/desktop": {
+	"@ryu/dashboards": {
 		light: url(icon17light),
 		dark: url(icon17dark),
 		mono: url(icon17mono),
 	},
-	"@ryu/dictation": {
+	"@ryu/desktop": {
 		light: url(icon18light),
 		dark: url(icon18dark),
 		mono: url(icon18mono),
 	},
-	"@ryu/docling": {
+	"@ryu/dictation": {
 		light: url(icon19light),
 		dark: url(icon19dark),
 		mono: url(icon19mono),
 	},
-	"@ryu/drafts": {
+	"@ryu/docling": {
 		light: url(icon20light),
 		dark: url(icon20dark),
 		mono: url(icon20mono),
 	},
-	"@ryu/drawesome": {
+	"@ryu/drafts": {
 		light: url(icon21light),
 		dark: url(icon21dark),
 		mono: url(icon21mono),
 	},
-	"@ryu/expenses": {
+	"@ryu/drawesome": {
 		light: url(icon22light),
 		dark: url(icon22dark),
 		mono: url(icon22mono),
 	},
-	"@ryu/feedback-board": {
+	"@ryu/expenses": {
 		light: url(icon23light),
 		dark: url(icon23dark),
 		mono: url(icon23mono),
 	},
-	"@ryu/finetune": {
+	"@ryu/feedback-board": {
 		light: url(icon24light),
 		dark: url(icon24dark),
 		mono: url(icon24mono),
 	},
-	"@ryu/healing": {
+	"@ryu/finetune": {
 		light: url(icon25light),
 		dark: url(icon25dark),
 		mono: url(icon25mono),
 	},
-	"@ryu/help-center": {
+	"@ryu/healing": {
 		light: url(icon26light),
 		dark: url(icon26dark),
 		mono: url(icon26mono),
 	},
-	"@ryu/invoices": {
+	"@ryu/help-center": {
 		light: url(icon27light),
 		dark: url(icon27dark),
 		mono: url(icon27mono),
 	},
-	"@ryu/learning": {
+	"@ryu/invoices": {
 		light: url(icon28light),
 		dark: url(icon28dark),
 		mono: url(icon28mono),
 	},
-	"@ryu/mail": {
+	"@ryu/learning": {
 		light: url(icon29light),
 		dark: url(icon29dark),
 		mono: url(icon29mono),
 	},
-	"@ryu/markitdown": {
+	"@ryu/life-recorder": {
 		light: url(icon30light),
 		dark: url(icon30dark),
 		mono: url(icon30mono),
 	},
-	"@ryu/meetings": {
+	"@ryu/mail": {
 		light: url(icon31light),
 		dark: url(icon31dark),
 		mono: url(icon31mono),
 	},
-	"@ryu/mineru": {
+	"@ryu/markitdown": {
 		light: url(icon32light),
 		dark: url(icon32dark),
 		mono: url(icon32mono),
 	},
-	"@ryu/mission-control": {
+	"@ryu/meetings": {
 		light: url(icon33light),
 		dark: url(icon33dark),
 		mono: url(icon33mono),
 	},
-	"@ryu/monitors": {
+	"@ryu/mineru": {
 		light: url(icon34light),
 		dark: url(icon34dark),
 		mono: url(icon34mono),
 	},
-	"@ryu/mpp": {
+	"@ryu/mission-control": {
 		light: url(icon35light),
 		dark: url(icon35dark),
 		mono: url(icon35mono),
 	},
-	"@ryu/news": {
+	"@ryu/monitors": {
 		light: url(icon36light),
 		dark: url(icon36dark),
 		mono: url(icon36mono),
 	},
-	"@ryu/outreach": {
+	"@ryu/mpp": {
 		light: url(icon37light),
 		dark: url(icon37dark),
 		mono: url(icon37mono),
 	},
-	"@ryu/people": {
+	"@ryu/news": {
 		light: url(icon38light),
 		dark: url(icon38dark),
 		mono: url(icon38mono),
 	},
-	"@ryu/predict": {
+	"@ryu/outreach": {
 		light: url(icon39light),
 		dark: url(icon39dark),
 		mono: url(icon39mono),
 	},
-	"@ryu/projects": {
+	"@ryu/people": {
 		light: url(icon40light),
 		dark: url(icon40dark),
 		mono: url(icon40mono),
 	},
-	"@ryu/pull-requests": {
+	"@ryu/predict": {
 		light: url(icon41light),
 		dark: url(icon41dark),
 		mono: url(icon41mono),
 	},
-	"@ryu/quests": {
+	"@ryu/projects": {
 		light: url(icon42light),
 		dark: url(icon42dark),
 		mono: url(icon42mono),
 	},
-	"@ryu/reasoning": {
+	"@ryu/pull-requests": {
 		light: url(icon43light),
 		dark: url(icon43dark),
 		mono: url(icon43mono),
 	},
-	"@ryu/recipes": {
+	"@ryu/quests": {
 		light: url(icon44light),
 		dark: url(icon44dark),
 		mono: url(icon44mono),
 	},
-	"@ryu/reelfarm": {
+	"@ryu/reasoning": {
 		light: url(icon45light),
 		dark: url(icon45dark),
 		mono: url(icon45mono),
 	},
-	"@ryu/research": {
+	"@ryu/recipes": {
 		light: url(icon46light),
 		dark: url(icon46dark),
 		mono: url(icon46mono),
 	},
-	"@ryu/rlm": {
+	"@ryu/studio": {
 		light: url(icon47light),
 		dark: url(icon47dark),
 		mono: url(icon47mono),
 	},
-	"@ryu/rooms": {
+	"@ryu/research": {
 		light: url(icon48light),
 		dark: url(icon48dark),
 		mono: url(icon48mono),
 	},
-	"@ryu/safe-actions": {
+	"@ryu/rlm": {
 		light: url(icon49light),
 		dark: url(icon49dark),
 		mono: url(icon49mono),
 	},
-	"@ryu/simulator": {
+	"@ryu/rooms": {
 		light: url(icon50light),
 		dark: url(icon50dark),
 		mono: url(icon50mono),
 	},
-	"@ryu/sites": {
+	"@ryu/safe-actions": {
 		light: url(icon51light),
 		dark: url(icon51dark),
 		mono: url(icon51mono),
 	},
-	"@ryu/skill-editor": {
+	"@ryu/security": {
 		light: url(icon52light),
 		dark: url(icon52dark),
 		mono: url(icon52mono),
 	},
-	"@ryu/slides": {
+	"@ryu/simulator": {
 		light: url(icon53light),
 		dark: url(icon53dark),
 		mono: url(icon53mono),
 	},
-	"@ryu/social": {
+	"@ryu/sites": {
 		light: url(icon54light),
 		dark: url(icon54dark),
 		mono: url(icon54mono),
 	},
-	"@ryu/subtitles": {
+	"@ryu/skill-editor": {
 		light: url(icon55light),
 		dark: url(icon55dark),
 		mono: url(icon55mono),
 	},
-	"@ryu/teams": {
+	"@ryu/slides": {
 		light: url(icon56light),
 		dark: url(icon56dark),
 		mono: url(icon56mono),
 	},
-	"@ryu/timeline": {
+	"@ryu/social": {
 		light: url(icon57light),
 		dark: url(icon57dark),
 		mono: url(icon57mono),
 	},
-	"@ryu/token-table": {
+	"@ryu/subtitles": {
 		light: url(icon58light),
 		dark: url(icon58dark),
 		mono: url(icon58mono),
 	},
-	"@ryu/tuition": {
+	"@ryu/teams": {
 		light: url(icon59light),
 		dark: url(icon59dark),
 		mono: url(icon59mono),
 	},
-	"@ryu/ugc": {
+	"@ryu/timeline": {
 		light: url(icon60light),
 		dark: url(icon60dark),
 		mono: url(icon60mono),
 	},
-	"@ryu/unstructured": {
+	"@ryu/token-table": {
 		light: url(icon61light),
 		dark: url(icon61dark),
 		mono: url(icon61mono),
 	},
-	"@ryu/video-studio": {
+	"@ryu/tuition": {
 		light: url(icon62light),
 		dark: url(icon62dark),
 		mono: url(icon62mono),
 	},
-	"@ryu/voice": {
+	"@ryu/ugc": {
 		light: url(icon63light),
 		dark: url(icon63dark),
 		mono: url(icon63mono),
 	},
-	"@ryu/warmup": {
+	"@ryu/unstructured": {
 		light: url(icon64light),
 		dark: url(icon64dark),
 		mono: url(icon64mono),
 	},
-	"@ryu/webhooks": {
+	"@ryu/video-studio": {
 		light: url(icon65light),
 		dark: url(icon65dark),
 		mono: url(icon65mono),
 	},
-	"@ryu/whatsapp": {
+	"@ryu/voice": {
 		light: url(icon66light),
 		dark: url(icon66dark),
 		mono: url(icon66mono),
 	},
-	"@ryu/whiteboard": {
+	"@ryu/warmup": {
 		light: url(icon67light),
 		dark: url(icon67dark),
 		mono: url(icon67mono),
 	},
-	"@ryu/workflows": {
+	"@ryu/webhooks": {
 		light: url(icon68light),
 		dark: url(icon68dark),
 		mono: url(icon68mono),
 	},
-	"@ryu/cloudflare-browser-run": {
+	"@ryu/whatsapp": {
 		light: url(icon69light),
 		dark: url(icon69dark),
 		mono: url(icon69mono),
 	},
-	"@ryu/composio-connect": {
+	"@ryu/whiteboard": {
 		light: url(icon70light),
 		dark: url(icon70dark),
 		mono: url(icon70mono),
 	},
-	"@ryu/clangd-lsp": {
+	"@ryu/workflows": {
 		light: url(icon71light),
 		dark: url(icon71dark),
 		mono: url(icon71mono),
 	},
-	"@ryu/csharp-lsp": {
+	"@ryu/cloudflare-browser-run": {
 		light: url(icon72light),
 		dark: url(icon72dark),
 		mono: url(icon72mono),
 	},
-	"@ryu/gopls-lsp": {
+	"@ryu/composio-connect": {
 		light: url(icon73light),
 		dark: url(icon73dark),
 		mono: url(icon73mono),
 	},
-	"@ryu/jdtls-lsp": {
+	"@ryu/clangd-lsp": {
 		light: url(icon74light),
 		dark: url(icon74dark),
 		mono: url(icon74mono),
 	},
-	"@ryu/kotlin-lsp": {
+	"@ryu/csharp-lsp": {
 		light: url(icon75light),
 		dark: url(icon75dark),
 		mono: url(icon75mono),
 	},
-	"@ryu/lua-lsp": {
+	"@ryu/gopls-lsp": {
 		light: url(icon76light),
 		dark: url(icon76dark),
 		mono: url(icon76mono),
 	},
-	"@ryu/php-lsp": {
+	"@ryu/jdtls-lsp": {
 		light: url(icon77light),
 		dark: url(icon77dark),
 		mono: url(icon77mono),
 	},
-	"@ryu/pyright-lsp": {
+	"@ryu/kotlin-lsp": {
 		light: url(icon78light),
 		dark: url(icon78dark),
 		mono: url(icon78mono),
 	},
-	"@ryu/ruby-lsp": {
+	"@ryu/lua-lsp": {
 		light: url(icon79light),
 		dark: url(icon79dark),
 		mono: url(icon79mono),
 	},
-	"@ryu/rust-analyzer-lsp": {
+	"@ryu/php-lsp": {
 		light: url(icon80light),
 		dark: url(icon80dark),
 		mono: url(icon80mono),
 	},
-	"@ryu/swift-lsp": {
+	"@ryu/pyright-lsp": {
 		light: url(icon81light),
 		dark: url(icon81dark),
 		mono: url(icon81mono),
 	},
-	"@ryu/typescript-lsp": {
+	"@ryu/ruby-lsp": {
 		light: url(icon82light),
 		dark: url(icon82dark),
 		mono: url(icon82mono),
 	},
-	"@ryu/action-summary": {
+	"@ryu/rust-analyzer-lsp": {
 		light: url(icon83light),
 		dark: url(icon83dark),
 		mono: url(icon83mono),
 	},
-	"@ryu/advisor": {
+	"@ryu/swift-lsp": {
 		light: url(icon84light),
 		dark: url(icon84dark),
 		mono: url(icon84mono),
 	},
-	"@ryu/agent-comms": {
+	"@ryu/typescript-lsp": {
 		light: url(icon85light),
 		dark: url(icon85dark),
 		mono: url(icon85mono),
 	},
-	"@ryu/agentation": {
+	"@ryu/action-summary": {
 		light: url(icon86light),
 		dark: url(icon86dark),
 		mono: url(icon86mono),
 	},
-	"@ryu/agentbrowser": {
+	"@ryu/advisor": {
 		light: url(icon87light),
 		dark: url(icon87dark),
 		mono: url(icon87mono),
 	},
-	"@ryu/agents-md-tail": {
+	"@ryu/agent-comms": {
 		light: url(icon88light),
 		dark: url(icon88dark),
 		mono: url(icon88mono),
 	},
-	"@ryu/ambient-elevator": {
+	"@ryu/agentation": {
 		light: url(icon89light),
 		dark: url(icon89dark),
 		mono: url(icon89mono),
 	},
-	"@ryu/auto-continue": {
+	"@ryu/agentbrowser": {
 		light: url(icon90light),
 		dark: url(icon90dark),
 		mono: url(icon90mono),
 	},
-	"@ryu/bitwarden": {
+	"@ryu/agents-md-tail": {
 		light: url(icon91light),
 		dark: url(icon91dark),
 		mono: url(icon91mono),
 	},
-	"@ryu/brave": {
+	"@ryu/ambient-elevator": {
 		light: url(icon92light),
 		dark: url(icon92dark),
 		mono: url(icon92mono),
 	},
-	"@ryu/bytebot": {
+	"@ryu/auto-continue": {
 		light: url(icon93light),
 		dark: url(icon93dark),
 		mono: url(icon93mono),
 	},
-	"@ryu/chat-title": {
+	"@ryu/bitwarden": {
 		light: url(icon94light),
 		dark: url(icon94dark),
 		mono: url(icon94mono),
 	},
-	"@ryu/chatgpt-web": {
+	"@ryu/brave": {
 		light: url(icon95light),
 		dark: url(icon95dark),
 		mono: url(icon95mono),
 	},
-	"@ryu/docs": {
+	"@ryu/bytebot": {
 		light: url(icon96light),
 		dark: url(icon96dark),
 		mono: url(icon96mono),
 	},
-	"@ryu/double-check": {
+	"@ryu/chat-title": {
 		light: url(icon97light),
 		dark: url(icon97dark),
 		mono: url(icon97mono),
 	},
-	"@ryu/dynamic-workflows": {
+	"@ryu/chatgpt-web": {
 		light: url(icon98light),
 		dark: url(icon98dark),
 		mono: url(icon98mono),
 	},
-	"@ryu/effort-escalator": {
+	"@ryu/docs": {
 		light: url(icon99light),
 		dark: url(icon99dark),
 		mono: url(icon99mono),
 	},
-	"@ryu/ego-browser": {
+	"@ryu/double-check": {
 		light: url(icon100light),
 		dark: url(icon100dark),
 		mono: url(icon100mono),
 	},
-	"@ryu/exa": {
+	"@ryu/dynamic-workflows": {
 		light: url(icon101light),
 		dark: url(icon101dark),
 		mono: url(icon101mono),
 	},
-	"@ryu/expanded-composer": {
+	"@ryu/effort-escalator": {
 		light: url(icon102light),
 		dark: url(icon102dark),
 		mono: url(icon102mono),
 	},
-	"@ryu/expect": {
+	"@ryu/ego-browser": {
 		light: url(icon103light),
 		dark: url(icon103dark),
 		mono: url(icon103mono),
 	},
-	"@ryu/firecrawl": {
+	"@ryu/exa": {
 		light: url(icon104light),
 		dark: url(icon104dark),
 		mono: url(icon104mono),
 	},
-	"@ryu/firewall": {
+	"@ryu/expanded-composer": {
 		light: url(icon105light),
 		dark: url(icon105dark),
 		mono: url(icon105mono),
 	},
-	"@ryu/ghost": {
+	"@ryu/expect": {
 		light: url(icon106light),
 		dark: url(icon106dark),
 		mono: url(icon106mono),
 	},
-	"@ryu/ghost-chats": {
+	"@ryu/firecrawl": {
 		light: url(icon107light),
 		dark: url(icon107dark),
 		mono: url(icon107mono),
 	},
-	"@ryu/goal": {
+	"@ryu/firewall": {
 		light: url(icon108light),
 		dark: url(icon108dark),
 		mono: url(icon108mono),
 	},
-	"@ryu/headroom": {
+	"@ryu/ghost": {
 		light: url(icon109light),
 		dark: url(icon109dark),
 		mono: url(icon109mono),
 	},
-	"@ryu/honcho": {
+	"@ryu/ghost-chats": {
 		light: url(icon110light),
 		dark: url(icon110dark),
 		mono: url(icon110mono),
 	},
-	"@ryu/hook-observers": {
+	"@ryu/goal": {
 		light: url(icon111light),
 		dark: url(icon111dark),
 		mono: url(icon111mono),
 	},
-	"@ryu/session-context": {
+	"@ryu/headroom": {
 		light: url(icon112light),
 		dark: url(icon112dark),
 		mono: url(icon112mono),
 	},
-	"@ryu/mem0": {
+	"@ryu/honcho": {
 		light: url(icon113light),
 		dark: url(icon113dark),
 		mono: url(icon113mono),
 	},
-	"@ryu/no-ai-slop": {
+	"@ryu/hook-observers": {
 		light: url(icon114light),
 		dark: url(icon114dark),
 		mono: url(icon114mono),
 	},
-	"@ryu/no-more-mistakes": {
+	"@ryu/session-context": {
 		light: url(icon115light),
 		dark: url(icon115dark),
 		mono: url(icon115mono),
 	},
-	"@ryu/observer-agents": {
+	"@ryu/mem0": {
 		light: url(icon116light),
 		dark: url(icon116dark),
 		mono: url(icon116mono),
 	},
-	"@ryu/output-styles": {
+	"@ryu/no-ai-slop": {
 		light: url(icon117light),
 		dark: url(icon117dark),
 		mono: url(icon117mono),
 	},
-	"@ryu/parallel": {
+	"@ryu/no-more-mistakes": {
 		light: url(icon118light),
 		dark: url(icon118dark),
 		mono: url(icon118mono),
 	},
-	"@ryu/pi-monitor": {
+	"@ryu/observer-agents": {
 		light: url(icon119light),
 		dark: url(icon119dark),
 		mono: url(icon119mono),
 	},
-	"@ryu/pi-shell": {
+	"@ryu/output-styles": {
 		light: url(icon120light),
 		dark: url(icon120dark),
 		mono: url(icon120mono),
 	},
-	"@ryu/pi-subagent": {
+	"@ryu/parallel": {
 		light: url(icon121light),
 		dark: url(icon121dark),
 		mono: url(icon121mono),
 	},
-	"@ryu/plan-continue": {
+	"@ryu/pi-monitor": {
 		light: url(icon122light),
 		dark: url(icon122dark),
 		mono: url(icon122mono),
 	},
-	"@ryu/prompt-suggestions": {
+	"@ryu/pi-shell": {
 		light: url(icon123light),
 		dark: url(icon123dark),
 		mono: url(icon123mono),
 	},
-	"@ryu/proof": {
+	"@ryu/pi-subagent": {
 		light: url(icon124light),
 		dark: url(icon124dark),
 		mono: url(icon124mono),
 	},
-	"@ryu/pxpipe": {
+	"@ryu/plan-continue": {
 		light: url(icon125light),
 		dark: url(icon125dark),
 		mono: url(icon125mono),
 	},
-	"@ryu/reactions": {
+	"@ryu/prompt-suggestions": {
 		light: url(icon126light),
 		dark: url(icon126dark),
 		mono: url(icon126mono),
 	},
-	"@ryu/recap": {
+	"@ryu/proof": {
 		light: url(icon127light),
 		dark: url(icon127dark),
 		mono: url(icon127mono),
 	},
-	"@ryu/receipts": {
+	"@ryu/pxpipe": {
 		light: url(icon128light),
 		dark: url(icon128dark),
 		mono: url(icon128mono),
 	},
-	"@ryu/reconnect-retry": {
+	"@ryu/reactions": {
 		light: url(icon129light),
 		dark: url(icon129dark),
 		mono: url(icon129mono),
 	},
-	"@ryu/ripgrep": {
+	"@ryu/recap": {
 		light: url(icon130light),
 		dark: url(icon130dark),
 		mono: url(icon130mono),
 	},
-	"@ryu/rtk": {
+	"@ryu/receipts": {
 		light: url(icon131light),
 		dark: url(icon131dark),
 		mono: url(icon131mono),
 	},
-	"@ryu/rules": {
+	"@ryu/reconnect-retry": {
 		light: url(icon132light),
 		dark: url(icon132dark),
 		mono: url(icon132mono),
 	},
-	"@example/research-assistant": {
+	"@ryu/ripgrep": {
 		light: url(icon133light),
 		dark: url(icon133dark),
 		mono: url(icon133mono),
 	},
-	"@ryu/sample-widget": {
+	"@ryu/rtk": {
 		light: url(icon134light),
 		dark: url(icon134dark),
 		mono: url(icon134mono),
 	},
-	"@ryu/scrapling": {
+	"@ryu/rules": {
 		light: url(icon135light),
 		dark: url(icon135dark),
 		mono: url(icon135mono),
 	},
-	"@ryu/security-guidance": {
+	"@example/research-assistant": {
 		light: url(icon136light),
 		dark: url(icon136dark),
 		mono: url(icon136mono),
 	},
-	"@ryu/security-scanner": {
+	"@ryu/sample-widget": {
 		light: url(icon137light),
 		dark: url(icon137dark),
 		mono: url(icon137mono),
 	},
-	"@ryu/serper": {
+	"@ryu/scrapling": {
 		light: url(icon138light),
 		dark: url(icon138dark),
 		mono: url(icon138mono),
 	},
-	"@ryu/shadow": {
+	"@ryu/security-guidance": {
 		light: url(icon139light),
 		dark: url(icon139dark),
 		mono: url(icon139mono),
 	},
-	"@ryu/side-chats": {
+	"@ryu/security-scanner": {
 		light: url(icon140light),
 		dark: url(icon140dark),
 		mono: url(icon140mono),
 	},
-	"@ryu/spider": {
+	"@ryu/serper": {
 		light: url(icon141light),
 		dark: url(icon141dark),
 		mono: url(icon141mono),
 	},
-	"@ryu/spidercloud": {
+	"@ryu/shadow": {
 		light: url(icon142light),
 		dark: url(icon142dark),
 		mono: url(icon142mono),
 	},
-	"@ryu/stats": {
+	"@ryu/side-chats": {
 		light: url(icon143light),
 		dark: url(icon143dark),
 		mono: url(icon143mono),
 	},
-	"@ryu/tavily": {
+	"@ryu/spider": {
 		light: url(icon144light),
 		dark: url(icon144dark),
 		mono: url(icon144mono),
 	},
-	"@ryu/tokenmaxxing": {
+	"@ryu/spidercloud": {
 		light: url(icon145light),
 		dark: url(icon145dark),
 		mono: url(icon145mono),
 	},
-	"@ryu/tool-firewall": {
+	"@ryu/stats": {
 		light: url(icon146light),
 		dark: url(icon146dark),
 		mono: url(icon146mono),
 	},
-	"@ryu/toolsmith-example": {
+	"@ryu/tavily": {
 		light: url(icon147light),
 		dark: url(icon147dark),
 		mono: url(icon147mono),
 	},
-	"@ryu/usage-pacer": {
+	"@ryu/tokenmaxxing": {
 		light: url(icon148light),
 		dark: url(icon148dark),
 		mono: url(icon148mono),
 	},
-	"@ryu/zvec-grep": {
+	"@ryu/tool-firewall": {
 		light: url(icon149light),
 		dark: url(icon149dark),
 		mono: url(icon149mono),
+	},
+	"@ryu/toolsmith-example": {
+		light: url(icon150light),
+		dark: url(icon150dark),
+		mono: url(icon150mono),
+	},
+	"@ryu/usage-pacer": {
+		light: url(icon151light),
+		dark: url(icon151dark),
+		mono: url(icon151mono),
+	},
+	"@ryu/writing-style": {
+		light: url(icon152light),
+		dark: url(icon152dark),
+		mono: url(icon152mono),
+	},
+	"@ryu/zvec-grep": {
+		light: url(icon153light),
+		dark: url(icon153dark),
+		mono: url(icon153mono),
 	},
 };

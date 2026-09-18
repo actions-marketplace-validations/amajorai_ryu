@@ -123,19 +123,12 @@ pub async fn chat_completions(
     let agent_proof = header_string(&headers, "x-ryu-agent-proof");
     // Active skill ids for attribution (M3 / #145 AC3).
     let skill_ids = header_string(&headers, "x-ryu-skill-ids");
-    // Per-agent egress tool allowlist (#475 C7). CSV of FQ tool ids forwarded by
-    // Core; scopes this request's unified tool loop to the agent's selected
-    // tools. Reads `x-ryu-tools` with a legacy fallback to the old
-    // `x-ryu-composio-actions` header (new wins) during migration.
-    //
-    // `tools_header_present` captures whether the NEW header was literally there
-    // BEFORE folding in the legacy fallback. The unified loop triggers only on
-    // the new header (or `x-ryu-tool-search`), so a bare Composio agent (legacy
-    // header only) keeps its fast stream + legacy Composio loop; the folded
-    // `tool_actions` still feeds the allowlist for migration.
+    // Per-agent egress tool allowlist (#475 C7). Only the Core-stamped
+    // `x-ryu-tools` header is accepted. The legacy Composio action header is
+    // caller-controlled and cannot grant capabilities during migration.
     let tools_header = header_string(&headers, "x-ryu-tools");
     let tools_header_present = tools_header.is_some();
-    let tool_actions = tools_header.or_else(|| header_string(&headers, "x-ryu-composio-actions"));
+    let tool_actions = tools_header;
     // Explicit opt-in to the unified search-based tool loop (#475). `on`/`true`/`1`
     // flips the chat path to the buffered tool loop even without an allowlist
     // header (so the model can discover tools via `tool_search`). Core's ACP

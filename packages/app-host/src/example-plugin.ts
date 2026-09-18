@@ -14,41 +14,94 @@
 
 import { HORIZONTAL_WHEEL_SCROLL_SCRIPT } from "./horizontal-wheel-scroll-script.ts";
 import { handshakeAnnounceScript } from "./rpc.ts";
+import {
+	buildCompanionThemeLayoutCss,
+	buildThemeTokenStyle,
+} from "./third-party-plugin.ts";
 
 /** Build the example plugin's sandboxed document, with the host nonce baked in.
  *  `nonce` MUST be host-generated (e.g. crypto.randomUUID()), never plugin- or
  *  user-controlled. It is JSON-encoded into a string literal in the script. */
 
-export function examplePluginSrcdoc(nonce: string): string {
-	const nonceLiteral = JSON.stringify(nonce);
+export function examplePluginSrcdoc(
+	nonce: string,
+	themeTokens?: Record<string, string>,
+	/** True when the containing Ryu root already applies `--ryu-ui-scale`. */
+	scaleInParent = false
+): string {
+	const scriptSafe = (value: unknown): string =>
+		JSON.stringify(value ?? null)
+			.replace(/</g, "\\u003c")
+			.replace(/>/g, "\\u003e")
+			.replace(/&/g, "\\u0026")
+			.replace(/\u2028/g, "\\u2028")
+			.replace(/\u2029/g, "\\u2029");
+	const nonceLiteral = scriptSafe(nonce);
+	const themeTokensLiteral = scriptSafe(themeTokens);
+	const themeStyle = buildThemeTokenStyle(themeTokens);
+	const themeLayoutStyle = themeTokens
+		? `<style>${buildCompanionThemeLayoutCss(scaleInParent)}</style>`
+		: "";
 	return `<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8" />
 <style>
-  :root { color-scheme: light dark; }
+  :root {
+    --background: #18181b;
+    --foreground: #e7e7e7;
+    --card: #27272a;
+    --primary: #0099ff;
+    --primary-foreground: #ffffff;
+    --muted-foreground: #a1a1aa;
+    --border: #3f3f46;
+    --destructive: #f87171;
+    --radius: 0.625rem;
+    --ryu-ui-scale: 1;
+    --ryu-page-bg-image: none;
+    --ryu-page-bg-repeat: repeat;
+    --ryu-page-bg-position: 0 0;
+    --ryu-page-bg-size: auto;
+    --ryu-page-bg-opacity: 1;
+    --ryu-page-bg-blur: 0px;
+    color-scheme: light dark;
+  }
   body {
     margin: 0; padding: 16px;
-    font: 13px/1.5 system-ui, sans-serif;
-    color: #e7e7e7; background: #18181b;
+    font: 13px/1.5 var(--font-sans, system-ui), sans-serif;
+    color: var(--foreground); background: var(--background);
+    zoom: var(--ryu-ui-scale, 1);
+    position: relative; isolation: isolate;
   }
+  body::before {
+    position: fixed; inset: 0; z-index: -1; content: ""; pointer-events: none;
+    background-color: var(--background);
+    background-image: var(--ryu-page-bg-image, none);
+    background-repeat: var(--ryu-page-bg-repeat, repeat);
+    background-position: var(--ryu-page-bg-position, 0 0);
+    background-size: var(--ryu-page-bg-size, auto);
+    opacity: var(--ryu-page-bg-opacity, 1);
+    filter: blur(var(--ryu-page-bg-blur, 0px));
+  }
+  html[data-ryu-page-bg-active="on"] body { background: transparent !important; }
   h1 { font-size: 14px; margin: 0 0 4px; }
-  p.sub { margin: 0 0 12px; color: #a1a1aa; font-size: 12px; }
+  p.sub { margin: 0 0 12px; color: var(--muted-foreground); font-size: 12px; }
   ul { list-style: none; margin: 0; padding: 0; }
   li {
     padding: 6px 10px; margin-bottom: 4px;
-    border: 1px solid #3f3f46; border-radius: 6px;
-    background: #27272a;
+    border: 1px solid var(--border); border-radius: var(--radius);
+    background: var(--card);
   }
-  .status { margin-top: 12px; font-size: 12px; color: #a1a1aa; }
-  .err { color: #f87171; }
+  .status { margin-top: 12px; font-size: 12px; color: var(--muted-foreground); }
+  .err { color: var(--destructive); }
   button {
     font: inherit; padding: 6px 12px; margin-bottom: 12px;
-    border: 1px solid #3f3f46; border-radius: 6px;
-    background: #27272a; color: #e7e7e7; cursor: pointer;
+    border: 1px solid var(--border); border-radius: var(--radius);
+    background: var(--card); color: var(--foreground); cursor: pointer;
   }
-  button:hover { background: #3f3f46; }
+  button:hover { background: var(--primary); color: var(--primary-foreground); }
 </style>
+${themeTokens ? `${themeStyle}\n${themeLayoutStyle}` : themeStyle}
 </head>
 <body>
   <h1>Example plugin</h1>
@@ -59,12 +112,52 @@ export function examplePluginSrcdoc(nonce: string): string {
 <script>
   (function () {
     var NONCE = ${nonceLiteral};
+    var INITIAL_THEME_TOKENS = ${themeTokensLiteral};
     var port = null;
     var nextId = 1;
     var pending = {};
     var statusEl = document.getElementById("status");
     var listEl = document.getElementById("agents");
     var loadBtn = document.getElementById("load");
+
+    function applyThemeTokens(tokens) {
+      if (!tokens || typeof tokens !== "object") return;
+      var root = document.documentElement;
+      Object.keys(tokens).forEach(function (name) {
+        var value = tokens[name];
+        if (/^--[a-z0-9-]+$/.test(name) && typeof value === "string" && value.length > 0 && !/[{}<>;]/.test(value)) {
+          root.style.setProperty(name, value);
+        }
+      });
+      var mode = tokens["--ryu-theme-mode"];
+      if (mode === "dark" || mode === "light") {
+        root.classList.toggle("dark", mode === "dark");
+        root.classList.toggle("light", mode === "light");
+        root.setAttribute("data-ryu-theme", mode);
+      }
+      var scheme = tokens["--ryu-color-scheme"];
+      if (scheme === "dark" || scheme === "light") root.style.colorScheme = scheme;
+      var state = function (token, attribute, activeValue) {
+        var value = tokens[token];
+        if (typeof value !== "string") return;
+        if (value === activeValue) root.setAttribute(attribute, activeValue);
+        else root.removeAttribute(attribute);
+      };
+      state("--ryu-pointer-cursor", "data-pointer-cursor", "true");
+      state("--ryu-chrome-shadows", "data-chrome-shadows", "off");
+      state("--ryu-inverted-backgrounds", "data-inverted-backgrounds", "on");
+      state("--ryu-dialog-overlay-mode", "data-dialog-overlay-blur", "off");
+      state("--ryu-popup-overlay-mode", "data-popup-overlay-blur", "on");
+      state("--ryu-animations", "data-ryu-animations", "off");
+      state("--ryu-page-bg-active", "data-ryu-page-bg-active", "on");
+    }
+
+    applyThemeTokens(INITIAL_THEME_TOKENS);
+    window.addEventListener("message", function (ev) {
+      var msg = ev.data;
+      if (ev.source !== window.parent || !msg || msg.kind !== "ryu-plugin-theme" || msg.nonce !== NONCE) return;
+      applyThemeTokens(msg.tokens);
+    });
 
 ${HORIZONTAL_WHEEL_SCROLL_SCRIPT}
 

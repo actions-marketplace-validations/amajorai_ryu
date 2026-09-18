@@ -338,6 +338,7 @@ export interface PluginDoctorFinding {
 }
 
 export interface PluginDoctorInventoryItem {
+	evals?: PluginEvalSuite;
 	findingCount: number;
 	id: string;
 	name: string;
@@ -360,6 +361,111 @@ export interface PluginDoctorReport {
 	schemaVersion: string;
 	scope: string;
 	score: number;
+}
+
+export interface PluginEvalIssue {
+	code: string;
+	message: string;
+	path: string;
+	severity: "error" | "warning" | "info" | string;
+}
+
+export interface PluginEvalCaseSummary {
+	graderCount: number;
+	id: string;
+	maxTurns: number;
+	name: string;
+	path: string;
+	runnable?: string | null;
+	runs: number;
+	tags: string[];
+	timeoutSeconds: number;
+}
+
+export interface PluginEvalSuite {
+	caseCount: number;
+	cases: PluginEvalCaseSummary[];
+	directory: string;
+	graderCount: number;
+	issues: PluginEvalIssue[];
+	rulesetVersion: string;
+	schemaVersion: string;
+	status:
+		| "not_configured"
+		| "empty"
+		| "ready"
+		| "ready_with_warnings"
+		| "invalid"
+		| string;
+	supportedGraders: string[];
+	unsupportedGraders: string[];
+}
+
+export interface PluginEvalOverview {
+	artifactKind: "plugin" | "app" | string;
+	pluginId: string;
+	suite: PluginEvalSuite;
+}
+
+export interface PluginEvalGraderResult {
+	detail: string;
+	executed: boolean;
+	id: string;
+	score: number | null;
+	status: "pass" | "fail" | "skipped" | string;
+	type: string;
+}
+
+export interface PluginEvalAttempt {
+	durationMs: number;
+	error: string | null;
+	graders: PluginEvalGraderResult[];
+	id: string;
+	responsePreview: string | null;
+	score: number | null;
+	status: "passed" | "failed" | "unavailable" | "error" | "skipped" | string;
+	toolCalls: string[];
+}
+
+export interface PluginEvalCaseResult {
+	failed: number;
+	id: string;
+	name: string;
+	passed: number;
+	runs: PluginEvalAttempt[];
+	score: number | null;
+	skipped: number;
+	status: "passed" | "failed" | "unavailable" | string;
+}
+
+export interface PluginEvalRunResult {
+	artifactKind: "plugin" | "app" | string;
+	baseline: { reason: string; status: string };
+	cases: PluginEvalCaseResult[];
+	evidenceLevel: string;
+	finishedAt?: string;
+	pluginId: string;
+	runId: string | null;
+	schemaVersion: string;
+	score: number | null;
+	startedAt?: string;
+	status:
+		| "passed"
+		| "failed"
+		| "partial"
+		| "unavailable"
+		| "invalid"
+		| "not_configured"
+		| string;
+	suite: PluginEvalSuite;
+	threshold?: number;
+}
+
+export interface PluginEvalRunInput {
+	case?: string;
+	id: string;
+	runs?: number;
+	threshold?: number;
 }
 
 /** An {@link AppRecord} plus the "the change did not reach the gateway" truth Core
@@ -654,7 +760,7 @@ async function parseLifecycleError(
  *  otherwise omits it, leaving `targets` inert. */
 export async function fetchApps(
 	target: ApiTarget,
-	options: { skipUserJwt?: boolean } = {}
+	options: { skipUserJwt?: boolean; signal?: AbortSignal } = {}
 ): Promise<AppInfo[]> {
 	const resp = await authenticatedFetch(target, "/api/plugins", {
 		method: "GET",
@@ -663,6 +769,7 @@ export async function fetchApps(
 			...identityHeaders(),
 		},
 		skipUserJwt: options.skipUserJwt,
+		signal: options.signal,
 	});
 	if (!resp.ok) {
 		throw new Error(`/api/plugins failed: ${resp.status}`);
@@ -757,6 +864,58 @@ export async function fetchPluginDoctor(
 		throw new Error(`/api/plugins/doctor failed: ${resp.status}`);
 	}
 	return (await resp.json()) as PluginDoctorReport;
+}
+
+/** Inspect the Claude-compatible package eval suite without executing it. */
+export async function fetchPluginEvals(
+	target: ApiTarget,
+	id?: string
+): Promise<PluginEvalOverview | { plugins: PluginEvalOverview[] }> {
+	const suffix = id ? `?id=${encodeURIComponent(id)}` : "";
+	const resp = await authenticatedFetch(target, `/api/plugins/evals${suffix}`, {
+		method: "GET",
+		headers: {
+			...makeHeaders(target.token, target.userJwt),
+			...identityHeaders(),
+		},
+	});
+	if (!resp.ok) {
+		throw new Error(`/api/plugins/evals failed: ${resp.status}`);
+	}
+	return (await resp.json()) as
+		| PluginEvalOverview
+		| {
+				plugins: PluginEvalOverview[];
+		  };
+}
+
+/** Run an installed plugin/app eval suite through Core's normal agent path. */
+export async function runPluginEvals(
+	target: ApiTarget,
+	input: PluginEvalRunInput
+): Promise<PluginEvalRunResult> {
+	const resp = await authenticatedFetch(target, "/api/plugins/evals/run", {
+		method: "POST",
+		headers: {
+			...makeHeaders(target.token, target.userJwt),
+			...identityHeaders(),
+		},
+		body: JSON.stringify(input),
+	});
+	const payload: unknown = await resp.json().catch(() => null);
+	if (!resp.ok) {
+		const message =
+			typeof payload === "object" && payload !== null
+				? (payload as { message?: unknown; error?: { message?: unknown } })
+						.error?.message
+				: undefined;
+		throw new Error(
+			typeof message === "string"
+				? message
+				: `/api/plugins/evals/run failed: ${resp.status}`
+		);
+	}
+	return payload as PluginEvalRunResult;
 }
 
 /**
@@ -1523,38 +1682,52 @@ export async function pluginHostInvokeStream(
 	const reader = resp.body.getReader();
 	const decoder = new TextDecoder();
 	let buf = "";
-	let chunk = await reader.read();
-	while (!chunk.done) {
-		buf += decoder.decode(chunk.value, { stream: true });
-		let boundary = buf.indexOf("\n\n");
-		while (boundary !== -1) {
-			const frame = buf.slice(0, boundary);
-			buf = buf.slice(boundary + 2);
-			const data = frame.startsWith("data:")
-				? frame.slice("data:".length).trim()
-				: null;
-			if (data === "[DONE]") {
+	try {
+		if (opts.signal?.aborted) {
+			return;
+		}
+		let chunk = await reader.read();
+		while (!(chunk.done || opts.signal?.aborted)) {
+			buf += decoder.decode(chunk.value, { stream: true });
+			let boundary = buf.indexOf("\n\n");
+			while (boundary !== -1 && !opts.signal?.aborted) {
+				const frame = buf.slice(0, boundary);
+				buf = buf.slice(boundary + 2);
+				const data = frame.startsWith("data:")
+					? frame.slice("data:".length).trim()
+					: null;
+				if (data === "[DONE]") {
+					return;
+				}
+				if (data !== null && data.length > 0) {
+					let parsed: { type?: string; delta?: string; errorText?: string };
+					try {
+						parsed = JSON.parse(data);
+					} catch {
+						parsed = {};
+					}
+					if (
+						parsed.type === "text-delta" &&
+						typeof parsed.delta === "string"
+					) {
+						opts.onChunk(parsed.delta);
+					} else if (parsed.type === "error") {
+						throw new PluginHostError(
+							"server_error",
+							parsed.errorText ?? "agent stream error"
+						);
+					}
+				}
+				boundary = buf.indexOf("\n\n");
+			}
+			if (opts.signal?.aborted) {
 				return;
 			}
-			if (data !== null && data.length > 0) {
-				let parsed: { type?: string; delta?: string; errorText?: string };
-				try {
-					parsed = JSON.parse(data);
-				} catch {
-					parsed = {};
-				}
-				if (parsed.type === "text-delta" && typeof parsed.delta === "string") {
-					opts.onChunk(parsed.delta);
-				} else if (parsed.type === "error") {
-					throw new PluginHostError(
-						"server_error",
-						parsed.errorText ?? "agent stream error"
-					);
-				}
-			}
-			boundary = buf.indexOf("\n\n");
+			chunk = await reader.read();
 		}
-		chunk = await reader.read();
+	} finally {
+		await reader.cancel().catch(() => undefined);
+		reader.releaseLock();
 	}
 }
 
@@ -1603,26 +1776,40 @@ export async function pluginFinetuneStream(
 	const reader = resp.body.getReader();
 	const decoder = new TextDecoder();
 	let buf = "";
-	let chunk = await reader.read();
-	while (!chunk.done) {
-		buf += decoder.decode(chunk.value, { stream: true });
-		let boundary = buf.indexOf("\n\n");
-		while (boundary !== -1) {
-			const frame = buf.slice(0, boundary);
-			buf = buf.slice(boundary + 2);
-			// A frame may carry `event: <name>` and `data: <json>` lines; forward the
-			// data payload(s) verbatim. The app reads `state`/`step`/`loss` from the JSON.
-			for (const line of frame.split("\n")) {
-				if (line.startsWith("data:")) {
-					const data = line.slice("data:".length).trim();
-					if (data.length > 0) {
-						opts.onFrame(data);
+	try {
+		if (opts.signal?.aborted) {
+			return;
+		}
+		let chunk = await reader.read();
+		while (!(chunk.done || opts.signal?.aborted)) {
+			buf += decoder.decode(chunk.value, { stream: true });
+			let boundary = buf.indexOf("\n\n");
+			while (boundary !== -1 && !opts.signal?.aborted) {
+				const frame = buf.slice(0, boundary);
+				buf = buf.slice(boundary + 2);
+				// A frame may carry `event: <name>` and `data: <json>` lines; forward the
+				// data payload(s) verbatim. The app reads `state`/`step`/`loss` from the JSON.
+				for (const line of frame.split("\n")) {
+					if (opts.signal?.aborted) {
+						return;
+					}
+					if (line.startsWith("data:")) {
+						const data = line.slice("data:".length).trim();
+						if (data.length > 0) {
+							opts.onFrame(data);
+						}
 					}
 				}
+				boundary = buf.indexOf("\n\n");
 			}
-			boundary = buf.indexOf("\n\n");
+			if (opts.signal?.aborted) {
+				return;
+			}
+			chunk = await reader.read();
 		}
-		chunk = await reader.read();
+	} finally {
+		await reader.cancel().catch(() => undefined);
+		reader.releaseLock();
 	}
 }
 

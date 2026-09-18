@@ -150,11 +150,14 @@ export function modelListQuery(
 
 export function useModelCatalog(initialQuery = ""): UseModelCatalogResult {
 	const activeNode = useActiveNode();
-	const target: ApiTarget = {
-		url: activeNode.url,
-		token: activeNode.token ?? null,
-		userJwt: activeNode.userJwt ?? null,
-	};
+	const target = useMemo<ApiTarget>(
+		() => ({
+			url: activeNode.url,
+			token: activeNode.token ?? null,
+			userJwt: activeNode.userJwt ?? null,
+		}),
+		[activeNode.url, activeNode.token, activeNode.userJwt]
+	);
 	const { url, token, userJwt } = target;
 	const qc = useQueryClient();
 
@@ -181,19 +184,24 @@ export function useModelCatalog(initialQuery = ""): UseModelCatalogResult {
 	// filter can't apply offline — ignore it in the installed-only view.
 	const task = installedOnly ? "" : MODEL_CATEGORY_TASK[category];
 
-	const listQuery = useInfiniteQuery({
-		...modelListQuery(target, {
-			query: debouncedQuery,
-			sort,
-			format,
-			installedOnly,
-			task,
-			org,
-		}),
-		// Keep the previous list on screen while the next one loads (no flash on
-		// filter/sort changes) — pure-cache navigation feel.
-		placeholderData: keepPreviousData,
-	});
+	const listQuery = useInfiniteQuery(
+		useMemo(
+			() => ({
+				...modelListQuery(target, {
+					query: debouncedQuery,
+					sort,
+					format,
+					installedOnly,
+					task,
+					org,
+				}),
+				// Keep the previous list on screen while the next one loads (no flash on
+				// filter/sort changes) — pure-cache navigation feel.
+				placeholderData: keepPreviousData,
+			}),
+			[target, debouncedQuery, sort, format, installedOnly, task, org]
+		)
+	);
 
 	// Flatten every loaded page into one list for the selector.
 	const models = useMemo(
@@ -201,16 +209,17 @@ export function useModelCatalog(initialQuery = ""): UseModelCatalogResult {
 		[listQuery.data]
 	);
 
-	const detailQuery = useQuery({
-		queryKey: ["models", "detail", url, selectedId, selectedFormat],
-		queryFn: () =>
-			fetchModelDetail(
-				{ url, token, userJwt },
-				selectedId as string,
-				selectedFormat
-			),
-		enabled: selectedId !== null,
-	});
+	const detailQuery = useQuery(
+		useMemo(
+			() => ({
+				queryKey: ["models", "detail", url, selectedId, selectedFormat],
+				queryFn: () =>
+					fetchModelDetail(target, selectedId as string, selectedFormat),
+				enabled: selectedId !== null,
+			}),
+			[target, url, selectedId, selectedFormat]
+		)
+	);
 
 	const installMutation = useMutation({
 		mutationFn: (file: string) =>
@@ -286,10 +295,15 @@ export function useModelCatalog(initialQuery = ""): UseModelCatalogResult {
 
 	// Catalog sources: list + active selection live in Core. Selecting a source
 	// switches Core's active endpoint, so every model list/detail must refetch.
-	const sourcesQuery = useQuery({
-		queryKey: ["models", "sources", url],
-		queryFn: () => fetchModelSources({ url, token, userJwt }),
-	});
+	const sourcesQuery = useQuery(
+		useMemo(
+			() => ({
+				queryKey: ["models", "sources", url],
+				queryFn: () => fetchModelSources(target),
+			}),
+			[target, url]
+		)
+	);
 
 	const selectSourceMutation = useMutation({
 		mutationFn: (id: string) => selectModelSource({ url, token, userJwt }, id),

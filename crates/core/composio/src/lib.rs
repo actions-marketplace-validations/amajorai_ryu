@@ -23,10 +23,12 @@
 pub mod auth;
 pub mod catalog;
 pub mod connect;
+pub mod consumer;
 pub mod execute;
 pub mod host;
 pub mod service;
 pub mod triggers;
+pub mod worker;
 
 pub use host::{set_global_host, ComposioHost};
 pub use triggers::{set_global, ComposioTriggerStore, TriggerSubscription};

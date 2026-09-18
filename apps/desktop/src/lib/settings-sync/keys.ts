@@ -107,6 +107,16 @@ export const SYNCABLE_KEYS: SyncableKey[] = [
 		label: "Invert overlay backgrounds",
 		group: "appearance",
 	},
+	{
+		key: "ryu:sidebar-transparency",
+		label: "Transparent sidebar",
+		group: "appearance",
+	},
+	{
+		key: "ryu:window-transparency",
+		label: "Transparent window",
+		group: "appearance",
+	},
 	{ key: "ryu_pointer_cursor", label: "Pointer cursor", group: "appearance" },
 	{
 		key: "ryu:agent-row-style",

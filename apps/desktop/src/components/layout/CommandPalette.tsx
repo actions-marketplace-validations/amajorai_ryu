@@ -49,7 +49,7 @@ import { useAuthContext } from "@/contexts/auth-context.tsx";
 import { ImportSetupDialog } from "@/src/components/chat/ImportSetupDialog.tsx";
 import { ImportThreadsDialog } from "@/src/components/chat/ImportThreadsDialog.tsx";
 import { useChatHistoryContext } from "@/src/contexts/ChatHistoryContext.tsx";
-import { useTabsContext } from "@/src/contexts/TabsContext.tsx";
+import { useTabSelector } from "@/src/contexts/TabsContext.tsx";
 import { parseContributedTarget } from "@/src/contributions/contributed-target.ts";
 import { contributionRegistry } from "@/src/contributions/registry.ts";
 import { useCompanionAlias } from "@/src/contributions/use-companion-alias.ts";
@@ -174,7 +174,10 @@ export function CommandPalette() {
 	const [settingsSection, setSettingsSection] =
 		useState<SettingsSection>("appearance");
 	const [activeResultType, setActiveResultType] = useState("all");
-	const { openTab, requestScrollToMessage } = useTabsContext();
+	const openTab = useTabSelector((state) => state.openTab);
+	const requestScrollToMessage = useTabSelector(
+		(state) => state.requestScrollToMessage
+	);
 	const { agents, sections: commandSearchSections } =
 		useCommandSearchSections();
 	const { theme, setTheme } = useTheme();

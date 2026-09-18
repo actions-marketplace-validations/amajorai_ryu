@@ -1,3 +1,4 @@
+use std::path::Path;
 use std::sync::{mpsc, Mutex};
 use std::thread;
 
@@ -18,10 +19,53 @@ use tracing::{error, info, warn};
 pub struct AuditConfig {
     #[serde(default = "default_true")]
     pub enabled: bool,
-    /// Path to the SQLite database file. Defaults to
-    /// `$XDG_DATA_HOME/ryu/audit.db` (or `~/.local/share/ryu/audit.db`).
+    /// Path to the SQLite database file. Defaults to `$RYU_DIR/audit.db` when
+    /// `RYU_DIR` is set, otherwise `$XDG_DATA_HOME/ryu/audit.db` (or
+    /// `~/.local/share/ryu/audit.db`). A runtime `RYU_AUDIT_DB_PATH` override
+    /// may replace an inherited configured path for a profile-isolated child.
     #[serde(default = "default_audit_db_path")]
     pub db_path: String,
+}
+
+/// Runtime override used by Core when it spawns a profile-isolated Gateway.
+/// The child may inherit an older `gateway.toml` whose absolute `db_path` points
+/// at another profile; this override keeps audit records beside the active Core
+/// data without rewriting the operator's file.
+pub const AUDIT_DB_PATH_ENV: &str = "RYU_AUDIT_DB_PATH";
+
+/// The local retention policy applied when an audit database opens. A value of
+/// `None` means that limit is disabled. The policy is intentionally environment
+/// based so existing `AuditConfig` literals and gateway TOML remain backward
+/// compatible while operators can bound local storage on self-hosted nodes.
+#[derive(Debug, Clone, Copy, Default, Serialize)]
+pub struct AuditRetentionPolicy {
+    pub retention_days: Option<u64>,
+    pub max_rows: Option<u64>,
+}
+
+/// Result of one local retention pass.
+#[derive(Debug, Clone, Copy, Default, Serialize)]
+pub struct AuditPruneSummary {
+    pub deleted_rows: u64,
+    pub retention_days: Option<u64>,
+    pub max_rows: Option<u64>,
+}
+
+const DEFAULT_RETENTION_DAYS: u64 = 90;
+const DEFAULT_MAX_ROWS: u64 = 1_000_000;
+
+fn audit_retention_policy() -> AuditRetentionPolicy {
+    let parse = |name: &str, fallback: u64| {
+        std::env::var(name)
+            .ok()
+            .and_then(|value| value.trim().parse::<u64>().ok())
+            .map(|value| if value == 0 { None } else { Some(value) })
+            .unwrap_or(Some(fallback))
+    };
+    AuditRetentionPolicy {
+        retention_days: parse("RYU_AUDIT_RETENTION_DAYS", DEFAULT_RETENTION_DAYS),
+        max_rows: parse("RYU_AUDIT_MAX_ROWS", DEFAULT_MAX_ROWS),
+    }
 }
 
 fn default_true() -> bool {
@@ -29,10 +73,30 @@ fn default_true() -> bool {
 }
 
 fn default_audit_db_path() -> String {
-    dirs::data_local_dir()
-        .map(|d| d.join("ryu").join("audit.db"))
-        .and_then(|p| p.to_str().map(|s| s.to_string()))
-        .unwrap_or_else(|| "audit.db".to_string())
+    let ryu_dir = std::env::var_os("RYU_DIR")
+        .filter(|value| !value.is_empty())
+        .map(std::path::PathBuf::from);
+    let data_local_dir = dirs::data_local_dir();
+    default_audit_db_path_for(ryu_dir.as_deref(), data_local_dir.as_deref())
+}
+
+/// Resolve the default audit path from the same data-dir override Core passes
+/// to every managed child. Keeping this pure makes the profile boundary easy to
+/// test without mutating process-global environment during parallel tests.
+fn default_audit_db_path_for(ryu_dir: Option<&Path>, data_local_dir: Option<&Path>) -> String {
+    let path = ryu_dir
+        .map(|dir| dir.join("audit.db"))
+        .or_else(|| data_local_dir.map(|dir| dir.join("ryu").join("audit.db")));
+    path.and_then(|value| value.to_str().map(str::to_owned))
+        .unwrap_or_else(|| "audit.db".to_owned())
+}
+
+fn audit_db_path_for(configured: &str, override_path: Option<&str>) -> String {
+    override_path
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+        .unwrap_or(configured)
+        .to_owned()
 }
 
 impl Default for AuditConfig {
@@ -342,6 +406,7 @@ pub struct AuditLogger {
     /// Per API-key lifetime token totals (input + output).
     token_totals: DashMap<String, u64>,
     enabled: bool,
+    db_path: Option<String>,
 }
 
 impl AuditLogger {
@@ -350,12 +415,17 @@ impl AuditLogger {
             return Ok(Self::disabled());
         }
 
+        let db_path = audit_db_path_for(
+            &config.db_path,
+            std::env::var(AUDIT_DB_PATH_ENV).ok().as_deref(),
+        );
+
         // Ensure parent directories exist.
-        if let Some(parent) = std::path::Path::new(&config.db_path).parent() {
+        if let Some(parent) = std::path::Path::new(&db_path).parent() {
             std::fs::create_dir_all(parent)?;
         }
 
-        let mut conn = Connection::open(&config.db_path)?;
+        let mut conn = Connection::open(&db_path)?;
         conn.execute_batch(
             "PRAGMA journal_mode=WAL;
              CREATE TABLE IF NOT EXISTS audit_log (
@@ -385,6 +455,7 @@ impl AuditLogger {
              -- ALTER TABLE that is swallowed if the column already exists.
              ",
         )?;
+
         // Older versions stored the raw API key and only redacted it on read.
         // Add a non-secret display prefix, then replace every legacy value with
         // its SHA-256 lookup key before this logger accepts new records.
@@ -480,6 +551,15 @@ impl AuditLogger {
              WHERE singleton = 1;",
         )?;
 
+        let retention = audit_retention_policy();
+        let pruned = prune_database(&conn, retention)?;
+        if pruned.deleted_rows > 0 {
+            info!(
+                deleted_rows = pruned.deleted_rows,
+                "audit retention pass removed old rows"
+            );
+        }
+
         // Load existing per-key token totals so budget enforcement survives restarts.
         let token_totals: DashMap<String, u64> = DashMap::new();
         {
@@ -495,11 +575,11 @@ impl AuditLogger {
             }
         }
 
-        info!(db = %config.db_path, "audit store opened");
+        info!(db = %db_path, "audit store opened");
 
         // Dedicated read-only connection for local audit queries. WAL mode lets
         // this read concurrently with the background writer.
-        let reader = Connection::open(&config.db_path)?;
+        let reader = Connection::open(&db_path)?;
         reader.execute_batch("PRAGMA query_only=ON;")?;
 
         let (sender, receiver) = mpsc::sync_channel::<AuditRecord>(1_000);
@@ -610,6 +690,7 @@ impl AuditLogger {
             reader: Some(Mutex::new(reader)),
             token_totals,
             enabled: true,
+            db_path: Some(db_path),
         })
     }
 
@@ -621,6 +702,7 @@ impl AuditLogger {
             reader: None,
             token_totals: DashMap::new(),
             enabled: false,
+            db_path: None,
         }
     }
 
@@ -916,6 +998,18 @@ impl AuditLogger {
         self.enabled
     }
 
+    /// Apply the configured local retention policy immediately. This is useful
+    /// for an operator-triggered maintenance pass; normal startup also runs the
+    /// same pass before loading token totals.
+    pub fn prune(&self) -> anyhow::Result<AuditPruneSummary> {
+        let Some(path) = &self.db_path else {
+            return Ok(AuditPruneSummary::default());
+        };
+        let conn = Connection::open(path)?;
+        conn.execute_batch("PRAGMA journal_mode=WAL;")?;
+        prune_database(&conn, audit_retention_policy())
+    }
+
     /// Query the local audit store. Returns entries newest-first, with the raw
     /// `api_key` redacted to a short prefix so secrets never leave the store.
     pub fn query(&self, query: &AuditQuery) -> anyhow::Result<Vec<AuditEntry>> {
@@ -1191,6 +1285,56 @@ impl Default for AuditLogger {
     }
 }
 
+fn prune_database(
+    conn: &Connection,
+    policy: AuditRetentionPolicy,
+) -> anyhow::Result<AuditPruneSummary> {
+    let mut deleted_rows = 0_u64;
+    if let Some(days) = policy.retention_days {
+        let modifier = format!("-{days} days");
+        deleted_rows = deleted_rows.saturating_add(conn.execute(
+            "DELETE FROM audit_log WHERE timestamp < datetime('now', ?1)",
+            params![modifier],
+        )? as u64);
+    }
+    if let Some(max_rows) = policy.max_rows {
+        let max_rows = max_rows.min(i64::MAX as u64) as i64;
+        deleted_rows = deleted_rows.saturating_add(conn.execute(
+            "DELETE FROM audit_log
+                 WHERE id NOT IN (SELECT id FROM audit_log ORDER BY id DESC LIMIT ?1)",
+            params![max_rows],
+        )? as u64);
+    }
+    conn.execute_batch(
+        "UPDATE audit_summary SET
+             request_count = (SELECT COUNT(*) FROM audit_log WHERE event_type != 'control_change'),
+             error_count = (SELECT COALESCE(SUM(CASE WHEN error IS NOT NULL THEN 1 ELSE 0 END), 0)
+                            FROM audit_log WHERE event_type != 'control_change'),
+             input_tokens = (SELECT COALESCE(SUM(input_tokens), 0) FROM audit_log
+                             WHERE event_type != 'control_change'),
+             output_tokens = (SELECT COALESCE(SUM(output_tokens), 0) FROM audit_log
+                              WHERE event_type != 'control_change'),
+             reported_cost_micro_usd = (SELECT COALESCE(SUM(CASE
+                 WHEN event_type = 'model_call' AND managed_inference != 0
+                      AND provider_cost_micro_usd IS NOT NULL
+                 THEN provider_cost_micro_usd ELSE 0 END), 0) FROM audit_log),
+             unpriced_input_tokens = (SELECT COALESCE(SUM(CASE
+                 WHEN event_type = 'model_call' AND managed_inference != 0
+                      AND provider_cost_micro_usd IS NULL
+                 THEN input_tokens ELSE 0 END), 0) FROM audit_log),
+             unpriced_output_tokens = (SELECT COALESCE(SUM(CASE
+                 WHEN event_type = 'model_call' AND managed_inference != 0
+                      AND provider_cost_micro_usd IS NULL
+                 THEN output_tokens ELSE 0 END), 0) FROM audit_log)
+         WHERE singleton = 1;",
+    )?;
+    Ok(AuditPruneSummary {
+        deleted_rows,
+        retention_days: policy.retention_days,
+        max_rows: policy.max_rows,
+    })
+}
+
 // ─── Swappable audit sink (Lg decomposition) ─────────────────────────────────
 
 /// The audit sink (append-only record log + lifetime token totals + query /
@@ -1215,6 +1359,11 @@ pub trait AuditBackend: Send + Sync {
     fn summary(&self) -> anyhow::Result<AuditSummary>;
     /// Canonical 15-minute usage buckets for analytics surfaces.
     fn usage_rollup(&self, query: &AuditUsageQuery) -> anyhow::Result<Vec<AuditUsageEvent>>;
+    /// Apply the backend's local retention policy. Non-persistent backends may
+    /// return a zero-deletion summary.
+    fn prune(&self) -> anyhow::Result<AuditPruneSummary> {
+        Ok(AuditPruneSummary::default())
+    }
 }
 
 impl AuditBackend for AuditLogger {
@@ -1238,6 +1387,9 @@ impl AuditBackend for AuditLogger {
     }
     fn usage_rollup(&self, query: &AuditUsageQuery) -> anyhow::Result<Vec<AuditUsageEvent>> {
         AuditLogger::usage_rollup(self, query)
+    }
+    fn prune(&self) -> anyhow::Result<AuditPruneSummary> {
+        AuditLogger::prune(self)
     }
 }
 
@@ -1347,6 +1499,11 @@ impl AuditRegistry {
     pub fn usage_rollup(&self, query: &AuditUsageQuery) -> anyhow::Result<Vec<AuditUsageEvent>> {
         self.active.usage_rollup(query)
     }
+
+    /// Apply the active backend's retention policy immediately.
+    pub fn prune(&self) -> anyhow::Result<AuditPruneSummary> {
+        self.active.prune()
+    }
 }
 
 #[cfg(test)]
@@ -1402,6 +1559,54 @@ mod tests {
         assert_eq!(redact_key("sk-secret-1234567890"), "sk-sec…");
         assert_eq!(redact_key("master"), "master");
         assert_eq!(redact_key("anonymous"), "anonymous");
+    }
+
+    #[test]
+    fn default_audit_path_follows_ryu_dir_before_platform_data_dir() {
+        let isolated = Path::new("/tmp/ryu-dev-profile");
+        let platform_data = Path::new("/Users/test/Library/Application Support");
+
+        assert_eq!(
+            default_audit_db_path_for(Some(isolated), Some(platform_data)),
+            "/tmp/ryu-dev-profile/audit.db"
+        );
+        assert_eq!(
+            default_audit_db_path_for(None, Some(platform_data)),
+            "/Users/test/Library/Application Support/ryu/audit.db"
+        );
+        assert_eq!(default_audit_db_path_for(None, None), "audit.db");
+    }
+
+    #[test]
+    fn runtime_audit_path_override_wins_without_mutating_config() {
+        assert_eq!(
+            audit_db_path_for("/release/audit.db", Some(" /dev/audit.db ")),
+            "/dev/audit.db"
+        );
+        assert_eq!(
+            audit_db_path_for("/release/audit.db", Some("  ")),
+            "/release/audit.db"
+        );
+        assert_eq!(
+            audit_db_path_for("/release/audit.db", None),
+            "/release/audit.db"
+        );
+    }
+
+    #[test]
+    fn an_explicit_audit_path_is_opened_verbatim() {
+        let dir = std::env::temp_dir().join(format!("ryu-audit-explicit-{}", unique_suffix()));
+        let explicit = dir.join("operator-audit.db");
+        let logger = AuditLogger::new(&AuditConfig {
+            enabled: true,
+            db_path: explicit.to_string_lossy().into_owned(),
+        })
+        .expect("explicit audit path should open");
+
+        assert!(explicit.is_file());
+        assert_eq!(logger.db_path.as_deref(), explicit.to_str());
+        drop(logger);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

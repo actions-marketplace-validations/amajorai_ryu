@@ -327,6 +327,10 @@ pub fn gateway_bearer_for_agent(
         agent_id: agent_id.to_owned(),
         user_id: user_id.map(str::to_owned),
         session_id: session_id.map(str::to_owned),
+        expires_at: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_secs().saturating_add(60 * 60))
+            .unwrap_or(u64::MAX),
     }
     .sign(&required_gateway_core_token()?)
 }
@@ -675,25 +679,81 @@ pub async fn govern_egress(text: &str) -> Result<(), String> {
 ///      got NO `local` provider, so the zero-key default chat model
 ///      (`gemma* → Local`) failed with "all_providers_unavailable" even while
 ///      llama-server was healthy (QA finding B1's last leg). `start_all` also
-///      persists its resolved resident engine now, but the gateway spawns
-///      concurrently with `start_all`, so this closes the first-boot race too.
+///      persists its resolved resident engine before the Gateway startup task
+///      runs, so the live-sidecar gate closes the first-boot race too.
 ///
 /// Returns `None` when none apply, in which case the gateway falls back to
 /// its own built-in default (Ollama on `11434`).
 pub fn local_engine_gateway_url() -> Option<String> {
-    if let Ok(url) = std::env::var(ENV_LOCAL_LLM_URL) {
-        if !url.is_empty() {
-            return Some(url);
-        }
+    let explicit = std::env::var(ENV_LOCAL_LLM_URL).ok();
+    let active = ActiveEngineStore::load().active;
+    let llamacpp_installed = crate::sidecar::download_manager::VersionStore::load()
+        .installed_version("llamacpp")
+        .is_some();
+    local_engine_gateway_url_with_state(
+        explicit,
+        active,
+        llamacpp_installed,
+        managed_llamacpp_ready(),
+    )
+}
+
+/// Resolve the local provider URL from the persisted selection and the live
+/// lifecycle state. An explicit `LOCAL_LLM_URL` is an operator-owned endpoint
+/// and remains authoritative. The profile-derived llama.cpp URL is published
+/// only after the registered sidecar has passed its own health and model
+/// identity checks; a persisted row alone cannot prove that the listener is the
+/// newly selected model.
+fn local_engine_gateway_url_with_state(
+    explicit: Option<String>,
+    active: Option<String>,
+    llamacpp_installed: bool,
+    llamacpp_ready: bool,
+) -> Option<String> {
+    if explicit.as_deref().is_some_and(|url| !url.is_empty()) {
+        return explicit;
     }
-    if let Some(active) = ActiveEngineStore::load().active {
+    if let Some(active) = active {
+        if active.eq_ignore_ascii_case("llamacpp") && !llamacpp_ready {
+            return None;
+        }
         return local_engine_url(&active);
     }
-    let versions = crate::sidecar::download_manager::VersionStore::load();
-    if versions.installed_version("llamacpp").is_some() {
+    if llamacpp_installed && llamacpp_ready {
         return local_engine_url("llamacpp");
     }
     None
+}
+
+/// Whether the automatic local provider path currently has a resident llama.cpp
+/// sidecar that completed startup. `SidecarManager::statuses` calls the
+/// manager's liveness probe, which is only true after `LlamaCppManager::start`
+/// has verified both `/health` and `/v1/models`.
+fn managed_llamacpp_ready() -> bool {
+    SIDECAR_MANAGER.get().is_some_and(|manager| {
+        manager
+            .statuses()
+            .into_iter()
+            .any(|status| status.name == "llamacpp" && status.running)
+    })
+}
+
+/// Whether a managed Gateway must wait for the local llama.cpp provider before
+/// adopting an existing listener. Explicit `LOCAL_LLM_URL` points at an
+/// operator-owned endpoint and deliberately bypasses this Core-managed gate.
+fn managed_llamacpp_selected() -> bool {
+    if std::env::var(ENV_LOCAL_LLM_URL)
+        .ok()
+        .is_some_and(|url| !url.is_empty())
+    {
+        return false;
+    }
+    if let Some(active) = ActiveEngineStore::load().active {
+        return active.eq_ignore_ascii_case("llamacpp");
+    }
+    crate::sidecar::download_manager::VersionStore::load()
+        .installed_version("llamacpp")
+        .is_some()
 }
 
 /// OpenAI-compatible base URL of the local classify tier (`llamacpp-classify`),
@@ -1444,6 +1504,17 @@ pub(crate) async fn fetch_config(client: &reqwest::Client) -> anyhow::Result<ser
 /// `local` provider at the active engine. Empty when nothing is selected.
 fn gateway_spawn_env() -> Vec<(String, String)> {
     let mut env = Vec::new();
+    // Keep a profile-isolated child Gateway's audit store beside Core's active
+    // data. A stale absolute `audit.db_path` in gateway.toml must not send a dev
+    // or test child back to the release database; the audit crate treats this as
+    // a runtime override and never persists it.
+    env.push((
+        "RYU_AUDIT_DB_PATH".to_owned(),
+        crate::paths::ryu_dir()
+            .join("audit.db")
+            .to_string_lossy()
+            .into_owned(),
+    ));
     // Ryu-owned analytics is a typed relay, not the customer's OTLP exporter.
     // Managed local Gateways receive only the relay URL/key and the explicit
     // product-analytics gate; no Ryu Axiom credential is ever forwarded.
@@ -2067,6 +2138,11 @@ impl GatewayManager {
         let base = configured_gateway_url();
         if health_check(&base).await {
             REJECTED_LOCAL_GATEWAY.store(true, std::sync::atomic::Ordering::Release);
+            if managed_llamacpp_selected() && !managed_llamacpp_ready() {
+                anyhow::bail!(
+                    "managed llama.cpp is not ready; refusing to adopt the existing Gateway listener"
+                );
+            }
             verify_managed_gateway(&base, &admin, &relay, &core_relay).await?;
             REJECTED_LOCAL_GATEWAY.store(false, std::sync::atomic::Ordering::Release);
             tracing::info!(url = %base, "gateway: authenticated existing listener verified");
@@ -2102,8 +2178,13 @@ impl GatewayManager {
         };
         spawned.map_err(|e| anyhow::anyhow!("failed to spawn ryu-gateway ({bin}): {e}"))?;
 
-        // Wait for health, polling for a short window.
-        for _ in 0..30 {
+        // Wait long enough for a cold first launch to load its config and
+        // initialize provider clients. A seven-second window quarantined a
+        // healthy managed child when the binary was present but still starting,
+        // leaving Core stuck on the intentionally invalid `:0` URL for its whole
+        // process lifetime. Keep polling rather than treating slow startup as a
+        // permanent data-plane failure.
+        for _ in 0..120 {
             if health_check(&base).await {
                 if let Err(error) = verify_managed_gateway(&base, &admin, &relay, &core_relay).await
                 {
@@ -2314,6 +2395,24 @@ fn parse_widget_budget_response(body: serde_json::Value) -> ExecBudgetOutcome {
     }
 }
 
+fn parse_exec_budget_response(body: serde_json::Value) -> ExecBudgetOutcome {
+    let Some(allowed) = body.get("allowed").and_then(serde_json::Value::as_bool) else {
+        return ExecBudgetOutcome::Deny(
+            "exec budget response missing boolean allowed verdict".to_owned(),
+        );
+    };
+    if allowed {
+        ExecBudgetOutcome::Allow
+    } else {
+        ExecBudgetOutcome::Deny(
+            body.get("reason")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("exec budget exhausted")
+                .to_owned(),
+        )
+    }
+}
+
 async fn check_exec_budget_request(payload: serde_json::Value) -> ExecBudgetOutcome {
     let base = gateway_url();
     let endpoint = format!("{}/v1/exec/budget/check", base.trim_end_matches('/'));
@@ -2330,22 +2429,7 @@ async fn check_exec_budget_request(payload: serde_json::Value) -> ExecBudgetOutc
 
     match req.send().await {
         Ok(resp) if resp.status().is_success() => match resp.json::<serde_json::Value>().await {
-            Ok(body) => {
-                let allowed = body
-                    .get("allowed")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(true);
-                if allowed {
-                    ExecBudgetOutcome::Allow
-                } else {
-                    let reason = body
-                        .get("reason")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("exec budget exhausted")
-                        .to_owned();
-                    ExecBudgetOutcome::Deny(reason)
-                }
-            }
+            Ok(body) => parse_exec_budget_response(body),
             Err(e) => {
                 tracing::warn!("exec budget check: could not parse gateway response: {e}");
                 if allow_fallback() {
@@ -3119,6 +3203,40 @@ mod tests {
         }
     }
 
+    #[test]
+    fn derived_llamacpp_url_requires_verified_sidecar_readiness() {
+        let expected = local_engine_url("llamacpp");
+        assert_eq!(
+            local_engine_gateway_url_with_state(None, Some("llamacpp".to_owned()), true, false,),
+            None,
+            "a persisted llama.cpp selection must not publish before readiness"
+        );
+        assert_eq!(
+            local_engine_gateway_url_with_state(None, Some("llamacpp".to_owned()), true, true,),
+            expected.clone()
+        );
+        assert_eq!(
+            local_engine_gateway_url_with_state(None, None, true, false),
+            None,
+            "the installed-engine fallback must also wait for readiness"
+        );
+        assert_eq!(
+            local_engine_gateway_url_with_state(None, Some("ollama".to_owned()), true, false),
+            local_engine_url("ollama"),
+            "other local engines keep their existing URL contract"
+        );
+        assert_eq!(
+            local_engine_gateway_url_with_state(
+                Some("http://127.0.0.1:9999/v1".to_owned()),
+                Some("llamacpp".to_owned()),
+                true,
+                false,
+            ),
+            Some("http://127.0.0.1:9999/v1".to_owned()),
+            "an explicit operator endpoint remains authoritative"
+        );
+    }
+
     /// Snapshot + restore a set of env vars so a test that mutates process env
     /// does not leak into the others (cargo runs tests in the same process).
     struct EnvGuard {
@@ -3321,6 +3439,36 @@ mod tests {
         assert!(!managed_node());
     }
 
+    #[test]
+    fn unmanaged_gateway_requires_an_explicit_relay_token() {
+        // Manifest sidecars receive the Gateway relay credential at spawn. An
+        // externally managed/remote Gateway must therefore fail closed when the
+        // operator omitted that credential, while a validated token is accepted.
+        // Serialize both env domains because `remote_data_plane()` also reads the
+        // managed-node flag.
+        let _managed_lock = super::lock_managed_node_env();
+        let _gateway_lock = super::lock_gateway_env();
+        let _g = EnvGuard::capture(&[
+            ENV_GATEWAY_MANAGED,
+            ENV_GATEWAY_REMOTE,
+            ENV_MANAGED_NODE,
+            ENV_GATEWAY_TOKEN,
+        ]);
+        std::env::set_var(ENV_GATEWAY_MANAGED, "0");
+        std::env::set_var(ENV_GATEWAY_REMOTE, "0");
+        std::env::set_var(ENV_MANAGED_NODE, "0");
+
+        let err = gateway_bearer().expect_err("unmanaged Gateway must require a token");
+        assert!(
+            err.to_string().contains("requires RYU_GATEWAY_TOKEN"),
+            "unexpected error: {err}"
+        );
+
+        let token = "gwrelay_gateway-test-token-20260917-please-do-not-use-outside-tests";
+        std::env::set_var(ENV_GATEWAY_TOKEN, token);
+        assert_eq!(gateway_bearer().expect("validated relay token"), token);
+    }
+
     /// #447: the four gateway/sandbox policy plugins (compression / firewall /
     /// routing / sandbox) round-trip through their on/off flag into the surface
     /// the gateway actually reads. Three are gateway-spawn-env policies, so they
@@ -3464,6 +3612,21 @@ mod tests {
             &serde_json::json!({ "firewall": { "inspector": { "enabled": true, "model": model } } }),
             &model
         ));
+    }
+
+    #[test]
+    fn spawn_env_pins_audit_store_to_the_active_core_data_dir() {
+        let _env = super::lock_gateway_env();
+        let env = gateway_spawn_env();
+        let path = env
+            .iter()
+            .find(|(key, _)| key == "RYU_AUDIT_DB_PATH")
+            .map(|(_, value)| value.as_str())
+            .expect("gateway spawn env must carry the active audit path");
+        assert_eq!(
+            path,
+            crate::paths::ryu_dir().join("audit.db").to_string_lossy()
+        );
     }
 
     /// An operator-set `RYU_CLASSIFY_LLM_URL` points the tier at an external small
@@ -4072,6 +4235,24 @@ mod tests {
         }
         assert_eq!(
             parse_widget_budget_response(serde_json::json!({ "allowed": true })),
+            ExecBudgetOutcome::Allow
+        );
+    }
+
+    #[test]
+    fn exec_budget_response_requires_a_boolean_allowed_verdict() {
+        for body in [
+            serde_json::json!({}),
+            serde_json::json!({ "allowed": null }),
+            serde_json::json!({ "allowed": "true" }),
+        ] {
+            assert!(matches!(
+                parse_exec_budget_response(body),
+                ExecBudgetOutcome::Deny(_)
+            ));
+        }
+        assert_eq!(
+            parse_exec_budget_response(serde_json::json!({ "allowed": true })),
             ExecBudgetOutcome::Allow
         );
     }

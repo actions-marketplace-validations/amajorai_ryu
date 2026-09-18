@@ -1,3 +1,4 @@
+import { THEME_APPEARANCE_CHANGE_EVENT } from "@ryu/ui/theme/prefs";
 import { useEffect, useState } from "react";
 
 const KEY = "ryu_pointer_cursor";
@@ -34,4 +35,5 @@ export function setPointerCursor(enabled: boolean) {
 	localStorage.setItem(KEY, String(enabled));
 	applyDataAttribute(enabled);
 	window.dispatchEvent(new Event("storage"));
+	window.dispatchEvent(new Event(THEME_APPEARANCE_CHANGE_EVENT));
 }

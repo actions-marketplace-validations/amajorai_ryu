@@ -42,25 +42,68 @@ use crate::ingest::MeetingIngest;
 pub mod live {
     use super::{RhpServerMsg, SessionOutput};
     use std::collections::HashMap;
-    use std::sync::OnceLock;
+    use std::sync::{
+        atomic::{AtomicU64, Ordering},
+        OnceLock,
+    };
+    use tokio::sync::watch;
     use tokio::sync::{mpsc, Mutex};
 
-    static REGISTRY: OnceLock<Mutex<HashMap<String, mpsc::Sender<SessionOutput>>>> =
-        OnceLock::new();
+    struct LiveConnection {
+        generation: u64,
+        tx: mpsc::Sender<SessionOutput>,
+        revoked: watch::Sender<bool>,
+    }
 
-    fn registry() -> &'static Mutex<HashMap<String, mpsc::Sender<SessionOutput>>> {
+    static REGISTRY: OnceLock<Mutex<HashMap<String, LiveConnection>>> = OnceLock::new();
+    static NEXT_GENERATION: AtomicU64 = AtomicU64::new(0);
+
+    fn registry() -> &'static Mutex<HashMap<String, LiveConnection>> {
         REGISTRY.get_or_init(|| Mutex::new(HashMap::new()))
     }
 
     /// Register a connected device's outbound sender. Replaces any prior entry (a
     /// reconnect supersedes the stale socket).
-    pub async fn register(device_id: &str, tx: mpsc::Sender<SessionOutput>) {
-        registry().lock().await.insert(device_id.to_string(), tx);
+    pub async fn register(
+        device_id: &str,
+        tx: mpsc::Sender<SessionOutput>,
+    ) -> (u64, watch::Receiver<bool>) {
+        let generation = NEXT_GENERATION.fetch_add(1, Ordering::Relaxed) + 1;
+        let (revoked, receiver) = watch::channel(false);
+        let mut connections = registry().lock().await;
+        if let Some(previous) = connections.remove(device_id) {
+            let _ = previous.revoked.send(true);
+        }
+        connections.insert(
+            device_id.to_string(),
+            LiveConnection {
+                generation,
+                tx,
+                revoked,
+            },
+        );
+        (generation, receiver)
     }
 
     /// Remove a device's sender on disconnect. Idempotent.
-    pub async fn unregister(device_id: &str) {
-        registry().lock().await.remove(device_id);
+    pub async fn unregister(device_id: &str, generation: u64) {
+        let mut connections = registry().lock().await;
+        if connections
+            .get(device_id)
+            .is_some_and(|connection| connection.generation == generation)
+        {
+            connections.remove(device_id);
+        }
+    }
+
+    /// Mark the current live connection revoked. The receive loop observes this
+    /// watch signal and tears down the socket even though the durable device row
+    /// has already been deleted.
+    pub async fn revoke(device_id: &str) -> bool {
+        let connections = registry().lock().await;
+        connections
+            .get(device_id)
+            .is_some_and(|connection| connection.revoked.send(true).is_ok())
     }
 
     /// Whether a device currently has a live socket (so a producer can skip work
@@ -69,19 +112,29 @@ pub mod live {
         registry().lock().await.contains_key(device_id)
     }
 
+    /// Whether any device still has an open outbound channel.
+    pub(crate) async fn has_connections() -> bool {
+        registry()
+            .lock()
+            .await
+            .values()
+            .any(|connection| !connection.tx.is_closed())
+    }
+
     /// Push one control message to a connected device. Returns `true` if it was
     /// queued (the device is connected and its channel is not full/closed). A closed
     /// channel is pruned so it isn't retried.
     pub async fn send(device_id: &str, msg: RhpServerMsg) -> bool {
-        let tx = {
+        let connection = {
             let map = registry().lock().await;
-            map.get(device_id).cloned()
+            map.get(device_id)
+                .map(|connection| (connection.generation, connection.tx.clone()))
         };
-        match tx {
-            Some(tx) => match tx.try_send(SessionOutput::Control(msg)) {
+        match connection {
+            Some((generation, tx)) => match tx.try_send(SessionOutput::Control(msg)) {
                 Ok(()) => true,
                 Err(mpsc::error::TrySendError::Closed(_)) => {
-                    unregister(device_id).await;
+                    unregister(device_id, generation).await;
                     false
                 }
                 // Full: the device is busy draining; the nudge is best-effort.
@@ -141,6 +194,7 @@ pub struct HardwareSession {
 
 /// ~1 s of 16 kHz mono audio — the ambient flush granularity (PROTOCOL.md §4.2).
 const AMBIENT_FLUSH_SAMPLES: usize = UPLINK_RATE as usize;
+const MAX_CHAT_SAMPLES: usize = UPLINK_RATE as usize * 60;
 
 impl HardwareSession {
     /// Create a session from the device's `hello`. `ambient_session_id` is the
@@ -200,6 +254,10 @@ impl HardwareSession {
         let pcm = self.uplink.decode(opus_packet)?;
         match self.mode {
             Mode::Chat => {
+                if self.chat_pcm.len().saturating_add(pcm.len()) > MAX_CHAT_SAMPLES {
+                    self.chat_pcm.clear();
+                    anyhow::bail!("hardware chat audio exceeded the 60-second buffer limit");
+                }
                 self.chat_pcm.extend_from_slice(&pcm);
                 Ok(Vec::new())
             }
@@ -285,4 +343,27 @@ pub enum TurnInput {
     Voice(Vec<i16>),
     /// Already-text input (the `text` fallback frame) — skips ASR.
     Text(String),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::live;
+    use super::SessionOutput;
+
+    #[tokio::test]
+    async fn revocation_notifies_only_the_current_connection() {
+        let device_id = format!("revocation-test-{}", uuid::Uuid::new_v4());
+        let (tx, _rx) = tokio::sync::mpsc::channel::<SessionOutput>(1);
+        let (generation, mut revoked) = live::register(&device_id, tx).await;
+
+        assert!(!*revoked.borrow());
+        assert!(live::revoke(&device_id).await);
+        revoked
+            .changed()
+            .await
+            .expect("revocation watch remains live");
+        assert!(*revoked.borrow());
+
+        live::unregister(&device_id, generation).await;
+    }
 }

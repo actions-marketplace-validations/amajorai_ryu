@@ -78,14 +78,12 @@ export function useSidebarSectionSources(
 ): SidebarSectionSourceData[] {
 	const node = useActiveNode();
 	const target = toTarget(node);
-	const results = useQueries(
-		{
-			queries: sections.map((section) =>
-				sidebarSectionQueryOptions(section, target)
-			),
-		},
-		queryClient
+	const queries = useMemo(
+		() =>
+			sections.map((section) => sidebarSectionQueryOptions(section, target)),
+		[sections, target.token, target.url, target.userJwt]
 	);
+	const results = useQueries({ queries }, queryClient);
 
 	return useMemo(
 		() =>

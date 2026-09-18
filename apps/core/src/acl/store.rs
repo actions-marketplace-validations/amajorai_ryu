@@ -135,6 +135,12 @@ fn cached() -> AclStore {
     guard.get_or_insert_with(load_from_disk).clone()
 }
 
+fn with_cached<R>(read: impl FnOnce(&AclStore) -> R) -> R {
+    let mut guard = CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    let store = guard.get_or_insert_with(load_from_disk);
+    read(store)
+}
+
 pub fn invalidate_cache() {
     let mut guard = CACHE.lock().unwrap_or_else(|e| e.into_inner());
     *guard = None;
@@ -173,26 +179,29 @@ fn save(store: &AclStore) -> std::io::Result<()> {
 /// The overwrites in force for one resource. Absent = no exceptions, which is the
 /// overwhelmingly common case and resolves to the caller's base role grant.
 pub fn acl_for(key: &ResourceKey) -> ResourceAcl {
-    let store = cached();
-    let Some(rows) = store.resources.get(&key.to_flat()) else {
-        return ResourceAcl::new();
-    };
-    ResourceAcl {
-        overwrites: rows
-            .iter()
-            .filter_map(StoredOverwrite::to_overwrite)
-            .collect(),
-    }
+    with_cached(|store| {
+        let Some(rows) = store.resources.get(&key.to_flat()) else {
+            return ResourceAcl::new();
+        };
+        ResourceAcl {
+            overwrites: rows
+                .iter()
+                .filter_map(StoredOverwrite::to_overwrite)
+                .collect(),
+        }
+    })
 }
 
 /// The raw stored rows for one resource, for the editing UI (which needs to show
 /// what is persisted, including rows the resolver would drop).
 pub fn stored_for(key: &ResourceKey) -> Vec<StoredOverwrite> {
-    cached()
-        .resources
-        .get(&key.to_flat())
-        .cloned()
-        .unwrap_or_default()
+    with_cached(|store| {
+        store
+            .resources
+            .get(&key.to_flat())
+            .cloned()
+            .unwrap_or_default()
+    })
 }
 
 /// Replace every overwrite on a resource. Passing an empty list REMOVES the
@@ -216,11 +225,13 @@ pub fn set_overwrites(key: &ResourceKey, rows: Vec<StoredOverwrite>) -> std::io:
 
 /// Every resource that carries at least one overwrite, for an admin overview.
 pub fn resources_with_overwrites() -> Vec<ResourceKey> {
-    cached()
-        .resources
-        .keys()
-        .filter_map(|flat| ResourceKey::from_flat(flat))
-        .collect()
+    with_cached(|store| {
+        store
+            .resources
+            .keys()
+            .filter_map(|flat| ResourceKey::from_flat(flat))
+            .collect()
+    })
 }
 
 #[cfg(test)]

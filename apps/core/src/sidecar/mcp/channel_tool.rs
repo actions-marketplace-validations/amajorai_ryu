@@ -8,8 +8,6 @@
 //!
 //! Registered as a reserved registry server (`channel`) like spider/exa.
 
-use std::time::Duration;
-
 use anyhow::Result;
 use reqwest::Client;
 use serde_json::{json, Value};
@@ -18,8 +16,6 @@ use super::RegistryTool;
 
 /// Reserved registry server name for the built-in channel provider.
 pub const SERVER_NAME: &str = "channel";
-
-const SEND_TIMEOUT: Duration = Duration::from_secs(15);
 
 fn send_schema() -> Value {
     json!({
@@ -97,27 +93,14 @@ pub async fn dispatch(http: &Client, tool: &str, arguments: Value) -> Result<Val
             // guardrail (or a fail-closed unreachable gateway) returns a structured
             // refusal so the agent's turn continues — `Err` stays reserved for
             // malformed calls.
-            if let Err(reason) = crate::sidecar::gateway::govern_egress(text).await {
+            let outbound = format!("POST {url}\n{text}");
+            if let Err(reason) = crate::sidecar::gateway::govern_egress(&outbound).await {
                 return Ok(json!({ "ok": false, "blocked": true, "reason": reason }));
             }
 
-            // Slack expects `{text}`, Discord expects `{content}`. Send both keys
-            // so a single payload works for either provider's webhook.
-            let resp = http
-                .post(url)
-                .timeout(SEND_TIMEOUT)
-                .json(&json!({ "text": text, "content": text }))
-                .send()
-                .await;
-
-            match resp {
-                Ok(r) if r.status().is_success() => Ok(json!({ "ok": true, "sent": true })),
-                Ok(r) => Ok(json!({
-                    "ok": false,
-                    "status": r.status().as_u16(),
-                    "reason": "webhook returned a non-success status"
-                })),
-                Err(e) => Ok(json!({ "ok": false, "error": e.to_string() })),
+            match ryu_notify::send_webhook_text(http, url, text).await {
+                Ok(()) => Ok(json!({ "ok": true, "sent": true })),
+                Err(error) => Ok(json!({ "ok": false, "error": error })),
             }
         }
         other => Err(anyhow::anyhow!("unknown channel tool '{other}'")),

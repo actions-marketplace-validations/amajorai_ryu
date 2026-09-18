@@ -5,7 +5,8 @@
 //! subscribe to. Mirrors `quests_api.rs` (plain `Json` responses, fetch-based SSE
 //! so the bearer token can ride the request).
 
-use axum::extract::{Path, Query, State};
+use axum::extract::{Extension, Path, Query, State};
+use axum::response::IntoResponse;
 use axum::Json;
 use serde::Deserialize;
 use serde_json::json;
@@ -43,11 +44,15 @@ fn parse_status(s: &str) -> Option<ApprovalStatus> {
 pub async fn list_approvals(
     State(state): State<ServerState>,
     Query(q): Query<ListQuery>,
-) -> Json<serde_json::Value> {
+    Extension(caller): Extension<Option<crate::identity_verify::VerifiedCaller>>,
+) -> axum::response::Response {
+    if let Err(status) = require_permission(&state, &caller, "approvals.view").await {
+        return status.into_response();
+    }
     let status = q.status.as_deref().and_then(parse_status);
     match state.approvals.store.list(status).await {
-        Ok(approvals) => Json(json!({ "approvals": approvals })),
-        Err(e) => Json(json!({ "approvals": [], "error": e.to_string() })),
+        Ok(approvals) => Json(json!({ "approvals": approvals })).into_response(),
+        Err(e) => Json(json!({ "approvals": [], "error": e.to_string() })).into_response(),
     }
 }
 
@@ -63,7 +68,14 @@ pub async fn list_approvals(
 pub async fn get_approval(
     State(state): State<ServerState>,
     Path(id): Path<String>,
+    Extension(caller): Extension<Option<crate::identity_verify::VerifiedCaller>>,
 ) -> (axum::http::StatusCode, Json<serde_json::Value>) {
+    if let Err(status) = require_permission(&state, &caller, "approvals.view").await {
+        return (
+            status,
+            Json(json!({ "success": false, "error": "forbidden" })),
+        );
+    }
     match state.approvals.store.get(&id).await {
         Ok(Some(req)) => (axum::http::StatusCode::OK, Json(json!({ "approval": req }))),
         Ok(None) => (
@@ -116,8 +128,15 @@ async fn decide(
 pub async fn approve_approval(
     State(state): State<ServerState>,
     Path(id): Path<String>,
+    Extension(caller): Extension<Option<crate::identity_verify::VerifiedCaller>>,
     body: Option<Json<DecideBody>>,
 ) -> (axum::http::StatusCode, Json<serde_json::Value>) {
+    if let Err(status) = require_permission(&state, &caller, "approvals.decide").await {
+        return (
+            status,
+            Json(json!({ "success": false, "error": "forbidden" })),
+        );
+    }
     let note = body.and_then(|b| b.0.note);
     decide(&state, &id, true, note).await
 }
@@ -135,8 +154,15 @@ pub async fn approve_approval(
 pub async fn reject_approval(
     State(state): State<ServerState>,
     Path(id): Path<String>,
+    Extension(caller): Extension<Option<crate::identity_verify::VerifiedCaller>>,
     body: Option<Json<DecideBody>>,
 ) -> (axum::http::StatusCode, Json<serde_json::Value>) {
+    if let Err(status) = require_permission(&state, &caller, "approvals.decide").await {
+        return (
+            status,
+            Json(json!({ "success": false, "error": "forbidden" })),
+        );
+    }
     let note = body.and_then(|b| b.0.note);
     decide(&state, &id, false, note).await
 }
@@ -150,9 +176,15 @@ pub async fn reject_approval(
     summary = "the global approval mode (Layer B): `off` /",
     responses((status = 200, description = "OK", body = serde_json::Value))
 )]
-pub async fn get_mode(State(state): State<ServerState>) -> Json<serde_json::Value> {
+pub async fn get_mode(
+    State(state): State<ServerState>,
+    Extension(caller): Extension<Option<crate::identity_verify::VerifiedCaller>>,
+) -> axum::response::Response {
+    if let Err(status) = require_permission(&state, &caller, "approvals.view").await {
+        return status.into_response();
+    }
     let mode = state.approvals.approval_mode().await;
-    Json(json!({ "mode": mode.as_str() }))
+    Json(json!({ "mode": mode.as_str() })).into_response()
 }
 
 #[derive(Debug, Deserialize)]
@@ -172,8 +204,15 @@ pub struct SetModeBody {
 )]
 pub async fn set_mode(
     State(state): State<ServerState>,
+    Extension(caller): Extension<Option<crate::identity_verify::VerifiedCaller>>,
     Json(body): Json<SetModeBody>,
 ) -> (axum::http::StatusCode, Json<serde_json::Value>) {
+    if let Err(status) = require_permission(&state, &caller, "approvals.decide").await {
+        return (
+            status,
+            Json(json!({ "success": false, "error": "forbidden" })),
+        );
+    }
     // Normalize through the enum so only a valid mode is ever stored.
     let mode = crate::approvals::policy::ApprovalMode::from_pref(&body.mode);
     match state
@@ -202,9 +241,14 @@ pub async fn set_mode(
 )]
 pub async fn approval_events(
     State(state): State<ServerState>,
-) -> axum::response::sse::Sse<
-    impl futures_util::Stream<Item = Result<axum::response::sse::Event, std::convert::Infallible>>,
-> {
+    Extension(caller): Extension<Option<crate::identity_verify::VerifiedCaller>>,
+) -> axum::response::Response {
+    // The SSE stream contains approval titles, summaries, and tool arguments;
+    // require the same verified app permission as the list route before opening
+    // the long-lived subscription.
+    if let Err(status) = require_permission(&state, &caller, "approvals.view").await {
+        return status.into_response();
+    }
     use axum::response::sse::{Event, KeepAlive, Sse};
     use tokio::sync::broadcast::error::RecvError;
 
@@ -214,12 +258,31 @@ pub async fn approval_events(
             match rx.recv().await {
                 Ok(event) => {
                     let data = serde_json::to_string(&event).unwrap_or_default();
-                    return Some((Ok(Event::default().data(data)), rx));
+                    return Some((
+                        Ok::<_, std::convert::Infallible>(Event::default().data(data)),
+                        rx,
+                    ));
                 }
                 Err(RecvError::Lagged(_)) => continue,
                 Err(RecvError::Closed) => return None,
             }
         }
     });
-    Sse::new(stream).keep_alive(KeepAlive::default())
+    Sse::new(stream)
+        .keep_alive(KeepAlive::default())
+        .into_response()
+}
+
+async fn require_permission(
+    state: &ServerState,
+    caller: &Option<crate::identity_verify::VerifiedCaller>,
+    permission: &str,
+) -> Result<(), axum::http::StatusCode> {
+    // Approval decisions are governance actions. Unlike a local read-only
+    // catalog, a node-token-only/paired request must not list or execute a
+    // user's pending action, even on an otherwise unbound node.
+    if caller.is_none() {
+        return Err(axum::http::StatusCode::FORBIDDEN);
+    }
+    super::enforce_permission(state, caller, permission).await
 }

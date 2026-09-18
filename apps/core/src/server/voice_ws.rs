@@ -8,14 +8,11 @@
 //!
 //! ## Auth placement (auth-in-handler, mirroring `realtime_ws` / `hardware_ws`)
 //!
-//! On the **public** router, not behind `require_auth`: a browser WS upgrade can't
-//! set the bearer header, so the node-admittance token rides `?token=` (or an
-//! `Authorization: Bearer` for non-browser clients). If `RYU_TOKEN` is configured
-//! the upgrade is rejected unless it matches; unconfigured (loopback dev) allows.
-//!
-//! Because it is on the PUBLIC router it never receives `attach_verified_caller`,
-//! so — exactly like `realtime_ws` — it resolves the user identity IN the handler
-//! from `?jwt=` via the shared [`crate::server::verified_caller_from_token`].
+//! On the **public** router because a browser WebSocket constructor cannot set an
+//! authorization header. Clients first exchange normal HTTP credentials for a
+//! short-lived, one-use ticket at `/api/ws/ticket`; the ticket carries the
+//! verified caller and node-token generation without putting credentials in the
+//! upgrade URL.
 //!
 //! ## Per-conversation ACL
 //!
@@ -44,7 +41,7 @@ use axum::{
         ws::{Message, WebSocket, WebSocketUpgrade},
         Query, State,
     },
-    http::{HeaderMap, StatusCode},
+    http::StatusCode,
     response::{IntoResponse, Response},
 };
 use serde::Deserialize;
@@ -57,16 +54,13 @@ use crate::voice::session::{
     TTS_SAMPLE_RATE,
 };
 
-/// Query params on the upgrade URL. `token` is the node-admittance `RYU_TOKEN`
-/// (also accepted via `Authorization: Bearer`); `jwt` is the user identity, used
-/// here to gate the client-supplied `conversation_id` (browsers cannot set custom
-/// headers on a WS upgrade, so it rides the query string — same as `realtime_ws`).
+/// Query params on the upgrade URL. The opaque one-use ticket is the only
+/// accepted credential; node/user credentials must be exchanged over HTTP first.
 #[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct VoiceQuery {
     #[serde(default)]
-    token: Option<String>,
-    #[serde(default)]
-    jwt: Option<String>,
+    ticket: Option<String>,
 }
 
 /// `GET /api/voice/ws` — upgrade to the voice-mode socket. Node admittance is
@@ -81,58 +75,35 @@ pub struct VoiceQuery {
 pub async fn voice_ws(
     ws: WebSocketUpgrade,
     State(state): State<ServerState>,
-    headers: HeaderMap,
     Query(query): Query<VoiceQuery>,
 ) -> Response {
-    // Node admittance (mirror `require_auth` / `realtime_ws`): enforce only a
-    // non-empty configured token; empty/unset = loopback dev, allow.
-    let active_node_token = crate::node_token::active_token();
-    if let Some(expected) = active_node_token
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-    {
-        let provided = query
-            .token
-            .as_deref()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(str::to_owned)
-            .or_else(|| bearer_token(&headers));
-        if provided.as_deref() != Some(expected) {
-            return (StatusCode::UNAUTHORIZED, "missing or invalid node token").into_response();
+    let ticket = match crate::server::ws_ticket::consume(
+        query.ticket.as_deref(),
+        crate::server::ws_ticket::WsTicketRoute::Voice,
+        None,
+    ) {
+        Some(ticket) => ticket,
+        None => {
+            return (
+                StatusCode::UNAUTHORIZED,
+                "missing or invalid WebSocket ticket",
+            )
+                .into_response();
         }
-    }
-
-    // ── User identity (Phase 0 verify path, reused — mirrors `realtime_ws`) ───
-    // This route is on the PUBLIC router, so `attach_verified_caller` never runs on
-    // it; resolve the caller here instead. Any failure is anonymous (`None`), never
-    // an error — on an unbound node that is the normal single-user flow, and on a
-    // bound node the conversation gate below denies it.
-    let jwt = query
-        .jwt
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(str::to_owned)
-        .or_else(|| super::header_str(&headers, "x-ryu-user-jwt"));
-    let caller = match jwt {
-        Some(token) => super::verified_caller_from_token(&token).await,
-        None => None,
     };
-
-    ws.on_upgrade(move |socket| handle_socket(socket, state, caller))
-}
-
-/// Extract a bearer token from the `Authorization` header.
-fn bearer_token(headers: &HeaderMap) -> Option<String> {
-    headers
-        .get("authorization")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "))
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(str::to_owned)
+    let caller = ticket.caller.clone();
+    if ticket
+        .jwt_expires_at
+        .is_some_and(|expires_at| expires_at <= chrono::Utc::now().timestamp())
+    {
+        return (
+            StatusCode::UNAUTHORIZED,
+            "WebSocket ticket user identity expired",
+        )
+            .into_response();
+    }
+    let token_generation = ticket.node_generation;
+    ws.on_upgrade(move |socket| handle_socket(socket, state, caller, token_generation, ticket))
 }
 
 /// Build the in-process seam bundle a session drives (same handles `ServerState`
@@ -165,14 +136,22 @@ async fn handle_socket(
     socket: WebSocket,
     state: ServerState,
     caller: Option<crate::identity_verify::VerifiedCaller>,
+    token_generation: u64,
+    ticket: crate::server::ws_ticket::WsTicketClaims,
 ) {
     use futures_util::{SinkExt, StreamExt};
 
     let (mut ws_tx, mut ws_rx) = socket.split();
+    let jwt_expiry = crate::server::ws_ticket::wait_for_jwt_expiry(ticket.jwt_expires_at);
+    tokio::pin!(jwt_expiry);
 
     // ── Handshake: the first frame must be `start` ───────────────────────────
     let start = loop {
-        match ws_rx.next().await {
+        let frame = tokio::select! {
+            _ = &mut jwt_expiry => return,
+            frame = ws_rx.next() => frame,
+        };
+        match frame {
             Some(Ok(Message::Text(text))) => match serde_json::from_str::<VoiceClientMsg>(&text) {
                 Ok(msg @ VoiceClientMsg::Start { .. }) => break msg,
                 Ok(_) => {
@@ -211,6 +190,19 @@ async fn handle_socket(
     // client-supplied id is a REUSE of an existing conversation and must be gated;
     // a minted `voice_…` id is brand new and cannot collide with anyone's row.
     let conversation_id = conversation_id.unwrap_or_else(|| format!("voice_{session_id}"));
+    if ticket
+        .room_id
+        .as_deref()
+        .is_some_and(|room_id| room_id != conversation_id.as_str())
+    {
+        let _ = ws_tx
+            .send(error_frame(
+                "forbidden",
+                "WebSocket ticket is not bound to this conversation",
+            ))
+            .await;
+        return;
+    }
     if !crate::sidecar::adapters::acp::is_safe_host_conversation_id(&conversation_id) {
         let _ = ws_tx
             .send(error_frame(
@@ -288,7 +280,52 @@ async fn handle_socket(
     let mut turn_handle: Option<tokio::task::JoinHandle<()>> = None;
 
     // ── Receive loop ─────────────────────────────────────────────────────────
-    while let Some(frame) = ws_rx.next().await {
+    let mut token_updates = crate::node_token::subscribe_generation();
+    if *token_updates.borrow() != token_generation {
+        let _ = out_tx
+            .send(VoiceOutput::Control(VoiceServerMsg::Error {
+                code: "node_token_rotated".to_string(),
+                message: "node token rotated; reconnect required".to_string(),
+            }))
+            .await;
+        drop(out_tx);
+        let _ = send_task.await;
+        return;
+    }
+    loop {
+        let frame = tokio::select! {
+            _ = &mut jwt_expiry => {
+                let _ = out_tx
+                    .send(VoiceOutput::Control(VoiceServerMsg::Error {
+                        code: "user_identity_expired".to_string(),
+                        message: "user identity expired; reconnect required".to_string(),
+                    }))
+                    .await;
+                break;
+            }
+            changed = token_updates.changed() => {
+                if changed.is_ok() && *token_updates.borrow() != token_generation {
+                    let _ = out_tx
+                        .send(VoiceOutput::Control(VoiceServerMsg::Error {
+                            code: "node_token_rotated".to_string(),
+                            message: "node token rotated; reconnect required".to_string(),
+                        }))
+                        .await;
+                }
+                break;
+            }
+            frame = ws_rx.next() => frame,
+        };
+        let Some(frame) = frame else { break };
+        if crate::node_token::active_generation() != token_generation {
+            let _ = out_tx
+                .send(VoiceOutput::Control(VoiceServerMsg::Error {
+                    code: "node_token_rotated".to_string(),
+                    message: "node token rotated; reconnect required".to_string(),
+                }))
+                .await;
+            break;
+        }
         let frame = match frame {
             Ok(f) => f,
             Err(_) => break,
@@ -413,7 +450,6 @@ fn error_frame(code: &str, message: &str) -> Message {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::http::{HeaderMap, HeaderValue};
 
     /// Little-endian PCM16 decode: bytes pair into i16 samples LSB-first, including
     /// negative samples (the mic sends signed audio).
@@ -441,25 +477,16 @@ mod tests {
         assert!(pcm_from_bytes(&[0x42]).is_empty());
     }
 
-    /// `bearer_token` accepts a well-formed `Bearer <t>` and rejects everything else
-    /// (missing header, wrong scheme, empty/whitespace token).
+    /// The upgrade query accepts only the opaque ticket field; bearer credentials
+    /// are exchanged over HTTP before the socket is opened.
     #[test]
-    fn bearer_token_extracts_only_wellformed_bearer() {
-        let mut h = HeaderMap::new();
-        h.insert("authorization", HeaderValue::from_static("Bearer  tok123 "));
-        // Leading spaces after "Bearer " are part of the token per strip_prefix,
-        // then trimmed — a padded token resolves to its trimmed form.
-        assert_eq!(bearer_token(&h).as_deref(), Some("tok123"));
-
-        let mut wrong = HeaderMap::new();
-        wrong.insert("authorization", HeaderValue::from_static("Basic abc"));
-        assert_eq!(bearer_token(&wrong), None);
-
-        let mut empty = HeaderMap::new();
-        empty.insert("authorization", HeaderValue::from_static("Bearer   "));
-        assert_eq!(bearer_token(&empty), None);
-
-        assert_eq!(bearer_token(&HeaderMap::new()), None);
+    fn voice_query_contains_only_a_ticket() {
+        let query: VoiceQuery =
+            serde_json::from_value(serde_json::json!({ "ticket": "opaque-ticket" })).unwrap();
+        assert_eq!(query.ticket.as_deref(), Some("opaque-ticket"));
+        assert!(
+            serde_json::from_value::<VoiceQuery>(serde_json::json!({ "jwt": "legacy" })).is_err()
+        );
     }
 
     /// The error frame is a tagged-union TEXT message the client can route by

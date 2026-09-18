@@ -59,6 +59,8 @@ export interface DockLabelProps {
 export interface DockIconProps {
 	children: ReactNode;
 	className?: string;
+	/** Fraction of the magnified hit area occupied by the artwork. */
+	scale?: number;
 	width?: MotionValue<number>;
 }
 
@@ -238,10 +240,15 @@ export function DockLabel({ children, className, isHovered }: DockLabelProps) {
 	);
 }
 
-export function DockIcon({ children, className, width }: DockIconProps) {
+export function DockIcon({
+	children,
+	className,
+	width,
+	scale = 0.5,
+}: DockIconProps) {
 	const fallbackWidth = useMotionValue(DEFAULT_ITEM_SIZE);
 	const itemWidth = width ?? fallbackWidth;
-	const iconWidth = useTransform(itemWidth, (value) => value / 2);
+	const iconWidth = useTransform(itemWidth, (value) => value * scale);
 
 	return (
 		<motion.div

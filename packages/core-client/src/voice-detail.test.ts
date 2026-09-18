@@ -12,7 +12,10 @@ test("measured word timestamps survive the detailed client without being fabrica
 	];
 	expect(
 		parseTranscriptionDetail({ text: "Hello world", segments: [], words }).words
-	).toEqual([{ ...words[0], text: "Hello" }, words[1]]);
+	).toEqual([
+		{ startMs: 100, endMs: 420, text: "Hello" },
+		{ startMs: 500, endMs: 800, text: "world" },
+	]);
 	expect(
 		parseTranscriptionDetail({ text: "Hello world", segments: [] }).words
 	).toBeUndefined();

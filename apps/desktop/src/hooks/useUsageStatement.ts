@@ -47,29 +47,49 @@ export function useUsageStatement(): UseUsageStatement {
 	const [loadingMore, setLoadingMore] = useState(false);
 	const [error, setError] = useState<CreditsError | null>(null);
 	const activeOrgId = useActiveOrgId();
+	const initialRequest = useRef<AbortController | null>(null);
+	const pageRequest = useRef<AbortController | null>(null);
 	const latestOrgId = useRef(activeOrgId);
 	latestOrgId.current = activeOrgId;
 
 	const load = useCallback(
 		async (next: UsageFilters) => {
+			initialRequest.current?.abort();
+			pageRequest.current?.abort();
+			pageRequest.current = null;
+			const controller = new AbortController();
+			initialRequest.current = controller;
 			const requestOrgId = activeOrgId;
 			setLoading(true);
+			setLoadingMore(false);
 			setError(null);
 			try {
-				const res = await fetchUsage({ ...next, limit: PAGE_SIZE });
-				if (latestOrgId.current !== requestOrgId) {
+				const res = await fetchUsage(
+					{ ...next, limit: PAGE_SIZE },
+					controller.signal
+				);
+				if (controller.signal.aborted || latestOrgId.current !== requestOrgId) {
 					return;
 				}
 				setEntries(res.entries);
 				setStats(res.stats);
 				setCursor(res.nextCursor);
 			} catch (err) {
-				if (latestOrgId.current === requestOrgId) {
+				if (
+					!controller.signal.aborted &&
+					latestOrgId.current === requestOrgId
+				) {
 					setError(err as CreditsError);
 				}
 			} finally {
-				if (latestOrgId.current === requestOrgId) {
+				if (
+					!controller.signal.aborted &&
+					latestOrgId.current === requestOrgId
+				) {
 					setLoading(false);
+				}
+				if (initialRequest.current === controller) {
+					initialRequest.current = null;
 				}
 			}
 		},
@@ -77,30 +97,44 @@ export function useUsageStatement(): UseUsageStatement {
 	);
 
 	const loadMore = useCallback(() => {
-		if (!cursor || loadingMore) {
+		if (!cursor || initialRequest.current || pageRequest.current) {
 			return;
 		}
+		const controller = new AbortController();
+		pageRequest.current = controller;
 		const requestOrgId = activeOrgId;
 		setLoadingMore(true);
-		fetchUsage({ ...filters, before: cursor, limit: PAGE_SIZE })
+		fetchUsage(
+			{ ...filters, before: cursor, limit: PAGE_SIZE },
+			controller.signal
+		)
 			.then((res) => {
-				if (latestOrgId.current !== requestOrgId) {
+				if (controller.signal.aborted || latestOrgId.current !== requestOrgId) {
 					return;
 				}
 				setEntries((prev) => [...prev, ...res.entries]);
 				setCursor(res.nextCursor);
 			})
 			.catch((err) => {
-				if (latestOrgId.current === requestOrgId) {
+				if (
+					!controller.signal.aborted &&
+					latestOrgId.current === requestOrgId
+				) {
 					setError(err as CreditsError);
 				}
 			})
 			.finally(() => {
-				if (latestOrgId.current === requestOrgId) {
+				if (
+					!controller.signal.aborted &&
+					latestOrgId.current === requestOrgId
+				) {
 					setLoadingMore(false);
 				}
+				if (pageRequest.current === controller) {
+					pageRequest.current = null;
+				}
 			});
-	}, [activeOrgId, cursor, filters, loadingMore]);
+	}, [activeOrgId, cursor, filters]);
 
 	const applyFilters = useCallback(
 		(next: UsageFilters) => {
@@ -125,6 +159,10 @@ export function useUsageStatement(): UseUsageStatement {
 		setLoadingMore(false);
 		setError(null);
 		void load({});
+		return () => {
+			initialRequest.current?.abort();
+			pageRequest.current?.abort();
+		};
 	}, [activeOrgId, load]);
 
 	return {

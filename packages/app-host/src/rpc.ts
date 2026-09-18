@@ -125,6 +125,8 @@ export interface WidgetGlobalsPatch {
 	maxHeight?: number | null;
 	safeArea?: { bottom: number; left: number; right: number; top: number };
 	theme?: "light" | "dark";
+	/** Complete resolved Ryu appearance tokens for the widget document. */
+	themeTokens?: Record<string, string>;
 	toolInput?: unknown;
 	toolOutput?: unknown;
 	toolResponseMetadata?: unknown;
@@ -255,6 +257,10 @@ export type Capability =
 	// `activity.*` family, including the `activity.openSession` shell-navigation verb
 	// that opens the chat tab for an item's session id.
 	| "activity.read"
+	// Agent observability actions (grant `activity:run`). Read-side trace capture is
+	// still `activity:read`; running a provider-backed security sweep and importing a
+	// trace into Quality tests are kept behind a separate reviewed grant.
+	| "activity.run"
 	| "background.control"
 	| "warmup.crud"
 	// Timeline (grant `timeline:read`) — the `@ryu/timeline` app renders the
@@ -477,6 +483,38 @@ export type QuestJudgeResult = Record<string, unknown>;
 export interface ActivityRecord {
 	id: string;
 	[key: string]: unknown;
+}
+
+/** Bounded Gateway audit filters accepted by the Activity observability view. */
+export interface ActivityAuditInput {
+	agent_id?: string;
+	errors_only?: boolean;
+	event_type?: string;
+	from?: string;
+	limit?: number;
+	model?: string;
+	provider?: string;
+	until?: string;
+	widget_instance_id?: string;
+}
+
+/** Completed production output submitted to the shared online scorer. */
+export interface ActivityScoreInput {
+	agent_id?: string;
+	assertions?: unknown[];
+	context?: unknown;
+	cost_micro_usd?: number;
+	description?: string;
+	evaluators?: string[];
+	expected?: string;
+	id?: string;
+	latency_ms?: number;
+	metadata?: Record<string, unknown>;
+	model?: string;
+	prompt?: string;
+	response: unknown;
+	threshold?: number;
+	vars?: Record<string, unknown>;
 }
 
 /** A redacted conversation summary for the Chat Broadcast companion. The host
@@ -1175,6 +1213,30 @@ export interface HostServices {
 
 	/** List the unified activity feed (`GET /api/activity`), capped, newest-first. */
 	activityList?(input: { limit?: number }): Promise<ActivityRecord[]>;
+	/** Read Gateway audit rows for the node's observability explorer. */
+	activityAudit?(input: ActivityAuditInput): Promise<Record<string, unknown>>;
+	/** Apply the local Gateway audit retention policy. */
+	activityPrune?(): Promise<Record<string, unknown>>;
+	/** Score a completed output without replaying its provider request. */
+	activityScore?(input: ActivityScoreInput): Promise<Record<string, unknown>>;
+	/** Read Core spans for one conversation/run. */
+	activityTrace?(input: { run_id: string }): Promise<Record<string, unknown>>;
+	/** Run the server-owned bounded security probe campaign for one agent. */
+	activityRedteam?(input: {
+		agent_id: string;
+		model?: string;
+	}): Promise<Record<string, unknown>>;
+	/** Run the shared Promptfoo-compatible quality evaluator for one agent. */
+	activityEval?(input: {
+		agent_id: string;
+		model?: string;
+	}): Promise<Record<string, unknown>>;
+	/** Import a run's last user/assistant pair into the agent's first Quality suite. */
+	activityImportTrace?(input: {
+		agent_id?: string;
+		run_id: string;
+		suite_id?: string;
+	}): Promise<Record<string, unknown>>;
 	/** Open the chat tab for an item's session id. A pure shell-navigation verb (no
 	 *  Core call); fire-and-forget from the frame's view (mirrors the desktop page's
 	 *  clickable row). */
@@ -2073,6 +2135,9 @@ export interface HostServices {
 		kind: "status" | "toolkits" | "triggers" | "connections";
 		toolkit?: string;
 	}): Promise<unknown>;
+	workflowsConnectBindings?(input: { id: string }): Promise<unknown>;
+	workflowsBindConnectTrigger?(input: { id: string; connectTriggerId: string }): Promise<unknown>;
+	workflowsRemoveConnectBinding?(input: { id: string; bindingId: string }): Promise<void>;
 	/** Delete a workflow (`DELETE /workflows/:id`). */
 	workflowsDelete?(input: { id: string }): Promise<void>;
 	/** Read one workflow definition (`GET /workflows/:id`). */
@@ -3659,6 +3724,24 @@ export async function dispatchRpc(
 				);
 			}
 			return await services.workflowsHookEvents();
+		case "workflows.connectBindings": {
+			const input = asConnectWorkflowIdArg(args[0]);
+			if (!input) throw new CodedRpcError("invalid_args", "A saved workflow id is required");
+			if (!services.workflowsConnectBindings) throw new CodedRpcError("server_error", "Connect workflow bindings are not available");
+			return await services.workflowsConnectBindings(input);
+		}
+		case "workflows.bindConnectTrigger": {
+			const input = asWorkflowBindingArg(args[0], "connectTriggerId");
+			if (!input) throw new CodedRpcError("invalid_args", "A workflow id and Connect trigger id are required");
+			if (!services.workflowsBindConnectTrigger) throw new CodedRpcError("server_error", "Connect workflow binding is not available");
+			return await services.workflowsBindConnectTrigger({id:input.id,connectTriggerId:input.value});
+		}
+		case "workflows.removeConnectBinding": {
+			const input = asWorkflowBindingArg(args[0], "bindingId");
+			if (!input) throw new CodedRpcError("invalid_args", "A workflow id and binding id are required");
+			if (!services.workflowsRemoveConnectBinding) throw new CodedRpcError("server_error", "Connect workflow binding removal is not available");
+			return await services.workflowsRemoveConnectBinding({id:input.id,bindingId:input.value});
+		}
 		case "workflows.composio": {
 			const input = asComposioArg(args[0]);
 			if (!input) {
@@ -3987,6 +4070,104 @@ export async function dispatchRpc(
 				);
 			}
 			return await services.activityList(input);
+		}
+		case "activity.audit": {
+			const input = asActivityAuditArg(args[0]);
+			if (!services.activityAudit) {
+				throw new CodedRpcError(
+					"server_error",
+					"activity.audit is not available"
+				);
+			}
+			return await services.activityAudit(input);
+		}
+		case "activity.prune":
+			if (!services.activityPrune) {
+				throw new CodedRpcError(
+					"server_error",
+					"activity.prune is not available"
+				);
+			}
+			return await services.activityPrune();
+		case "activity.score": {
+			const input = asActivityScoreArg(args[0]);
+			if (!input) {
+				throw new CodedRpcError(
+					"invalid_args",
+					"activity.score requires a { response: unknown } object"
+				);
+			}
+			if (!services.activityScore) {
+				throw new CodedRpcError(
+					"server_error",
+					"activity.score is not available"
+				);
+			}
+			return await services.activityScore(input);
+		}
+		case "activity.trace": {
+			const input = asActivityTraceArg(args[0]);
+			if (!input) {
+				throw new CodedRpcError(
+					"invalid_args",
+					"activity.trace requires a { run_id: string } object"
+				);
+			}
+			if (!services.activityTrace) {
+				throw new CodedRpcError(
+					"server_error",
+					"activity.trace is not available"
+				);
+			}
+			return await services.activityTrace(input);
+		}
+		case "activity.redteam": {
+			const input = asActivityRedteamArg(args[0]);
+			if (!input) {
+				throw new CodedRpcError(
+					"invalid_args",
+					"activity.redteam requires a { agent_id: string, model?: string } object"
+				);
+			}
+			if (!services.activityRedteam) {
+				throw new CodedRpcError(
+					"server_error",
+					"activity.redteam is not available"
+				);
+			}
+			return await services.activityRedteam(input);
+		}
+		case "activity.eval": {
+			const input = asActivityRedteamArg(args[0]);
+			if (!input) {
+				throw new CodedRpcError(
+					"invalid_args",
+					"activity.eval requires a { agent_id: string, model?: string } object"
+				);
+			}
+			if (!services.activityEval) {
+				throw new CodedRpcError(
+					"server_error",
+					"activity.eval is not available"
+				);
+			}
+			return await services.activityEval(input);
+		}
+		case "activity.importTrace": {
+			const input = asActivityImportTraceArg(args[0]);
+			if (!input) {
+				throw new CodedRpcError(
+					"invalid_args",
+					"activity.importTrace requires a { run_id: string } object"
+				);
+			}
+			if (!services.activityImportTrace) {
+				throw new CodedRpcError(
+					"server_error",
+					"activity.importTrace is not available"
+				);
+			}
+			return await services.activityImportTrace(input);
 		}
 		case "background.list": {
 			const input = asBackgroundListArg(args[0]);
@@ -6443,6 +6624,170 @@ export function asActivityListArg(data: unknown): { limit?: number } {
 		: {};
 }
 
+/** Narrow the read-only Gateway audit filters used by `activity.audit`. */
+export function asActivityAuditArg(data: unknown): ActivityAuditInput {
+	if (typeof data !== "object" || data === null) {
+		return {};
+	}
+	const o = data as Record<string, unknown>;
+	const result: ActivityAuditInput = {};
+	if (typeof o.agent_id === "string" && o.agent_id.trim().length > 0) {
+		result.agent_id = o.agent_id.trim();
+	}
+	if (typeof o.event_type === "string" && o.event_type.trim().length > 0) {
+		result.event_type = o.event_type.trim();
+	}
+	if (typeof o.model === "string" && o.model.trim().length > 0) {
+		result.model = o.model.trim();
+	}
+	if (typeof o.provider === "string" && o.provider.trim().length > 0) {
+		result.provider = o.provider.trim();
+	}
+	if (typeof o.errors_only === "boolean") {
+		result.errors_only = o.errors_only;
+	}
+	if (typeof o.from === "string" && o.from.length <= 64) {
+		result.from = o.from;
+	}
+	if (typeof o.limit === "number" && Number.isInteger(o.limit) && o.limit > 0) {
+		result.limit = Math.min(o.limit, 1000);
+	}
+	if (typeof o.until === "string" && o.until.length <= 64) {
+		result.until = o.until;
+	}
+	if (
+		typeof o.widget_instance_id === "string" &&
+		o.widget_instance_id.trim().length > 0
+	) {
+		result.widget_instance_id = o.widget_instance_id.trim();
+	}
+	return result;
+}
+
+/** Narrow a completed output for `activity.score` before it reaches Core. */
+export function asActivityScoreArg(data: unknown): ActivityScoreInput | null {
+	if (typeof data !== "object" || data === null) {
+		return null;
+	}
+	const o = data as Record<string, unknown>;
+	if (!("response" in o) || o.response === undefined) {
+		return null;
+	}
+	try {
+		if (JSON.stringify(o.response).length > 1_000_000) {
+			return null;
+		}
+	} catch {
+		return null;
+	}
+	const result: ActivityScoreInput = { response: o.response };
+	for (const key of [
+		"agent_id",
+		"description",
+		"expected",
+		"id",
+		"model",
+		"prompt",
+	] as const) {
+		const value = o[key];
+		if (
+			typeof value === "string" &&
+			value.trim().length > 0 &&
+			value.length <= 4096
+		) {
+			result[key] = value.trim();
+		}
+	}
+	for (const key of ["cost_micro_usd", "latency_ms"] as const) {
+		const value = o[key];
+		if (typeof value === "number" && Number.isFinite(value) && value >= 0) {
+			result[key] = value;
+		}
+	}
+	if (
+		typeof o.threshold === "number" &&
+		Number.isFinite(o.threshold) &&
+		o.threshold >= 0 &&
+		o.threshold <= 1
+	) {
+		result.threshold = o.threshold;
+	}
+	if (Array.isArray(o.assertions) && o.assertions.length <= 100) {
+		result.assertions = o.assertions;
+	}
+	if (Array.isArray(o.evaluators) && o.evaluators.length <= 100) {
+		result.evaluators = o.evaluators.filter(
+			(value): value is string =>
+				typeof value === "string" && value.length <= 256
+		);
+	}
+	if (
+		typeof o.metadata === "object" &&
+		o.metadata !== null &&
+		!Array.isArray(o.metadata)
+	) {
+		result.metadata = o.metadata as Record<string, unknown>;
+	}
+	if (typeof o.vars === "object" && o.vars !== null && !Array.isArray(o.vars)) {
+		result.vars = o.vars as Record<string, unknown>;
+	}
+	if (typeof o.context === "object" && o.context !== null) {
+		result.context = o.context;
+	}
+	return result;
+}
+
+/** Narrow a run id for both trace inspection and trace-to-test import. */
+export function asActivityTraceArg(data: unknown): { run_id: string } | null {
+	if (typeof data !== "object" || data === null) {
+		return null;
+	}
+	const runId = (data as Record<string, unknown>).run_id;
+	return typeof runId === "string" && runId.trim().length > 0
+		? { run_id: runId.trim() }
+		: null;
+}
+
+/** Narrow the trace-import target and optional agent/suite selectors. */
+export function asActivityImportTraceArg(
+	data: unknown
+): { agent_id?: string; run_id: string; suite_id?: string } | null {
+	const trace = asActivityTraceArg(data);
+	if (!trace || typeof data !== "object" || data === null) {
+		return null;
+	}
+	const o = data as Record<string, unknown>;
+	const result: { agent_id?: string; run_id: string; suite_id?: string } =
+		trace;
+	if (typeof o.agent_id === "string" && o.agent_id.trim().length > 0) {
+		result.agent_id = o.agent_id.trim();
+	}
+	if (typeof o.suite_id === "string" && o.suite_id.trim().length > 0) {
+		result.suite_id = o.suite_id.trim();
+	}
+	return result;
+}
+
+/** Narrow the provider-backed security sweep input. */
+export function asActivityRedteamArg(
+	data: unknown
+): { agent_id: string; model?: string } | null {
+	if (typeof data !== "object" || data === null) {
+		return null;
+	}
+	const o = data as Record<string, unknown>;
+	if (typeof o.agent_id !== "string" || o.agent_id.trim().length === 0) {
+		return null;
+	}
+	const result: { agent_id: string; model?: string } = {
+		agent_id: o.agent_id.trim(),
+	};
+	if (typeof o.model === "string" && o.model.trim().length > 0) {
+		result.model = o.model.trim().slice(0, 256);
+	}
+	return result;
+}
+
 /** Narrow an optional background-process list arg. Core applies the running-only
  * default; invalid optional fields are dropped rather than widening the read. */
 export function asBackgroundListArg(data: unknown): {
@@ -7677,6 +8022,26 @@ export function asWorkflowIdArg(data: unknown): { id: string } | null {
 	return { id: o.id };
 }
 
+export function asWorkflowBindingArg(data: unknown, field: "connectTriggerId" | "bindingId"): {id:string;value:string} | null {
+	if (!data || typeof data !== "object" || Array.isArray(data)) return null;
+	const object = data as Record<string, unknown>;
+	if (Object.keys(object).some((key) => key !== "id" && key !== field)) return null;
+	const id = object.id;
+	const value = object[field];
+	if (typeof id !== "string" || !id || id.length > 256 || /\s/.test(id) ||
+		typeof value !== "string" || !value || value.length > 256 || /\s/.test(value)) return null;
+	return {id,value};
+}
+
+/** Strict selector used by the Connect binding read; identity fields are never ignored. */
+export function asConnectWorkflowIdArg(data: unknown): { id: string } | null {
+	if (!data || typeof data !== "object" || Array.isArray(data)) return null;
+	const object = data as Record<string, unknown>;
+	if (Object.keys(object).length !== 1 || typeof object.id !== "string") return null;
+	if (!object.id || object.id.length > 256 || /\s/.test(object.id)) return null;
+	return {id: object.id};
+}
+
 /** Narrow an explicit Webhooks secret read to `{ id: string }`. */
 export function asWebhookSecretIdArg(data: unknown): { id: string } | null {
 	if (typeof data !== "object" || data === null || Array.isArray(data)) {
@@ -7866,6 +8231,9 @@ export function asRecordStartArg(data: unknown): { task: string } | null {
 /** Narrow an unknown postMessage payload to a valid {@link RpcRequest}. Rejects
  *  anything not shaped like our envelope so stray messages never reach dispatch. */
 export function asRpcRequest(data: unknown): RpcRequest | null {
+	const MAX_RPC_ARGS = 16;
+	const MAX_RPC_ID = 2 ** 31 - 1;
+	const MAX_RPC_METHOD_LENGTH = 128;
 	if (typeof data !== "object" || data === null) {
 		return null;
 	}
@@ -7873,8 +8241,14 @@ export function asRpcRequest(data: unknown): RpcRequest | null {
 	if (
 		candidate.kind !== "ryu-plugin-rpc" ||
 		typeof candidate.id !== "number" ||
+		!Number.isSafeInteger(candidate.id) ||
+		candidate.id < 0 ||
+		candidate.id > MAX_RPC_ID ||
 		typeof candidate.method !== "string" ||
-		!Array.isArray(candidate.args)
+		candidate.method.length === 0 ||
+		candidate.method.length > MAX_RPC_METHOD_LENGTH ||
+		!Array.isArray(candidate.args) ||
+		candidate.args.length > MAX_RPC_ARGS
 	) {
 		return null;
 	}

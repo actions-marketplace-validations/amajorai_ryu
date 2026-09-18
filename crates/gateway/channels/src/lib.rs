@@ -49,18 +49,19 @@ pub mod voice_call;
 pub mod whatsapp;
 pub mod whatsapp_format;
 
+use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use tokio::sync::RwLock;
-use tracing::{info, warn};
+use tokio::sync::{OwnedSemaphorePermit, RwLock, Semaphore};
+use tracing::{debug, info, warn};
 
 use crate::commands::ChannelCommand;
 use crate::media::{Attachment, VoiceDelivery, VoiceReplyMode};
-use crate::pairing::{AccessPolicy, Decision, DmPolicy, GroupPolicy, PairingStore};
+use crate::pairing::{AccessPolicy, Decision, DeliveryClaim, DmPolicy, GroupPolicy, PairingStore};
 use crate::status::StatusReporter;
 
 // ─── Channel-layer configuration (transport-adapter shapes) ─────────────────
@@ -557,6 +558,9 @@ pub struct ChannelRuntime {
     pub status: Option<StatusReporter>,
     /// The command menu last fetched from Core.
     commands: RwLock<Vec<ChannelCommand>>,
+    /// Bound concurrent channel turns so a public webhook cannot create an
+    /// unbounded number of model/media tasks while the provider is retrying.
+    delivery_slots: Arc<Semaphore>,
 }
 
 /// The response metadata a Core-routed channel turn needs in addition to text.
@@ -565,6 +569,35 @@ pub struct ChannelRunResult {
     pub reply: String,
     pub assistant_message_id: Option<String>,
     pub assistant_message_ids: Vec<String>,
+}
+
+/// Outcome of one normalized inbound turn.
+///
+/// `Completed` includes an intentional access-policy drop and a pairing prompt:
+/// neither should be re-run when the provider retries the same callback. Only a
+/// transport failure that prevented the final response from being delivered is
+/// retryable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChannelTurnOutcome {
+    Completed,
+    Failed,
+}
+
+/// Maximum number of local attempts after a provider delivery is durably
+/// claimed. The provider remains the outer retry mechanism after this budget is
+/// exhausted, while the durable ledger keeps concurrent callbacks from
+/// multiplying work.
+const DELIVERY_MAX_ATTEMPTS: u32 = 3;
+
+/// Maximum number of webhook turns allowed to run concurrently for one channel
+/// runtime. A full set returns `503` at the provider boundary.
+const MAX_ACTIVE_DELIVERIES: usize = 128;
+
+fn delivery_retry_delay(attempt: u32) -> Duration {
+    match attempt {
+        1 => Duration::from_secs(2),
+        _ => Duration::from_secs(5),
+    }
 }
 
 impl ChannelRuntime {
@@ -580,7 +613,14 @@ impl ChannelRuntime {
             pairing,
             status,
             commands: RwLock::new(Vec::new()),
+            delivery_slots: Arc::new(Semaphore::new(MAX_ACTIVE_DELIVERIES)),
         }
+    }
+
+    /// Reserve one processing slot for a webhook before acknowledging it. A
+    /// failed reservation must be translated into a provider-visible retry.
+    pub fn try_reserve_delivery(&self) -> Option<OwnedSemaphorePermit> {
+        self.delivery_slots.clone().try_acquire_owned().ok()
     }
 
     /// True when this bot routes through Core's session seam. Store-backed
@@ -616,6 +656,7 @@ impl ChannelRuntime {
         conversation_id: &str,
         text: &str,
         author_name: Option<&str>,
+        idempotency_key: Option<&str>,
     ) -> anyhow::Result<ChannelRunResult> {
         let url = format!(
             "{}/api/channels/run",
@@ -631,6 +672,7 @@ impl ChannelRuntime {
                 "team_id": self.cfg.team_id,
                 "text": text,
                 "author_name": author_name,
+                "idempotencyKey": idempotency_key,
             }))
             .send()
             .await?
@@ -839,6 +881,20 @@ pub trait Channel: Send + Sync {
     /// Shared per-bot state (Core route, access policy, command cache).
     fn runtime(&self) -> &ChannelRuntime;
 
+    /// Stable non-secret identity for this channel instance in the node delivery
+    /// ledger. Store-backed records use their control-plane id, so two Telegram
+    /// bots or two WhatsApp numbers cannot collide on the same provider event
+    /// number. Env-configured deployments have at most one instance per
+    /// platform and fall back to the platform name.
+    fn delivery_scope(&self) -> String {
+        self.runtime()
+            .cfg
+            .channel_id
+            .clone()
+            .filter(|id| !id.trim().is_empty())
+            .unwrap_or_else(|| self.name().to_string())
+    }
+
     /// Deliver an outbound reply back to the originating chat.
     async fn send_message(&self, chat_id: &str, text: &str) -> anyhow::Result<()>;
 
@@ -950,6 +1006,149 @@ pub trait Channel: Send + Sync {
     /// Defaults to answering in the originating chat.
     async fn open_thread(&self, chat_id: &str, _message: &InboundMessage) -> String {
         chat_id.to_string()
+    }
+}
+
+/// Build the node-local delivery id from a provider's stable event/message id.
+/// The provider id itself is never used as an unscoped global key because one
+/// node can host multiple channel records of the same platform.
+pub fn scoped_delivery_id<C: Channel + ?Sized>(channel: &C, provider_id: &str) -> String {
+    format!("{}:{}", channel.delivery_scope(), provider_id.trim())
+}
+
+/// Claim one inbound provider delivery before accepting it for asynchronous
+/// processing. Webhook handlers call this while the HTTP request is still open;
+/// a persistence error therefore becomes a provider-visible retry rather than a
+/// `200` for work that was never durably accepted.
+pub async fn claim_inbound_delivery<C: Channel + ?Sized>(
+    channel: &C,
+    provider_id: &str,
+) -> anyhow::Result<(String, DeliveryClaim)> {
+    let delivery_id = scoped_delivery_id(channel, provider_id);
+    let claim = channel
+        .runtime()
+        .pairing
+        .claim_delivery(channel.name(), &delivery_id)
+        .await?;
+    Ok((delivery_id, claim))
+}
+
+/// Process a delivery that has already been claimed. The closure is invoked
+/// serially for up to [`DELIVERY_MAX_ATTEMPTS`] attempts; it must construct a
+/// fresh future (and usually a cloned `InboundMessage`) on each invocation.
+///
+/// A completed record is written only after the shared turn reports that its
+/// terminal action was delivered. A failed record remains reclaimable by a later
+/// provider callback, while an in-flight record suppresses concurrent retries.
+pub async fn run_claimed_delivery<C, F, Fut>(channel: Arc<C>, delivery_id: String, mut work: F)
+where
+    C: Channel + 'static,
+    F: FnMut() -> Fut + Send,
+    Fut: Future<Output = ChannelTurnOutcome> + Send,
+{
+    let platform = channel.name();
+    let ledger = channel.runtime().pairing.clone();
+    for attempt in 1..=DELIVERY_MAX_ATTEMPTS {
+        if work().await == ChannelTurnOutcome::Completed {
+            if let Err(error) = ledger.complete_delivery(platform, &delivery_id).await {
+                warn!(
+                    channel = platform,
+                    %error,
+                    "channel delivery completed but its durable completion could not be persisted"
+                );
+            }
+            return;
+        }
+
+        if attempt == DELIVERY_MAX_ATTEMPTS {
+            if let Err(error) = ledger.fail_delivery(platform, &delivery_id).await {
+                warn!(
+                    channel = platform,
+                    %error,
+                    "channel delivery failed and its failure state could not be persisted"
+                );
+            }
+            warn!(
+                channel = platform,
+                delivery_id = %delivery_id,
+                attempts = DELIVERY_MAX_ATTEMPTS,
+                "channel delivery exhausted local retries; waiting for provider redelivery"
+            );
+            if let Some(reporter) = &channel.runtime().status {
+                reporter
+                    .error("inbound delivery failed after local retries")
+                    .await;
+            }
+            return;
+        }
+
+        warn!(
+            channel = platform,
+            delivery_id = %delivery_id,
+            attempt,
+            "channel delivery failed; retrying"
+        );
+        if let Err(error) = ledger.touch_delivery(platform, &delivery_id).await {
+            warn!(
+                channel = platform,
+                %error,
+                "channel delivery retry lease could not be persisted"
+            );
+        }
+        tokio::time::sleep(delivery_retry_delay(attempt)).await;
+    }
+}
+
+/// Process a claimed webhook while holding a bounded concurrency slot acquired
+/// before the HTTP acknowledgement. Dropping the permit after the terminal
+/// state lets the next provider callback enter without widening the public
+/// queue.
+pub async fn run_claimed_delivery_with_permit<C, F, Fut>(
+    channel: Arc<C>,
+    delivery_id: String,
+    permit: OwnedSemaphorePermit,
+    work: F,
+) where
+    C: Channel + 'static,
+    F: FnMut() -> Fut + Send,
+    Fut: Future<Output = ChannelTurnOutcome> + Send,
+{
+    run_claimed_delivery(channel, delivery_id, work).await;
+    drop(permit);
+}
+
+/// Try to reserve a webhook processing slot without exposing the semaphore
+/// itself to provider adapters.
+pub fn try_reserve_delivery<C: Channel + ?Sized>(channel: &C) -> Option<OwnedSemaphorePermit> {
+    channel.runtime().try_reserve_delivery()
+}
+
+/// Claim and process one delivery for transports that do not need to return an
+/// HTTP acknowledgement themselves (polling, sockets, or a queued webhook
+/// worker).
+pub async fn deliver_inbound<C, F, Fut>(channel: Arc<C>, provider_id: String, mut work: F)
+where
+    C: Channel + 'static,
+    F: FnMut() -> Fut + Send,
+    Fut: Future<Output = ChannelTurnOutcome> + Send,
+{
+    let (delivery_id, claim) = match claim_inbound_delivery(channel.as_ref(), &provider_id).await {
+        Ok(result) => result,
+        Err(error) => {
+            warn!(
+                channel = channel.name(),
+                %error,
+                "channel delivery could not be durably claimed; processing once without dedupe"
+            );
+            let _ = work().await;
+            return;
+        }
+    };
+    match claim {
+        DeliveryClaim::Claimed => run_claimed_delivery(channel, delivery_id, work).await,
+        DeliveryClaim::InFlight | DeliveryClaim::Completed => {
+            debug!(channel = channel.name(), delivery_id = %delivery_id, ?claim, "duplicate channel delivery suppressed");
+        }
     }
 }
 
@@ -1296,8 +1495,21 @@ async fn run_proactive_opening<C: Channel + 'static>(channel: Arc<C>) {
 pub async fn handle_turn<C: Channel + 'static>(
     channel: Arc<C>,
     host: Arc<dyn ChannelHost>,
+    message: InboundMessage,
+) -> ChannelTurnOutcome {
+    handle_turn_with_delivery(channel, host, message, None).await
+}
+
+/// Handle one inbound message with its provider delivery identity. The identity
+/// is forwarded to Core for session-backed turns, where Core can replay a
+/// completed result if the outbound provider call timed out after the model turn
+/// already persisted. Callers without a provider event id use [`handle_turn`].
+pub async fn handle_turn_with_delivery<C: Channel + 'static>(
+    channel: Arc<C>,
+    host: Arc<dyn ChannelHost>,
     mut message: InboundMessage,
-) {
+    delivery_id: Option<&str>,
+) -> ChannelTurnOutcome {
     let runtime = channel.runtime();
     let platform = channel.name();
 
@@ -1324,7 +1536,7 @@ pub async fn handle_turn<C: Channel + 'static>(
                 is_group = message.is_group,
                 "channel inbound refused by access policy"
             );
-            return;
+            return ChannelTurnOutcome::Completed;
         }
         Decision::Challenge(code) | Decision::Pending(code) => {
             info!(
@@ -1337,8 +1549,9 @@ pub async fn handle_turn<C: Channel + 'static>(
                 .await
             {
                 warn!(channel = platform, %err, "failed to deliver pairing prompt");
+                return ChannelTurnOutcome::Failed;
             }
-            return;
+            return ChannelTurnOutcome::Completed;
         }
     }
 
@@ -1368,7 +1581,7 @@ pub async fn handle_turn<C: Channel + 'static>(
             channel = platform,
             "channel inbound had no usable text after media ingest; dropping"
         );
-        return;
+        return ChannelTurnOutcome::Completed;
     }
 
     // 4. Thread the reply where the platform supports it, and key the Core
@@ -1405,6 +1618,7 @@ pub async fn handle_turn<C: Channel + 'static>(
                 &conversation_id,
                 &message.text,
                 message.author_name.as_deref(),
+                delivery_id,
             )
             .await
         {
@@ -1447,7 +1661,7 @@ pub async fn handle_turn<C: Channel + 'static>(
                 %err,
                 "failed to deliver channel reply"
             );
-            return;
+            return ChannelTurnOutcome::Failed;
         }
     };
     if !assistant_message_ids.is_empty() {
@@ -1488,6 +1702,7 @@ pub async fn handle_turn<C: Channel + 'static>(
             }
         }
     }
+    ChannelTurnOutcome::Completed
 }
 
 // NOTE: the legacy `handle_message(&C, host, InboundMessage)` entry point is
@@ -1597,6 +1812,29 @@ pub async fn run_channel<C: Channel + 'static>(
 mod tests {
     use super::*;
 
+    struct TestDeliveryChannel {
+        runtime: ChannelRuntime,
+    }
+
+    #[async_trait::async_trait]
+    impl Channel for TestDeliveryChannel {
+        fn name(&self) -> &'static str {
+            "test"
+        }
+
+        fn runtime(&self) -> &ChannelRuntime {
+            &self.runtime
+        }
+
+        async fn send_message(&self, _chat_id: &str, _text: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn run(self: Arc<Self>, _host: Arc<dyn ChannelHost>) -> anyhow::Result<()> {
+            anyhow::bail!("test channel does not run a transport")
+        }
+    }
+
     #[test]
     fn build_request_body_includes_user_message() {
         let body = build_request_body("gpt-4o", None, "hello");
@@ -1632,6 +1870,58 @@ mod tests {
     fn extract_reply_none_when_missing() {
         let response = json!({ "choices": [] });
         assert!(extract_reply(&response).is_none());
+    }
+
+    #[tokio::test]
+    async fn claimed_delivery_retries_and_completes_after_a_transient_failure() {
+        let channel = Arc::new(TestDeliveryChannel {
+            runtime: ChannelRuntime::new(
+                reqwest::Client::new(),
+                CommonChannelConfig::default(),
+                PairingStore::ephemeral(),
+                None,
+            ),
+        });
+        let (delivery_id, claim) = claim_inbound_delivery(&*channel, "message-1")
+            .await
+            .unwrap();
+        assert_eq!(claim, DeliveryClaim::Claimed);
+
+        let attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let work_attempts = Arc::clone(&attempts);
+        run_claimed_delivery(channel, delivery_id, move || {
+            let attempt = work_attempts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            async move {
+                if attempt == 0 {
+                    ChannelTurnOutcome::Failed
+                } else {
+                    ChannelTurnOutcome::Completed
+                }
+            }
+        })
+        .await;
+
+        assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn delivery_backpressure_is_bounded_and_releases_after_completion() {
+        let runtime = ChannelRuntime::new(
+            reqwest::Client::new(),
+            CommonChannelConfig::default(),
+            PairingStore::ephemeral(),
+            None,
+        );
+        let permits = (0..MAX_ACTIVE_DELIVERIES)
+            .map(|_| runtime.try_reserve_delivery())
+            .collect::<Option<Vec<_>>>()
+            .expect("the configured delivery capacity should be available");
+        assert!(
+            runtime.try_reserve_delivery().is_none(),
+            "a full webhook queue must reject before spawning another task"
+        );
+        drop(permits);
+        assert!(runtime.try_reserve_delivery().is_some());
     }
 
     #[test]

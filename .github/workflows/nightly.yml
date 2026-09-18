@@ -30,8 +30,10 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  # Skip the whole run when main has not moved in the last three hours, so a quiet repo does
-  # not republish identical binaries. Manual dispatch always builds.
+  # Skip the whole run when the current tree is identical to the newest nightly release, so
+  # a quiet repo does not republish identical binaries. Compare with the release rather than
+  # a time window: a delayed schedule must still catch changes, while a repeated schedule
+  # must stay a no-op. Manual dispatch always builds.
   gate:
     runs-on: ubuntu-latest
     outputs:
@@ -42,19 +44,42 @@ jobs:
           fetch-depth: 0
       - id: check
         shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          set -euo pipefail
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             echo "Manual dispatch — building."
             echo "build=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          if [ -n "$(git log --since='3 hours ago' --oneline)" ]; then
-            echo "New commits on main — building."
+
+          previous_tag="$(
+            gh release list --repo "$GITHUB_REPOSITORY" --limit 200 --exclude-drafts \
+              --json tagName,createdAt \
+              --jq '[.[] | select(.tagName | test("^v[0-9]+\\.[0-9]+\\.[0-9]+-nightly\\."))]
+                    | sort_by(.createdAt) | reverse | .[0].tagName // empty'
+          )"
+
+          if [ -z "$previous_tag" ]; then
+            echo "No previous nightly release found — building."
             echo "build=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "No commits in the last 3h — skipping nightly."
-            echo "build=false" >> "$GITHUB_OUTPUT"
+            exit 0
           fi
+
+          # The release tag may not be present in the checkout even with full history when
+          # GitHub created it after the checkout ref was selected. Fetch exactly that tag so
+          # the comparison is against the release's committed tree, not its wall-clock age.
+          git fetch --no-tags origin "refs/tags/$previous_tag:refs/tags/$previous_tag"
+          previous_sha="$(git rev-list -n 1 "$previous_tag")"
+          if git diff --quiet "$previous_sha" "$GITHUB_SHA" --; then
+            echo "No file changes since nightly $previous_tag ($previous_sha) — skipping nightly."
+            echo "build=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "Changes since nightly $previous_tag ($previous_sha) — building."
+          echo "build=true" >> "$GITHUB_OUTPUT"
 
   # Create this run's prerelease BEFORE the matrix uploads, so the parallel build jobs
   # upload into an existing release instead of racing to create it.

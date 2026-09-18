@@ -443,6 +443,12 @@ pub(crate) const BUILTIN_CODE_FILES: &[(&str, &str, &str)] = &[
         "adapters/web.search.js",
         include_str!("../../../../generated/ryu-runtime/plugins-store/plugins/exa/adapters/web.search.js"),
     ),
+    // scrapling
+    (
+        "@ryu/scrapling",
+        "adapters/web.extract.js",
+        include_str!("../../../../generated/ryu-runtime/plugins-store/plugins/scrapling/adapters/web.extract.js"),
+    ),
     (
         "@ryu/goal",
         "hooks/loop.js",

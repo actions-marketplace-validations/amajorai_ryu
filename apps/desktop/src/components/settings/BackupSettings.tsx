@@ -46,6 +46,7 @@ import {
 import { toTarget } from "@/src/lib/api/client.ts";
 import { queryClient } from "@/src/lib/query-client.ts";
 import { spaceListQueryOptions } from "@/src/lib/space-list-query.ts";
+import { formatDateTime } from "@/src/lib/timezone.ts";
 import { SettingsCard, SettingsSection } from "./shared/settings-items.tsx";
 
 const EMPTY: BackupOverview = {
@@ -899,7 +900,7 @@ function ScopedBackupSettings({
 											<div>
 												<p className="text-sm">
 													{scopeLabel(record.scope)} ·{" "}
-													{new Date(record.createdAt).toLocaleString()}
+													{formatDateTime(record.createdAt)}
 												</p>
 												<p className="mt-1 text-muted-foreground text-xs">
 													{bytes(record.bytes)} · Encrypted
@@ -1068,7 +1069,7 @@ function OperationRow({ operation }: { operation: BackupOperation }) {
 				</span>
 			</div>
 			<p className="mt-1 text-muted-foreground text-xs">
-				{new Date(operation.createdAt).toLocaleString()}
+				{formatDateTime(operation.createdAt)}
 				{operation.backup ? ` · ${bytes(operation.backup.bytes)}` : ""}
 			</p>
 			{operation.error && (

@@ -75,27 +75,30 @@ export function useMcp(): UseMcpResult {
 		[url, token, userJwt]
 	);
 	const agentsKey = agentsOptions.queryKey;
-	const serversQuery = useQuery(
-		{
+	const serversOptions = useMemo(
+		() => ({
 			queryKey: serversKey,
-			queryFn: ({ signal }) => fetchMcpServers({ url, token, userJwt }, signal),
+			queryFn: ({ signal }: { signal: AbortSignal }) =>
+				fetchMcpServers({ url, token, userJwt }, signal),
 			staleTime: 30_000,
-		},
-		queryClient
+		}),
+		[serversKey, token, url, userJwt]
 	);
-	const toolsQuery = useQuery(
-		{
+	const toolsOptions = useMemo(
+		() => ({
 			queryKey: [...toolsPrefix, agentFilter],
-			queryFn: ({ signal }) =>
+			queryFn: ({ signal }: { signal: AbortSignal }) =>
 				fetchMcpTools(
 					{ url, token, userJwt },
 					agentFilter ?? undefined,
 					signal
 				),
 			staleTime: 30_000,
-		},
-		queryClient
+		}),
+		[agentFilter, token, toolsPrefix, url, userJwt]
 	);
+	const serversQuery = useQuery(serversOptions, queryClient);
+	const toolsQuery = useQuery(toolsOptions, queryClient);
 	const agentsQuery = useQuery(agentsOptions, queryClient);
 	const servers = serversQuery.data ?? [];
 	const tools = toolsQuery.data ?? [];

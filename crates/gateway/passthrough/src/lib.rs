@@ -42,12 +42,15 @@ pub enum WireFormat {
     OpenAiResponses,
 }
 
-/// True for the Messages endpoint (`.../v1/messages`), the only Anthropic path
-/// with a JSON prompt body. `count_tokens` and other sub-paths are proxied
-/// untouched.
+/// True for Anthropic prompt-bearing endpoints (`.../v1/messages` and
+/// `.../v1/messages/count_tokens`). Both carry message content and must receive
+/// the same request-side DLP treatment; only unrelated sub-paths are untouched.
 pub fn is_messages_path(path: &str) -> bool {
     let p = path.trim_end_matches('/');
-    p == "v1/messages" || p.ends_with("/v1/messages")
+    p == "v1/messages"
+        || p.ends_with("/v1/messages")
+        || p == "v1/messages/count_tokens"
+        || p.ends_with("/v1/messages/count_tokens")
 }
 
 /// True for the Codex Responses endpoint (`.../responses`), the path carrying the
@@ -223,6 +226,132 @@ pub fn redact_sse_event<F: PassthroughFirewall + ?Sized>(
     (out, redacted_text)
 }
 
+/// Redact a complete SSE response with one contiguous assistant-text pass.
+///
+/// Streaming one delta at a time is insufficient for credentials split across
+/// adjacent deltas. This function collects the text-delta payloads, sanitizes
+/// their concatenation, and rewrites the first text event with the redacted
+/// result while emptying later text events. Framing and non-text events remain
+/// intact, and the caller can bound the input before invoking this helper.
+pub fn redact_sse_stream<F: PassthroughFirewall + ?Sized>(
+    format: WireFormat,
+    fw: &F,
+    raw: &str,
+) -> (String, String) {
+    let mut events = Vec::new();
+    let mut text = String::new();
+    for event in raw.split_inclusive("\n\n") {
+        let event_text = sse_event_text(format, event);
+        if let Some(value) = event_text.as_deref() {
+            text.push_str(value);
+        }
+        events.push((event, event_text.is_some()));
+    }
+
+    let sanitized = fw.sanitize(&text);
+    let (sanitized, _) = fw.redact_outbound(&sanitized);
+    let mut inserted = false;
+    let mut out = String::with_capacity(raw.len());
+    for (event, has_text) in events {
+        if !has_text {
+            out.push_str(event);
+            continue;
+        }
+        let replacement = if inserted {
+            ""
+        } else {
+            inserted = true;
+            sanitized.as_str()
+        };
+        out.push_str(&rewrite_sse_event_text(format, event, replacement));
+    }
+    let (out, _) = fw.redact_outbound(&out);
+    (out, sanitized)
+}
+
+fn sse_event_text(format: WireFormat, raw: &str) -> Option<String> {
+    for line in raw.split_inclusive('\n') {
+        let content = line.strip_suffix('\n').unwrap_or(line);
+        let Some(data) = content.strip_prefix("data:") else {
+            continue;
+        };
+        let data = data.trim();
+        if data.is_empty() || data == "[DONE]" {
+            continue;
+        }
+        let json: Value = serde_json::from_str(data).ok()?;
+        match format {
+            WireFormat::Anthropic if json.get("delta").and_then(|d| d.get("text")).is_some() => {
+                return json
+                    .get("delta")
+                    .and_then(|d| d.get("text"))
+                    .and_then(Value::as_str)
+                    .map(str::to_owned);
+            }
+            WireFormat::OpenAiResponses
+                if json
+                    .get("type")
+                    .and_then(Value::as_str)
+                    .is_some_and(|kind| kind.ends_with("output_text.delta")) =>
+            {
+                return json.get("delta").and_then(Value::as_str).map(str::to_owned);
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn rewrite_sse_event_text(format: WireFormat, raw: &str, replacement: &str) -> String {
+    let mut replaced = false;
+    let mut out = String::with_capacity(raw.len());
+    for line in raw.split_inclusive('\n') {
+        let (content, newline) = match line.strip_suffix('\n') {
+            Some(value) => (value, "\n"),
+            None => (line, ""),
+        };
+        let Some(data) = content.strip_prefix("data:") else {
+            out.push_str(line);
+            continue;
+        };
+        let trimmed = data.trim();
+        let Ok(mut json) = serde_json::from_str::<Value>(trimmed) else {
+            out.push_str(line);
+            continue;
+        };
+        let is_text = match format {
+            WireFormat::Anthropic => json.get("delta").and_then(|d| d.get("text")).is_some(),
+            WireFormat::OpenAiResponses => {
+                json.get("type")
+                    .and_then(Value::as_str)
+                    .is_some_and(|kind| kind.ends_with("output_text.delta"))
+                    && json.get("delta").and_then(Value::as_str).is_some()
+            }
+        };
+        if !replaced && is_text {
+            match format {
+                WireFormat::Anthropic => {
+                    json["delta"]["text"] = Value::String(replacement.to_owned())
+                }
+                WireFormat::OpenAiResponses => {
+                    json["delta"] = Value::String(replacement.to_owned())
+                }
+            }
+            replaced = true;
+            let lead_ws = &data[..data.len() - data.trim_start().len()];
+            out.push_str("data:");
+            out.push_str(lead_ws);
+            if let Ok(serialized) = serde_json::to_string(&json) {
+                out.push_str(&serialized);
+                out.push_str(newline);
+                continue;
+            }
+        }
+        out.push_str(line);
+    }
+    out
+}
+
 /// Redact the assistant-text field of a single SSE `data:` JSON payload per
 /// format. Returns the re-serialized JSON + the redacted text, or `None` if the
 /// event is not a text delta or fails to parse (caller passes it through).
@@ -310,7 +439,8 @@ mod tests {
     fn messages_path_detection() {
         assert!(is_messages_path("v1/messages"));
         assert!(is_messages_path("v1/messages/"));
-        assert!(!is_messages_path("v1/messages/count_tokens"));
+        assert!(is_messages_path("v1/messages/count_tokens"));
+        assert!(is_messages_path("proxy/v1/messages/count_tokens/"));
         assert!(!is_messages_path("v1/models"));
     }
 
@@ -397,6 +527,20 @@ mod tests {
         // Non-text events pass through verbatim, framing preserved.
         assert!(out.contains("\"type\":\"message_start\""));
         assert!(out.contains("event: content_block_delta\n"));
+    }
+
+    #[test]
+    fn sse_secret_split_across_text_events_is_redacted() {
+        let fw = StubFirewall;
+        let transcript = concat!(
+            "event: content_block_delta\n",
+            "data: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"SECR\"}}\n\n",
+            "event: content_block_delta\n",
+            "data: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"ET\"}}\n\n",
+        );
+        let (out, text) = redact_sse_stream(WireFormat::Anthropic, &fw, transcript);
+        assert!(!out.contains("SECRET"), "got: {out}");
+        assert_eq!(text, "[REDACTED:test]");
     }
 
     #[test]

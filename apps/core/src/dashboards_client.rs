@@ -47,6 +47,19 @@ const DASHBOARDS_SIDECAR: &str = "ryu-dashboards";
 /// Backoff between SSE reconnect attempts for the nudge subscription.
 const SSE_RECONNECT_EVERY: Duration = Duration::from_secs(5);
 
+fn redact_dashboard_widget_headers(value: &mut Value) {
+    let Some(widgets) = value.get_mut("widgets").and_then(Value::as_array_mut) else {
+        return;
+    };
+    for widget in widgets {
+        if let Some(source) = widget.get_mut("source").and_then(Value::as_object_mut) {
+            if source.remove("headers").is_some() {
+                source.insert("headers_configured".to_owned(), Value::Bool(true));
+            }
+        }
+    }
+}
+
 /// Process-global dashboards client so the state-free `dashboard_builder` MCP
 /// runnable can reach the sidecar without carrying `ServerState`. Set once from
 /// `main.rs`, mirroring the `quests_client` / `monitors_client` pattern.
@@ -108,7 +121,9 @@ impl DashboardsClient {
         if !resp.status().is_success() {
             bail!("dashboards sidecar GET /{id} returned {}", resp.status());
         }
-        Ok(Some(resp.json().await.context("decoding dashboard")?))
+        let mut body: Value = resp.json().await.context("decoding dashboard")?;
+        redact_dashboard_widget_headers(&mut body);
+        Ok(Some(body))
     }
 
     /// Create a dashboard, returning its new id.
@@ -219,6 +234,30 @@ impl DashboardsClient {
             .as_str()
             .map(str::to_owned)
             .ok_or_else(|| anyhow::anyhow!("dashboards sidecar returned no dashboard id"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::redact_dashboard_widget_headers;
+    use serde_json::json;
+
+    #[test]
+    fn dashboard_projections_do_not_return_http_widget_headers() {
+        let mut body = json!({
+            "widgets": [{
+                "source": {
+                    "type": "http",
+                    "url": "https://example.test/data",
+                    "headers": {"Authorization": "Bearer secret"}
+                }
+            }]
+        });
+        redact_dashboard_widget_headers(&mut body);
+        let source = &body["widgets"][0]["source"];
+        assert!(source.get("headers").is_none());
+        assert_eq!(source["headers_configured"], true);
+        assert!(!body.to_string().contains("Bearer secret"));
     }
 }
 
@@ -422,13 +461,20 @@ impl DashboardFeed for DashboardsClient {
         // a fixed backoff until the nudge loop drops its receiver.
         tokio::spawn(async move {
             loop {
-                if tx.is_closed() {
-                    return;
+                tokio::select! {
+                    biased;
+                    _ = tx.closed() => return,
+                    result = client.stream_changes(&tx) => {
+                        if let Err(e) = result {
+                            tracing::debug!("dashboards events stream ended ({e}); retrying");
+                        }
+                    }
                 }
-                if let Err(e) = client.stream_changes(&tx).await {
-                    tracing::debug!("dashboards events stream ended ({e}); retrying");
+                tokio::select! {
+                    biased;
+                    _ = tx.closed() => return,
+                    _ = tokio::time::sleep(SSE_RECONNECT_EVERY) => {}
                 }
-                tokio::time::sleep(SSE_RECONNECT_EVERY).await;
             }
         });
         rx

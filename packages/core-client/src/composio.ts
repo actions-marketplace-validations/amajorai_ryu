@@ -1,10 +1,8 @@
 // apps/desktop/src/lib/api/composio.ts
 //
 // Typed client for Core's Composio browse catalog (`/api/composio/*`). Core uses
-// the user's configured Composio key (Settings → Integrations) to list their
-// available toolkits, actions, and trigger types. Execution itself happens in
-// the gateway; this client only browses descriptors for the agent editor's
-// Tools/Triggers pickers.
+// Connect's tenant-scoped service in remote mode, with embedded compatibility
+// otherwise. These descriptors feed the agent editor's Tools/Triggers pickers.
 
 import { type ApiTarget, request } from "./client.ts";
 
@@ -12,6 +10,7 @@ import { type ApiTarget, request } from "./client.ts";
 export interface ComposioStatus {
 	baseUrl: string;
 	configured: boolean;
+	executionOwner?: "connect";
 }
 
 /** A Composio toolkit (an integration like GitHub, Gmail, Slack). */
@@ -33,6 +32,7 @@ export interface ComposioAction {
 
 /** A Composio trigger type (an event a toolkit can fire). */
 export interface ComposioTrigger {
+	config?: Record<string, unknown> | null;
 	description: string | null;
 	displayName: string;
 	name: string;
@@ -55,6 +55,7 @@ interface ActionWire {
 }
 
 interface TriggerWire {
+	config?: unknown;
 	description?: string | null;
 	display_name?: string;
 	name?: string;
@@ -64,13 +65,17 @@ interface TriggerWire {
 export async function fetchComposioStatus(
 	target: ApiTarget
 ): Promise<ComposioStatus> {
-	const json = await request<{ configured?: boolean; base_url?: string }>(
-		target,
-		"/api/composio/status"
-	);
+	const json = await request<{
+		configured?: boolean;
+		base_url?: string;
+		execution_owner?: string;
+	}>(target, "/api/composio/status");
 	return {
 		configured: json.configured ?? false,
 		baseUrl: json.base_url ?? "",
+		...(json.execution_owner === "connect"
+			? { executionOwner: "connect" as const }
+			: {}),
 	};
 }
 
@@ -120,6 +125,10 @@ export async function fetchComposioTriggers(
 		`/api/composio/triggers?toolkit=${encodeURIComponent(toolkit)}`
 	);
 	return (json.data ?? []).map((t) => ({
+		config:
+			t.config && typeof t.config === "object" && !Array.isArray(t.config)
+				? (t.config as Record<string, unknown>)
+				: null,
 		name: t.name ?? "",
 		displayName: t.display_name ?? t.name ?? "",
 		description: t.description ?? null,

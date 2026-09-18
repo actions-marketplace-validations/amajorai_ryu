@@ -1,7 +1,7 @@
 {
   "name": "desktop",
   "private": true,
-  "version": "0.3.1",
+  "version": "0.4.0",
   "type": "module",
   "scripts": {
     "dev": "node scripts/dev.mjs",
@@ -24,9 +24,11 @@
     "test:wiring": "bun test e2e/wiring/",
     "build:harness": "vite build --config e2e/harness/vite.harness.config.ts",
     "build:harness:welcome": "vite build --config e2e/harness/vite.welcome.config.ts",
+    "build:harness:onboarding-final": "vite build --config e2e/harness/vite.onboarding-final-step.config.ts",
     "licenses": "node ../../tools/generate-desktop-licenses.mjs",
     "licenses:check": "node ../../tools/generate-desktop-licenses.mjs --check",
     "test:e2e:welcome": "playwright test --config e2e/welcome-step-story.playwright.config.ts",
+    "test:e2e:onboarding-final": "playwright test --config e2e/onboarding-final-step.playwright.config.ts",
     "clean": "rm -rf src-tauri/target dist build",
     "brand:dev": "node ../../scripts/release/channel-brand.mjs --channel dev --config apps/desktop/src-tauri/tauri.dev.conf.json"
   },

@@ -7,10 +7,10 @@
   "termsOfServiceUrl": "https://ryuhq.com/terms",
   "id": "@ryu/activity",
   "name": "Activity",
-  "version": "0.1.14",
+  "version": "0.1.15",
   "stability": "experimental",
   "category": "Productivity",
-  "description": "The unified activity feed: everything happening on this node — monitor alerts, finished tasks, runs, approvals, meetings, and notes — newest first, grouped by day.",
+  "description": "The unified activity feed and agent observability workspace: inspect local audits, correlated traces, quality, and security evidence alongside monitor alerts, finished tasks, runs, approvals, meetings, and notes.",
   "tagline": "Everything happening on this node, newest first",
   "keywords": ["activity", "feed", "notifications", "history"],
   "icon": "activity-03",
@@ -40,12 +40,17 @@
       }
     }
   ],
-  "permission_grants": ["activity:read", "shell:integrate"],
+  "permission_grants": ["activity:read", "activity:run", "shell:integrate"],
   "permission_levels": [
     {
       "id": "activity.view",
       "label": "Can view",
       "description": "See the node's activity feed: every monitor alert, finished run, approval, meeting, and note."
+    },
+    {
+      "id": "activity.run",
+      "label": "Can run checks",
+      "description": "Run bounded security probes, score completed outputs, capture traces as quality tests, and apply local audit retention."
     }
   ],
   "companion": {

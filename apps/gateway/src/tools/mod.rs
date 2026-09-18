@@ -374,7 +374,10 @@ async fn handle_search(
         if existing.contains(&model_name) {
             continue;
         }
-        match catalog.describe(&d.id).await {
+        match catalog
+            .describe_for_agent(&d.id, ctx.agent_id.as_deref())
+            .await
+        {
             Ok(described) => {
                 existing.insert(catalog_client::model_tool_name(&described.id));
                 to_inject.push(described.to_tool_def());
@@ -404,7 +407,10 @@ async fn handle_search(
         .any(|d| d.kind == catalog_client::ToolKind::Skill);
     let skills_load_model_name = catalog_client::model_tool_name(SKILLS_LOAD_TOOL_ID);
     if surfaced_a_skill && !existing.contains(&skills_load_model_name) {
-        match catalog.describe(SKILLS_LOAD_TOOL_ID).await {
+        match catalog
+            .describe_for_agent(SKILLS_LOAD_TOOL_ID, ctx.agent_id.as_deref())
+            .await
+        {
             Ok(described) => {
                 existing.insert(skills_load_model_name);
                 to_inject.push(described.to_tool_def());
@@ -588,6 +594,7 @@ mod tests {
         search_results: Vec<catalog_client::ToolDescriptor>,
         described: std::collections::HashMap<String, catalog_client::DescribedTool>,
         executed: Mutex<Vec<String>>,
+        described_scopes: Mutex<Vec<Option<String>>>,
     }
 
     #[async_trait]
@@ -606,6 +613,17 @@ mod tests {
                 .get(id)
                 .cloned()
                 .ok_or_else(|| format!("unknown {id}"))
+        }
+        async fn describe_for_agent(
+            &self,
+            id: &str,
+            agent: Option<&str>,
+        ) -> Result<catalog_client::DescribedTool, String> {
+            self.described_scopes
+                .lock()
+                .unwrap()
+                .push(agent.map(str::to_owned));
+            self.describe(id).await
         }
         async fn call_tool(
             &self,
@@ -905,6 +923,11 @@ mod tests {
         assert_eq!(out["choices"][0]["message"]["content"], "done");
         // exa.search is not a Composio tool ⇒ not billable.
         assert_eq!(billable, 0);
+
+        assert_eq!(
+            *catalog.described_scopes.lock().unwrap(),
+            vec![Some("agent1".to_owned())]
+        );
 
         // The body's tools must now include the described exa.search def.
         let names: Vec<&str> = body["tools"]

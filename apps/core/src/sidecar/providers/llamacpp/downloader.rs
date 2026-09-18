@@ -56,6 +56,57 @@ fn archive_url(variant: LlamaVariant) -> Result<String> {
     ))
 }
 
+/// SHA-256 digests published by GitHub for the pinned `b10218` release assets.
+///
+/// Engine downloads are deliberately required to carry a checksum by the
+/// shared DownloadCenter. Keeping the digest next to the compile-time release
+/// pin makes the URL, platform gate, and verification requirement one contract;
+/// an unknown future asset fails closed instead of silently downloading an
+/// executable without verification. Values were read from the release asset
+/// metadata at `https://api.github.com/repos/ggml-org/llama.cpp/releases/tags/b10218`.
+fn archive_sha256(variant: LlamaVariant) -> Result<&'static str> {
+    let platform = variant.asset_slug().ok_or_else(|| {
+        anyhow::anyhow!(
+            "llama.cpp publishes no {} build for {}-{}",
+            variant.as_str(),
+            std::env::consts::OS,
+            std::env::consts::ARCH
+        )
+    })?;
+    archive_sha256_for_platform(platform).ok_or_else(|| {
+        anyhow::anyhow!(
+            "no pinned SHA-256 digest for llama.cpp release asset platform '{platform}'"
+        )
+    })
+}
+
+fn archive_sha256_for_platform(platform: &str) -> Option<&'static str> {
+    match platform {
+        "macos-arm64" => Some("f3e87f1664c09183a861f16758c55a5adc925672705cd3a47e3dc4444504c914"),
+        "macos-x64" => Some("3cfdcb4c0a2071b470577cf26e182baf9a51edff09a8c89d9252d2d5c7d4b849"),
+        "ubuntu-arm64" => Some("9692bd7147325654b69c62fb7780118c0a2579945a014dda53ca909b3bc7829e"),
+        "ubuntu-x64" => Some("78ec7a1964710918030e85c132a0995b10b07e4f43001bdf54fe0fd48d1eb85b"),
+        "ubuntu-vulkan-arm64" => {
+            Some("608cc42c4718db8faba5b16b15f70b0d52c0a04512c6a6e39f05518b734e1cec")
+        }
+        "ubuntu-vulkan-x64" => {
+            Some("ea12376a18e1c0cb39e32ada5ad797ec7e49f3b8a8583b9f81627a0b63e9c454")
+        }
+        "win-cpu-arm64" => Some("8407f05d4cc6e614eb8391de4c39af549428a6341603f1023355f5bd326611ba"),
+        "win-cpu-x64" => Some("678d67405b12abd8ea3541ec6f501c10c9c15ba3cd0767bf090f79eb51168a17"),
+        "win-cuda-12.4-x64" => {
+            Some("28b08668627672d9f91ff716c32cd08e1d8d14b2e65427627951e5fc29d802a1")
+        }
+        "win-cuda-13.3-x64" => {
+            Some("c275a6a5923e1d665d0b1d2b32ae266241a83936e9a5c2f0453b99d21877c88f")
+        }
+        "win-vulkan-x64" => {
+            Some("5196ca655a6126ce368ee589c24604eaa491e5057c1edf2890c888f43764663d")
+        }
+        _ => None,
+    }
+}
+
 /// The CUDA runtime archive that a Windows CUDA build needs beside it. Upstream
 /// ships the `ggml-cuda` backend and the CUDA runtime DLLs as **two** archives;
 /// installing only the first yields a `llama-server.exe` that fails to load its
@@ -69,6 +120,19 @@ fn cudart_url(variant: LlamaVariant) -> Option<String> {
     Some(format!(
         "https://github.com/ggml-org/llama.cpp/releases/download/{TARGET_VERSION}/cudart-llama-bin-{slug}.zip"
     ))
+}
+
+fn cudart_sha256(variant: LlamaVariant) -> Option<&'static str> {
+    let platform = variant.asset_slug()?;
+    match platform {
+        "win-cuda-12.4-x64" => {
+            Some("8c79a9b226de4b3cacfd1f83d24f962d0773be79f1e7b75c6af4ded7e32ae1d6")
+        }
+        "win-cuda-13.3-x64" => {
+            Some("1462a050eb4c684921ba51dcc4cc488a036674c3e73e9945ee705b854808d03e")
+        }
+        _ => None,
+    }
 }
 
 /// llama.cpp ships Windows release assets as `.zip` and macOS/Linux assets as
@@ -215,7 +279,7 @@ impl LlamaCppDownloader {
                 label: format!("llama.cpp ({})", wanted.label()),
                 url,
                 dest: archive_dest,
-                sha256: None,
+                sha256: Some(archive_sha256(wanted)?.to_owned()),
                 version_record: None,
             })
             .await
@@ -252,7 +316,7 @@ impl LlamaCppDownloader {
         // The Windows CUDA build needs the CUDA runtime DLLs from a second
         // archive dropped beside it, or it cannot load `ggml-cuda`.
         if let Some(url) = cudart_url(wanted) {
-            self.install_cudart(downloads, &url, &bin_dir)
+            self.install_cudart(downloads, wanted, &url, &bin_dir)
                 .await
                 .context("installing the CUDA runtime for llama.cpp")?;
         }
@@ -303,6 +367,7 @@ impl LlamaCppDownloader {
     async fn install_cudart(
         &self,
         downloads: &crate::downloads::DownloadCenter,
+        variant: LlamaVariant,
         url: &str,
         bin_dir: &std::path::Path,
     ) -> Result<()> {
@@ -316,7 +381,13 @@ impl LlamaCppDownloader {
                 label: "CUDA runtime".to_string(),
                 url: url.to_string(),
                 dest,
-                sha256: None,
+                sha256: Some(
+                    cudart_sha256(variant)
+                        .ok_or_else(|| {
+                            anyhow::anyhow!("no pinned SHA-256 digest for CUDA runtime")
+                        })?
+                        .to_owned(),
+                ),
                 version_record: None,
             })
             .await
@@ -397,7 +468,7 @@ impl LlamaCppDownloader {
                 label: "llama-tts".to_string(),
                 url,
                 dest: archive_dest,
-                sha256: None,
+                sha256: Some(archive_sha256(wanted)?.to_owned()),
                 version_record: None,
             })
             .await
@@ -436,5 +507,38 @@ impl LlamaCppDownloader {
 impl Default for LlamaCppDownloader {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{archive_sha256_for_platform, cudart_sha256};
+    use crate::sidecar::providers::llamacpp::variant::LlamaVariant;
+
+    #[test]
+    fn every_release_archive_platform_has_a_pinned_digest() {
+        for platform in [
+            "macos-arm64",
+            "macos-x64",
+            "ubuntu-arm64",
+            "ubuntu-x64",
+            "ubuntu-vulkan-arm64",
+            "ubuntu-vulkan-x64",
+            "win-cpu-arm64",
+            "win-cpu-x64",
+            "win-cuda-12.4-x64",
+            "win-cuda-13.3-x64",
+            "win-vulkan-x64",
+        ] {
+            let digest = archive_sha256_for_platform(platform).expect(platform);
+            assert_eq!(digest.len(), 64, "digest for {platform} must be SHA-256");
+            assert!(digest.bytes().all(|byte| byte.is_ascii_hexdigit()));
+        }
+    }
+
+    #[test]
+    fn unsupported_release_assets_fail_closed() {
+        assert!(archive_sha256_for_platform("unknown-platform").is_none());
+        assert!(cudart_sha256(LlamaVariant::Cpu).is_none());
     }
 }

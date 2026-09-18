@@ -139,7 +139,12 @@ pub async fn download(
     for (name, value) in extra_headers {
         req = req.header(*name, *value);
     }
-    let resp = req.send().await?.error_for_status()?;
+    let resp = req
+        .send()
+        .await
+        .map_err(reqwest::Error::without_url)?
+        .error_for_status()
+        .map_err(reqwest::Error::without_url)?;
 
     // Trust the declared length when present so an oversized body is refused
     // before it is buffered.
@@ -185,8 +190,10 @@ pub async fn transcribe(
         .multipart(form)
         .timeout(MEDIA_TIMEOUT)
         .send()
-        .await?
-        .error_for_status()?;
+        .await
+        .map_err(reqwest::Error::without_url)?
+        .error_for_status()
+        .map_err(reqwest::Error::without_url)?;
     let parsed: TranscribeResponse = resp.json().await?;
     debug!(chars = parsed.text.len(), "transcribed inbound audio");
     Ok(parsed.text)
@@ -203,8 +210,10 @@ pub async fn speak(http: &reqwest::Client, core_url: &str, text: &str) -> anyhow
         .json(&serde_json::json!({ "text": text }))
         .timeout(MEDIA_TIMEOUT)
         .send()
-        .await?
-        .error_for_status()?;
+        .await
+        .map_err(reqwest::Error::without_url)?
+        .error_for_status()
+        .map_err(reqwest::Error::without_url)?;
     Ok(resp.bytes().await?.to_vec())
 }
 

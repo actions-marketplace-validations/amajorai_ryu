@@ -17,6 +17,7 @@ import type {
 	LiveActivityStatus,
 } from "@ryu/app-host/live-activity";
 import { isLiveStatus } from "@ryu/app-host/live-activity";
+import { replaceEqualDeep } from "@tanstack/react-query";
 import { create } from "zustand";
 import { useShallow } from "zustand/react/shallow";
 
@@ -25,6 +26,13 @@ interface LiveActivityState {
 	activities: Record<string, LiveActivity>;
 	/** Replace the whole set (a streamed snapshot, e.g. the runs snapshot). */
 	applySnapshot: (activities: LiveActivity[]) => void;
+	/** Replace only one producer's activities, preserving other sources. */
+	applySourceSnapshot: (
+		appId: string,
+		kind: string,
+		activities: LiveActivity[],
+		idPrefix?: string
+	) => void;
 	/** Drop one activity (removed/decided server-side). */
 	remove: (id: string) => void;
 	/** Clear the local registry (e.g. on node switch before re-subscribing). */
@@ -39,11 +47,40 @@ export const useLiveActivityStore = create<LiveActivityState>((set) => ({
 		set(() => ({
 			activities: Object.fromEntries(activities.map((a) => [a.id, a])),
 		})),
+	applySourceSnapshot: (appId, kind, activities, idPrefix) =>
+		set((state) => {
+			const next = Object.fromEntries(
+				[
+					...Object.values(state.activities).filter(
+						(activity) =>
+							activity.appId !== appId ||
+							activity.kind !== kind ||
+							(idPrefix !== undefined && !activity.id.startsWith(idPrefix))
+					),
+					...activities.filter(
+						(activity) =>
+							activity.appId === appId &&
+							activity.kind === kind &&
+							(idPrefix === undefined || activity.id.startsWith(idPrefix))
+					),
+				].map((activity) => [activity.id, activity])
+			);
+			const shared = replaceEqualDeep(state.activities, next);
+			return shared === state.activities ? state : { activities: shared };
+		}),
 	upsert: (activity) =>
-		set((s) => ({ activities: { ...s.activities, [activity.id]: activity } })),
+		set((state) => {
+			const shared = replaceEqualDeep(state.activities[activity.id], activity);
+			return shared === state.activities[activity.id]
+				? state
+				: { activities: { ...state.activities, [activity.id]: shared } };
+		}),
 	remove: (id) =>
-		set((s) => {
-			const next = { ...s.activities };
+		set((state) => {
+			if (!Object.hasOwn(state.activities, id)) {
+				return state;
+			}
+			const next = { ...state.activities };
 			delete next[id];
 			return { activities: next };
 		}),

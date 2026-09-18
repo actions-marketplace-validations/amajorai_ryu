@@ -157,10 +157,10 @@ pub fn parse_pack_source(raw: &str) -> Result<PackSource> {
     anyhow::bail!("pack source must be `owner/repo`, a github/skills.sh URL, or a custom manifest")
 }
 
-/// The built-in pack catalog — the packs Ryu ships and manages. A pack is a repo
-/// whose `SKILL.md` directories are its members. This is the "skill packs you get
-/// for free" set, mirroring the bundled system-skills catalog in
-/// [`crate::skills_catalog::system_skills`].
+/// The built-in pack catalog — the optional external packs Ryu recommends during
+/// node onboarding. A pack is a repo whose `SKILL.md` directories are its members.
+/// The catalog is available without installing anything; the node's explicit
+/// onboarding selection decides which packs Core fetches.
 pub const BUILTIN_PACKS: &[(&str, &str)] = &[
     // (id/owner-repo, one-line description)
     (
@@ -554,7 +554,12 @@ pub async fn install_skill_by_id(client: &reqwest::Client, id: &str) -> Result<I
         let repo_full = format!("{owner}/{repo}");
         if repo_from_ref(&repo_full).is_some() {
             if slug == repo {
-                return from_source::install_from_source(client, &repo_full).await;
+                return from_source::install_from_source_named(
+                    client,
+                    &repo_full,
+                    Some(slug.as_str()),
+                )
+                .await;
             }
             return skills_catalog::install_skill(client, id).await;
         }

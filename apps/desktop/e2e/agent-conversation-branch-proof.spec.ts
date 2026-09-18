@@ -23,6 +23,73 @@ test("shows inline bot threads, fallback group chats, and agent-to-agent transcr
 		.click();
 	await expect(page.getByTestId("agent-thread-list")).toBeVisible();
 	await expect(page.getByText("Design review (branch)")).toBeVisible();
+	const sessionRow = page.getByTestId("agent-thread-row-builder-branch");
+	await sessionRow.click({ modifiers: ["Alt"], force: true });
+	await expect(page.getByTestId("opened-thread")).toHaveText(
+		"Quick reply builder-branch"
+	);
+	const sessionBounds = await sessionRow.boundingBox();
+	if (!sessionBounds) {
+		throw new Error("Agent session row did not expose layout bounds");
+	}
+	await page.keyboard.down("Shift");
+	await page.mouse.move(
+		sessionBounds.x + sessionBounds.width / 2,
+		sessionBounds.y + sessionBounds.height / 2
+	);
+	await page.mouse.down();
+	await page.waitForTimeout(500);
+	const sessionPreview = page.getByTestId("quick-preview");
+	await expect(sessionPreview).toBeVisible();
+	await expect(sessionPreview).toContainText("The branch keeps the main chat");
+	await expect(page.getByTestId("opened-thread")).toHaveText(
+		"Quick reply builder-branch"
+	);
+	await page.mouse.up();
+	await page.keyboard.up("Shift");
+	await sessionPreview.getByRole("button", { name: "Mark as unread" }).click();
+	await expect(
+		sessionPreview.getByRole("button", { name: "Mark as read" })
+	).toBeVisible();
+	await sessionPreview.getByRole("button", { name: "Mark as read" }).click();
+	await page.getByRole("button", { name: "Close" }).click();
+	await expect(sessionPreview).not.toBeVisible();
+	await sessionRow.hover();
+	await expect(
+		page.getByRole("button", {
+			name: "More actions for Design review (branch)",
+		})
+	).toBeVisible();
+	await page
+		.getByRole("button", {
+			name: "More actions for Design review (branch)",
+		})
+		.click();
+	await expect(
+		page.getByRole("menuitem", { name: "Quick reply", exact: true })
+	).toBeVisible();
+	await page.keyboard.press("Escape");
+	await sessionRow.click({ button: "right", force: true });
+	await expect(
+		page.getByRole("menuitem", { name: "Quick reply", exact: true })
+	).toBeVisible();
+	await expect(
+		page.getByRole("menuitem", { name: "Mark as unread", exact: true })
+	).toBeVisible();
+	await page
+		.getByRole("menuitem", { name: "Quick reply", exact: true })
+		.click();
+	await sessionRow.click({ button: "right", force: true });
+	await page
+		.getByRole("menuitem", { name: "Mark as unread", exact: true })
+		.click();
+	await sessionRow.click({ button: "right", force: true });
+	await expect(
+		page.getByRole("menuitem", { name: "Mark as read", exact: true })
+	).toBeVisible();
+	await page
+		.getByRole("menuitem", { name: "Mark as read", exact: true })
+		.click();
 	await page.getByRole("button", { name: "Show 1 more" }).first().click();
 	await expect(page.getByText("Design review", { exact: true })).toBeVisible();
 

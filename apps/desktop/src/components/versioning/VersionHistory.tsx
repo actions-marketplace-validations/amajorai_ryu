@@ -339,16 +339,28 @@ export function VersionHistory({
 									className="flex flex-col gap-1 rounded-md border p-2"
 									key={v.id}
 								>
-									<div className="flex items-center gap-2">
-										{v.label ? (
-											<Badge className="text-[10px]" variant="secondary">
-												{v.label}
-											</Badge>
-										) : null}
-										<span className="text-muted-foreground text-xs">
-											{formatDateTime(v.createdAt)}
-										</span>
-										<div className="ml-auto flex items-center gap-1">
+									<div className="flex items-start gap-2">
+										<div className="min-w-0 flex-1">
+											{v.title ? (
+												<span
+													className="block truncate font-medium text-xs"
+													title={v.title}
+												>
+													{v.title}
+												</span>
+											) : null}
+											<div className="flex flex-wrap items-center gap-2">
+												{v.label ? (
+													<Badge className="text-[10px]" variant="secondary">
+														{v.label}
+													</Badge>
+												) : null}
+												<span className="text-muted-foreground text-xs">
+													{formatDateTime(v.createdAt)}
+												</span>
+											</div>
+										</div>
+										<div className="flex shrink-0 items-center gap-1">
 											<Button
 												className="text-[11px]"
 												onClick={() => handleToggleDiff(v.id)}

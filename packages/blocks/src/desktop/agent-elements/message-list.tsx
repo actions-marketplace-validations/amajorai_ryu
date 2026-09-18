@@ -121,6 +121,7 @@ import {
 	reconcileUnreadMessageState,
 	type UnreadMessageState,
 } from "./message-list-unread.ts";
+import type { MessageReadReceiptState } from "./message-read-receipt.tsx";
 import { AcpUsageStats, MessageStats } from "./message-stats.tsx";
 import { PinnedUserMessageBar } from "./pinned-user-message-bar.tsx";
 import { shouldShowPlanning } from "./planning-visibility.ts";
@@ -166,6 +167,22 @@ import {
 import { extractCitations } from "./utils/citations.ts";
 import { normalizeAssistantToolParts } from "./utils/tool-part-normalizer.ts";
 import { WorkflowRunProgressCard } from "./workflow-run-part.tsx";
+
+function messageIsPersisted(message: UIMessage): boolean {
+	const candidate = message as UIMessage & {
+		metadata?: unknown;
+		persisted?: unknown;
+	};
+	if (candidate.persisted === true) {
+		return true;
+	}
+	if (typeof candidate.metadata !== "object" || candidate.metadata === null) {
+		return false;
+	}
+	return (
+		(candidate.metadata as { ryuPersisted?: unknown }).ryuPersisted === true
+	);
+}
 
 export interface MessageListProps {
 	/** Agent identities used when an agent-comms tool becomes a transcript activity. */
@@ -267,6 +284,8 @@ export interface MessageListProps {
 	/** Contributed per-message toolbar actions (see {@link ContributedMessageAction}),
 	 *  rendered after the built-ins. Filtered to the message's `target` by the shell. */
 	messageActions?: ContributedMessageAction[];
+	/** Durable read markers grouped by message id for the transcript footer. */
+	messageReadReceipts?: ReadonlyMap<string, MessageReadReceiptState>;
 	messages: UIMessage[];
 	onAgentUiSubmit?: AgentUiSubmit;
 	onAnnotateImage?: (image: {
@@ -299,6 +318,8 @@ export interface MessageListProps {
 	onEditMessage?: (messageId: string, newText: string) => void;
 	/** Request the next older message page when the viewport reaches the top. */
 	onLoadOlderMessages?: () => Promise<void>;
+	/** Called when a persisted user message enters the viewport. */
+	onMessageVisible?: (messageId: string) => void;
 	/**
 	 * Open a project file referenced by assistant output or tool summaries.
 	 */
@@ -366,6 +387,7 @@ export interface MessageListProps {
 			actions?: React.ReactNode;
 			message: UIMessage;
 			className?: string;
+			readReceipt?: MessageReadReceiptState;
 			currentUser?: {
 				avatar?: string;
 				name?: string;
@@ -1700,6 +1722,7 @@ export const MessageList = memo(function MessageList({
 	loadingOlderMessages,
 	messageActions,
 	messageActionStates,
+	messageReadReceipts,
 	onContributedMessageAction,
 	selectionActions,
 	onContributedSelectionAction,
@@ -1717,6 +1740,7 @@ export const MessageList = memo(function MessageList({
 	onWorkflowResume,
 	previewResolvers,
 	mentionItems,
+	onMessageVisible,
 	suppressQuestionTool = false,
 	initialScrollBehavior = "bottom",
 	enableImagePreview = true,
@@ -2113,6 +2137,41 @@ export const MessageList = memo(function MessageList({
 		enabled: !isCompact,
 		viewportRef,
 	});
+
+	// A receipt is recorded when a user-authored message actually enters the
+	// viewport, not merely when the conversation is opened. The observer is kept
+	// here because this is the shared transcript's one stable message-row DOM
+	// boundary; callers only receive the durable message id.
+	useEffect(() => {
+		if (!onMessageVisible || typeof IntersectionObserver === "undefined") {
+			return;
+		}
+		const container = scrollerRef.current;
+		if (!container) {
+			return;
+		}
+		const observer = new IntersectionObserver(
+			(entries) => {
+				for (const entry of entries) {
+					if (!entry.isIntersecting) {
+						continue;
+					}
+					const messageId = (entry.target as HTMLElement).dataset.messageId;
+					if (messageId) {
+						onMessageVisible(messageId);
+					}
+				}
+			},
+			{ root: viewportRef.current, threshold: 0.1 }
+		);
+		const rows = container.querySelectorAll<HTMLElement>(
+			'[data-slot="message-scroller-item"][data-message-id]'
+		);
+		for (const row of rows) {
+			observer.observe(row);
+		}
+		return () => observer.disconnect();
+	}, [onMessageVisible, turns]);
 
 	// --- messaging-style user runs -----------------------------------------
 	// A "run" is consecutive messages from the same speaker: one avatar for the
@@ -2517,6 +2576,12 @@ export const MessageList = memo(function MessageList({
 													onOpenLink={onOpenLink}
 													onOpenMention={onOpenMention}
 													previewResolvers={previewResolvers}
+													readReceipt={
+														messageReadReceipts?.get(userMsgId) ??
+														(messageIsPersisted(turn.userMsg)
+															? { delivered: true, readers: [] }
+															: undefined)
+													}
 												/>
 												{!isEditingThis &&
 													userVersion &&

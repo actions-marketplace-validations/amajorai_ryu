@@ -213,11 +213,13 @@ export function supportsSubscriptionProviderUsage(
  */
 export async function fetchAgentUsage(
 	target: ApiTarget,
-	agentId: string
+	agentId: string,
+	signal?: AbortSignal
 ): Promise<UsageSnapshot> {
 	const wire = await request<WireSnapshot>(
 		target,
-		`/api/agents/${encodeURIComponent(agentId)}/usage`
+		`/api/agents/${encodeURIComponent(agentId)}/usage`,
+		{ signal }
 	);
 	return toSnapshot(wire);
 }
@@ -230,11 +232,13 @@ export async function fetchAgentUsage(
 export async function fetchProviderAccountUsage(
 	target: ApiTarget,
 	providerId: string,
-	accountId: string
+	accountId: string,
+	signal?: AbortSignal
 ): Promise<UsageSnapshot> {
 	const wire = await request<WireSnapshot>(
 		target,
-		`/api/pi-config/providers/${encodeURIComponent(providerId)}/accounts/${encodeURIComponent(accountId)}/usage`
+		`/api/pi-config/providers/${encodeURIComponent(providerId)}/accounts/${encodeURIComponent(accountId)}/usage`,
+		{ signal }
 	);
 	return toSnapshot(wire);
 }

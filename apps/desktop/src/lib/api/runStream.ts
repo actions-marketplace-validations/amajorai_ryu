@@ -64,30 +64,51 @@ export async function streamRuns(
 	onFrame: (frame: RunStreamFrame) => void,
 	signal: AbortSignal
 ): Promise<void> {
-	const resp = await authenticatedFetch(target, "/api/runs/stream", {
-		method: "GET",
-		headers: { Accept: "text/event-stream" },
-		signal,
-	});
-	if (!(resp.ok && resp.body)) {
-		throw new Error(`runs stream failed: ${resp.status}`);
+	const controller = new AbortController();
+	const abort = () => controller.abort(signal.reason);
+	if (signal.aborted) {
+		abort();
+	} else {
+		signal.addEventListener("abort", abort, { once: true });
 	}
-	const reader = resp.body.getReader();
-	const decoder = new TextDecoder();
-	let buffer = "";
-	for (;;) {
-		const { done, value } = await reader.read();
-		if (done) {
-			break;
+	try {
+		const resp = await authenticatedFetch(target, "/api/runs/stream", {
+			method: "GET",
+			headers: { Accept: "text/event-stream" },
+			signal: controller.signal,
+		});
+		if (!(resp.ok && resp.body)) {
+			throw new Error(`runs stream failed: ${resp.status}`);
 		}
-		buffer += decoder.decode(value, { stream: true });
-		const { frames, rest } = extractFrames(buffer);
-		buffer = rest;
-		for (const frame of frames) {
-			const parsed = parseFrame(frame);
-			if (parsed) {
-				onFrame(parsed);
+		const reader = resp.body.getReader();
+		const decoder = new TextDecoder();
+		let buffer = "";
+		try {
+			for (;;) {
+				const { done, value } = await reader.read();
+				if (done) {
+					break;
+				}
+				buffer += decoder.decode(value, { stream: true });
+				const { frames, rest } = extractFrames(buffer);
+				buffer = rest;
+				for (const frame of frames) {
+					if (signal.aborted) {
+						return;
+					}
+					const parsed = parseFrame(frame);
+					if (parsed) {
+						onFrame(parsed);
+					}
+				}
 			}
+		} finally {
+			controller.abort();
+			await reader.cancel().catch(() => undefined);
+			reader.releaseLock();
 		}
+	} finally {
+		signal.removeEventListener("abort", abort);
+		controller.abort();
 	}
 }

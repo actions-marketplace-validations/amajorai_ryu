@@ -35,6 +35,7 @@ export interface HistoryRow extends Omit<Message, "timestamp"> {
 export interface HydratedMessage extends UIMessage {
 	_interrupted?: boolean;
 	originServer?: string;
+	persisted?: boolean;
 	source?: string;
 	widgetInstanceId?: string;
 }
@@ -74,11 +75,20 @@ export function hydrateHistoryMessage(
 	const body = hasParts
 		? (m.parts ?? [])
 		: [{ type: "text" as const, text: m.content }];
+	const metadata =
+		m.author || m.persisted
+			? {
+					...(m.author ? { author: m.author } : {}),
+					...(m.persisted ? { ryuPersisted: true } : {}),
+				}
+			: undefined;
 	if (!interrupted) {
 		return {
 			id: m.id,
+			...(metadata ? { metadata } : {}),
 			originServer: m.originServer,
 			parts: body,
+			persisted: m.persisted,
 			role: m.role,
 			source: m.source,
 			widgetInstanceId: m.widgetInstanceId,
@@ -89,9 +99,11 @@ export function hydrateHistoryMessage(
 	const kept = blankBody && !hasParts ? [] : body;
 	return {
 		id: m.id,
+		...(metadata ? { metadata } : {}),
 		originServer: m.originServer,
 		role: m.role,
 		parts: kept,
+		persisted: m.persisted,
 		source: m.source,
 		widgetInstanceId: m.widgetInstanceId,
 		// READ by the transcript: message-list.tsx draws a `Marker` at the end of

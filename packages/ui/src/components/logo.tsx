@@ -1023,8 +1023,8 @@ const AnimatedLogo: React.FC<LogoProps> = ({
 		// The ghost path is drawn edge-to-edge, so its 1.5px non-scaling stroke
 		// straddles the viewBox boundary by half its width. Relying on
 		// `overflow: visible` to show that overhang fails inside a compositing
-		// layer — StaggerReveal clones `will-change: transform` onto this
-		// container on the desktop start page, and macOS WKWebView rasterizes the
+		// layer — entrance transitions can promote this container on the
+		// desktop start page, and macOS WKWebView rasterizes the
 		// layer to its bounds, shaving the ghost's right edge. Insetting the
 		// geometry inside the viewBox keeps the whole stroke within the box.
 		const strokeMargin = 1.5;

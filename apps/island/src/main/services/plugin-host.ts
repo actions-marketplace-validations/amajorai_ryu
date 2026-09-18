@@ -21,6 +21,7 @@ import type {
 	PluginView,
 } from "../../shared/ipc.ts";
 import { coreHeaders, loadConfig } from "./config.ts";
+import { withResponseDeadline } from "./response-deadline.ts";
 import { SseDecoder } from "./sse.ts";
 
 /** Short timeout for the contributions / ui-bundle probes. */
@@ -45,21 +46,6 @@ function reasonFromError(error: unknown): string {
 		return error.message;
 	}
 	return "unreachable";
-}
-
-/** Fetch with an abort-based timeout. Rethrows so callers can map to a reason. */
-async function fetchWithTimeout(
-	url: string,
-	init: RequestInit,
-	timeoutMs: number
-): Promise<Response> {
-	const controller = new AbortController();
-	const timer = setTimeout(() => controller.abort(), timeoutMs);
-	try {
-		return await fetch(url, { ...init, signal: controller.signal });
-	} finally {
-		clearTimeout(timer);
-	}
 }
 
 /** Map an HTTP status to the closed host-bridge error code (fallback when the
@@ -143,33 +129,35 @@ function toPluginCompanion(w: PluginCompanionWire): PluginCompanion | null {
 export async function pluginContributions(): Promise<PluginContributionsResult> {
 	const { coreBaseUrl } = loadConfig();
 	try {
-		const resp = await fetchWithTimeout(
+		return await withResponseDeadline<PluginContributionsResult>(
 			`${coreBaseUrl}/api/plugins/contributions`,
 			{ method: "GET", headers: coreHeaders() },
-			PROBE_TIMEOUT_MS
+			PROBE_TIMEOUT_MS,
+			async (resp) => {
+				if (!resp.ok) {
+					return { available: false, reason: `core responded ${resp.status}` };
+				}
+				const data = (await resp.json()) as {
+					companions?: PluginCompanionWire[];
+					views?: PluginViewWire[];
+				};
+				const companions: PluginCompanion[] = [];
+				for (const raw of data.companions ?? []) {
+					const mapped = toPluginCompanion(raw);
+					if (mapped) {
+						companions.push(mapped);
+					}
+				}
+				const views: PluginView[] = [];
+				for (const raw of data.views ?? []) {
+					const mapped = toPluginView(raw);
+					if (mapped) {
+						views.push(mapped);
+					}
+				}
+				return { available: true, companions, views };
+			}
 		);
-		if (!resp.ok) {
-			return { available: false, reason: `core responded ${resp.status}` };
-		}
-		const data = (await resp.json()) as {
-			companions?: PluginCompanionWire[];
-			views?: PluginViewWire[];
-		};
-		const companions: PluginCompanion[] = [];
-		for (const raw of data.companions ?? []) {
-			const mapped = toPluginCompanion(raw);
-			if (mapped) {
-				companions.push(mapped);
-			}
-		}
-		const views: PluginView[] = [];
-		for (const raw of data.views ?? []) {
-			const mapped = toPluginView(raw);
-			if (mapped) {
-				views.push(mapped);
-			}
-		}
-		return { available: true, companions, views };
 	} catch (error) {
 		return { available: false, reason: reasonFromError(error) };
 	}
@@ -181,26 +169,29 @@ export async function pluginContributions(): Promise<PluginContributionsResult> 
  * host holds the token; the plugin frame never does. Never rejects to the caller.
  */
 export async function pluginUiBundle(
-	pluginId: string
+	pluginId: string,
+	signal?: AbortSignal
 ): Promise<PluginUiBundleResult> {
 	const { coreBaseUrl } = loadConfig();
 	try {
-		const resp = await fetchWithTimeout(
+		return await withResponseDeadline<PluginUiBundleResult>(
 			`${coreBaseUrl}/api/plugins/${encodeURIComponent(pluginId)}/ui-bundle`,
-			{ method: "GET", headers: coreHeaders() },
-			PROBE_TIMEOUT_MS
+			{ method: "GET", headers: coreHeaders(), signal },
+			PROBE_TIMEOUT_MS,
+			async (resp) => {
+				if (resp.status === 404) {
+					return { available: true, code: null };
+				}
+				if (!resp.ok) {
+					return { available: false, reason: `core responded ${resp.status}` };
+				}
+				const data = (await resp.json()) as { code?: unknown };
+				return {
+					available: true,
+					code: typeof data.code === "string" ? data.code : null,
+				};
+			}
 		);
-		if (resp.status === 404) {
-			return { available: true, code: null };
-		}
-		if (!resp.ok) {
-			return { available: false, reason: `core responded ${resp.status}` };
-		}
-		const data = (await resp.json()) as { code?: unknown };
-		return {
-			available: true,
-			code: typeof data.code === "string" ? data.code : null,
-		};
 	} catch (error) {
 		return { available: false, reason: reasonFromError(error) };
 	}
@@ -219,42 +210,45 @@ export async function pluginHostInvoke(
 	args: unknown
 ): Promise<PluginHostInvokeResult> {
 	const { coreBaseUrl } = loadConfig();
-	let resp: Response;
 	try {
-		resp = await fetchWithTimeout(
+		return await withResponseDeadline<PluginHostInvokeResult>(
 			`${coreBaseUrl}/api/plugins/${encodeURIComponent(pluginId)}/host`,
 			{
 				method: "POST",
 				headers: coreHeaders({ "Content-Type": "application/json" }),
 				body: JSON.stringify({ method, args }),
 			},
-			INVOKE_TIMEOUT_MS
+			INVOKE_TIMEOUT_MS,
+			async (resp) => {
+				if (!resp.ok) {
+					let code = codeForStatus(resp.status);
+					let message = `host bridge ${method} failed: ${resp.status}`;
+					try {
+						const body = (await resp.json()) as {
+							error?: { code?: string; message?: string };
+						};
+						if (body.error) {
+							if (typeof body.error.message === "string") {
+								message = body.error.message;
+							}
+							if (typeof body.error.code === "string") {
+								code = body.error.code as PluginHostErrorCode;
+							}
+						}
+					} catch {
+						// Non-JSON error body: keep the status-derived code + message.
+					}
+					return { ok: false, code, message };
+				}
+				const json = (await resp.json().catch(() => ({}))) as {
+					result?: unknown;
+				};
+				return { ok: true, result: json.result };
+			}
 		);
 	} catch (error) {
 		return { ok: false, code: "server_error", message: reasonFromError(error) };
 	}
-	if (!resp.ok) {
-		let code = codeForStatus(resp.status);
-		let message = `host bridge ${method} failed: ${resp.status}`;
-		try {
-			const body = (await resp.json()) as {
-				error?: { code?: string; message?: string };
-			};
-			if (body.error) {
-				if (typeof body.error.message === "string") {
-					message = body.error.message;
-				}
-				if (typeof body.error.code === "string") {
-					code = body.error.code as PluginHostErrorCode;
-				}
-			}
-		} catch {
-			// Non-JSON error body: keep the status-derived code + message.
-		}
-		return { ok: false, code, message };
-	}
-	const json = (await resp.json().catch(() => ({}))) as { result?: unknown };
-	return { ok: true, result: json.result };
 }
 
 /** HTTP methods a declarative view action may use. Mirrors the vocabulary's
@@ -290,9 +284,8 @@ export async function pluginCoreHttp(
 		};
 	}
 	const { coreBaseUrl } = loadConfig();
-	let resp: Response;
 	try {
-		resp = await fetchWithTimeout(
+		return await withResponseDeadline<PluginCoreHttpResult>(
 			`${coreBaseUrl}${req.path}`,
 			{
 				method,
@@ -303,20 +296,22 @@ export async function pluginCoreHttp(
 				),
 				body: req.body === undefined ? undefined : JSON.stringify(req.body),
 			},
-			INVOKE_TIMEOUT_MS
+			INVOKE_TIMEOUT_MS,
+			async (resp) => {
+				if (!resp.ok) {
+					return {
+						ok: false,
+						code: codeForStatus(resp.status),
+						message: `${req.path} failed: ${resp.status}`,
+					};
+				}
+				const data: unknown = await resp.json().catch(() => null);
+				return { ok: true, status: resp.status, data };
+			}
 		);
 	} catch (error) {
 		return { ok: false, code: "server_error", message: reasonFromError(error) };
 	}
-	if (!resp.ok) {
-		return {
-			ok: false,
-			code: codeForStatus(resp.status),
-			message: `${req.path} failed: ${resp.status}`,
-		};
-	}
-	const data: unknown = await resp.json().catch(() => null);
-	return { ok: true, status: resp.status, data };
 }
 
 /**
@@ -388,6 +383,9 @@ async function runHostStream(
 			code: "server_error",
 			error: reasonFromError(error),
 		});
+	} finally {
+		// Terminal SSE frames can arrive before the HTTP body closes.
+		controller.abort();
 	}
 }
 

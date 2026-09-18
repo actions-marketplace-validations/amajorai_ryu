@@ -421,6 +421,13 @@
       "tsHost": false
     },
     {
+      "capability": "conversation.reactions",
+      "grant": "conversation:reactions",
+      "method": "conversation.addReaction",
+      "streaming": false,
+      "tsHost": false
+    },
+    {
       "capability": "preferences.read",
       "grant": "preferences:read",
       "method": "preferences.get",
@@ -871,6 +878,27 @@
     {
       "capability": "workflows.catalogs",
       "grant": "workflows:catalogs",
+      "method": "workflows.connectBindings",
+      "streaming": false,
+      "tsHost": true
+    },
+    {
+      "capability": "workflows.runstate",
+      "grant": "workflows:runstate",
+      "method": "workflows.bindConnectTrigger",
+      "streaming": false,
+      "tsHost": true
+    },
+    {
+      "capability": "workflows.runstate",
+      "grant": "workflows:runstate",
+      "method": "workflows.removeConnectBinding",
+      "streaming": false,
+      "tsHost": true
+    },
+    {
+      "capability": "workflows.catalogs",
+      "grant": "workflows:catalogs",
       "method": "workflows.hookEvents",
       "streaming": false,
       "tsHost": true
@@ -1046,7 +1074,56 @@
     {
       "capability": "activity.read",
       "grant": "activity:read",
+      "method": "activity.audit",
+      "streaming": false,
+      "tsHost": true
+    },
+    {
+      "capability": "activity.run",
+      "grant": "activity:run",
+      "method": "activity.prune",
+      "streaming": false,
+      "tsHost": true
+    },
+    {
+      "capability": "activity.run",
+      "grant": "activity:run",
+      "method": "activity.score",
+      "streaming": false,
+      "tsHost": true
+    },
+    {
+      "capability": "activity.read",
+      "grant": "activity:read",
+      "method": "activity.trace",
+      "streaming": false,
+      "tsHost": true
+    },
+    {
+      "capability": "activity.read",
+      "grant": "activity:read",
       "method": "activity.openSession",
+      "streaming": false,
+      "tsHost": true
+    },
+    {
+      "capability": "activity.run",
+      "grant": "activity:run",
+      "method": "activity.redteam",
+      "streaming": false,
+      "tsHost": true
+    },
+    {
+      "capability": "activity.run",
+      "grant": "activity:run",
+      "method": "activity.eval",
+      "streaming": false,
+      "tsHost": true
+    },
+    {
+      "capability": "activity.run",
+      "grant": "activity:run",
+      "method": "activity.importTrace",
       "streaming": false,
       "tsHost": true
     },

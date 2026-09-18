@@ -38,7 +38,7 @@ function DialogOverlay({
 	return (
 		<DialogPrimitive.Backdrop
 			className={cn(
-				"ryu-dialog-overlay corner-squircle data-open:fade-in-0 data-closed:fade-out-0 fixed inset-0 isolate z-50 rounded-[var(--ryu-window-radius,0px)] duration-(--modal-open-dur) ease-(--modal-ease) data-closed:animate-out data-open:animate-in data-closed:duration-(--modal-close-dur)",
+				"ryu-dialog-overlay data-open:fade-in-0 data-closed:fade-out-0 fixed inset-0 isolate z-50 rounded-[var(--ryu-window-radius,0px)] duration-(--modal-open-dur) ease-(--modal-ease) data-closed:animate-out data-open:animate-in data-closed:duration-(--modal-close-dur)",
 				className
 			)}
 			data-slot="dialog-overlay"
@@ -65,7 +65,7 @@ function DialogContent({
 			<DialogOverlay className={overlayClassName} />
 			<DialogPrimitive.Popup
 				className={cn(
-					"data-open:fade-in-0 data-open:zoom-in-95 data-closed:fade-out-0 data-closed:zoom-out-95 corner-squircle fixed top-1/2 left-1/2 z-50 grid w-full max-w-[calc(100%-2rem)] -translate-x-1/2 -translate-y-1/2 gap-4 rounded-4xl bg-popover/90 p-4 text-popover-foreground text-sm shadow-xl outline-none backdrop-blur-xl duration-(--modal-open-dur) ease-(--modal-ease) data-closed:animate-out data-open:animate-in data-closed:duration-(--modal-close-dur) sm:max-w-md",
+					"data-open:fade-in-0 data-open:zoom-in-95 data-closed:fade-out-0 data-closed:zoom-out-95 fixed top-1/2 left-1/2 z-50 grid w-full max-w-[calc(100%-2rem)] -translate-x-1/2 -translate-y-1/2 gap-4 rounded-4xl bg-popover/90 p-4 text-popover-foreground text-sm shadow-xl outline-none backdrop-blur-xl duration-(--modal-open-dur) ease-(--modal-ease) data-closed:animate-out data-open:animate-in data-closed:duration-(--modal-close-dur) sm:max-w-md",
 					className,
 					mobileFullPage
 						? MOBILE_FULL_PAGE_CONTENT_CLASSES

@@ -11,6 +11,7 @@
 
 import { describe, expect, it } from "bun:test";
 import {
+	buildCompanionThemeLayoutCss,
 	buildThemeTokenStyle,
 	sanitizeCspOrigin,
 } from "./third-party-plugin.ts";
@@ -167,5 +168,15 @@ describe("buildThemeTokenStyle (theme-token → :root style bridge)", () => {
 		expect(buildThemeTokenStyle({ "--x": "  #fff  " })).toBe(
 			"<style>html:root{--x: #fff;}</style>"
 		);
+	});
+
+	it("applies host typography and scales the Companion only once", () => {
+		const inherited = buildCompanionThemeLayoutCss(true);
+		const local = buildCompanionThemeLayoutCss(false);
+		expect(inherited).toContain("html body{zoom:1 !important;}");
+		expect(local).toContain("var(--ryu-ui-scale, 1)");
+		expect(inherited).toContain("var(--font-sans");
+		expect(inherited).toContain("var(--font-heading");
+		expect(inherited).toContain("var(--font-code");
 	});
 });

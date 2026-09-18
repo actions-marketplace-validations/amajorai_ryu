@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import {
+	fetchAgentUsage,
 	fetchProviderAccountUsage,
 	supportsSubscriptionProviderUsage,
 	supportsUsage,
@@ -98,3 +99,69 @@ describe("subscription provider usage eligibility", () => {
 		]);
 	});
 });
+
+for (const kind of ["agent", "account"]) {
+	test(`${kind} usage cancellation releases a pending HTTP body`, async () => {
+		let closed = false;
+		let receivedHeaders = false;
+		const server = Bun.serve({
+			hostname: "127.0.0.1",
+			port: 0,
+			fetch() {
+				return new Response(
+					new ReadableStream({
+						start(controller) {
+							controller.enqueue(new TextEncoder().encode("{"));
+						},
+						cancel() {
+							closed = true;
+						},
+					})
+				);
+			},
+		});
+		globalThis.fetch = Object.assign(
+			async (input: RequestInfo | URL, init?: RequestInit) => {
+				const response = await realFetch(input, init);
+				receivedHeaders = true;
+				return response;
+			},
+			{ preconnect: realFetch.preconnect }
+		);
+		try {
+			const target = {
+				url: server.url.toString(),
+				token: "fixture",
+				userJwt: "fixture",
+			};
+			const controller = new AbortController();
+			const result = (
+				kind === "agent"
+					? fetchAgentUsage(target, "acp:codex", controller.signal)
+					: fetchProviderAccountUsage(
+							target,
+							"codex",
+							"fixture",
+							controller.signal
+						)
+			).then(
+				() => "complete",
+				() => "aborted"
+			);
+			const startDeadline = Date.now() + 1000;
+			while (!receivedHeaders && Date.now() < startDeadline) {
+				await Bun.sleep(5);
+			}
+			expect(receivedHeaders).toBe(true);
+			controller.abort();
+			const closeDeadline = Date.now() + 1000;
+			while (!closed && Date.now() < closeDeadline) {
+				await Bun.sleep(5);
+			}
+			expect(closed).toBe(true);
+			expect(await result).toBe("aborted");
+		} finally {
+			server.stop(true);
+		}
+	});
+}

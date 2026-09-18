@@ -210,13 +210,12 @@ impl ShadowDownloader {
         // is hashed separately below and recorded in `versions.json` under the
         // `shadow` key. Two different values over two different byte ranges;
         // crossing them would invert the fast path.
-        let sha256 = self.fetch_release_sha256(&url).await;
-        if sha256.is_none() {
-            tracing::warn!(
-                "shadow: no usable .sha256 published at {} — downloading unverified",
+        let sha256 = self.fetch_release_sha256(&url).await.ok_or_else(|| {
+            anyhow::anyhow!(
+                "shadow archive has no trusted sibling checksum at {}; refusing to install",
                 sha256_sibling_url(&url)
-            );
-        }
+            )
+        })?;
 
         let archive_path = downloads
             .download_blocking(crate::downloads::DownloadSpec {
@@ -225,7 +224,7 @@ impl ShadowDownloader {
                 label: "Shadow".to_string(),
                 url: url.to_string(),
                 dest: archive_dest,
-                sha256,
+                sha256: Some(sha256),
                 version_record: None,
             })
             .await

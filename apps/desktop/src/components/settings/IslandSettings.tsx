@@ -768,7 +768,7 @@ export function IslandSettings() {
 				</SettingsGroup>
 			</SettingsSection>
 
-			<SettingsSection caption="How the island's background looks. Translucent works everywhere and keeps the smooth floating shape with a dark tint (no blur). Acrylic and Mica blur your desktop behind the island using a built-in system effect, but the island then shows as a rounded rectangle. Mica is a richer blur on Windows 11 and falls back to the standard blur on other systems.">
+			<SettingsSection caption="How the island's transparent window looks. Translucent works everywhere and keeps the smooth floating shape with a dark tint (CSS blur stays inside the island). Acrylic and Mica use a transparent native window so the operating system can blur your desktop behind it; the island then shows as a rounded rectangle. Mica is a richer blur on Windows 11 and falls back to the standard native blur on other systems.">
 				<SettingsGroup>
 					<SettingsItem
 						actions={

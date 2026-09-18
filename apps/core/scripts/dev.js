@@ -66,6 +66,9 @@ const binExt = process.platform === "win32" ? ".exe" : "";
 // sync with the [[bin]] crates and the release/fetch wiring.
 const sidecarBins = [
 	"mail",
+	"checks",
+	"projects",
+	"token-table",
 	"teams",
 	"research",
 	"clips",
@@ -91,6 +94,7 @@ const sidecarBins = [
 	"expenses",
 	"subtitles",
 	"anydoc",
+	"security",
 ];
 
 // Build ALL sidecar bins in a SINGLE cargo invocation so the shared dependency
@@ -98,7 +102,11 @@ const sidecarBins = [
 // checkout is therefore noticeably slower (all bins compile up front); subsequent
 // boots are incremental. Best-effort: a failed build warns but never blocks Core —
 // individual apps whose binary is missing simply won't spawn.
-const buildArgs = sidecarBins.flatMap((name) => ["-p", `ryu-${name}`]);
+const buildArgs = [
+	"-p",
+	"ryu-gateway",
+	...sidecarBins.flatMap((name) => ["-p", `ryu-${name}`]),
+];
 try {
 	execSync(`cargo build ${buildArgs.join(" ")}`, {
 		stdio: "inherit",

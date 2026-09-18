@@ -70,6 +70,13 @@ export interface SubscriptionStatus {
 	 * `SubscriptionStatusPayload`, so an older control plane simply omits it.
 	 */
 	features?: Record<string, boolean> | null;
+	/** Non-renewing personal access received through a gift. */
+	giftSubscription?: {
+		endsAt: string;
+		id: string;
+		plan: string;
+		startsAt: string;
+	} | null;
 	lifetime?: LifetimeUpdatesWindow | null;
 	/** The organization that owns this resolved plan, when billing is org-scoped. */
 	organizationId?: string | null;

@@ -16,19 +16,30 @@ const FIVE_MINUTES_MS = 1000 * 60 * 5;
 /**
  * The usage snapshot for `agentId`, or `null` until the first load (or when the
  * agent has no readable subscription window). Refetches every 5 minutes while
- * mounted; stale data stays visible during a refetch.
+ * active; stale data stays visible during a refetch.
  */
-export function useAgentUsage(agentId: string | null): UsageSnapshot | null {
+export function useAgentUsage(
+	agentId: string | null,
+	active = true
+): UsageSnapshot | null {
 	const node = useActiveNode();
-	const enabled = supportsUsage(agentId);
+	const enabled = active && supportsUsage(agentId);
 	const { data } = useQuery({
-		queryKey: ["agent-usage", node.url, agentId],
-		queryFn: () =>
+		queryKey: [
+			"agent-usage",
+			node.url,
+			node.token ?? null,
+			node.userJwt ?? null,
+			agentId,
+		],
+		queryFn: ({ signal }) =>
 			fetchAgentUsage(
 				{ url: node.url, token: node.token, userJwt: node.userJwt ?? null },
-				agentId ?? ""
+				agentId ?? "",
+				signal
 			),
 		enabled,
+		subscribed: enabled,
 		staleTime: FIVE_MINUTES_MS,
 		refetchInterval: FIVE_MINUTES_MS,
 		refetchOnWindowFocus: true,

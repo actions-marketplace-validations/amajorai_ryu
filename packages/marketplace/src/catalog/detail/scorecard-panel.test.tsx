@@ -53,4 +53,22 @@ describe("ScorecardPanel agent presentation", () => {
 		expect(html).toContain("Runtime");
 		expect(html).toContain("Configuration-only check.");
 	});
+
+	test("renders behavioral evals as a separate health layer", () => {
+		const html = renderToStaticMarkup(
+			<ScorecardPanel
+				developerEvals={
+					<section data-testid="plugin-evals-card">
+						<h3>Behavioral evals</h3>
+						<p>100/100 · plugin-agent</p>
+					</section>
+				}
+				scorecard={runAgentScorecard(input)}
+			/>
+		);
+
+		expect(html).toContain('data-testid="plugin-evals-card"');
+		expect(html).toContain("Behavioral evals");
+		expect(html).toContain("plugin-agent");
+	});
 });

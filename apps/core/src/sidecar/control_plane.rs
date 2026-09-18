@@ -11,6 +11,7 @@
 //! this module just fetches the resolved set, then narrows the local config-
 //! driven MCP registry (U13) down to the entries the org has granted.
 
+use std::sync::{OnceLock, RwLock};
 use std::time::Duration;
 
 use anyhow::{anyhow, Result};
@@ -88,6 +89,40 @@ pub struct ResolvedGovernance {
 pub struct ResolvedScope {
     pub governance: Option<ResolvedGovernance>,
     pub tools: Vec<ResolvedTool>,
+}
+
+fn resolved_scope_slot() -> &'static RwLock<Option<ResolvedScope>> {
+    static SLOT: OnceLock<RwLock<Option<ResolvedScope>>> = OnceLock::new();
+    SLOT.get_or_init(|| RwLock::new(None))
+}
+
+/// Publish the last successful control-plane grant resolution. A failed refresh
+/// deliberately leaves the last verified scope in place; a managed node with no
+/// successful resolution remains deny-by-default at the MCP dispatch boundary.
+pub fn set_resolved_scope(scope: ResolvedScope) {
+    if let Ok(mut slot) = resolved_scope_slot().write() {
+        *slot = Some(scope);
+    }
+}
+
+/// Check a control-plane-managed source at the final Core dispatch boundary.
+/// Local/unmanaged nodes retain their local-first behavior. Managed nodes need a
+/// successful grant resolution and an exact kind/slug match; a missing scope or
+/// a revoked grant therefore cannot fall through to the local registry.
+pub fn resolved_source_granted(kind: &str, slug: &str) -> bool {
+    if !is_managed_node() {
+        return true;
+    }
+    resolved_scope_slot()
+        .read()
+        .ok()
+        .and_then(|slot| slot.as_ref().cloned())
+        .is_some_and(|scope| {
+            scope
+                .tools
+                .iter()
+                .any(|tool| tool.kind == kind && tool.slug == slug)
+        })
 }
 
 impl ResolvedScope {
@@ -428,7 +463,7 @@ pub async fn resolve_roles(client: &reqwest::Client) -> Vec<OrgRole> {
 // ── Effective-permission resolution (org/team RBAC) ──────────────────────────
 
 use std::collections::{HashMap, HashSet};
-use std::sync::{Mutex, OnceLock};
+use std::sync::Mutex;
 use std::time::Instant;
 
 /// How long a resolved permission set is trusted before Core re-asks the control
@@ -565,8 +600,6 @@ pub async fn resolve_permissions(client: &reqwest::Client, user_id: &str) -> Has
 // key and remember it", reusing the credential `/gateway/resolve` already
 // performs (also used by the credits debit, so the wallet resolves to the same
 // org). Building a node row nothing reads would be a half-feature, so we don't.
-
-use std::sync::RwLock;
 
 /// The org and stable node scope this managed node resolved to, cached after a
 /// successful register so request authorization can bind to the exact node.

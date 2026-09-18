@@ -1173,6 +1173,7 @@ mod tests {
         RequestContext {
             request_id: "t".into(),
             api_key: "k".into(),
+            owner_binding: ryu_gw_credentials::fingerprint("k"),
             is_master_key: false,
             org_id: org.map(str::to_string),
             team_id: None,

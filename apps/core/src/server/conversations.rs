@@ -244,6 +244,30 @@ pub struct ProactiveOpeningStatus {
     pub status: String,
 }
 
+/// The replayable result of one channel-session turn. The channel adapter uses
+/// this when a provider send timed out after Core had already persisted the
+/// assistant reply: the retry can deliver the same reply without running the
+/// model again.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChannelTurnReplay {
+    pub reply: String,
+    pub assistant_message_id: Option<String>,
+    pub assistant_message_ids: Vec<String>,
+    pub agent_id: Option<String>,
+    pub fallback_warning: Option<String>,
+}
+
+/// Result of claiming a channel-session idempotency key.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ChannelTurnClaim {
+    /// The caller owns the key and may run the turn.
+    Claimed,
+    /// Another request is currently running the same key.
+    InFlight,
+    /// Core already completed the key; return this exact result to the caller.
+    Completed(ChannelTurnReplay),
+}
+
 /// **THE CHOKE POINT** — the one and only `INSERT INTO conversations` in Core.
 ///
 /// Every path that can bring a conversation row into existence
@@ -627,6 +651,32 @@ pub struct MessageReaction {
     pub emoji: String,
     pub count: i64,
     pub reacted_by_me: bool,
+}
+
+/// One human's durable read marker for one message. The database keeps the
+/// timestamp as epoch milliseconds alongside the rest of the conversation
+/// metadata; the public projection uses RFC 3339 so clients do not have to
+/// guess the unit.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct MessageReadReceipt {
+    pub message_id: String,
+    pub user_id: String,
+    pub read_at: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub user_name: Option<String>,
+}
+
+/// Display metadata for a human who has a durable read marker in the same
+/// conversation. The identity is still the stable `id`; name and avatar are
+/// refreshed from the scoped organization roster when available.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct MessageReadReceiptUser {
+    pub id: String,
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub avatar: Option<String>,
 }
 
 fn default_child_entry_kind() -> String {
@@ -1274,6 +1324,21 @@ impl ConversationStore {
                  created_at      INTEGER NOT NULL,
                  completed_at    INTEGER
              );
+             CREATE TABLE IF NOT EXISTS channel_turn_idempotency (
+                 idempotency_key      TEXT PRIMARY KEY,
+                 conversation_id      TEXT NOT NULL,
+                 request_hash         TEXT NOT NULL,
+                 status               TEXT NOT NULL,
+                 reply                TEXT,
+                 assistant_message_id TEXT,
+                 assistant_message_ids TEXT NOT NULL DEFAULT '[]',
+                 agent_id             TEXT,
+                 fallback_warning     TEXT,
+                 created_at           INTEGER NOT NULL,
+                 updated_at           INTEGER NOT NULL
+             );
+             CREATE INDEX IF NOT EXISTS idx_channel_turn_idempotency_updated
+                 ON channel_turn_idempotency(updated_at);
              CREATE TABLE IF NOT EXISTS sessions (
                  id              TEXT PRIMARY KEY,
                  conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
@@ -1349,7 +1414,16 @@ impl ConversationStore {
                  PRIMARY KEY (message_id, user_id, emoji)
              );
              CREATE INDEX IF NOT EXISTS idx_reactions_conversation
-                 ON message_reactions(conversation_id);",
+                 ON message_reactions(conversation_id);
+             CREATE TABLE IF NOT EXISTS message_read_receipts (
+                 message_id      TEXT NOT NULL,
+                 conversation_id TEXT NOT NULL,
+                 user_id         TEXT NOT NULL,
+                 read_at         INTEGER NOT NULL,
+                 PRIMARY KEY (message_id, user_id)
+             );
+             CREATE INDEX IF NOT EXISTS idx_read_receipts_conversation
+                 ON message_read_receipts(conversation_id, message_id);",
         )
         .context("initializing conversation schema")?;
 
@@ -3419,6 +3493,167 @@ impl ConversationStore {
         Ok(())
     }
 
+    /// Atomically claim one channel-session turn. Completed results are retained
+    /// for thirty days so a provider redelivery after a Gateway restart replays
+    /// the exact Core reply rather than appending another user/assistant pair.
+    /// A live processing claim returns `InFlight`; a stale one is reclaimed so a
+    /// Core process that died mid-turn does not wedge that provider message.
+    pub async fn claim_channel_turn(
+        &self,
+        idempotency_key: &str,
+        conversation_id: &str,
+        request_hash: &str,
+    ) -> Result<ChannelTurnClaim> {
+        let key = idempotency_key.trim();
+        if key.is_empty() || key.len() > 500 {
+            anyhow::bail!("channel turn idempotency key must be 1..=500 bytes");
+        }
+        let now = now_millis();
+        let stale_before = now - 15 * 60 * 1000;
+        let retention_before = now - 30 * 24 * 60 * 60 * 1000;
+        let conn = self.conn.lock().await;
+        conn.execute(
+            "DELETE FROM channel_turn_idempotency
+             WHERE status = 'completed' AND updated_at < ?1",
+            params![retention_before],
+        )?;
+
+        let existing: Option<(
+            String,
+            String,
+            Option<String>,
+            Option<String>,
+            String,
+            Option<String>,
+            Option<String>,
+            i64,
+        )> = conn
+            .query_row(
+                "SELECT conversation_id, request_hash, reply, assistant_message_id,
+                        assistant_message_ids, agent_id, fallback_warning, updated_at
+                 FROM channel_turn_idempotency
+                 WHERE idempotency_key = ?1",
+                params![key],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                        row.get(6)?,
+                        row.get(7)?,
+                    ))
+                },
+            )
+            .optional()?;
+
+        if let Some((
+            existing_conversation_id,
+            existing_hash,
+            sealed_reply,
+            assistant_message_id,
+            assistant_message_ids,
+            agent_id,
+            fallback_warning,
+            updated_at,
+        )) = existing
+        {
+            if existing_conversation_id != conversation_id || existing_hash != request_hash {
+                anyhow::bail!("channel turn idempotency key was reused for a different request");
+            }
+            if sealed_reply.is_some() {
+                let reply = sealed_reply
+                    .map(|sealed| self.cipher.open(&sealed))
+                    .transpose()?
+                    .unwrap_or_default();
+                let assistant_message_ids =
+                    serde_json::from_str(&assistant_message_ids).unwrap_or_default();
+                return Ok(ChannelTurnClaim::Completed(ChannelTurnReplay {
+                    reply,
+                    assistant_message_id,
+                    assistant_message_ids,
+                    agent_id,
+                    fallback_warning,
+                }));
+            }
+            if updated_at >= stale_before {
+                return Ok(ChannelTurnClaim::InFlight);
+            }
+            conn.execute(
+                "UPDATE channel_turn_idempotency
+                 SET status = 'processing', updated_at = ?2
+                 WHERE idempotency_key = ?1",
+                params![key, now],
+            )?;
+            return Ok(ChannelTurnClaim::Claimed);
+        }
+
+        conn.execute(
+            "INSERT INTO channel_turn_idempotency
+             (idempotency_key, conversation_id, request_hash, status, created_at, updated_at)
+             VALUES (?1, ?2, ?3, 'processing', ?4, ?4)",
+            params![key, conversation_id, request_hash, now],
+        )?;
+        Ok(ChannelTurnClaim::Claimed)
+    }
+
+    /// Persist the complete channel-session result after the conversation rows
+    /// are durable. The update is idempotent and refuses to overwrite a result
+    /// that a concurrent retry already completed.
+    pub async fn complete_channel_turn(
+        &self,
+        idempotency_key: &str,
+        result: &ChannelTurnReplay,
+    ) -> Result<()> {
+        let sealed_reply = self.cipher.seal(&result.reply)?;
+        let assistant_message_ids = serde_json::to_string(&result.assistant_message_ids)?;
+        let conn = self.conn.lock().await;
+        let updated = conn.execute(
+            "UPDATE channel_turn_idempotency
+             SET status = 'completed', reply = ?2, assistant_message_id = ?3,
+                 assistant_message_ids = ?4, agent_id = ?5, fallback_warning = ?6,
+                 updated_at = ?7
+             WHERE idempotency_key = ?1 AND status = 'processing'",
+            params![
+                idempotency_key.trim(),
+                sealed_reply,
+                result.assistant_message_id,
+                assistant_message_ids,
+                result.agent_id,
+                result.fallback_warning,
+                now_millis(),
+            ],
+        )?;
+        if updated == 0 {
+            let status: Option<String> = conn
+                .query_row(
+                    "SELECT status FROM channel_turn_idempotency WHERE idempotency_key = ?1",
+                    params![idempotency_key.trim()],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            if status.as_deref() != Some("completed") {
+                anyhow::bail!("channel turn idempotency claim disappeared before completion");
+            }
+        }
+        Ok(())
+    }
+
+    /// Release a channel-session claim when validation or the model path fails
+    /// before a replayable result exists. A later provider retry can then make a
+    /// fresh claim instead of receiving a permanent in-flight response.
+    pub async fn release_channel_turn(&self, idempotency_key: &str) -> Result<()> {
+        let conn = self.conn.lock().await;
+        conn.execute(
+            "DELETE FROM channel_turn_idempotency
+             WHERE idempotency_key = ?1 AND status = 'processing'",
+            params![idempotency_key.trim()],
+        )?;
+        Ok(())
+    }
+
     /// Read only the plaintext user/assistant projection allowed into learning.
     /// This query deliberately does not select or decrypt `parts`,
     /// `author_user_id`, or `author_name`, and has no read path to the identity
@@ -3636,6 +3871,109 @@ impl ConversationStore {
                     "emoji": emoji,
                     "user_id": user_id,
                     "op": op,
+                }),
+            );
+        }
+    }
+
+    /// Return the durable per-person read markers for a conversation. The join
+    /// back to `messages` is intentional: older databases did not enable foreign
+    /// keys, so an orphaned marker must never surface as a receipt for a message
+    /// that no longer exists.
+    pub async fn list_read_receipts(
+        &self,
+        conversation_id: &str,
+    ) -> Result<Vec<MessageReadReceipt>> {
+        let conn = self.conn.lock().await;
+        let mut stmt = conn.prepare(
+            "SELECT receipt.message_id, receipt.user_id, receipt.read_at
+             FROM message_read_receipts AS receipt
+             INNER JOIN messages AS message
+               ON message.id = receipt.message_id
+              AND message.conversation_id = receipt.conversation_id
+             WHERE receipt.conversation_id = ?1
+             ORDER BY receipt.read_at ASC, receipt.rowid ASC",
+        )?;
+        let rows = stmt.query_map(params![conversation_id], |row| {
+            let read_at: i64 = row.get(2)?;
+            Ok(MessageReadReceipt {
+                message_id: row.get(0)?,
+                user_id: row.get(1)?,
+                read_at: millis_to_rfc3339(read_at),
+                user_name: None,
+            })
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
+    /// Mark a bounded set of messages read for one verified human. The composite
+    /// key makes the operation idempotent across tabs, retries, and reconnects;
+    /// only the first insert fans a receipt event out to the room.
+    pub async fn mark_messages_read(
+        &self,
+        conversation_id: &str,
+        message_ids: &[String],
+        user_id: &str,
+        user_name: Option<&str>,
+    ) -> Result<Vec<MessageReadReceipt>> {
+        let read_at_ms = now_millis();
+        let read_at = millis_to_rfc3339(read_at_ms);
+        let inserted_ids = {
+            let conn = self.conn.lock().await;
+            let mut inserted = Vec::new();
+            for message_id in message_ids {
+                if !message_in_conversation(&conn, conversation_id, message_id)? {
+                    continue;
+                }
+                let count = conn
+                    .execute(
+                        "INSERT OR IGNORE INTO message_read_receipts
+                             (message_id, conversation_id, user_id, read_at)
+                         VALUES (?1, ?2, ?3, ?4)",
+                        params![message_id, conversation_id, user_id, read_at_ms],
+                    )
+                    .context("marking message read")?;
+                if count > 0 {
+                    inserted.push(message_id.clone());
+                }
+            }
+            inserted
+        };
+
+        let receipts = inserted_ids
+            .into_iter()
+            .map(|message_id| MessageReadReceipt {
+                message_id,
+                user_id: user_id.to_owned(),
+                read_at: read_at.clone(),
+                user_name: user_name.map(str::to_owned),
+            })
+            .collect::<Vec<_>>();
+        for receipt in &receipts {
+            self.broadcast_read_receipt(conversation_id, receipt);
+        }
+        Ok(receipts)
+    }
+
+    /// Broadcast one newly-created receipt without holding the conversation DB
+    /// lock. `readAt` and the optional display name are presentation metadata;
+    /// the durable source of truth remains the table above.
+    fn broadcast_read_receipt(&self, conversation_id: &str, receipt: &MessageReadReceipt) {
+        if let Some(realtime) = &self.realtime {
+            realtime.broadcast_event(
+                conversation_id,
+                "conversation.readReceipt",
+                serde_json::json!({
+                    "type": "readReceipt",
+                    "conversationId": conversation_id,
+                    "messageId": receipt.message_id,
+                    "userId": receipt.user_id,
+                    "readAt": receipt.read_at,
+                    "userName": receipt.user_name,
                 }),
             );
         }
@@ -5134,12 +5472,20 @@ impl ConversationStore {
             "DELETE FROM message_reactions WHERE conversation_id = ?1",
             params![conversation_id],
         )?;
+        conn.execute(
+            "DELETE FROM message_read_receipts WHERE conversation_id = ?1",
+            params![conversation_id],
+        )?;
         // Proactive openings deliberately have no FK (their key survives a
         // failed message write), so delete the idempotency tombstone with the
         // conversation. Otherwise deleting and recreating the same conversation
         // id can suppress its first greeting forever.
         conn.execute(
             "DELETE FROM proactive_openings WHERE conversation_id = ?1",
+            params![conversation_id],
+        )?;
+        conn.execute(
+            "DELETE FROM channel_turn_idempotency WHERE conversation_id = ?1",
             params![conversation_id],
         )?;
         // Legacy databases do not rely on SQLite foreign-key enforcement for
@@ -5345,6 +5691,7 @@ impl ConversationStore {
     pub async fn clear_all_conversations(&self) -> Result<u64> {
         let conn = self.conn.lock().await;
         conn.execute("DELETE FROM messages", [])?;
+        conn.execute("DELETE FROM message_read_receipts", [])?;
         conn.execute(
             "DELETE FROM harness_run_events WHERE run_id IN (SELECT id FROM harness_runs)",
             [],
@@ -5353,6 +5700,7 @@ impl ConversationStore {
         conn.execute("DELETE FROM sessions", [])?;
         conn.execute("DELETE FROM btw_entries", [])?;
         conn.execute("DELETE FROM proactive_openings", [])?;
+        conn.execute("DELETE FROM channel_turn_idempotency", [])?;
         conn.execute("DELETE FROM conversation_collaborators", [])?;
         let removed = conn.execute("DELETE FROM conversations", [])?;
         Ok(removed as u64)
@@ -5371,6 +5719,10 @@ impl ConversationStore {
         let owned = "SELECT id FROM conversations WHERE owner_user_id = ?1";
         conn.execute(
             &format!("DELETE FROM messages WHERE conversation_id IN ({owned})"),
+            params![owner_user_id],
+        )?;
+        conn.execute(
+            &format!("DELETE FROM message_read_receipts WHERE conversation_id IN ({owned})"),
             params![owner_user_id],
         )?;
         conn.execute(
@@ -5395,6 +5747,10 @@ impl ConversationStore {
         )?;
         conn.execute(
             &format!("DELETE FROM proactive_openings WHERE conversation_id IN ({owned})"),
+            params![owner_user_id],
+        )?;
+        conn.execute(
+            &format!("DELETE FROM channel_turn_idempotency WHERE conversation_id IN ({owned})"),
             params![owner_user_id],
         )?;
         conn.execute(
@@ -7643,6 +7999,78 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn message_reactions_allow_a_peer_agent_authored_message() {
+        let store = ConversationStore::open_in_memory().unwrap();
+        store
+            .append_message(
+                "conv-agents-reactions",
+                "user",
+                "review this",
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        let alpha_message = store
+            .append_message(
+                "conv-agents-reactions",
+                "assistant",
+                "alpha's review",
+                Some("agent-alpha"),
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        let beta_message = store
+            .append_message(
+                "conv-agents-reactions",
+                "assistant",
+                "beta's follow-up",
+                Some("agent-beta"),
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+
+        // The reaction writer is a different agent from both message authors.
+        // The persisted-message gate checks conversation membership, not role or
+        // agent ownership, so peer-agent replies remain reactable.
+        assert!(store
+            .add_reaction(
+                "conv-agents-reactions",
+                &alpha_message,
+                "agent:agent-reviewer",
+                "✅",
+            )
+            .await
+            .unwrap());
+        assert!(store
+            .add_reaction(
+                "conv-agents-reactions",
+                &beta_message,
+                "agent:agent-reviewer",
+                "👀",
+            )
+            .await
+            .unwrap());
+
+        let reactions = store
+            .list_reactions("conv-agents-reactions", "agent:agent-reviewer")
+            .await
+            .unwrap();
+        assert_eq!(reactions.len(), 2);
+        assert!(reactions.iter().any(|reaction| {
+            reaction.message_id == alpha_message && reaction.emoji == "✅" && reaction.reacted_by_me
+        }));
+        assert!(reactions.iter().any(|reaction| {
+            reaction.message_id == beta_message && reaction.emoji == "👀" && reaction.reacted_by_me
+        }));
+    }
+
+    #[tokio::test]
     async fn message_reactions_are_gated_on_a_persisted_message_of_this_conversation() {
         let store = ConversationStore::open_in_memory().unwrap();
         let msg = store
@@ -7673,6 +8101,127 @@ mod tests {
             .remove_reaction("conv-other", &msg, "alice", "🎉")
             .await
             .unwrap());
+    }
+
+    #[tokio::test]
+    async fn read_receipts_are_per_user_idempotent_and_message_scoped() {
+        let store = ConversationStore::open_in_memory().unwrap();
+        let first = store
+            .append_message("conv-read", "user", "first", None, Some("alice"), None)
+            .await
+            .unwrap();
+        let second = store
+            .append_message("conv-read", "user", "second", None, Some("alice"), None)
+            .await
+            .unwrap();
+
+        let first_mark = store
+            .mark_messages_read(
+                "conv-read",
+                &[first.clone(), second.clone(), "not-in-this-chat".to_owned()],
+                "bob",
+                Some("bob@example.test"),
+            )
+            .await
+            .unwrap();
+        assert_eq!(first_mark.len(), 2);
+        assert!(first_mark.iter().all(|receipt| {
+            receipt.user_id == "bob"
+                && receipt.read_at.contains('T')
+                && receipt.user_name.as_deref() == Some("bob@example.test")
+        }));
+
+        // Retrying the same batch produces no second event/row.
+        assert!(store
+            .mark_messages_read("conv-read", &[first.clone(), second.clone()], "bob", None,)
+            .await
+            .unwrap()
+            .is_empty());
+
+        // A second person gets an independent receipt, while a different
+        // conversation cannot attach to these message ids.
+        assert_eq!(
+            store
+                .mark_messages_read("conv-read", std::slice::from_ref(&first), "carol", None,)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(store
+            .mark_messages_read("conv-other", std::slice::from_ref(&first), "dave", None,)
+            .await
+            .unwrap()
+            .is_empty());
+
+        let listed = store.list_read_receipts("conv-read").await.unwrap();
+        assert_eq!(listed.len(), 3);
+        assert!(listed
+            .iter()
+            .any(|receipt| { receipt.message_id == first && receipt.user_id == "carol" }));
+
+        assert!(store.delete_conversation("conv-read").await.unwrap());
+        assert!(store
+            .list_read_receipts("conv-read")
+            .await
+            .unwrap()
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn read_receipts_publish_a_named_live_event_once() {
+        let registry = ryu_realtime::RoomRegistry::new();
+        let store = ConversationStore::open_in_memory()
+            .unwrap()
+            .with_realtime(registry.clone());
+        let message_id = store
+            .append_message(
+                "conv-realtime-read",
+                "user",
+                "live message",
+                None,
+                Some("alice"),
+                None,
+            )
+            .await
+            .unwrap();
+        let mut receiver = registry.get_or_create("conv-realtime-read").subscribe();
+
+        let receipts = store
+            .mark_messages_read(
+                "conv-realtime-read",
+                std::slice::from_ref(&message_id),
+                "bob",
+                Some("bob@example.test"),
+            )
+            .await
+            .unwrap();
+        assert_eq!(receipts.len(), 1);
+        let frame = receiver.recv().await.unwrap();
+        let event = ryu_realtime::Event::decode(&frame).expect("named read event");
+        assert_eq!(event.name, "conversation.readReceipt");
+        assert_eq!(event.payload["type"], "readReceipt");
+        assert_eq!(event.payload["conversationId"], "conv-realtime-read");
+        assert_eq!(event.payload["messageId"], message_id);
+        assert_eq!(event.payload["userId"], "bob");
+        assert_eq!(event.payload["userName"], "bob@example.test");
+
+        // Idempotent retries do not produce another room event.
+        assert!(store
+            .mark_messages_read(
+                "conv-realtime-read",
+                std::slice::from_ref(&message_id),
+                "bob",
+                None,
+            )
+            .await
+            .unwrap()
+            .is_empty());
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(20), receiver.recv())
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]
@@ -9423,5 +9972,60 @@ mod tests {
             .claim_proactive_opening("opening-2", "conversation-2")
             .await
             .unwrap());
+    }
+
+    #[tokio::test]
+    async fn channel_turn_idempotency_replays_the_completed_result() {
+        let store = ConversationStore::open_in_memory().unwrap();
+        assert_eq!(
+            store
+                .claim_channel_turn("telegram:bot-a:update-42", "conversation-1", "hash-1")
+                .await
+                .unwrap(),
+            ChannelTurnClaim::Claimed
+        );
+        assert_eq!(
+            store
+                .claim_channel_turn("telegram:bot-a:update-42", "conversation-1", "hash-1")
+                .await
+                .unwrap(),
+            ChannelTurnClaim::InFlight
+        );
+
+        let result = ChannelTurnReplay {
+            reply: "same reply".to_string(),
+            assistant_message_id: Some("assistant-1".to_string()),
+            assistant_message_ids: vec!["assistant-1".to_string(), "assistant-2".to_string()],
+            agent_id: Some("agent-1".to_string()),
+            fallback_warning: None,
+        };
+        store
+            .complete_channel_turn("telegram:bot-a:update-42", &result)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            store
+                .claim_channel_turn("telegram:bot-a:update-42", "conversation-1", "hash-1")
+                .await
+                .unwrap(),
+            ChannelTurnClaim::Completed(result)
+        );
+    }
+
+    #[tokio::test]
+    async fn channel_turn_idempotency_rejects_key_reuse_for_different_input() {
+        let store = ConversationStore::open_in_memory().unwrap();
+        store
+            .claim_channel_turn("whatsapp:bot-a:wamid-1", "conversation-1", "hash-1")
+            .await
+            .unwrap();
+        let error = store
+            .claim_channel_turn("whatsapp:bot-a:wamid-1", "conversation-1", "hash-2")
+            .await
+            .expect_err("one provider id must not be reused for another payload");
+        assert!(error
+            .to_string()
+            .contains("idempotency key was reused for a different request"));
     }
 }

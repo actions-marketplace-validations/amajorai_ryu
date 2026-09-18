@@ -111,8 +111,11 @@ export function updateCheckFailed(verdict: UpdateCheck): boolean {
 }
 
 /** Read the installed Ryu version + per-component builds. */
-export function getVersionInfo(target: ApiTarget): Promise<VersionInfo> {
-	return request<VersionInfo>(target, "/api/version");
+export function getVersionInfo(
+	target: ApiTarget,
+	signal?: AbortSignal
+): Promise<VersionInfo> {
+	return request<VersionInfo>(target, "/api/version", { signal });
 }
 
 export interface CheckForUpdateOptions {
@@ -129,6 +132,7 @@ export interface CheckForUpdateOptions {
 	 * Only pass `true` for THIS app's own LOCAL node (`isLocalNode`).
 	 */
 	clamp?: boolean;
+	signal?: AbortSignal;
 }
 
 /**
@@ -155,7 +159,8 @@ export async function checkForUpdate(
 	try {
 		return await request<UpdateCheck>(
 			target,
-			`/api/update/check?${params.toString()}`
+			`/api/update/check?${params.toString()}`,
+			{ signal: options?.signal }
 		);
 	} catch {
 		// Deliberately leaves every updates-window field undefined. A transport

@@ -1,15 +1,72 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { expect, test } from "@playwright/test";
+import { expect, type Page, test } from "@playwright/test";
+
+async function measureAction(
+	page: Page,
+	name: string,
+	selector = "button",
+	heading = name
+) {
+	return await page.evaluate(
+		async ({ name, selector, heading }) => {
+			const button = Array.from(document.querySelectorAll(selector)).find(
+				(item) => item.textContent === name
+			);
+			if (!(button instanceof HTMLButtonElement)) {
+				throw new Error(`Missing button: ${name}`);
+			}
+			const start = performance.now();
+			await new Promise<void>((resolve, reject) => {
+				const visible = () =>
+					Array.from(document.querySelectorAll("h1,h2,h3")).some(
+						(item) =>
+							item.textContent === heading && item.getClientRects().length > 0
+					);
+				const observer = new MutationObserver(() => {
+					if (visible()) {
+						observer.disconnect();
+						clearTimeout(timer);
+						resolve();
+					}
+				});
+				const timer = setTimeout(() => {
+					observer.disconnect();
+					reject(new Error(`View did not appear: ${heading}`));
+				}, 10_000);
+				observer.observe(document.body, {
+					attributes: true,
+					childList: true,
+					subtree: true,
+				});
+				button.click();
+				if (visible()) {
+					observer.disconnect();
+					clearTimeout(timer);
+					resolve();
+				}
+			});
+			await new Promise<void>((resolve) =>
+				requestAnimationFrame(() => requestAnimationFrame(() => resolve()))
+			);
+			return performance.now() - start;
+		},
+		{ name, selector, heading }
+	);
+}
 
 const baseline = Boolean(process.env.RYU_NAV_BASELINE);
-const proofDir = path.resolve(
-	import.meta.dirname,
-	"../../../docs/proof/navigation-performance"
-);
 test("warm switching avoids unrelated route renders and preserves working state", async ({
 	page,
-}) => {
+	browserName,
+}, testInfo) => {
+	const proofDir = path.resolve(
+		import.meta.dirname,
+		"../../../docs/proof/navigation-performance",
+		process.env.RYU_NAV_PROOF_RUN ?? "",
+		browserName === "chromium" ? "" : browserName,
+		testInfo.repeatEachIndex === 0 ? "" : `run-${testInfo.repeatEachIndex}`
+	);
 	const errors: string[] = [];
 	page.on("pageerror", (error) => errors.push(error.message));
 	page.on("console", (message) => {
@@ -35,22 +92,9 @@ test("warm switching avoids unrelated route renders and preserves working state"
 	const timings: number[] = [];
 	for (let index = 0; index < 24; index++) {
 		const title = index % 2 === 0 ? "Workspace 2" : "Workspace 1";
-		// Time the real click handler through the next painted frame. Avoid including
-		// Playwright locator/IPC overhead in the navigation measurement.
-		const elapsed = await page.evaluate(async (name) => {
-			const button = Array.from(document.querySelectorAll("nav button")).find(
-				(item) => item.textContent === name
-			);
-			if (!(button instanceof HTMLButtonElement)) {
-				throw new Error("Missing tab button");
-			}
-			const start = performance.now();
-			button.click();
-			await new Promise<void>((resolve) =>
-				requestAnimationFrame(() => requestAnimationFrame(() => resolve()))
-			);
-			return performance.now() - start;
-		}, title);
+		// Measure the visible target through two animation-frame callbacks, excluding
+		// Playwright locator/IPC overhead. This is not an optical paint measurement.
+		const elapsed = await measureAction(page, title, "nav button");
 		timings.push(elapsed);
 		await expect(
 			page.getByRole("heading", { name: title, exact: true })
@@ -80,7 +124,12 @@ test("warm switching avoids unrelated route renders and preserves working state"
 	await expect(
 		page.getByRole("heading", { name: "Workspace 1", exact: true })
 	).toBeVisible();
-	await page.getByRole("button", { name: "Open page", exact: true }).click();
+	const openPageMs = await measureAction(
+		page,
+		"Open page",
+		"button",
+		"New workspace"
+	);
 	await expect(
 		page.getByRole("heading", { name: "New workspace", exact: true })
 	).toBeVisible();
@@ -90,9 +139,11 @@ test("warm switching avoids unrelated route renders and preserves working state"
 		.getByRole("button", { name: "Unload last tab", exact: true })
 		.click();
 	await expect(page.locator("[data-workspace]")).toHaveCount(12);
-	await page
-		.getByRole("button", { name: "New workspace", exact: true })
-		.click();
+	const remountPageMs = await measureAction(
+		page,
+		"New workspace",
+		"nav button"
+	);
 	await expect(page.locator("[data-workspace]")).toHaveCount(13);
 	await expect(
 		page.getByRole("heading", { name: "New workspace", exact: true })
@@ -110,7 +161,12 @@ test("warm switching avoids unrelated route renders and preserves working state"
 		JSON.stringify(
 			{
 				scenario:
-					"12 mounted routes, 160 rows per route, 24 warm switches; component harness",
+					"12 mounted routes, 160 rows per route, 24 switches including first activation; component harness; click to visible target plus two animation-frame callbacks",
+				measurementVersion: 2,
+				openPageMs,
+				remountPageMs,
+				firstSwitchMs: timings[0],
+				maxMs: sorted.at(-1),
 				unrelatedRenders,
 				timings,
 				medianMs: sorted[12],

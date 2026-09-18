@@ -90,6 +90,29 @@ test("promotes a secondary source folder and persists the primary order", async 
 		SECONDARY_FOLDER
 	);
 
+	await settings.getByRole("button", { name: "Add environment" }).click();
+	await expect(
+		settings.getByText(
+			"Setup and cleanup shell hooks are unavailable for chat worktrees.",
+			{
+				exact: false,
+			}
+		)
+	).toBeVisible();
+	await expect(
+		settings.getByText("Inherited by actions and the coding agent.", {
+			exact: false,
+		})
+	).toBeVisible();
+	await settings
+		.getByText(
+			"Setup and cleanup shell hooks are unavailable for chat worktrees.",
+			{
+				exact: false,
+			}
+		)
+		.scrollIntoViewIfNeeded();
+
 	await page.screenshot({ path: PROOF_SCREENSHOT, fullPage: true });
 	await writeFile(
 		PROOF_LOG,

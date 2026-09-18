@@ -25,6 +25,7 @@
 
 import { invoke } from "@tauri-apps/api/core";
 import type { UpdateCheck } from "@/src/lib/api/update.ts";
+import { formatDateTime } from "@/src/lib/timezone.ts";
 
 /** The hour a deferred install targets, in the machine's own local zone. */
 const QUIET_HOUR = 3;
@@ -110,7 +111,7 @@ export function nextQuietWindow(now: Date): { at: Date; timeZone: string } {
  * that is asleep at the hour.
  */
 export function describePendingAppUpdate(pending: PendingAppUpdate): string {
-	const when = new Date(pending.scheduled_for_ms).toLocaleString();
+	const when = formatDateTime(pending.scheduled_for_ms);
 	return `v${pending.version} will install the next time you open Ryu after ${when} (${pending.time_zone}).`;
 }
 

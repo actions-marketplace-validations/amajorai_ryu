@@ -236,7 +236,7 @@ export default function StartupPrograms({ className }: { className?: string }) {
 		>
 			<div className="mx-auto max-w-6xl text-center">
 				<h2
-					className="font-medium text-muted-foreground text-sm"
+					className="!text-sm font-medium text-muted-foreground"
 					id="backed-by-heading"
 				>
 					Backed by leading startup programs

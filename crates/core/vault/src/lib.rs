@@ -40,6 +40,10 @@
 //! See `docs/identity-vault-spec.md` for the full design.
 
 pub mod health;
+pub mod mcp_oauth;
+pub mod mcp_sse;
+pub mod mcp_transport;
+pub mod passport;
 pub mod source;
 mod store;
 

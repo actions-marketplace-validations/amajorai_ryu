@@ -56,10 +56,19 @@ const DENIED_PREFIXES: &[&str] = &[
     "/api/auth/",
     // Credential vault — never expose stored secrets or their lifecycle.
     "/api/identity/",
+    "/api/identities",
+    "/api/vault",
     // Capability broker — cross-app privilege escalation surface.
     "/api/host/",
+    // Mesh/node control — loopback self-API must not mint or expose peer
+    // credentials on behalf of the calling agent.
+    "/api/mesh/",
     // The unified tool routes themselves — recursion (search/describe/exec).
     "/api/tools/",
+    // Rule discovery accepts a filesystem root. It remains available to the
+    // authenticated desktop route, but must not become an agent-controlled
+    // loopback file browser through CoreApi.
+    "/api/rules/",
 ];
 
 /// Exact paths excluded for every verb.
@@ -94,6 +103,11 @@ pub fn is_denied(path: &str, method: &str) -> bool {
         return true;
     }
     if DENIED_STREAMING_SUBSTRINGS.iter().any(|s| path.contains(s)) {
+        return true;
+    }
+    // Webhook signing secrets are credentials even though the registry/list
+    // routes themselves are metadata-only.
+    if path.starts_with("/api/webhooks/") && path.ends_with("/secret") {
         return true;
     }
     // Approvals: reads OK, mutations forbidden (self-approval bypass).
@@ -577,6 +591,14 @@ mod tests {
                 assert!(is_denied(exact, m), "{exact} {m}");
             }
         }
+        assert!(is_denied("/api/mesh/peers", "get"));
+        assert!(is_denied("/api/identities", "get"));
+        assert!(is_denied("/api/identities/connections", "get"));
+        assert!(is_denied("/api/vault/secrets", "get"));
+        assert!(is_denied("/api/vault/secrets/name", "post"));
+        assert!(is_denied("/api/rules/discover", "get"));
+        assert!(is_denied("/api/webhooks/workflow-1/secret", "get"));
+        assert!(is_denied("/api/webhooks/workflow-1/secret", "post"));
         // Streaming/WS routes are excluded.
         assert!(is_denied("/api/chat/stream", "post"));
         assert!(is_denied("/api/realtime_ws", "get"));

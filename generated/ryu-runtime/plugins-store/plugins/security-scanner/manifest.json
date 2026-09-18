@@ -31,7 +31,7 @@
   "category": "Security",
   "icon": "shield-check",
   "iconDither": {
-    "from": 312,
+    "from": 276,
     "to": "transparent",
     "direction": "down"
   },

@@ -30,7 +30,7 @@
 // NOT `useAgentCapabilities` — that reports one agent's tool/vision support and
 // is unrelated to capability→provider binding.
 
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useCallback } from "react";
 import {
 	type CapabilityProvider,
@@ -82,15 +82,27 @@ export interface UseCapabilityLayersResult {
 	select: (capability: string, providerId: string) => Promise<void>;
 }
 
+function capabilityLayersKey(target: ApiTarget) {
+	return [
+		"node-capability-layers",
+		target.url,
+		target.token ?? null,
+		target.userJwt ?? null,
+	];
+}
+
 export function useCapabilityLayers(
 	target: ApiTarget,
 	enabled: boolean
 ): UseCapabilityLayersResult {
+	const queryClient = useQueryClient();
 	const query = useQuery({
 		enabled,
-		queryFn: async (): Promise<CapabilityLayerEntry[]> => {
+		queryFn: async ({ signal }): Promise<CapabilityLayerEntry[]> => {
 			// Absent on an older Core → no layers rather than a broken section.
-			const model = await fetchCapabilityLayers(target).catch(() => null);
+			const model = await fetchCapabilityLayers(target, signal).catch(
+				() => null
+			);
 			if (!model) {
 				return [];
 			}
@@ -112,7 +124,7 @@ export function useCapabilityLayers(
 					})
 				);
 		},
-		queryKey: ["node-capability-layers", target.url],
+		queryKey: capabilityLayersKey(target),
 		refetchInterval: 30_000,
 		retry: false,
 	});
@@ -134,9 +146,12 @@ export function useCapabilityLayers(
 				capability,
 				providerId
 			);
-			await refetch();
+			await queryClient.invalidateQueries({
+				queryKey: capabilityLayersKey({ url, token, userJwt }),
+				exact: true,
+			});
 		},
-		[refetch, token, url, userJwt]
+		[queryClient, token, url, userJwt]
 	);
 
 	return {

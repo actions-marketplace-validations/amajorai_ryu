@@ -41,6 +41,11 @@ export function docsHref(path: string): string {
  */
 export const DEMO_HREF = "https://cal.com/amajor/ryu-demo";
 
+/** Public markdown playbook that lets another agent set up Ryu for the user. */
+export const SETUP_RYU_HREF = "/setup-ryu.md";
+export const SETUP_RYU_LABEL = "Set up Ryu for me";
+export const DISCORD_INVITE_HREF = "https://discord.gg/3RxeVyvdjG";
+
 export interface Resource {
 	category: ResourceCategory;
 	description: string;
@@ -145,7 +150,7 @@ export const resources: Resource[] = [
 		category: "Support",
 		label: "Discord",
 		description: "Join the community and talk to the team.",
-		href: "https://discord.gg/46FkCKCMba",
+		href: DISCORD_INVITE_HREF,
 		external: true,
 		Icon: MessageCircle,
 	},

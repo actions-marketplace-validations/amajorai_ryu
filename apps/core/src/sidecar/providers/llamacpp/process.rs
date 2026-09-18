@@ -90,6 +90,19 @@ pub struct LlamaCppProcess {
     child: Option<Child>,
 }
 
+impl Drop for LlamaCppProcess {
+    fn drop(&mut self) {
+        // `std::process::Child` deliberately does not kill its process when it
+        // is dropped. Core owns this child, so dropping the manager during a
+        // graceful shutdown must stop and reap llama-server or the next Core
+        // can mistake the old listener for its newly requested model.
+        if let Some(mut child) = self.child.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+}
+
 impl LlamaCppProcess {
     pub fn new(binary_path: PathBuf) -> Self {
         Self {
@@ -185,12 +198,82 @@ impl LlamaCppProcess {
         Ok(())
     }
 
-    pub fn is_running(&self) -> bool {
-        self.child.is_some() && self.binary_path.exists()
+    pub fn is_running(&mut self) -> bool {
+        let Some(child) = self.child.as_mut() else {
+            return false;
+        };
+        match child.try_wait() {
+            Ok(None) => true,
+            Ok(Some(_)) => {
+                // `try_wait` reaps an exited child. Clear the handle so a
+                // later readiness/start path cannot treat it as owned.
+                self.child = None;
+                false
+            }
+            Err(_) => false,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn from_child_for_test(child: Child) -> Self {
+        Self {
+            binary_path: PathBuf::from("/bin/sleep"),
+            child: Some(child),
+        }
     }
 
     /// OS process id of the running llama-server child, when one is held.
     pub fn pid(&self) -> Option<u32> {
         self.child.as_ref().map(|c| c.id())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[cfg(unix)]
+    fn process_exists(pid: u32) -> bool {
+        // Signal 0 only probes liveness; it never terminates the process.
+        unsafe { libc::kill(pid as i32, 0) == 0 }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn drop_kills_and_reaps_owned_child() {
+        let child = std::process::Command::new("/bin/sleep")
+            .arg("30")
+            .spawn()
+            .expect("spawn sleep fixture");
+        let pid = child.id();
+        let process = LlamaCppProcess::from_child_for_test(child);
+
+        drop(process);
+
+        for _ in 0..100 {
+            if !process_exists(pid) {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        panic!("owned child {pid} survived process drop");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn is_running_reaps_an_exited_child() {
+        let child = std::process::Command::new("/usr/bin/true")
+            .spawn()
+            .expect("spawn true fixture");
+        let mut process = LlamaCppProcess::from_child_for_test(child);
+
+        for _ in 0..100 {
+            if !process.is_running() {
+                assert!(process.pid().is_none());
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        panic!("exited fixture still reported running");
     }
 }

@@ -13,6 +13,10 @@ import { type ApiTarget, authenticatedFetch } from "./client.ts";
 
 /** Options for {@link generateImage}. */
 export interface GenerateImageOptions {
+	/** Host attribution for app-level generation ACLs. */
+	appId?: string;
+	/** Human-facing app permission required for this host-direct call. */
+	appPermission?: string;
 	/** How many images to request (sd-server returns `data[]`). Defaults to 1. */
 	count?: number;
 	/** Optional source images for an edit/remix request. */
@@ -61,6 +65,13 @@ export async function generateImage(
 
 	const resp = await authenticatedFetch(target, "/api/images/generate", {
 		method: "POST",
+		headers:
+			options.appId && options.appPermission
+				? {
+						"x-ryu-app-id": options.appId,
+						"x-ryu-app-permission": options.appPermission,
+					}
+				: undefined,
 		body: JSON.stringify(body),
 	});
 

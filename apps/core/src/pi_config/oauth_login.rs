@@ -305,7 +305,7 @@ const JS_RUNTIMES: [&str; 2] = ["node", "bun"];
 ///   `PATH` (`/usr/bin:/bin:/usr/sbin:/sbin`) that contains no Node install, so
 ///   the GUI case fails where a terminal launch works. The common install
 ///   prefixes are probed explicitly, mirroring
-///   `skills_catalog::default_skills::resolve_npx`.
+///   `skills_catalog::from_source::install_from_source`.
 ///
 /// PATH still wins over the well-known prefixes — a user who put a specific
 /// runtime on their PATH meant it.

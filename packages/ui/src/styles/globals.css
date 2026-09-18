@@ -3,7 +3,6 @@
 @import "tailwindcss";
 @import "tw-animate-css";
 @import "shadcn/tailwind.css";
-@plugin "@toolwind/corner-shape";
 @source "../../../apps/**/*.{ts,tsx}";
 @source "../**/*.{ts,tsx}";
 
@@ -86,6 +85,13 @@
 }
 
 @custom-variant dark (&:is(.dark *));
+
+/* Keep icon controls circular even when the shared Button base applies the
+ * optional squircle corner shape. Equal dimensions plus this explicit round
+ * shape are the contract for compact circular actions. */
+@utility corner-round {
+	corner-shape: round !important;
+}
 
 /* Backport of shadcn's scroll-fade utilities. The classes are documented by
    shadcn and already used by shared components, but the currently published

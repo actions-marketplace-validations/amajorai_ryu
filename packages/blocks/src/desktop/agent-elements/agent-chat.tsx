@@ -51,6 +51,7 @@ export function AgentChat({
 	toolRenderers,
 	attachments,
 	showCopyToolbar,
+	conversationHeader,
 	onBranch,
 	onAgentUiSubmit,
 	onEditMessage,
@@ -59,6 +60,7 @@ export function AgentChat({
 	onRetryGeneration,
 	messageActions,
 	messageActionStates,
+	messageReadReceipts,
 	onContributedMessageAction,
 	selectionActions,
 	onContributedSelectionAction,
@@ -110,6 +112,7 @@ export function AgentChat({
 	hasOlderMessages,
 	loadingOlderMessages,
 	onLoadOlderMessages,
+	onMessageVisible,
 	questionTool,
 	historyNotice,
 	className,
@@ -435,6 +438,7 @@ export function AgentChat({
 				mentionItems={mentionItems}
 				messageActionStates={messageActionStates}
 				messageActions={messageActions}
+				messageReadReceipts={messageReadReceipts}
 				messages={listMessages}
 				onAgentUiSubmit={onAgentUiSubmit}
 				onAnnotateImage={onAnnotateImage}
@@ -443,6 +447,7 @@ export function AgentChat({
 				onContributedSelectionAction={onContributedSelectionAction}
 				onEditMessage={onEditMessage}
 				onLoadOlderMessages={onLoadOlderMessages}
+				onMessageVisible={onMessageVisible}
 				onOpenFile={onOpenFile}
 				onOpenLink={onOpenLink}
 				onOpenMention={onOpenMention}
@@ -566,6 +571,9 @@ export function AgentChat({
 			ref={rootRef}
 			style={style}
 		>
+			{conversationHeader ? (
+				<div className="shrink-0">{conversationHeader}</div>
+			) : null}
 			{chatStage}
 		</div>
 	);

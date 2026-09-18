@@ -79,6 +79,10 @@ import { formatCount } from "@ryu/ui/lib/number-format.ts";
 import { useQuery } from "@tanstack/react-query";
 import { useCallback, useContext, useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
+import {
+	StandaloneAppContextMenuItems,
+	StandaloneAppDropdownMenuItems,
+} from "@/src/components/apps/standalone-app-menu.tsx";
 import { OAuthConnections } from "@/src/components/marketplace/ConnectionsTab.tsx";
 import { PluginSettingsFields } from "@/src/components/settings/PluginSettingsFields.tsx";
 import { TabsContext } from "@/src/contexts/TabsContext.tsx";
@@ -86,6 +90,7 @@ import { useActiveNodeGetter } from "@/src/hooks/useActiveNode.ts";
 import { useApps } from "@/src/hooks/useApps.ts";
 import { usePluginSettingsOpener } from "@/src/hooks/usePluginSettingsOpener.ts";
 import { usePluginSettingsTabs } from "@/src/hooks/usePluginSettingsTabs.ts";
+import { useStandaloneApps } from "@/src/hooks/useStandaloneApps.ts";
 import { runCatalogScan } from "@/src/lib/api/catalog-scan.ts";
 import type { ApiTarget } from "@/src/lib/api/client.ts";
 import {
@@ -95,9 +100,13 @@ import {
 	fetchAppLifecycleCapabilities,
 	fetchPluginCatalogDetail,
 	fetchPluginDoctor,
+	fetchPluginEvals,
 	fetchSidecarStatus,
 	installSidecar,
 	type PluginDoctorReport,
+	type PluginEvalOverview,
+	type PluginEvalRunResult,
+	runPluginEvals,
 	setPluginGrants,
 	startSidecar,
 	stopSidecar,
@@ -320,6 +329,12 @@ export default function InstalledSection() {
 		staleTime: 30_000,
 	});
 	const { byPlugin: settingsByPlugin } = usePluginSettingsTabs();
+	const {
+		install: installStandalone,
+		installedAppIds,
+		open: openStandalone,
+		uninstall: uninstallStandalone,
+	} = useStandaloneApps();
 	// Where each row's settings live (Gateway dialog vs App Settings, at its own
 	// tab). Resolved once for the whole list and read per row below.
 	const settingsOpener = usePluginSettingsOpener();
@@ -422,6 +437,53 @@ export default function InstalledSection() {
 		navigate("/chat");
 	};
 
+	const standaloneTarget = (app: AppInfo) => ({
+		appId: app.id,
+		name: app.name,
+		version: app.installedVersion ?? app.version,
+	});
+
+	const handleInstallStandalone = async (app: AppInfo) => {
+		try {
+			const appTarget = standaloneTarget(app);
+			await installStandalone(appTarget);
+			await openStandalone(appTarget);
+			toast.success("Standalone app installed", {
+				description: `${app.name} now opens in its own window and keeps using the same Ryu data.`,
+			});
+		} catch (error) {
+			toast.error("Couldn't install the standalone app", {
+				description:
+					error instanceof Error ? error.message : "Please try again.",
+			});
+		}
+	};
+
+	const handleOpenStandalone = async (app: AppInfo) => {
+		try {
+			await openStandalone(standaloneTarget(app));
+		} catch (error) {
+			toast.error("Couldn't open the standalone app", {
+				description:
+					error instanceof Error ? error.message : "Please try again.",
+			});
+		}
+	};
+
+	const handleRemoveStandalone = async (app: AppInfo) => {
+		try {
+			await uninstallStandalone(app.id);
+			toast.success("Standalone app removed", {
+				description: `${app.name} is still installed inside Ryu with all of its data.`,
+			});
+		} catch (error) {
+			toast.error("Couldn't remove the standalone app", {
+				description:
+					error instanceof Error ? error.message : "Please try again.",
+			});
+		}
+	};
+
 	const visibleApps = useMemo(() => {
 		const q = query.trim().toLowerCase();
 		if (!q) {
@@ -476,6 +538,8 @@ export default function InstalledSection() {
 
 	const sidecarRunning = (app: AppInfo): boolean | undefined =>
 		app.sidecarName === null ? undefined : sidecarStatus[app.sidecarName];
+	const standaloneEnabled = (app: AppInfo): boolean =>
+		app.builtIn && app.sidecarName ? sidecarRunning(app) === true : app.enabled;
 
 	// The Installed tab shows only what is actually installed — a built-in counts
 	// once its sidecar reports a running-state, everything else once its record is
@@ -499,6 +563,28 @@ export default function InstalledSection() {
 	// regular apps get Enable/Disable + Uninstall.
 	const renderAppAction = (app: AppInfo) => {
 		const busy = pending[app.id] ?? false;
+		const standaloneMenu = {
+			enabled: standaloneEnabled(app),
+			hasCompanion: app.runnables.some(
+				(runnable) => runnable.kind === "companion"
+			),
+			installed: installedAppIds.has(app.id),
+			onInstall: () => {
+				handleInstallStandalone(app).catch(() => {
+					// The handler already surfaces the error.
+				});
+			},
+			onOpen: () => {
+				handleOpenStandalone(app).catch(() => {
+					// The handler already surfaces the error.
+				});
+			},
+			onRemove: () => {
+				handleRemoveStandalone(app).catch(() => {
+					// The handler already surfaces the error.
+				});
+			},
+		};
 		// Where this row's own settings live, or null when it declares none. Passed
 		// to every branch below — including the mandatory one, whose lifecycle verbs
 		// are all refused but whose settings are still perfectly reachable.
@@ -512,7 +598,10 @@ export default function InstalledSection() {
 					<Badge className="text-xs" variant="secondary">
 						Required
 					</Badge>
-					<StoreItemOverflowMenu onOpenSettings={openSettings} />
+					<StoreItemOverflowMenu
+						extra={<StandaloneAppDropdownMenuItems {...standaloneMenu} />}
+						onOpenSettings={openSettings}
+					/>
 				</div>
 			);
 		}
@@ -521,6 +610,7 @@ export default function InstalledSection() {
 				<StoreItemAction
 					busy={busy}
 					enabled={sidecarRunning(app) === true}
+					extra={<StandaloneAppDropdownMenuItems {...standaloneMenu} />}
 					installed
 					onDisable={() => {
 						handleSidecar(app, "stop").catch(() => {
@@ -540,6 +630,7 @@ export default function InstalledSection() {
 			<StoreItemAction
 				busy={busy}
 				enabled={app.enabled}
+				extra={<StandaloneAppDropdownMenuItems {...standaloneMenu} />}
 				installed
 				onDisable={() => {
 					handleToggle(app, false).catch(() => {
@@ -572,8 +663,31 @@ export default function InstalledSection() {
 	 *  did nothing anywhere on the page. */
 	const appContextMenu = (app: AppInfo) => {
 		const openSettings = settingsOpener(app.id) ?? undefined;
+		const standaloneMenu = {
+			enabled: standaloneEnabled(app),
+			hasCompanion: app.runnables.some(
+				(runnable) => runnable.kind === "companion"
+			),
+			installed: installedAppIds.has(app.id),
+			onInstall: () => {
+				handleInstallStandalone(app).catch(() => {
+					// The handler already surfaces the error.
+				});
+			},
+			onOpen: () => {
+				handleOpenStandalone(app).catch(() => {
+					// The handler already surfaces the error.
+				});
+			},
+			onRemove: () => {
+				handleRemoveStandalone(app).catch(() => {
+					// The handler already surfaces the error.
+				});
+			},
+		};
 		if (app.mandatory) {
 			return storeItemContextMenu({
+				extra: <StandaloneAppContextMenuItems {...standaloneMenu} />,
 				installed: true,
 				locked: true,
 				onOpenSettings: openSettings,
@@ -582,6 +696,7 @@ export default function InstalledSection() {
 		if (app.builtIn) {
 			return storeItemContextMenu({
 				enabled: sidecarRunning(app) === true,
+				extra: <StandaloneAppContextMenuItems {...standaloneMenu} />,
 				installed: true,
 				onDisable: () => {
 					handleSidecar(app, "stop").catch(() => {
@@ -598,6 +713,7 @@ export default function InstalledSection() {
 		}
 		return storeItemContextMenu({
 			enabled: app.enabled,
+			extra: <StandaloneAppContextMenuItems {...standaloneMenu} />,
 			installed: true,
 			onDisable: () => {
 				handleToggle(app, false).catch(() => {
@@ -981,6 +1097,7 @@ function InstalledAppTabs({
 					report={doctorQuery.data ?? null}
 					running={doctorQuery.isFetching}
 				/>
+				<InstalledPluginEvalCard appId={app.id} target={target} />
 			</div>
 		);
 	}
@@ -1011,6 +1128,9 @@ function InstalledAppTabs({
 					report={doctorQuery.data ?? null}
 					running={doctorQuery.isFetching}
 				/>
+			}
+			developerEvals={
+				<InstalledPluginEvalCard appId={app.id} target={target} />
 			}
 			entry={entry}
 			key={target.url}
@@ -1083,6 +1203,164 @@ function InstalledDoctorCard({
 						</p>
 					)}
 				</div>
+			) : null}
+		</section>
+	);
+}
+
+function evalStatusLabel(status: string): string {
+	switch (status) {
+		case "ready":
+		case "ready_with_warnings":
+			return "Ready";
+		case "not_configured":
+			return "Not configured";
+		case "empty":
+			return "Empty suite";
+		case "invalid":
+			return "Needs attention";
+		default:
+			return status;
+	}
+}
+
+function PluginEvalResultSummary({ result }: { result: PluginEvalRunResult }) {
+	return (
+		<div className="space-y-2" data-testid="plugin-evals-result">
+			<div className="flex flex-wrap items-center gap-2 text-xs">
+				<Badge variant="outline">
+					{result.score === null
+						? "—"
+						: `${Math.round(result.score * 100)}/100`}
+				</Badge>
+				<span className="text-muted-foreground">
+					{result.status} · {result.evidenceLevel}
+				</span>
+			</div>
+			<ul className="space-y-1">
+				{result.cases.map((item) => (
+					<li
+						className="flex flex-wrap items-center justify-between gap-2 rounded-md bg-background px-3 py-2"
+						key={item.id}
+					>
+						<span className="min-w-0 truncate">{item.name}</span>
+						<span className="shrink-0 text-muted-foreground">
+							{item.score === null
+								? "not scored"
+								: `${Math.round(item.score * 100)}/100`}
+						</span>
+					</li>
+				))}
+			</ul>
+			<p className="text-[11px] text-muted-foreground">
+				The no-plugin baseline is intentionally not run because Ryu never
+				disables a live installation to manufacture an ablation.
+			</p>
+		</div>
+	);
+}
+
+function InstalledPluginEvalCard({
+	appId,
+	target,
+}: {
+	appId: string;
+	target: ApiTarget;
+}) {
+	const [running, setRunning] = useState(false);
+	const [result, setResult] = useState<PluginEvalRunResult | null>(null);
+	const [runError, setRunError] = useState<string | null>(null);
+	const suiteQuery = useQuery({
+		enabled: Boolean(appId),
+		queryFn: async () => {
+			const payload = await fetchPluginEvals(target, appId);
+			return "suite" in payload ? payload : null;
+		},
+		queryKey: ["plugins", "evals", target.url, appId],
+		retry: false,
+		staleTime: 5 * 60 * 1000,
+	});
+	const overview = suiteQuery.data as PluginEvalOverview | null | undefined;
+	const suite = overview?.suite;
+	const run = async () => {
+		if (!suite || suite.caseCount === 0 || running) {
+			return;
+		}
+		setRunning(true);
+		setRunError(null);
+		try {
+			setResult(await runPluginEvals(target, { id: appId }));
+		} catch (error) {
+			setRunError(error instanceof Error ? error.message : String(error));
+		} finally {
+			setRunning(false);
+		}
+	};
+
+	return (
+		<section
+			className="flex flex-col gap-3 rounded-lg border border-primary/25 bg-primary/5 p-4"
+			data-testid="plugin-evals-card"
+		>
+			<div className="flex flex-wrap items-start justify-between gap-3">
+				<div>
+					<h3 className="font-medium text-sm">Behavioral evals</h3>
+					<p className="mt-1 text-muted-foreground text-xs leading-relaxed">
+						Runs the package's evals/ cases through the enabled Ryu plugin or
+						app. This is behavioral evidence, separate from the static scorecard
+						and read-only doctor.
+					</p>
+				</div>
+				<Button
+					disabled={!suite || suite.caseCount === 0 || running}
+					loading={running}
+					onClick={() => {
+						void run();
+					}}
+					size="sm"
+				>
+					{running ? "Running" : "Run evals"}
+				</Button>
+			</div>
+			{suiteQuery.isLoading ? (
+				<p className="text-muted-foreground text-xs">Inspecting eval suite…</p>
+			) : suiteQuery.error ? (
+				<p className="text-status-destructive text-xs" role="alert">
+					{suiteQuery.error instanceof Error
+						? suiteQuery.error.message
+						: "Eval suite inspection failed."}
+				</p>
+			) : suite ? (
+				<div className="space-y-2 text-xs">
+					<div className="flex flex-wrap items-center gap-2">
+						<Badge data-testid="plugin-evals-status" variant="outline">
+							{evalStatusLabel(suite.status)}
+						</Badge>
+						<span className="text-muted-foreground">
+							{suite.caseCount} case{suite.caseCount === 1 ? "" : "s"} ·{" "}
+							{suite.graderCount} grader{suite.graderCount === 1 ? "" : "s"}
+						</span>
+					</div>
+					{suite.unsupportedGraders.length > 0 ? (
+						<p className="text-status-warning">
+							Skipped grader types: {suite.unsupportedGraders.join(", ")}
+						</p>
+					) : null}
+					{suite.issues.length > 0 ? (
+						<p className="text-muted-foreground">{suite.issues[0]?.message}</p>
+					) : null}
+					{result ? <PluginEvalResultSummary result={result} /> : null}
+				</div>
+			) : (
+				<p className="text-muted-foreground text-xs">
+					No package eval suite found. Add evals/&lt;case&gt;/prompt.md and a
+					grader to measure behavior.
+				</p>
+			)}
+			{runError ? (
+				<p className="text-status-destructive text-xs" role="alert">
+					{runError}
+				</p>
 			) : null}
 		</section>
 	);

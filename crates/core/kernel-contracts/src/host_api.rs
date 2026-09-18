@@ -95,17 +95,59 @@ const fn m(
 }
 
 /// The canonical host-API method table. The union of the TS app host's
-/// `METHOD_CAPABILITY` (142 methods) and the Rust bridge's `view.action`
+/// `METHOD_CAPABILITY` (148 methods) and the Rust bridge's `view.action`
 /// (Rust-only). Serialised to `schemas/host-api.json` for the TS host to consume.
 pub const HOST_API_METHODS: &[HostApiMethod] = &[
     // Verified current caller only; no caller-chosen identity or roster lookup.
-    m("identity.current", "identity.read", Some("identity:read"), false, false),
-    m("security.check", "security.check", Some("security:check"), false, false),
-    m("backups.destinations", "backups.app", Some("backups:app"), false, true),
-    m("backups.create", "backups.app", Some("backups:app"), false, true),
-    m("backups.list", "backups.app", Some("backups:app"), false, true),
-    m("backups.get", "backups.app", Some("backups:app"), false, true),
-    m("backups.restore", "backups.app", Some("backups:app"), false, true),
+    m(
+        "identity.current",
+        "identity.read",
+        Some("identity:read"),
+        false,
+        false,
+    ),
+    m(
+        "security.check",
+        "security.check",
+        Some("security:check"),
+        false,
+        false,
+    ),
+    m(
+        "backups.destinations",
+        "backups.app",
+        Some("backups:app"),
+        false,
+        true,
+    ),
+    m(
+        "backups.create",
+        "backups.app",
+        Some("backups:app"),
+        false,
+        true,
+    ),
+    m(
+        "backups.list",
+        "backups.app",
+        Some("backups:app"),
+        false,
+        true,
+    ),
+    m(
+        "backups.get",
+        "backups.app",
+        Some("backups:app"),
+        false,
+        true,
+    ),
+    m(
+        "backups.restore",
+        "backups.app",
+        Some("backups:app"),
+        false,
+        true,
+    ),
     // Local browser/native host capabilities. These rows are intentionally
     // grant-free; the host decides whether the concrete surface can provide
     // them, while the contract still keeps the method vocabulary closed.
@@ -409,6 +451,17 @@ pub const HOST_API_METHODS: &[HostApiMethod] = &[
         "conversation.setTitle",
         "conversation.title",
         Some("conversation:set-title"),
+        false,
+        false,
+    ),
+    // Agent-only reaction write. The current conversation and reacting agent are
+    // bound by Core's tool dispatch; the sandbox supplies only the exact message
+    // id and emoji. Rust-bridge-only so a Companion cannot use this as a generic
+    // cross-chat mutation.
+    m(
+        "conversation.addReaction",
+        "conversation.reactions",
+        Some("conversation:reactions"),
         false,
         false,
     ),
@@ -891,6 +944,27 @@ pub const HOST_API_METHODS: &[HostApiMethod] = &[
         false,
         true,
     ),
+    m(
+        "workflows.connectBindings",
+        "workflows.catalogs",
+        Some("workflows:catalogs"),
+        false,
+        true,
+    ),
+    m(
+        "workflows.bindConnectTrigger",
+        "workflows.runstate",
+        Some("workflows:runstate"),
+        false,
+        true,
+    ),
+    m(
+        "workflows.removeConnectBinding",
+        "workflows.runstate",
+        Some("workflows:runstate"),
+        false,
+        true,
+    ),
     // The app-event catalog behind the `event` workflow trigger's picker: every
     // event any ENABLED app declares in its `contributes.hook_events`. Another
     // read-only node-config picker, so it joins the existing `workflows.catalogs`
@@ -1077,9 +1151,58 @@ pub const HOST_API_METHODS: &[HostApiMethod] = &[
         true,
     ),
     m(
+        "activity.audit",
+        "activity.read",
+        Some("activity:read"),
+        false,
+        true,
+    ),
+    m(
+        "activity.prune",
+        "activity.run",
+        Some("activity:run"),
+        false,
+        true,
+    ),
+    m(
+        "activity.score",
+        "activity.run",
+        Some("activity:run"),
+        false,
+        true,
+    ),
+    m(
+        "activity.trace",
+        "activity.read",
+        Some("activity:read"),
+        false,
+        true,
+    ),
+    m(
         "activity.openSession",
         "activity.read",
         Some("activity:read"),
+        false,
+        true,
+    ),
+    m(
+        "activity.redteam",
+        "activity.run",
+        Some("activity:run"),
+        false,
+        true,
+    ),
+    m(
+        "activity.eval",
+        "activity.run",
+        Some("activity:run"),
+        false,
+        true,
+    ),
+    m(
+        "activity.importTrace",
+        "activity.run",
+        Some("activity:run"),
         false,
         true,
     ),

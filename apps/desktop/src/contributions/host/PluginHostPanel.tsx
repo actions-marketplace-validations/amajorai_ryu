@@ -17,14 +17,20 @@
 // actually carries a UI bundle.
 
 import { PlugSocketIcon } from "@hugeicons/core-free-icons";
+import { bindWorkflowConnectTrigger, fetchWorkflowConnectBindings, removeWorkflowConnectBinding } from "@/src/lib/api/workflow-connect.ts";
 import { HugeiconsIcon } from "@hugeicons/react";
 import type {
 	RyuCatalogModels,
 	RyuCatalogSnapshot,
 } from "@ryu/app-host/app-bridge";
+import {
+	COMPANION_THEME_MUTATION_ATTRIBUTES,
+	readCompanionThemeTokens,
+} from "@ryu/app-host/companion-theme";
 import { ExtensionHost } from "@ryu/app-host/ExtensionHost";
 import {
 	type ActivityRecord,
+	type ActivityScoreInput,
 	type ApprovalRecord,
 	type BackgroundProcess,
 	type CalendarAgentRecord,
@@ -119,6 +125,13 @@ import {
 	type EventChannel,
 	subscribeChannel,
 } from "@/src/lib/api/eventStream.ts";
+import {
+	fetchGatewayAudit,
+	pruneGatewayAudit,
+	runGatewayEvals,
+	runGatewayRedTeam,
+	scoreGatewayOutput,
+} from "@/src/lib/api/gateway.ts";
 import { getHealingStatus } from "@/src/lib/api/healing.ts";
 import { generateImage as apiGenerateImage } from "@/src/lib/api/images.ts";
 import { getLearningConfig, listExperience } from "@/src/lib/api/learn.ts";
@@ -172,6 +185,11 @@ import {
 	pluginHostInvokeStream,
 } from "@/src/lib/api/plugins.ts";
 import {
+	createPromptSuite,
+	importPromptTrace,
+	listPromptSuites,
+} from "@/src/lib/api/prompt-suites.ts";
+import {
 	acceptSuggestion as acceptQuestSuggestion,
 	captureQuest,
 	completeQuest,
@@ -196,6 +214,7 @@ import {
 	stopRecording,
 } from "@/src/lib/api/recipes.ts";
 import { rlmRequest } from "@/src/lib/api/rlm.ts";
+import { fetchRunTrace } from "@/src/lib/api/runs.ts";
 import { safeActionsRequest } from "@/src/lib/api/safe-actions.ts";
 import { fetchJobs } from "@/src/lib/api/schedules.ts";
 import {
@@ -476,54 +495,6 @@ async function dataUrlToBlob(dataUrl: string): Promise<Blob> {
 	return await resp.blob();
 }
 
-/** The design-system semantic-color + radius/spacing tokens the theme-token bridge
- *  forwards into a sandboxed companion (matches the token block companions carry as
- *  their offline default; see `apps-store/<x>/ui/src/tailwind.css`). Kept in sync
- *  with `packages/ui/src/styles/globals.css`. */
-const COMPANION_THEME_TOKENS = [
-	"--background",
-	"--foreground",
-	"--card",
-	"--card-foreground",
-	"--popover",
-	"--popover-foreground",
-	"--primary",
-	"--primary-foreground",
-	"--secondary",
-	"--secondary-foreground",
-	"--muted",
-	"--muted-foreground",
-	"--accent",
-	"--accent-foreground",
-	"--destructive",
-	"--success",
-	"--success-foreground",
-	"--warning",
-	"--warning-foreground",
-	"--info",
-	"--info-foreground",
-	"--border",
-	"--input",
-	"--ring",
-	"--radius",
-	"--spacing",
-	// Typography, for the same reason as the colours: a companion that inherits
-	// the surface's palette but not its type still reads as a foreign document
-	// embedded in the app, which is exactly how the app UIs looked — every one of
-	// them fell back to its own bundled default stack.
-	//
-	// Only the family STACK crosses this bridge, not the webfont bytes: the frame
-	// is a null-origin `srcdoc` document, so an `@font-face` pointing at the
-	// shell's origin is not fetchable from inside it. Forwarding the stack still
-	// aligns the two on the same generic tail (`sans-serif`) instead of leaving
-	// them on unrelated defaults; carrying the actual Inter/Geist faces in needs
-	// them inlined as `data:` URIs under the companion CSP, which is a separate
-	// change with a real bundle-size cost.
-	"--font-sans",
-	"--font-heading",
-	"--font-code",
-] as const;
-
 /** The node event-stream channels a `shell.eventsSubscribe` call may request (grant
  *  `shell:integrate`). A companion's requested set is intersected with this — an
  *  unknown channel is silently dropped. Mirrors the `EventChannel` union. */
@@ -543,21 +514,9 @@ const SHELL_EVENT_CHANNELS: readonly EventChannel[] = [
  *  (a blank value is skipped, so the companion falls back to its own default for
  *  that token). Runs in the trusted webview (getComputedStyle on the host root). */
 function readHostThemeTokens(): Record<string, string> {
-	if (
-		typeof document === "undefined" ||
-		typeof getComputedStyle !== "function"
-	) {
-		return {};
-	}
-	const style = getComputedStyle(document.documentElement);
-	const out: Record<string, string> = {};
-	for (const name of COMPANION_THEME_TOKENS) {
-		const value = style.getPropertyValue(name).trim();
-		if (value.length > 0) {
-			out[name] = value;
-		}
-	}
-	return out;
+	return readCompanionThemeTokens(undefined, {
+		includeStoredPreferences: true,
+	});
 }
 
 /** How long the sandbox bridge may take to connect before the startup state stops
@@ -663,7 +622,7 @@ export function PluginHostPanel({
 		});
 		observer.observe(document.documentElement, {
 			attributes: true,
-			attributeFilter: ["class", "style", "data-theme"],
+			attributeFilter: [...COMPANION_THEME_MUTATION_ATTRIBUTES],
 		});
 		return () => observer.disconnect();
 	}, []);
@@ -692,28 +651,36 @@ export function PluginHostPanel({
 	// back to the local account vault) exactly as the deleted `useNotifications` hook did.
 	const { data: session } = useSession();
 	const meId = session?.user?.id ?? getActiveUserId() ?? null;
+	const target = useMemo(
+		() => toTarget(node),
+		[node.url, node.token, node.userJwt]
+	);
 
 	// Fetch the plugin's bundled code over the trusted API. `null` (no bundle /
 	// not enabled) or an error means we render the benign fallback, never code.
+	const bundleQueryOptions = useMemo(
+		() => ({
+			queryKey: [
+				"plugin-ui-bundle",
+				target.url,
+				target.token,
+				target.userJwt,
+				companion.pluginId,
+			],
+			// Fetch by the OWNING plugin id (the store key), not the companion id.
+			queryFn: ({ signal }: { signal: AbortSignal }) =>
+				fetchPluginUiBundle(target, companion.pluginId, signal),
+			retry: false,
+			staleTime: 60_000,
+		}),
+		[companion.pluginId, target]
+	);
 	const {
 		data: code,
 		isPending,
 		isError,
 		refetch,
-	} = useQuery({
-		queryKey: [
-			"plugin-ui-bundle",
-			node.url,
-			node.token,
-			node.userJwt,
-			companion.pluginId,
-		],
-		// Fetch by the OWNING plugin id (the store key), not the companion id.
-		queryFn: ({ signal }) =>
-			fetchPluginUiBundle(toTarget(node), companion.pluginId, signal),
-		retry: false,
-		staleTime: 60_000,
-	});
+	} = useQuery(bundleQueryOptions);
 
 	// Retry generation. Bumping it mints a fresh nonce → a fresh `srcdoc` → the
 	// iframe genuinely reloads (a re-render alone would not: React leaves an
@@ -774,6 +741,10 @@ export function PluginHostPanel({
 	const [now, setNow] = useState(() => Date.now());
 	const cooldownLeftMs = Math.max(0, cooldownUntil - now);
 	const cooldownSeconds = Math.ceil(cooldownLeftMs / 1000);
+	const mediaPermission =
+		companion.pluginId === "@ryu/canvas" || companion.pluginId === "@ryu/slides"
+			? `${companion.pluginId.slice("@ryu/".length)}.generate`
+			: undefined;
 	useEffect(() => {
 		if (cooldownLeftMs <= 0) {
 			return;
@@ -1124,6 +1095,8 @@ export function PluginHostPanel({
 			// CSP-locked frame (img/media-src data: blob: only) can render it.
 			generateImage: async (input) => {
 				const urls = await apiGenerateImage(toTarget(node), input.prompt, {
+					appId: mediaPermission ? companion.pluginId : undefined,
+					appPermission: mediaPermission,
 					count: input.count,
 					size: input.size,
 					provider: input.provider,
@@ -1135,6 +1108,8 @@ export function PluginHostPanel({
 			},
 			generateVideo: async (input) => {
 				const clips = await apiGenerateVideo(toTarget(node), input.prompt, {
+					appId: mediaPermission ? companion.pluginId : undefined,
+					appPermission: mediaPermission,
 					provider: input.provider,
 					model: input.model,
 					requestId: input.request_id,
@@ -1148,6 +1123,8 @@ export function PluginHostPanel({
 			},
 			ttsSpeak: async (input) => {
 				const blob = await apiSpeakText(toTarget(node), input.text, {
+					appId: mediaPermission ? companion.pluginId : undefined,
+					appPermission: mediaPermission,
 					engine: input.engine,
 					voice: input.voice,
 					speed: input.speed,
@@ -1377,6 +1354,9 @@ export function PluginHostPanel({
 			// one family the canvas needs.
 			workflowsHookEvents: async () =>
 				(await getPluginContributions(toTarget(node))).hook_events,
+			workflowsConnectBindings: ({id}) => fetchWorkflowConnectBindings(toTarget(node), id),
+			workflowsBindConnectTrigger: ({id,connectTriggerId}) => bindWorkflowConnectTrigger(toTarget(node), id, connectTriggerId),
+			workflowsRemoveConnectBinding: ({id,bindingId}) => removeWorkflowConnectBinding(toTarget(node), id, bindingId),
 			workflowsComposio: ({ kind, toolkit }) => {
 				switch (kind) {
 					case "status":
@@ -1476,6 +1456,79 @@ export function PluginHostPanel({
 				listActivity(toTarget(node), { limit }) as unknown as Promise<
 					ActivityRecord[]
 				>,
+			activityAudit: async ({
+				agent_id,
+				event_type,
+				errors_only,
+				from,
+				limit,
+				model,
+				provider,
+				until,
+				widget_instance_id,
+			}) =>
+				(await fetchGatewayAudit(toTarget(node), {
+					agentId: agent_id,
+					eventType: event_type,
+					errorsOnly: errors_only,
+					from,
+					limit,
+					model,
+					provider,
+					until,
+					widgetInstanceId: widget_instance_id,
+				})) as unknown as Record<string, unknown>,
+			activityPrune: async () =>
+				(await pruneGatewayAudit(toTarget(node))) as Record<string, unknown>,
+			activityScore: async (input: ActivityScoreInput) =>
+				(await scoreGatewayOutput(
+					toTarget(node),
+					input as Parameters<typeof scoreGatewayOutput>[1]
+				)) as unknown as Record<string, unknown>,
+			activityTrace: async ({ run_id }) =>
+				({ spans: await fetchRunTrace(toTarget(node), run_id) }) as Record<
+					string,
+					unknown
+				>,
+			activityRedteam: async ({ agent_id, model }) =>
+				(await runGatewayRedTeam(toTarget(node), {
+					agent_id,
+					model,
+				})) as unknown as Record<string, unknown>,
+			activityEval: async ({ agent_id, model }) =>
+				(await runGatewayEvals(toTarget(node), {
+					agent_id,
+					model,
+				})) as unknown as Record<string, unknown>,
+			activityImportTrace: async ({ agent_id, run_id, suite_id }) => {
+				const target = toTarget(node);
+				const suite = suite_id
+					? { id: suite_id }
+					: agent_id
+						? (await listPromptSuites(target, agent_id))[0]
+						: undefined;
+				if (!suite) {
+					throw new Error(
+						"activity.importTrace requires an agent_id or suite_id"
+					);
+				}
+				const resolvedSuite =
+					"name" in suite
+						? suite
+						: (
+								await createPromptSuite(target, {
+									agentId: agent_id ?? "",
+									config: { prompts: [], providers: [], tests: [] },
+									label: "Trace baseline",
+									name: "Agent regression suite",
+								})
+							).suite;
+				return (await importPromptTrace(
+					target,
+					resolvedSuite.id,
+					run_id
+				)) as unknown as Record<string, unknown>;
+			},
 			// Shell navigation: open the chat tab for an item's session. Not a Core call —
 			// the extracted page opened it via `useTabsContext().openTab` (same call here).
 			activityOpenSession: ({ session_id }) =>
@@ -2052,7 +2105,7 @@ export function PluginHostPanel({
 					const observer = new MutationObserver(push);
 					observer.observe(document.documentElement, {
 						attributes: true,
-						attributeFilter: ["class", "style", "data-theme"],
+						attributeFilter: [...COMPANION_THEME_MUTATION_ATTRIBUTES],
 					});
 					const done = () => {
 						observer.disconnect();
@@ -2251,14 +2304,17 @@ export function PluginHostPanel({
 				companion.id,
 				mountContext,
 				companion.csp,
-				initialThemeTokens
+				initialThemeTokens,
+				true
 			);
 		}
 		return thirdPartyPluginSrcdoc(
 			nonce,
 			toBase64Utf8(code),
 			companion.id,
-			mountContext
+			mountContext,
+			initialThemeTokens,
+			true
 		);
 	}, [
 		code,

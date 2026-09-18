@@ -30,7 +30,7 @@ const DEFAULT_STEP_MS = STAGGER_STEP_MS;
 // ms so the eye lands on the first line first. `transition-[...]` enumerates the
 // exact properties (not `all`) so unrelated style changes don't ride in.
 const LINE_BASE =
-	"transition-[opacity,transform,filter] duration-500 ease-[cubic-bezier(0.22,1,0.36,1)] will-change-transform motion-reduce:transition-none";
+	"transition-[opacity,transform,filter] duration-500 ease-[cubic-bezier(0.22,1,0.36,1)] motion-reduce:transition-none";
 const LINE_HIDDEN = "translate-y-3 opacity-0 blur-[3px]";
 const LINE_SHOWN = "translate-y-0 opacity-100 blur-[0px]";
 

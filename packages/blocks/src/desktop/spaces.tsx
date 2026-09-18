@@ -8,11 +8,15 @@
 
 import {
 	Add01Icon,
+	ArrowDown01Icon,
 	CanvasIcon,
 	DatabaseIcon,
 	Download01Icon,
 	File01Icon,
+	FolderOpenIcon,
+	Home01Icon,
 	LibraryIcon,
+	PinIcon,
 	Search01Icon,
 	Upload01Icon,
 	UserMultiple02Icon,
@@ -39,17 +43,25 @@ import {
 import { Input } from "@ryu/ui/components/input";
 import { Label } from "@ryu/ui/components/label";
 import { RadioGroup, RadioGroupItem } from "@ryu/ui/components/radio-group";
+import { Skeleton } from "@ryu/ui/components/skeleton";
 import { Spinner } from "@ryu/ui/components/spinner";
+import {
+	Table,
+	TableBody,
+	TableCell,
+	TableHead,
+	TableHeader,
+	TableRow,
+} from "@ryu/ui/components/table";
 import {
 	Tabs,
 	TabsContent,
 	TabsList,
 	TabsTrigger,
 } from "@ryu/ui/components/tabs";
-import { Textarea } from "@ryu/ui/components/textarea";
 import { useFriendlyMode } from "@ryu/ui/hooks/use-friendly-mode.ts";
 import type { ChangeEvent, FormEvent, ReactNode } from "react";
-import { useRef } from "react";
+import { useMemo, useRef, useState } from "react";
 
 /**
  * Which retrieval algorithm a Space uses. Structurally identical to the desktop
@@ -434,7 +446,7 @@ export const FILE_INDEX_NOTES: Readonly<
 	Record<Exclude<SpaceFileIndexState, "indexed">, string>
 > = {
 	unattempted:
-		"Files marked “Name only” are stored and open normally, but a search of this space only matches their name and file type — not the text inside them. Nothing has tried to read these yet: upload one again to have it read now, or paste its text into “Ingest a document” above.",
+		"Files marked “Name only” are stored and open normally, but a search of this space only matches their name and file type — not the text inside them. Nothing has tried to read these yet: upload one again to have it read now, or add it through the “Drop files here” zone above.",
 	skipped:
 		"Files marked “Name only” are stored and open normally, but nothing installed on this node can read their format, so a search only matches their name and file type. Install a document reader from the Store, then upload the file again to make its text searchable.",
 	failed:
@@ -456,6 +468,7 @@ export interface SpaceRow {
 }
 
 export interface SpaceDocumentRow {
+	byteSize?: number | null;
 	chunkCount: number;
 	id: string;
 	/**
@@ -501,7 +514,12 @@ export interface SpaceDocumentRow {
 	/** `"page"` (markdown), `"database"` (data grid), or `"whiteboard"`
 	 * (Excalidraw scene). Defaults to a page. */
 	kind?: "page" | "database" | "whiteboard";
+	mime?: string | null;
+	preview?: string;
+	previewLoading?: boolean;
+	rawKind?: string;
 	title: string;
+	updatedAt?: number;
 }
 
 export interface SpaceMatchRow {
@@ -515,19 +533,11 @@ export interface SpacesDetailProps {
 	documentsError?: string | null;
 	/** Desktop-owned import workflow. Shared renderers omit it and keep one Content view. */
 	importPanel?: ReactNode;
-	ingestBusy?: boolean;
-	ingestContent: string;
-	ingestError?: string | null;
-	// Ingest form
-	ingestTitle: string;
 	/** Omit (together with `space.retrievalMode`) to hide the Retrieval card. */
 	onCancelRetrievalMode?: () => void;
 	/** Portable Markdown package controls owned by the desktop container. */
 	onExportPackage?: () => void;
 	onImportPackage?: (file: File) => void;
-	onIngestContentChange?: (value: string) => void;
-	onIngestSubmit?: () => void;
-	onIngestTitleChange?: (value: string) => void;
 	onNewDatabase?: () => void;
 	onNewPage?: () => void;
 	onNewWhiteboard?: () => void;
@@ -555,6 +565,8 @@ export interface SpacesDetailProps {
 	searchQuery: string;
 	searchResults?: SpaceMatchRow[] | null;
 	space: SpaceRow;
+	/** Desktop-owned file upload flow. The host wires this to the node's extraction path. */
+	uploadPanel?: ReactNode;
 }
 
 export interface SpacesViewProps {
@@ -647,6 +659,666 @@ function rowDetail(doc: SpaceDocumentRow): string | null {
 	return null;
 }
 
+/** A page preview is only meaningful for the first-party Markdown page kind. */
+function isMarkdownPage(doc: SpaceDocumentRow): boolean {
+	return doc.kind === "page" && (!doc.rawKind || doc.rawKind === "page");
+}
+
+function formatDocumentDate(timestamp: number | undefined): string {
+	if (!timestamp) {
+		return "—";
+	}
+	const date = new Date(timestamp);
+	if (Number.isNaN(date.valueOf())) {
+		return "—";
+	}
+	return new Intl.DateTimeFormat(undefined, {
+		day: "numeric",
+		month: "short",
+		year: "numeric",
+	}).format(date);
+}
+
+function formatDocumentSize(bytes: number | null | undefined): string {
+	if (bytes === null || bytes === undefined || bytes <= 0) {
+		return "—";
+	}
+	const units = ["B", "KB", "MB", "GB"];
+	let value = bytes;
+	let unit = 0;
+	while (value >= 1024 && unit < units.length - 1) {
+		value /= 1024;
+		unit += 1;
+	}
+	const rounded =
+		value >= 10 || Number.isInteger(value) ? Math.round(value) : value;
+	return `${Number(rounded.toFixed(1))} ${units[unit]}`;
+}
+
+function documentTypeLabel(doc: SpaceDocumentRow): string {
+	if (doc.rawKind === "file") {
+		const subtype = doc.mime?.split("/").at(-1);
+		return subtype ? subtype.toUpperCase() : "File";
+	}
+	if (doc.rawKind?.startsWith("app:")) {
+		return "App document";
+	}
+	if (doc.kind === "database") {
+		return "Database";
+	}
+	if (doc.kind === "whiteboard") {
+		return "Whiteboard";
+	}
+	return "Markdown";
+}
+
+function previewLines(source: string | undefined): string[] {
+	const lines = (source ?? "")
+		.split(/\r?\n/)
+		.map((line) => line.trimEnd())
+		.filter((line) => line.trim())
+		.slice(0, 8);
+	return lines.length > 0 ? lines : ["A blank page ready for your first note."];
+}
+
+function MarkdownThumbnail({ document }: { document: SpaceDocumentRow }) {
+	return (
+		<div
+			aria-hidden="true"
+			className="relative h-[76px] w-14 shrink-0 overflow-hidden rounded-[3px] border border-[#d9d1c5] bg-[#fffdfa] p-1.5 text-left text-[#37332d] shadow-[0_2px_6px_rgba(44,39,30,0.14)] dark:border-[#49443d] dark:bg-[#292722] dark:text-[#f2eee5]"
+		>
+			<div className="absolute inset-y-0 left-0 w-0.5 bg-[#a88de8]" />
+			{document.previewLoading && !document.preview ? (
+				<div className="space-y-1.5 pt-1">
+					<Skeleton className="h-1.5 w-4/5 bg-[#e0d9ce] dark:bg-[#4a453e]" />
+					<Skeleton className="h-1 w-full bg-[#e7e0d5] dark:bg-[#3f3b35]" />
+					<Skeleton className="h-1 w-5/6 bg-[#e7e0d5] dark:bg-[#3f3b35]" />
+					<Skeleton className="h-1 w-2/3 bg-[#e7e0d5] dark:bg-[#3f3b35]" />
+				</div>
+			) : (
+				<div className="space-y-1 pt-0.5 text-[6px] leading-[1.25]">
+					{previewLines(document.preview)
+						.slice(0, 5)
+						.map((line, index) => (
+							<p
+								className={
+									index === 0 ? "font-semibold text-[7px]" : "opacity-75"
+								}
+								key={`${line}-${index}`}
+							>
+								{line.replace(/^[#*-]+\s*/, "")}
+							</p>
+						))}
+				</div>
+			)}
+			<div className="pointer-events-none absolute inset-x-0 bottom-0 h-5 bg-gradient-to-t from-[#fffdfa] to-transparent dark:from-[#292722]" />
+		</div>
+	);
+}
+
+type SpaceTemplateKind = "blank" | "welcome" | "table" | "simple" | "board";
+
+function SpaceTemplateCard({
+	featured,
+	kind,
+	label,
+	onClick,
+}: {
+	featured?: boolean;
+	kind: SpaceTemplateKind;
+	label: string;
+	onClick?: () => void;
+}) {
+	return (
+		<button
+			aria-label={`Create ${label}`}
+			className={`group flex w-36 shrink-0 flex-col gap-2 rounded-lg p-1.5 text-left outline-none transition-colors hover:bg-black/5 focus-visible:ring-2 focus-visible:ring-ring dark:hover:bg-white/5 ${featured ? "ring-2 ring-foreground/70" : ""}`}
+			onClick={onClick}
+			type="button"
+		>
+			<div className="relative flex h-24 items-center justify-center overflow-hidden rounded-md border border-black/10 bg-white shadow-sm dark:border-white/10 dark:bg-[#292a2d]">
+				{kind === "table" ? (
+					<div className="grid w-20 grid-cols-3 gap-px border border-[#b9b9b9] bg-[#b9b9b9] opacity-80">
+						{Array.from({ length: 12 }, (_, index) => (
+							<span className="h-3 bg-white" key={index} />
+						))}
+					</div>
+				) : kind === "board" ? (
+					<div className="flex size-16 items-center justify-center rounded-md border border-[#b9b9b9] border-dashed bg-[#fbfbfb] dark:bg-[#242528]">
+						<HugeiconsIcon
+							className="size-6 text-[#a78bfa]"
+							icon={CanvasIcon}
+						/>
+					</div>
+				) : (
+					<div className="flex h-[76px] w-14 flex-col gap-1 rounded-[2px] border border-[#d9d1c5] bg-[#fffdfa] p-2 text-[#3d3932] shadow-sm dark:border-[#49443d] dark:bg-[#24221f] dark:text-[#f2eee5]">
+						{kind === "blank" ? null : (
+							<span className="h-1.5 w-4/5 rounded bg-[#77716a] opacity-70" />
+						)}
+						<span className="h-1 w-full rounded bg-[#b9b1a6] opacity-70" />
+						<span className="h-1 w-5/6 rounded bg-[#b9b1a6] opacity-50" />
+						{kind === "welcome" ? (
+							<span className="mt-1 h-7 rounded-sm bg-[#a78bfa]/25" />
+						) : null}
+					</div>
+				)}
+			</div>
+			<span className="truncate px-0.5 font-medium text-xs">{label}</span>
+		</button>
+	);
+}
+
+function RecentDocumentRow({
+	document,
+	onOpenDoc,
+	spaceName,
+}: {
+	document: SpaceDocumentRow;
+	onOpenDoc?: (docId: string, title: string) => void;
+	spaceName: string;
+}) {
+	const title = document.title || "Untitled page";
+	return (
+		<button
+			aria-label={`Open ${title}`}
+			className="flex w-full items-center gap-3 border-border/70 border-b px-3 py-3 text-left outline-none transition-colors last:border-b-0 hover:bg-black/[0.035] focus-visible:bg-black/[0.035] dark:focus-visible:bg-white/[0.035] dark:hover:bg-white/[0.035]"
+			onClick={() => onOpenDoc?.(document.id, title)}
+			type="button"
+		>
+			<MarkdownThumbnail document={document} />
+			<span className="flex min-w-0 flex-1 flex-col">
+				<span className="truncate font-medium text-sm">{title}</span>
+				<span className="mt-1 truncate text-muted-foreground text-xs">
+					{spaceName} · {documentTypeLabel(document)}
+				</span>
+			</span>
+			<span className="hidden shrink-0 text-muted-foreground text-xs sm:block">
+				{formatDocumentDate(document.updatedAt)}
+			</span>
+			<HugeiconsIcon
+				aria-hidden="true"
+				className="size-3.5 shrink-0 text-muted-foreground/60"
+				icon={PinIcon}
+			/>
+		</button>
+	);
+}
+
+function FilesTableSection({
+	documents,
+	documentsError,
+	onOpenDoc,
+	onQueryChange,
+	query,
+}: {
+	documents: SpaceDocumentRow[];
+	documentsError?: string | null;
+	onOpenDoc?: (docId: string, title: string) => void;
+	onQueryChange: (value: string) => void;
+	query: string;
+}) {
+	const [friendly] = useFriendlyMode();
+	const filteredDocuments = useMemo(() => {
+		const normalized = query.trim().toLowerCase();
+		if (!normalized) {
+			return documents;
+		}
+		return documents.filter((document) =>
+			`${document.title} ${documentTypeLabel(document)}`
+				.toLowerCase()
+				.includes(normalized)
+		);
+	}, [documents, query]);
+
+	return (
+		<section
+			aria-labelledby="space-files-title"
+			className="flex flex-col gap-4"
+			data-testid="spaces-files-table"
+		>
+			<div className="flex flex-wrap items-end justify-between gap-3">
+				<div>
+					<h2
+						className="font-heading text-2xl tracking-tight"
+						id="space-files-title"
+					>
+						Files
+					</h2>
+				</div>
+			</div>
+			<div className="overflow-hidden rounded-[24px] border border-border/70 bg-card/70 shadow-sm">
+				<div className="flex flex-wrap items-center justify-between gap-3 border-border/60 border-b px-4 py-4 sm:px-6">
+					<p className="text-muted-foreground text-xs">
+						{filteredDocuments.length} of {documents.length} visible
+					</p>
+					<div className="relative w-full sm:w-64">
+						<HugeiconsIcon
+							aria-hidden="true"
+							className="absolute top-1/2 left-3 size-4 -translate-y-1/2 text-muted-foreground"
+							icon={Search01Icon}
+						/>
+						<Input
+							aria-label="Search files"
+							className="pl-9"
+							onChange={(event: ChangeEvent<HTMLInputElement>) =>
+								onQueryChange(event.target.value)
+							}
+							placeholder="Search files"
+							value={query}
+						/>
+					</div>
+				</div>
+				{documentsError ? (
+					<p className="px-4 pt-4 text-sm text-status-destructive sm:px-6">
+						{documentsError}
+					</p>
+				) : null}
+				<div className="p-3 sm:hidden">
+					{filteredDocuments.length > 0 ? (
+						<ul className="flex flex-col gap-2">
+							{filteredDocuments.map((document) => (
+								<DocumentRow
+									doc={document}
+									key={document.id}
+									onOpenDoc={onOpenDoc}
+								/>
+							))}
+						</ul>
+					) : (
+						<p className="px-3 py-8 text-center text-muted-foreground text-sm">
+							No files match “{query}”.
+						</p>
+					)}
+				</div>
+				<div className="hidden sm:block">
+					<Table aria-label="Files in this Space" className="min-w-[760px]">
+						<TableHeader>
+							<TableRow className="hover:bg-transparent">
+								<TableHead className="h-10 px-6 text-[10px] uppercase tracking-[0.14em]">
+									Name
+								</TableHead>
+								<TableHead className="h-10 text-[10px] uppercase tracking-[0.14em]">
+									Type
+								</TableHead>
+								<TableHead className="h-10 text-[10px] uppercase tracking-[0.14em]">
+									Size
+								</TableHead>
+								<TableHead className="h-10 text-[10px] uppercase tracking-[0.14em]">
+									Modified
+								</TableHead>
+								<TableHead className="h-10 pr-6 text-[10px] uppercase tracking-[0.14em]">
+									Search reach
+								</TableHead>
+							</TableRow>
+						</TableHeader>
+						<TableBody>
+							{filteredDocuments.length > 0 ? (
+								filteredDocuments.map((document) => {
+									const detail = rowDetail(document);
+									const title = document.title || "Untitled";
+									const badge = indexBadgeLabel(document.indexState);
+									return (
+										<TableRow className="group" key={document.id}>
+											<TableCell className="min-w-[19rem] px-6">
+												<button
+													aria-label={`Open ${title}`}
+													className="flex min-w-0 items-center gap-3 rounded-lg text-left outline-none focus-visible:ring-2 focus-visible:ring-ring"
+													onClick={() => onOpenDoc?.(document.id, title)}
+													type="button"
+												>
+													<span className="flex size-9 shrink-0 items-center justify-center rounded-xl bg-muted text-muted-foreground transition-colors group-hover:bg-primary/10 group-hover:text-primary">
+														<HugeiconsIcon
+															className="size-4"
+															icon={docIcon(document.kind)}
+														/>
+													</span>
+													<span className="flex min-w-0 flex-col">
+														<span className="truncate font-medium text-sm">
+															{title}
+														</span>
+														<span className="truncate text-muted-foreground text-xs">
+															{detail ?? documentTypeLabel(document)}
+														</span>
+													</span>
+												</button>
+											</TableCell>
+											<TableCell className="text-muted-foreground text-xs">
+												{documentTypeLabel(document)}
+											</TableCell>
+											<TableCell className="font-mono text-muted-foreground text-xs">
+												{formatDocumentSize(document.byteSize)}
+											</TableCell>
+											<TableCell className="text-muted-foreground text-xs">
+												{formatDocumentDate(document.updatedAt)}
+											</TableCell>
+											<TableCell className="pr-6">
+												{badge ? (
+													<Badge variant="outline">{badge}</Badge>
+												) : (
+													<span className="text-muted-foreground text-xs">
+														{friendly
+															? `${document.chunkCount} searchable ${document.chunkCount === 1 ? "piece" : "pieces"}`
+															: `${document.chunkCount} ${document.chunkCount === 1 ? "chunk" : "chunks"}`}
+													</span>
+												)}
+											</TableCell>
+										</TableRow>
+									);
+								})
+							) : (
+								<TableRow>
+									<TableCell
+										className="py-10 text-center text-muted-foreground"
+										colSpan={5}
+									>
+										{query ? `No files match “${query}”.` : "No documents yet."}
+									</TableCell>
+								</TableRow>
+							)}
+						</TableBody>
+					</Table>
+				</div>
+			</div>
+			{indexNotesFor(documents).map((note) => (
+				<p className="text-muted-foreground text-xs" key={note}>
+					{note}
+				</p>
+			))}
+		</section>
+	);
+}
+
+type SpaceHomeTab = "recent" | "pinned" | "shared";
+
+function greetingLabel(): string {
+	const hour = new Date().getHours();
+	if (hour < 12) {
+		return "Good morning";
+	}
+	if (hour < 18) {
+		return "Good afternoon";
+	}
+	return "Good evening";
+}
+
+function SpaceHomeRail({
+	onHome,
+	onNewPage,
+	onOpenFiles,
+	spaceName,
+}: {
+	onHome: () => void;
+	onNewPage?: () => void;
+	onOpenFiles: () => void;
+	spaceName: string;
+}) {
+	return (
+		<aside
+			aria-label="Space navigation"
+			className="hidden w-[94px] shrink-0 flex-col border-border/80 border-r bg-[#f7f7f7] py-3 text-[#464646] sm:flex dark:bg-[#222326] dark:text-[#d5d5d5]"
+			data-testid="spaces-home-rail"
+		>
+			<div className="flex flex-col gap-2 px-2">
+				<button
+					aria-current="page"
+					className="flex min-h-16 flex-col items-center justify-center gap-1 rounded-md border-2 border-[#e45d57] bg-white text-[#b7443e] shadow-sm outline-none focus-visible:ring-2 focus-visible:ring-ring dark:bg-[#2b2c30] dark:text-[#ff8c84]"
+					onClick={onHome}
+					type="button"
+				>
+					<HugeiconsIcon className="size-5" icon={Home01Icon} />
+					<span className="text-[11px]">Home</span>
+				</button>
+				<button
+					className="flex min-h-16 flex-col items-center justify-center gap-1 rounded-md border border-transparent outline-none hover:bg-black/5 focus-visible:ring-2 focus-visible:ring-ring dark:hover:bg-white/5"
+					onClick={onNewPage}
+					type="button"
+				>
+					<HugeiconsIcon className="size-5" icon={Add01Icon} />
+					<span className="text-[11px]">New</span>
+				</button>
+				<button
+					className="flex min-h-16 flex-col items-center justify-center gap-1 rounded-md border border-transparent outline-none hover:bg-black/5 focus-visible:ring-2 focus-visible:ring-ring dark:hover:bg-white/5"
+					onClick={onOpenFiles}
+					type="button"
+				>
+					<HugeiconsIcon className="size-5" icon={FolderOpenIcon} />
+					<span className="text-[11px]">Open</span>
+				</button>
+			</div>
+			<div className="mt-auto flex flex-col gap-3 border-border/70 border-t px-2 pt-3">
+				<div className="flex flex-col items-center gap-1 text-center">
+					<div className="flex size-7 items-center justify-center rounded-md bg-[#e9e9e9] text-muted-foreground dark:bg-[#34353a]">
+						<HugeiconsIcon className="size-4" icon={LibraryIcon} />
+					</div>
+					<span className="max-w-16 truncate text-[10px]">{spaceName}</span>
+				</div>
+			</div>
+		</aside>
+	);
+}
+
+function SpaceHomeShell({
+	children,
+	documents,
+	documentsError,
+	onNewDatabase,
+	onNewPage,
+	onNewWhiteboard,
+	onOpenDoc,
+	space,
+	uploadPanel,
+}: {
+	children: ReactNode;
+	documents: SpaceDocumentRow[];
+	documentsError?: string | null;
+	onNewDatabase?: () => void;
+	onNewPage?: () => void;
+	onNewWhiteboard?: () => void;
+	onOpenDoc?: (docId: string, title: string) => void;
+	space: SpaceRow;
+	uploadPanel?: ReactNode;
+}) {
+	const [activeTab, setActiveTab] = useState<SpaceHomeTab>("recent");
+	const [query, setQuery] = useState("");
+	const homeScrollRef = useRef<HTMLDivElement>(null);
+	const filesAnchorRef = useRef<HTMLDivElement>(null);
+	const recentDocuments = useMemo(() => {
+		const normalized = query.trim().toLowerCase();
+		return [...documents]
+			.filter(isMarkdownPage)
+			.filter((document) => {
+				if (!normalized) {
+					return true;
+				}
+				return `${document.title} ${space.name}`
+					.toLowerCase()
+					.includes(normalized);
+			})
+			.sort((a, b) => (b.updatedAt ?? 0) - (a.updatedAt ?? 0))
+			.slice(0, 5);
+	}, [documents, query, space.name]);
+
+	const scrollHome = () => {
+		homeScrollRef.current?.scrollTo({ top: 0 });
+	};
+	const scrollToFiles = () => {
+		filesAnchorRef.current?.scrollIntoView({ block: "start" });
+	};
+
+	return (
+		<div
+			className="flex min-h-full bg-[#f4f4f4] text-[#242424] dark:bg-[#1b1c1f] dark:text-[#f1f1f1]"
+			data-testid="spaces-home"
+		>
+			<SpaceHomeRail
+				onHome={scrollHome}
+				onNewPage={onNewPage}
+				onOpenFiles={scrollToFiles}
+				spaceName={space.name}
+			/>
+			<div
+				className="scroll-fade min-w-0 flex-1 overflow-auto"
+				ref={homeScrollRef}
+			>
+				<div className="mx-auto max-w-[1120px] px-5 py-6 sm:px-8 sm:py-8">
+					<header
+						className="border-border/70 border-b pb-5"
+						data-testid="spaces-hero"
+					>
+						<div className="flex flex-wrap items-start justify-between gap-4">
+							<div>
+								<p className="text-muted-foreground text-sm">{space.name}</p>
+								<h1 className="mt-1 font-heading font-semibold text-2xl tracking-[-0.03em] sm:text-3xl">
+									{greetingLabel()}
+								</h1>
+							</div>
+						</div>
+						{space.description ? (
+							<p className="mt-3 max-w-2xl text-muted-foreground text-sm leading-relaxed">
+								{space.description}
+							</p>
+						) : null}
+					</header>
+
+					<section aria-labelledby="new-documents-title" className="pt-6">
+						<h2
+							className="flex items-center gap-1 font-semibold text-sm"
+							id="new-documents-title"
+						>
+							<HugeiconsIcon className="size-3.5" icon={ArrowDown01Icon} />
+							New
+						</h2>
+						<div className="mt-3 flex gap-3 overflow-x-auto pb-2">
+							<SpaceTemplateCard
+								featured
+								kind="blank"
+								label="Blank document"
+								onClick={onNewPage}
+							/>
+							<SpaceTemplateCard
+								kind="welcome"
+								label="Welcome to Space"
+								onClick={onNewPage}
+							/>
+							<SpaceTemplateCard
+								kind="table"
+								label="First table"
+								onClick={onNewDatabase}
+							/>
+							<SpaceTemplateCard
+								kind="simple"
+								label="Single spaced"
+								onClick={onNewPage}
+							/>
+							<SpaceTemplateCard
+								kind="board"
+								label="Blank board"
+								onClick={onNewWhiteboard}
+							/>
+							<div className="flex shrink-0 items-center px-2 text-primary text-xs">
+								More templates <span className="ml-1 text-base">→</span>
+							</div>
+						</div>
+					</section>
+
+					<section
+						aria-labelledby="recent-documents-title"
+						className="pt-5"
+						data-testid="spaces-recent-pages"
+					>
+						<div className="relative max-w-[430px]">
+							<HugeiconsIcon
+								aria-hidden="true"
+								className="absolute top-1/2 left-3 size-4 -translate-y-1/2 text-muted-foreground"
+								icon={Search01Icon}
+							/>
+							<Input
+								aria-label="Search documents"
+								className="h-10 rounded-md border-border/80 bg-white pl-9 dark:bg-[#292a2e]"
+								onChange={(event: ChangeEvent<HTMLInputElement>) =>
+									setQuery(event.target.value)
+								}
+								placeholder="Search"
+								value={query}
+							/>
+						</div>
+						<div className="mt-6">
+							<h2
+								className="font-heading font-semibold text-xl"
+								id="recent-documents-title"
+							>
+								Recent
+							</h2>
+						</div>
+						<div
+							aria-label="Document views"
+							className="mt-3 flex items-center gap-5 border-border/70 border-b"
+							role="tablist"
+						>
+							{(
+								[
+									["recent", "Recent"],
+									["pinned", "Pinned"],
+									["shared", "Shared with Me"],
+								] as const
+							).map(([value, label]) => (
+								<button
+									aria-selected={activeTab === value}
+									className={`border-b-2 px-0.5 py-2 text-xs outline-none transition-colors focus-visible:ring-2 focus-visible:ring-ring ${activeTab === value ? "border-[#e45d57] font-semibold text-foreground" : "border-transparent text-muted-foreground hover:text-foreground"}`}
+									onClick={() => setActiveTab(value)}
+									role="tab"
+									type="button"
+								>
+									{label}
+								</button>
+							))}
+						</div>
+						<div
+							className="mt-2 overflow-hidden rounded-md border border-border/70 bg-white/80 dark:bg-[#25262a]"
+							data-testid="spaces-recent-list"
+						>
+							{activeTab === "recent" && recentDocuments.length > 0 ? (
+								recentDocuments.map((document) => (
+									<RecentDocumentRow
+										document={document}
+										key={document.id}
+										onOpenDoc={onOpenDoc}
+										spaceName={space.name}
+									/>
+								))
+							) : (
+								<div className="px-4 py-9 text-center text-muted-foreground text-sm">
+									{activeTab === "pinned"
+										? "No pinned pages yet."
+										: activeTab === "shared"
+											? "No pages have been shared with you yet."
+											: query
+												? `No recent pages match “${query}”.`
+												: "No recent pages yet."}
+								</div>
+							)}
+						</div>
+					</section>
+
+					{uploadPanel ? <div className="mt-6">{uploadPanel}</div> : null}
+
+					<div className="mt-10 scroll-mt-4" ref={filesAnchorRef}>
+						<FilesTableSection
+							documents={documents}
+							documentsError={documentsError}
+							onOpenDoc={onOpenDoc}
+							onQueryChange={setQuery}
+							query={query}
+						/>
+					</div>
+
+					<div className="mt-10 flex flex-col gap-6">{children}</div>
+				</div>
+			</div>
+		</div>
+	);
+}
+
 /**
  * One row of the document list.
  *
@@ -671,6 +1343,7 @@ function DocumentRow({
 	return (
 		<li>
 			<button
+				aria-label={`Open ${doc.title || "Untitled"}`}
 				className="flex w-full items-center gap-2 rounded-md border px-3 py-2 text-left hover:bg-accent/50"
 				onClick={() => onOpenDoc?.(doc.id, doc.title)}
 				type="button"
@@ -718,13 +1391,6 @@ function SpaceDetail(props: SpacesDetailProps) {
 	const {
 		documents,
 		documentsError,
-		ingestTitle,
-		ingestContent,
-		ingestBusy,
-		ingestError,
-		onIngestTitleChange,
-		onIngestContentChange,
-		onIngestSubmit,
 		onNewPage,
 		onNewDatabase,
 		onNewWhiteboard,
@@ -747,6 +1413,7 @@ function SpaceDetail(props: SpacesDetailProps) {
 		onSearchQueryChange,
 		onSearchSubmit,
 		space,
+		uploadPanel,
 	} = props;
 
 	// Both halves are required: without the mode there is nothing truthful to
@@ -757,18 +1424,10 @@ function SpaceDetail(props: SpacesDetailProps) {
 		retrievalMode !== undefined && onRetrievalModeChange !== undefined;
 	const portableInput = useRef<HTMLInputElement>(null);
 
-	const handleIngest = (e: FormEvent) => {
-		e.preventDefault();
-		onIngestSubmit?.();
-	};
-
 	const handleSearch = (e: FormEvent) => {
 		e.preventDefault();
 		onSearchSubmit?.();
 	};
-
-	const ingestDisabled =
-		ingestBusy || !(ingestTitle.trim() && ingestContent.trim());
 
 	// Same app-wide toggle the picker reads; the card's own copy around the picker
 	// (its description, the switch disclosure, the rebuild spinner) has to move
@@ -777,7 +1436,16 @@ function SpaceDetail(props: SpacesDetailProps) {
 	const [friendly] = useFriendlyMode();
 
 	return (
-		<div className="flex flex-col gap-6 p-4">
+		<SpaceHomeShell
+			documents={documents}
+			documentsError={documentsError}
+			onNewDatabase={onNewDatabase}
+			onNewPage={onNewPage}
+			onNewWhiteboard={onNewWhiteboard}
+			onOpenDoc={onOpenDoc}
+			space={space}
+			uploadPanel={uploadPanel}
+		>
 			{props.backupPanel}
 			{onExportPackage || onImportPackage ? (
 				<Card>
@@ -910,100 +1578,6 @@ function SpaceDetail(props: SpacesDetailProps) {
 				</Card>
 			) : null}
 
-			<Card>
-				<CardHeader>
-					<CardTitle className="text-sm">Ingest a document</CardTitle>
-					<CardDescription>
-						Text is chunked, embedded, and stored for search.
-					</CardDescription>
-				</CardHeader>
-				<CardContent>
-					<form className="flex flex-col gap-3" onSubmit={handleIngest}>
-						<div className="flex flex-col gap-1.5">
-							<Label htmlFor="ingest-title">Title</Label>
-							<Input
-								id="ingest-title"
-								onChange={(e: ChangeEvent<HTMLInputElement>) =>
-									onIngestTitleChange?.(e.target.value)
-								}
-								placeholder="Document title"
-								value={ingestTitle}
-							/>
-						</div>
-						<div className="flex flex-col gap-1.5">
-							<Label htmlFor="ingest-content">Content</Label>
-							<Textarea
-								id="ingest-content"
-								onChange={(e: ChangeEvent<HTMLTextAreaElement>) =>
-									onIngestContentChange?.(e.target.value)
-								}
-								placeholder="Paste document text here"
-								rows={5}
-								value={ingestContent}
-							/>
-						</div>
-						{ingestError ? (
-							<p className="text-sm text-status-destructive">{ingestError}</p>
-						) : null}
-						<div>
-							<Button
-								disabled={ingestDisabled && !ingestBusy}
-								loading={ingestBusy}
-								size="sm"
-								type="submit"
-							>
-								{!ingestBusy && (
-									<HugeiconsIcon className="size-4" icon={Upload01Icon} />
-								)}
-								Ingest
-							</Button>
-						</div>
-					</form>
-				</CardContent>
-			</Card>
-
-			<section className="flex flex-col gap-2">
-				<div className="flex items-center justify-between">
-					<h3 className="font-medium text-sm">Pages, databases & boards</h3>
-					<div className="flex items-center gap-2">
-						<Button onClick={onNewPage} size="sm" variant="outline">
-							<HugeiconsIcon className="size-4" icon={Add01Icon} />
-							New page
-						</Button>
-						<Button onClick={onNewDatabase} size="sm" variant="outline">
-							<HugeiconsIcon className="size-4" icon={DatabaseIcon} />
-							New database
-						</Button>
-						<Button onClick={onNewWhiteboard} size="sm" variant="outline">
-							<HugeiconsIcon className="size-4" icon={CanvasIcon} />
-							New whiteboard
-						</Button>
-					</div>
-				</div>
-				{documentsError ? (
-					<p className="text-sm text-status-destructive">{documentsError}</p>
-				) : null}
-				{documents.length === 0 ? (
-					<p className="text-muted-foreground text-sm">
-						Nothing yet. Create a page to write like a Notion doc, or a database
-						for a structured table.
-					</p>
-				) : (
-					<>
-						<ul className="flex flex-col gap-2">
-							{documents.map((doc) => (
-								<DocumentRow doc={doc} key={doc.id} onOpenDoc={onOpenDoc} />
-							))}
-						</ul>
-						{indexNotesFor(documents).map((note) => (
-							<p className="text-muted-foreground text-xs" key={note}>
-								{note}
-							</p>
-						))}
-					</>
-				)}
-			</section>
-
 			<section className="flex flex-col gap-3">
 				<h3 className="font-medium text-sm">Search</h3>
 				<form className="flex gap-2" onSubmit={handleSearch}>
@@ -1047,7 +1621,7 @@ function SpaceDetail(props: SpacesDetailProps) {
 					)
 				) : null}
 			</section>
-		</div>
+		</SpaceHomeShell>
 	);
 }
 

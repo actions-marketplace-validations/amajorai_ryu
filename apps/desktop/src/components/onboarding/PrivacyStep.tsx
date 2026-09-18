@@ -10,10 +10,16 @@
 // Consent is still informed here — each row explains exactly what it sends — and
 // every toggle flips the live runtime gate so a choice takes effect immediately.
 //
-// This unit ships the CONTROLS ONLY, exactly like PrivacySettings: no analytics
-// SDK, crash reporter, or OTLP exporter is wired here.
+// This unit owns the onboarding explanation and controls only, exactly like
+// PrivacySettings: no analytics SDK, crash reporter, or OTLP exporter is wired
+// here.
 
-import { Alert01Icon } from "@hugeicons/core-free-icons";
+import {
+	Alert01Icon,
+	Clock01Icon,
+	Settings01Icon,
+	Shield01Icon,
+} from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { ONBOARDING_CONTENT_DELAY_MS } from "@ryu/blocks/desktop/onboarding";
 import { Button } from "@ryu/ui/components/button";
@@ -25,7 +31,10 @@ import { Switch } from "@ryu/ui/components/switch";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { FRONTEND_URL } from "@/lib/auth-client.ts";
 import { openExternal } from "@/lib/tauri-bridge.ts";
-import { PRIVACY_DOCS_PATH } from "@/src/components/settings/privacy-disclosure.tsx";
+import {
+	acknowledgePrivacyDisclosure,
+	PRIVACY_DOCS_PATH,
+} from "@/src/components/settings/privacy-disclosure-state.ts";
 import {
 	SettingsCard,
 	SettingsGroup,
@@ -46,6 +55,27 @@ import {
 } from "@/src/lib/api/preferences.ts";
 import { setCrashReportingEnabled } from "@/src/lib/crash.ts";
 
+const FINAL_ONBOARDING_NOTICES = [
+	{
+		description:
+			"With your approval, agents can send messages, update connected apps, and take actions on your behalf. Review each request before it runs.",
+		icon: Shield01Icon,
+		title: "Can take actions for you",
+	},
+	{
+		description:
+			"Active turns, scheduled workflows, and approved background runs can keep going after you close the window. Follow their status and stop them from Ryu.",
+		icon: Clock01Icon,
+		title: "Can keep working in the background",
+	},
+	{
+		description:
+			"Choose which apps to connect, what each agent can access, and which actions require your approval in Settings.",
+		icon: Settings01Icon,
+		title: "You stay in control",
+	},
+] as const;
+
 interface PrivacyStepProps {
 	/** Onboarding is finishing; the step locks so the user can't double-submit. */
 	busy?: boolean;
@@ -63,7 +93,7 @@ export function PrivacyStep({ busy = false, onContinue }: PrivacyStepProps) {
 			token: activeNode.token ?? null,
 			userJwt: activeNode.userJwt ?? null,
 		}),
-		[activeNode.url, activeNode.token]
+		[activeNode.url, activeNode.token, activeNode.userJwt]
 	);
 
 	const [productAnalytics, setProductAnalytics] = useState(true);
@@ -181,6 +211,11 @@ export function PrivacyStep({ busy = false, onContinue }: PrivacyStepProps) {
 		);
 	}, []);
 
+	const handleContinue = useCallback(() => {
+		acknowledgePrivacyDisclosure();
+		onContinue();
+	}, [onContinue]);
+
 	return (
 		// Mirrors the shared OnboardingShell: the outer box owns the scroll and the
 		// inner column uses `min-h-full` so it centres when it fits and grows when it
@@ -196,8 +231,8 @@ export function PrivacyStep({ busy = false, onContinue }: PrivacyStepProps) {
 					</div>
 					<PageHeader
 						stagger={false}
-						subtitle="Choose what Ryu can send. You can change any of it later in Settings."
-						title="Your privacy"
+						subtitle="Ryu works with your approval and keeps you in control."
+						title="A few things to know"
 					/>
 				</StaggerReveal>
 
@@ -206,89 +241,125 @@ export function PrivacyStep({ busy = false, onContinue }: PrivacyStepProps) {
 				    another instead of as one block. Outside the reveal above on
 				    purpose: revealing this column there AND its rows here would apply
 				    the travel and the blur twice to the same rows. */}
-				<div className="flex w-full max-w-md flex-col gap-6">
+				<div
+					className="flex w-full max-w-lg flex-col gap-6"
+					data-testid="onboarding-final-step"
+				>
 					<StaggerReveal startDelay={ONBOARDING_CONTENT_DELAY_MS} wrap>
-						<SettingsCard className="flex flex-col gap-2.5 border-primary/40">
-							<div className="flex items-start gap-2.5">
-								<HugeiconsIcon
-									className="mt-0.5 size-4 shrink-0 opacity-70"
-									icon={Alert01Icon}
-								/>
-								<p className="text-muted-foreground text-xs leading-relaxed">
-									Anonymous, content-free product analytics and crash reports
-									are on by default so we can fix what breaks and improve the
-									app. They never include your prompts, conversations, files, or
-									any agent content, and they use a random install ID that is
-									not linked to your account. Your local data plane sends
-									nothing off your device unless you turn on diagnostics export.{" "}
-									<button
-										className="text-primary underline underline-offset-2"
-										onClick={openDocs}
-										type="button"
-									>
-										See our privacy &amp; data page
-									</button>{" "}
-									for the full breakdown.
+						<div className="flex flex-col gap-5">
+							{FINAL_ONBOARDING_NOTICES.map((notice) => (
+								<div className="flex items-start gap-3" key={notice.title}>
+									<HugeiconsIcon
+										className="mt-0.5 size-5 shrink-0 opacity-80"
+										icon={notice.icon}
+									/>
+									<div className="min-w-0 space-y-1">
+										<p className="font-medium text-sm">{notice.title}</p>
+										<p className="text-muted-foreground text-xs leading-relaxed">
+											{notice.description}
+										</p>
+									</div>
+								</div>
+							))}
+
+							<SettingsCard className="flex flex-col gap-2.5 border-primary/40">
+								<div className="flex items-start gap-2.5">
+									<HugeiconsIcon
+										className="mt-0.5 size-4 shrink-0 opacity-70"
+										icon={Alert01Icon}
+									/>
+									<div className="space-y-1.5">
+										<p className="font-medium text-sm">
+											How Ryu handles your data
+										</p>
+										<p className="text-muted-foreground text-xs leading-relaxed">
+											Ryu is local-first and encrypted by default. Anonymous,
+											content-free product analytics and crash reports are on by
+											default so we can fix what breaks and improve the app.
+											They never include your prompts, conversations, files, or
+											any agent content, and they use a random install ID that
+											is not linked to your account. Local traces and
+											diagnostics stay on your device unless you turn on
+											diagnostics export. Content used by a model or connected
+											app follows that service's own terms and privacy policy.
+											You can change these choices any time in Settings →
+											Privacy.{" "}
+											<button
+												className="text-primary underline underline-offset-2"
+												onClick={openDocs}
+												type="button"
+											>
+												Read the full privacy &amp; data breakdown
+											</button>
+											.
+										</p>
+									</div>
+								</div>
+							</SettingsCard>
+
+							<div className="space-y-2">
+								<p className="font-medium text-sm">
+									Choose your privacy settings
 								</p>
+								<SettingsGroup>
+									<SettingsItem
+										actions={
+											<Switch
+												checked={productAnalytics}
+												id="onboarding-product-analytics"
+												onCheckedChange={handleProductAnalytics}
+											/>
+										}
+										description="Anonymous usage events help us improve Ryu. They never include prompts, conversations, files, or agent content."
+										title="Product analytics"
+									/>
+									<SettingsItem
+										actions={
+											<Switch
+												checked={communityStats}
+												id="onboarding-community-stats"
+												onCheckedChange={handleCommunityStats}
+											/>
+										}
+										description="Anonymous, aggregate token-savings stats for the community leaderboard."
+										title="Community stats"
+									/>
+									<SettingsItem
+										actions={
+											<Switch
+												checked={crashReports}
+												id="onboarding-crash-reports"
+												onCheckedChange={handleCrashReports}
+											/>
+										}
+										description="Scrubbed crash and error stacks so we can fix what fails. No prompts or content."
+										title="Crash reports"
+									/>
+									<SettingsItem
+										actions={
+											<Switch
+												checked={diagnosticsExport}
+												id="onboarding-diagnostics-export"
+												onCheckedChange={handleDiagnosticsExport}
+											/>
+										}
+										description="Export local run-trace and audit records over OTLP to an endpoint you choose in Settings. Off by default."
+										title="Diagnostics export"
+									/>
+								</SettingsGroup>
 							</div>
-						</SettingsCard>
 
-						<SettingsGroup>
-							<SettingsItem
-								actions={
-									<Switch
-										checked={productAnalytics}
-										id="onboarding-product-analytics"
-										onCheckedChange={handleProductAnalytics}
-									/>
-								}
-								description="Anonymous usage events (which screens you open, whether onboarding finished) help us improve Ryu. Never includes prompts, conversations, files, or any agent content."
-								title="Product analytics"
-							/>
-							<SettingsItem
-								actions={
-									<Switch
-										checked={communityStats}
-										id="onboarding-community-stats"
-										onCheckedChange={handleCommunityStats}
-									/>
-								}
-								description="Anonymous, aggregate token-savings stats (request counts and tokens saved) so the community leaderboard reflects real usage."
-								title="Community stats"
-							/>
-							<SettingsItem
-								actions={
-									<Switch
-										checked={crashReports}
-										id="onboarding-crash-reports"
-										onCheckedChange={handleCrashReports}
-									/>
-								}
-								description="Scrubbed crash and error stacks so we can fix what fails. No prompts or content."
-								title="Crash reports"
-							/>
-							<SettingsItem
-								actions={
-									<Switch
-										checked={diagnosticsExport}
-										id="onboarding-diagnostics-export"
-										onCheckedChange={handleDiagnosticsExport}
-									/>
-								}
-								description="Export local run-trace and audit records over OpenTelemetry (OTLP) to an endpoint you choose in Settings. Off by default."
-								title="Diagnostics export"
-							/>
-						</SettingsGroup>
-
-						<div className="flex items-center justify-end">
-							<Button
-								disabled={busy}
-								onClick={onContinue}
-								size="lg"
-								variant="mono"
-							>
-								{busy ? "Finishing…" : "Continue"}
-							</Button>
+							<div className="flex items-center justify-end">
+								<Button
+									data-testid="onboarding-final-continue"
+									disabled={busy}
+									onClick={handleContinue}
+									size="lg"
+									variant="mono"
+								>
+									{busy ? "Finishing…" : "Get started"}
+								</Button>
+							</div>
 						</div>
 					</StaggerReveal>
 				</div>

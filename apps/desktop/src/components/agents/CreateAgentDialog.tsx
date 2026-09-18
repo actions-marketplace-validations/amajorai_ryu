@@ -23,7 +23,7 @@ import { AgentSetupComposer } from "@/src/components/agents/AgentSetupComposer.t
 import { useTabSelector } from "@/src/contexts/TabsContext.tsx";
 import { useActiveNode } from "@/src/hooks/useActiveNode.ts";
 import { useAgents } from "@/src/hooks/useAgents.ts";
-import { ALL_MCP_TOOLS } from "@/src/lib/agent-capabilities.ts";
+import { NO_AGENT_CAPABILITIES } from "@/src/lib/agent-capabilities.ts";
 import { agentEngineOptionId } from "@/src/lib/agent-engine.ts";
 import {
 	buildAgentNamePrompt,
@@ -221,7 +221,7 @@ export function CreateAgentDialog() {
 					...glyphToPersonaFields(avatar),
 				},
 				systemPrompt: instructions.trim() || null,
-				tools: [ALL_MCP_TOOLS],
+				tools: [NO_AGENT_CAPABILITIES],
 			});
 			const selectedChannelTypes = [
 				autoSetupTelegram ? "telegram" : null,

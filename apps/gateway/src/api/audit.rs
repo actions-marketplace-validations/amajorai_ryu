@@ -338,6 +338,37 @@ pub async fn query_audit_usage(
     })))
 }
 
+/// Apply the local audit retention policy immediately. The normal startup path
+/// runs this automatically; the endpoint gives an owner an explicit maintenance
+/// control without exposing the SQLite file or allowing arbitrary SQL.
+pub async fn prune_audit(
+    State(state): State<SharedState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, GatewayError> {
+    let raw_key = headers
+        .get("authorization")
+        .and_then(|value| value.to_str().ok());
+    let ctx = authenticate(&state, AuthInputs::with_key(raw_key)).await?;
+    crate::api::config::require_local_admin(
+        &state,
+        &peer,
+        ctx.is_master_key,
+        &headers,
+        "Audit maintenance",
+    )?;
+    let summary = state
+        .audit
+        .prune()
+        .map_err(|error| GatewayError::Internal(anyhow::anyhow!("audit prune failed: {error}")))?;
+    Ok(Json(json!({
+        "kind": "retention",
+        "deleted_rows": summary.deleted_rows,
+        "retention_days": summary.retention_days,
+        "max_rows": summary.max_rows,
+    })))
+}
+
 /// Record a successful gateway-local control mutation after the caller's
 /// authenticated admin boundary has been enforced.
 pub async fn record_control_change(

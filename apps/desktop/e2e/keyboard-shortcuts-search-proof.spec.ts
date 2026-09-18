@@ -79,6 +79,36 @@ test("keeps the large filter above an independently scrolling shortcut list", as
 	await expect(page.getByText("Toggle Sidebar", { exact: true })).toBeVisible();
 	await expect(page.getByText("New Chat", { exact: true })).not.toBeVisible();
 
+	await filter.fill("quick reply");
+	await expect(
+		page.getByText("Quick reply click modifier", { exact: true })
+	).toBeVisible();
+	const quickReplyModifier = page.getByRole("combobox", {
+		name: "Quick reply click modifier",
+	});
+	await expect(quickReplyModifier).toContainText("Alt / Option");
+	await quickReplyModifier.click();
+	await page.getByRole("option", { name: "Shift" }).click();
+	await expect(quickReplyModifier).toContainText("Shift");
+	await page.evaluate(() =>
+		localStorage.removeItem("ryu:quick-reply-modifier")
+	);
+
+	await filter.fill("quick preview");
+	await expect(
+		page.getByText("Quick preview click modifier", { exact: true })
+	).toBeVisible();
+	const quickPreviewModifier = page.getByRole("combobox", {
+		name: "Quick preview click modifier",
+	});
+	await expect(quickPreviewModifier).toContainText("Shift");
+	await quickPreviewModifier.click();
+	await page.getByRole("option", { name: "Control" }).click();
+	await expect(quickPreviewModifier).toContainText("Control");
+	await page.evaluate(() =>
+		localStorage.removeItem("ryu:quick-preview-modifier")
+	);
+
 	await filter.fill("no shortcut matches this phrase");
 	await expect(resetAll).toBeVisible();
 });

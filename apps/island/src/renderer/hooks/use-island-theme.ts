@@ -6,9 +6,23 @@
 // one, whose definition travels inline in the blob — renders identically here.
 // While the mode is "system" we also re-resolve on OS light/dark changes.
 
-import { applyRadius, applyVariant } from "@ryu/ui/theme/apply";
+import { systemTimeZone } from "@ryu/ui/lib/timezone.ts";
+import {
+	applyCardSpacing,
+	applyFonts,
+	applyRadius,
+	applyScale,
+	applySpacing,
+	applyVariant,
+	clearCardSpacing,
+} from "@ryu/ui/theme/apply";
 import {
 	activePresetId,
+	DEFAULT_CODE_FONT,
+	DEFAULT_HEADING_FONT,
+	DEFAULT_SCALE,
+	DEFAULT_SPACING,
+	DEFAULT_UI_FONT,
 	normalizeThemePrefs,
 	type ThemePrefs,
 } from "@ryu/ui/theme/prefs";
@@ -17,18 +31,37 @@ import { useEffect } from "react";
 
 const DARK_QUERY = "(prefers-color-scheme: dark)";
 
-// The island always resolves the DARK variant of the user's preset, whatever the
-// desktop's light/dark mode is. Its surface is a fixed near-black Siri gradient
-// (see index.css) — it has no light form. Resolving light tokens here would paint
-// `--foreground` near-black on that gradient, which is exactly what happens to
-// any token-driven component mounted inside the island (the shared desktop
-// message list, every @ryu/ui primitive). The preset id still tracks the user's
-// choice, so brand colour and radius follow the desktop.
-const ISLAND_IS_ALWAYS_DARK = true;
+function applyFlag(
+	root: HTMLElement,
+	attribute: string,
+	enabled: boolean,
+	enabledValue = "on",
+	disabledValue: string | null = null
+) {
+	if (enabled) {
+		if (enabledValue === "") {
+			root.removeAttribute(attribute);
+			return;
+		}
+		root.setAttribute(attribute, enabledValue);
+		return;
+	}
+	if (disabledValue === null) {
+		root.removeAttribute(attribute);
+	} else {
+		root.setAttribute(attribute, disabledValue);
+	}
+}
 
 function applyPrefs(prefs: ThemePrefs): void {
-	const dark = ISLAND_IS_ALWAYS_DARK;
+	const dark =
+		prefs.mode === "dark" ||
+		(prefs.mode === "system" && window.matchMedia(DARK_QUERY).matches);
+	const root = document.documentElement;
 	document.documentElement.classList.toggle("dark", dark);
+	document.documentElement.classList.toggle("light", !dark);
+	root.setAttribute("data-ryu-theme", dark ? "dark" : "light");
+	root.style.setProperty("color-scheme", dark ? "dark" : "light");
 	const variant = findVariantIn(
 		activePresetId(prefs, dark),
 		prefs.customThemes
@@ -37,6 +70,56 @@ function applyPrefs(prefs: ThemePrefs): void {
 		applyVariant(variant, prefs.contrast);
 	}
 	applyRadius(prefs.radius);
+	applySpacing(prefs.spacing ?? DEFAULT_SPACING);
+	applyScale(prefs.scale ?? DEFAULT_SCALE);
+	if (prefs.cardSpacing == null) {
+		clearCardSpacing();
+	} else {
+		applyCardSpacing(prefs.cardSpacing);
+	}
+	applyFonts(
+		prefs.uiFont ?? DEFAULT_UI_FONT,
+		prefs.headingFont ?? DEFAULT_HEADING_FONT,
+		prefs.codeFont ?? DEFAULT_CODE_FONT
+	);
+	root.style.setProperty(
+		"--ryu-timezone",
+		prefs.timezone && prefs.timezone !== "system"
+			? prefs.timezone
+			: systemTimeZone()
+	);
+	root.style.setProperty(
+		"--ryu-locale",
+		prefs.locale ?? navigator.language ?? "en-US"
+	);
+	applyFlag(root, "data-pointer-cursor", prefs.pointerCursor ?? false, "true");
+	applyFlag(
+		root,
+		"data-chrome-shadows",
+		prefs.chromeShadows ?? true,
+		"",
+		"off"
+	);
+	applyFlag(
+		root,
+		"data-inverted-backgrounds",
+		prefs.invertedBackgrounds ?? false
+	);
+	applyFlag(
+		root,
+		"data-dialog-overlay-blur",
+		prefs.dialogOverlayBlur ?? false,
+		"",
+		"off"
+	);
+	applyFlag(root, "data-popup-overlay-blur", prefs.popupOverlayBlur ?? false);
+	applyFlag(
+		root,
+		"data-ryu-animations",
+		prefs.animationsEnabled ?? true,
+		"",
+		"off"
+	);
 }
 
 export function useIslandTheme(): void {

@@ -54,6 +54,7 @@ import {
 	getSeasonDisplayEmoji,
 	SEASONS,
 } from "@/src/components/layout/SeasonalEffects.tsx";
+import { useAppSurface } from "@/src/contexts/app-surface-context.tsx";
 import {
 	setAgentRowStyle,
 	useAgentRowStylePref,
@@ -146,6 +147,10 @@ import {
 	setUsageBarPrefs,
 	useUsageBarPrefs,
 } from "@/src/hooks/useUsageBarPrefs.ts";
+import {
+	useSidebarTransparency,
+	useWindowTransparency,
+} from "@/src/hooks/useWindowTransparency.ts";
 import {
 	APPEARANCE_DEFAULTS,
 	APPEARANCE_KEYS,
@@ -1128,6 +1133,7 @@ export function AppearanceTab() {
 	// closed — and therefore not in the DOM the reveal polls. This says which
 	// page to open first.
 	const pendingSubpage = usePendingSubpage("appearance");
+	const { isDesktop } = useAppSurface();
 	const { theme, setTheme } = useTheme();
 	// next-themes' setter lives in React; bind it so registry reset can call it.
 	useEffect(() => {
@@ -1145,6 +1151,9 @@ export function AppearanceTab() {
 	const botTerminologyForced = interfaceLevel === "simple";
 	const [groupChatsByDate, setGroupChatsByDate] = useChatDateGrouping();
 	const [sidebarGroupedNav, setSidebarGroupedNav] = useSidebarGroupedNav();
+	const [sidebarTransparency, setSidebarTransparency] =
+		useSidebarTransparency();
+	const [windowTransparency, setWindowTransparency] = useWindowTransparency();
 	// The STORED choice, not the drawn one: Bot mode forces messaging rows, and a
 	// switch that flipped itself on when the user picked a sidebar mode would have
 	// nothing left to restore when they left it.
@@ -2011,6 +2020,36 @@ export function AppearanceTab() {
 						description="Use the page background instead of muted/popover colors for tooltips, dropdowns, popovers, selects, and menus."
 						title="Invert overlay backgrounds"
 					/>
+					{isDesktop && (
+						<>
+							<SettingsItem
+								actions={
+									<Switch
+										aria-label="Transparent sidebar"
+										checked={sidebarTransparency}
+										id="transparent-sidebar-toggle"
+										onCheckedChange={setSidebarTransparency}
+									/>
+								}
+								description="Let the sidebar reveal the native window backdrop with a soft glass blur. This is independent from the whole-window setting, so the page can stay opaque."
+								settingsId="appearance.sidebar-transparency"
+								title="Transparent sidebar"
+							/>
+							<SettingsItem
+								actions={
+									<Switch
+										aria-label="Transparent window"
+										checked={windowTransparency}
+										id="transparent-window-toggle"
+										onCheckedChange={setWindowTransparency}
+									/>
+								}
+								description="Let the main app canvas reveal the native window backdrop with a soft glass blur. The sidebar keeps its own separate transparency control."
+								settingsId="appearance.window-transparency"
+								title="Transparent window"
+							/>
+						</>
+					)}
 					<SettingsItem
 						actions={
 							<Switch

@@ -159,12 +159,13 @@
           { "path": "/list", "permission": "finetune.view" },
           { "path": "/adapters", "permission": "finetune.view" },
           { "path": "/merge", "permission": "finetune.run" },
-          { "path": "/:id", "method": "GET", "permission": "finetune.view" },
-          { "path": "/:id", "method": "DELETE", "permission": "finetune.run" },
+          { "path": "/:id", "method": "GET", "permission": "finetune.view", "resource_param": "id" },
+          { "path": "/:id", "method": "DELETE", "permission": "finetune.run", "resource_param": "id" },
           {
             "path": "/:id/stream",
             "method": "GET",
-            "permission": "finetune.view"
+            "permission": "finetune.view",
+            "resource_param": "id"
           }
         ]
       }

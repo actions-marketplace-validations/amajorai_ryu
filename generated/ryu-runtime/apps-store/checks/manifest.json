@@ -34,6 +34,7 @@
   "engines": { "ryu": ">=0.1.0" },
   "permission_grants": [
     "app:http",
+    "tool:http-egress:127.0.0.1",
     "core:list_agents",
     "hook:side-model",
     "hook:run-agent",

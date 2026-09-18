@@ -65,7 +65,7 @@ use axum::{
 use hmac::{Hmac, Mac};
 use serde::Deserialize;
 use serde_json::{json, Value};
-use sha2::Sha256;
+use sha2::{Digest, Sha256};
 use tokio::sync::RwLock;
 use tracing::{debug, info, warn};
 
@@ -75,8 +75,9 @@ use crate::pairing::{Decision, PairingStore};
 use crate::status::StatusReporter;
 use crate::whatsapp_format;
 use crate::{
-    handle_turn, Channel, ChannelCaps, ChannelHost, ChannelRuntime, InboundMessage,
-    WhatsAppChannelConfig,
+    claim_inbound_delivery, handle_turn_with_delivery, run_claimed_delivery_with_permit,
+    try_reserve_delivery, Channel, ChannelCaps, ChannelHost, ChannelRuntime, ChannelTurnOutcome,
+    InboundMessage, WhatsAppChannelConfig,
 };
 
 /// Meta Graph API host. The version segment is appended per request.
@@ -500,8 +501,13 @@ async fn verify_webhook(
     (StatusCode::FORBIDDEN, "forbidden".to_string())
 }
 
-/// Inbound message delivery. Always returns 200 quickly so Meta does not retry;
-/// each message is dispatched onto its own task.
+/// Inbound message delivery. Authenticate and durably claim every message before
+/// returning `200`; only then is the slow turn dispatched onto its own task.
+///
+/// Meta retries callbacks, so the message's stable `wamid` is the provider
+/// idempotency key. Payloads without a message id use a bounded hash fallback,
+/// which keeps an identical retry from duplicating work while avoiding a
+/// made-up identity that could collide with a real `wamid`.
 ///
 /// Every POST must carry a valid `X-Hub-Signature-256` HMAC of the raw body
 /// keyed by the Meta App Secret; otherwise the payload is spoofable. We take the
@@ -511,7 +517,7 @@ async fn receive_webhook(
     State(state): State<WebhookState>,
     headers: HeaderMap,
     body: Bytes,
-) -> impl IntoResponse {
+) -> StatusCode {
     let sig = headers
         .get("x-hub-signature-256")
         .and_then(|v| v.to_str().ok());
@@ -525,10 +531,56 @@ async fn receive_webhook(
         return StatusCode::BAD_REQUEST;
     };
 
-    for inbound in parse_inbound(&payload) {
+    for (index, inbound) in parse_inbound(&payload).into_iter().enumerate() {
+        let provider_id = inbound_delivery_id(&inbound, &body, index);
+        let (delivery_id, claim) = match claim_inbound_delivery(&*state.channel, &provider_id).await
+        {
+            Ok(result) => result,
+            Err(error) => {
+                warn!(%error, "whatsapp webhook delivery could not be durably claimed");
+                // A 5xx is intentional here: Meta can retry a valid event when
+                // local durable acceptance is unavailable.
+                return StatusCode::SERVICE_UNAVAILABLE;
+            }
+        };
+        if !matches!(claim, crate::pairing::DeliveryClaim::Claimed) {
+            debug!(
+                delivery_id = %delivery_id,
+                ?claim,
+                "duplicate whatsapp webhook delivery suppressed"
+            );
+            continue;
+        }
+        let Some(permit) = try_reserve_delivery(&*state.channel) else {
+            if let Err(error) = state
+                .channel
+                .runtime
+                .pairing
+                .fail_delivery(PLATFORM, &delivery_id)
+                .await
+            {
+                warn!(%error, "whatsapp webhook capacity failure could not be persisted");
+            }
+            warn!("whatsapp webhook capacity is exhausted; asking Meta to retry");
+            return StatusCode::SERVICE_UNAVAILABLE;
+        };
         let channel = Arc::clone(&state.channel);
         let host = Arc::clone(&state.host);
-        tokio::spawn(dispatch(channel, host, inbound));
+        tokio::spawn(async move {
+            let mut inbound = inbound;
+            prepare_message(&channel, &mut inbound).await;
+            let work_channel = Arc::clone(&channel);
+            let work_host = Arc::clone(&host);
+            let work_delivery_id = delivery_id.clone();
+            run_claimed_delivery_with_permit(channel, delivery_id, permit, move || {
+                let channel = Arc::clone(&work_channel);
+                let host = Arc::clone(&work_host);
+                let inbound = inbound.clone();
+                let delivery_id = work_delivery_id.clone();
+                async move { dispatch(channel, host, inbound, &delivery_id).await }
+            })
+            .await;
+        });
     }
     StatusCode::OK
 }
@@ -539,8 +591,27 @@ async fn receive_webhook(
 async fn dispatch(
     channel: Arc<WhatsAppChannel>,
     host: Arc<dyn ChannelHost>,
-    mut message: InboundMessage,
-) {
+    message: InboundMessage,
+    delivery_id: &str,
+) -> ChannelTurnOutcome {
+    // `/help` is the discovery affordance a platform with a command menu gets for
+    // free. Every OTHER command falls through untouched — Core's `pre_user_turn`
+    // hooks are what execute them, and they only need the text to arrive intact.
+    if is_help_request(&message.text) && channel.access_allows(&message).await {
+        let help = format_command_help(&channel.runtime.commands().await);
+        return match channel.send_message(&message.chat_id, &help).await {
+            Ok(()) => ChannelTurnOutcome::Completed,
+            Err(err) => {
+                warn!(channel = PLATFORM, %err, "failed to deliver the command list");
+                ChannelTurnOutcome::Failed
+            }
+        };
+    }
+
+    handle_turn_with_delivery(channel, host, message, Some(delivery_id)).await
+}
+
+async fn prepare_message(channel: &WhatsAppChannel, message: &mut InboundMessage) {
     if let Some(message_id) = message.message_id.clone() {
         channel.remember_inbound(&message.chat_id, message_id).await;
     }
@@ -553,25 +624,24 @@ async fn dispatch(
     if !message.attachments.is_empty()
         && channel
             .runtime
-            .already_admitted(channel.name(), &message)
+            .already_admitted(channel.name(), message)
             .await
     {
         let downloaded = channel.fetch_media(&message.attachments).await;
-        channel.runtime.ingest_media(&mut message, downloaded).await;
+        channel.runtime.ingest_media(message, downloaded).await;
     }
+}
 
-    // `/help` is the discovery affordance a platform with a command menu gets for
-    // free. Every OTHER command falls through untouched — Core's `pre_user_turn`
-    // hooks are what execute them, and they only need the text to arrive intact.
-    if is_help_request(&message.text) && channel.access_allows(&message).await {
-        let help = format_command_help(&channel.runtime.commands().await);
-        if let Err(err) = channel.send_message(&message.chat_id, &help).await {
-            warn!(channel = PLATFORM, %err, "failed to deliver the command list");
-        }
-        return;
+fn inbound_delivery_id(message: &InboundMessage, body: &[u8], index: usize) -> String {
+    if let Some(message_id) = message
+        .message_id
+        .as_deref()
+        .filter(|message_id| !message_id.trim().is_empty())
+    {
+        return format!("wamid:{message_id}");
     }
-
-    handle_turn(channel, host, message).await;
+    let digest = Sha256::digest(body);
+    format!("payload:{}:{index}", hex::encode(digest))
 }
 
 // ─── Payload builders ──────────────────────────────────────────────────────────
@@ -870,6 +940,15 @@ mod tests {
         json!({ "entry": [ { "changes": [ { "value": value } ] } ] })
     }
 
+    struct NoopHost;
+
+    #[async_trait]
+    impl ChannelHost for NoopHost {
+        async fn run_pipeline(&self, _channel_name: &str, _body: Value) -> anyhow::Result<Value> {
+            anyhow::bail!("noop host is not used by this webhook test")
+        }
+    }
+
     #[test]
     fn new_rejects_empty_app_secret() {
         let mut cfg = sample_config();
@@ -902,6 +981,58 @@ mod tests {
         assert!(!verify_signature(secret, None, body));
         assert!(!verify_signature(secret, Some("deadbeef"), body));
         assert!(!verify_signature(secret, Some(&sig), br#"{"entry":[1]}"#));
+    }
+
+    #[tokio::test]
+    async fn webhook_claims_wamid_before_ack_and_suppresses_retry() {
+        let mut config = sample_config();
+        config.common.access.dm = crate::pairing::DmPolicy::Disabled;
+        let channel = Arc::new(
+            WhatsAppChannel::new(config, reqwest::Client::new(), PairingStore::ephemeral())
+                .unwrap(),
+        );
+        let state = WebhookState {
+            channel: Arc::clone(&channel),
+            host: Arc::new(NoopHost),
+        };
+        let body = br#"{
+            "entry":[{"changes":[{"value":{"messages":[{
+                "id":"wamid.test","from":"1555","type":"text",
+                "text":{"body":"hello"}
+            }]}}]}]
+        }"#;
+        let mut mac = Hmac::<Sha256>::new_from_slice(b"shhh").unwrap();
+        mac.update(body);
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-hub-signature-256",
+            format!("sha256={}", hex::encode(mac.finalize().into_bytes()))
+                .parse()
+                .unwrap(),
+        );
+
+        assert_eq!(
+            receive_webhook(
+                State(state.clone()),
+                headers.clone(),
+                Bytes::from_static(body)
+            )
+            .await,
+            StatusCode::OK
+        );
+        assert_eq!(
+            receive_webhook(State(state), headers, Bytes::from_static(body)).await,
+            StatusCode::OK
+        );
+        assert!(matches!(
+            channel
+                .runtime
+                .pairing
+                .claim_delivery("whatsapp", "whatsapp:wamid:wamid.test")
+                .await
+                .unwrap(),
+            crate::pairing::DeliveryClaim::InFlight | crate::pairing::DeliveryClaim::Completed
+        ));
     }
 
     #[test]

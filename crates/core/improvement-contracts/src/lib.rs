@@ -255,9 +255,7 @@ impl ImprovementRun {
         validate_artifact(&candidate)?;
         if !matches!(
             self.status,
-            ImprovementStatus::Draft
-                | ImprovementStatus::Baseline
-                | ImprovementStatus::Candidate
+            ImprovementStatus::Draft | ImprovementStatus::Baseline | ImprovementStatus::Candidate
         ) {
             return Err(ContractError::InvalidState {
                 status: self.status,
@@ -303,9 +301,7 @@ impl ImprovementRun {
         validate_artifact(&rollback)?;
         if !matches!(
             self.status,
-            ImprovementStatus::Approved
-                | ImprovementStatus::Canary
-                | ImprovementStatus::Promoted
+            ImprovementStatus::Approved | ImprovementStatus::Canary | ImprovementStatus::Promoted
         ) {
             return Err(ContractError::InvalidState {
                 status: self.status,
@@ -434,8 +430,7 @@ impl ImprovementRun {
         {
             return Err(ContractError::Missing("promote decision"));
         }
-        if self.status == ImprovementStatus::Rejected
-            && !has_decision(self, DecisionAction::Reject)
+        if self.status == ImprovementStatus::Rejected && !has_decision(self, DecisionAction::Reject)
         {
             return Err(ContractError::Missing("reject decision"));
         }

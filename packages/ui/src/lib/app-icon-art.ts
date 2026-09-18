@@ -1,4 +1,4 @@
-import artwork from "./app-icon-art.json";
+import artwork from "./app-icon-art.json" with { type: "json" };
 
 /** Bundled first-party integration artwork; custom URLs keep normal caching. */
 export function bundledIconArt(url: string | null | undefined): string | null {

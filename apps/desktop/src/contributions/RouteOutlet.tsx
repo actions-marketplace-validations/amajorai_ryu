@@ -9,7 +9,7 @@
 // `docs/desktop-extension-host-spec.md`.
 
 import { Button } from "@ryu/ui/components/button.tsx";
-import { useCallback, useLayoutEffect, useMemo, useRef } from "react";
+import { Suspense, useCallback, useLayoutEffect, useMemo, useRef } from "react";
 import type { Tab } from "@/src/contexts/TabsContext.tsx";
 import {
 	contributionRegistry,
@@ -63,5 +63,15 @@ export function RouteOutlet({
 	}
 	// `Tab` is structurally a superset of `RouteTab`; the render-fns only read the
 	// `RouteTab` subset (path + the initial* params a pattern/exact route needs).
-	return <>{content}</>;
+	return (
+		<Suspense
+			fallback={
+				<div className="flex size-full items-center justify-center text-muted-foreground text-sm">
+					Loading…
+				</div>
+			}
+		>
+			{content}
+		</Suspense>
+	);
 }

@@ -597,6 +597,9 @@ const host = {{
   sideModel: (a) => tools.host.sideModel(a ?? {{}}),
   runAgent: (a) => tools.host.runAgent(a ?? {{}}),
   runFanout: (a) => tools.host.runFanout(a ?? {{}}),
+  reactions: {{
+    add: (a) => tools.host.addMessageReaction(a ?? {{}}),
+  }},
   storage: {{
     get: (k, ns) => tools.host.storage_get({{ key: String(k), namespace: ns }}),
     set: (k, v, ns) => tools.host.storage_set({{ key: String(k), value: typeof v === "string" ? v : JSON.stringify(v), namespace: ns }}),

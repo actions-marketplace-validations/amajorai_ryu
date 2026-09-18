@@ -764,13 +764,9 @@ interface ScanVerdict {
 /**
  * Ask Core whether this command may run.
  *
- * Returns `undefined` on ANY failure — unreachable Core, non-2xx, malformed
- * body, timeout — and the caller then falls back to the local policy. That is a
- * deliberate fail-OPEN at this hop and it is not the last word: the endpoint
- * itself fails closed on an unreachable gateway, so "Core answered" is the only
- * case where a verdict exists at all, and the local denylist plus the user
- * confirmation still stand behind this. Failing closed here instead would mean a
- * Core restart mid-turn bricks every shell command the agent tries.
+ * Returns `undefined` on a transport failure so the local hard-deny policy can
+ * still classify the command. Any command that would require interactive
+ * approval remains blocked when no approval channel is available.
  */
 async function scanExecCommand(
 	command: string
@@ -1304,19 +1300,18 @@ export default function (pi: ExtensionAPI) {
 				return;
 			}
 			if (IS_SUBAGENT) {
-				// A `--mode json -p` child has no user. Failing closed here would block
-				// EVERY tool in EVERY subagent; children are scoped with `--tools`
-				// instead, and the hard denials above still applied.
-				log(`subagent: skipping confirmation for ${event.toolName}.`);
-				return;
+				// A headless child has no user who can approve a consequential command.
+				// Never turn ApprovalRequired into an unattended allow.
+				return {
+					block: true,
+					reason: "This command requires interactive user approval, which is unavailable in a headless subagent.",
+				};
 			}
 			if (!uiAvailable(ctx)) {
-				// Headless with no dialog channel: allow, having already applied the
-				// hard denials. Blocking would strand every unattended turn.
-				log(
-					`no UI to confirm ${event.toolName}; allowing after hard-deny check.`
-				);
-				return;
+				return {
+					block: true,
+					reason: "This command requires interactive user approval, which is unavailable in headless mode.",
+				};
 			}
 			// Fails closed by construction: any ACP transport failure lands in
 			// pi-acp's `requestExtensionPermission` catch, which answers

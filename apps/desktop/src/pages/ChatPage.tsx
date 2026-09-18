@@ -17,6 +17,7 @@ import { deriveContextUsage } from "@ryu/blocks/desktop/agent-elements/context-u
 import type { GoalCompletion } from "@ryu/blocks/desktop/agent-elements/goal-message.ts";
 import { extractMemoryCitations } from "@ryu/blocks/desktop/agent-elements/memory-citations.ts";
 import { isMessageReactionAction } from "@ryu/blocks/desktop/agent-elements/message-action-types.ts";
+import type { MessageReadReceiptState } from "@ryu/blocks/desktop/agent-elements/message-read-receipt.tsx";
 import {
 	replyThreadDescription,
 	shouldSuggestReplyThread,
@@ -94,6 +95,7 @@ import type { QueueBarProps } from "@/components/agent-elements/queue/queue-bar.
 import { formatQuotePrefix } from "@/components/agent-elements/quote.tsx";
 import { openExternal, previewLinkMetadata } from "@/lib/tauri-bridge.ts";
 import { AppLaunchpad } from "@/src/components/chat/AppLaunchpad.tsx";
+import { BotChatHeader } from "@/src/components/chat/BotChatHeader.tsx";
 import {
 	BtwOverlay,
 	type BtwState,
@@ -187,6 +189,7 @@ import {
 } from "@/src/hooks/useMergedAgentThreads.ts";
 import { useMessageQueue } from "@/src/hooks/useMessageQueue.ts";
 import { useMessageReactions } from "@/src/hooks/useMessageReactions.ts";
+import { useMessageReadReceipts } from "@/src/hooks/useMessageReadReceipts.ts";
 import { useNodeDefaultAgentId } from "@/src/hooks/useNodeDefaultAgent.ts";
 import {
 	pluginCompanionPath,
@@ -472,6 +475,19 @@ async function fetchArtifactContent(
 	}
 }
 
+function messageAuthorId(message: UIMessage): string | null {
+	const metadata = (message as { metadata?: unknown }).metadata;
+	if (typeof metadata !== "object" || metadata === null) {
+		return null;
+	}
+	const author = (metadata as { author?: unknown }).author;
+	if (typeof author !== "object" || author === null) {
+		return null;
+	}
+	const id = (author as { id?: unknown }).id;
+	return typeof id === "string" && id.trim() ? id.trim() : null;
+}
+
 export default function ChatPage({
 	tabConversationId,
 	initialPrompt,
@@ -604,7 +620,6 @@ export default function ChatPage({
 					lastUsedAgentId: readLastUsedAgentId(),
 				})
 	);
-	const statsUsage = useAgentUsage(agentId);
 	// Read-only mirror for effects that must compare against the live target
 	// WITHOUT re-running when it changes — see the conversation-hydration effect,
 	// where depending on `agentId` is what reverted the user's own pick.
@@ -919,6 +934,10 @@ export default function ChatPage({
 			),
 		};
 	}, [agentId, teamId, agents, teams]);
+	const botHeaderAgent = useMemo(
+		() => (botProduct ? agents.find((agent) => agent.id === "ryu") : null),
+		[agents, botProduct]
+	);
 
 	// The agent-comms transcript renderer uses the same roster and avatar primitive
 	// as the main assistant header, so a sender stays recognizable in both places.
@@ -1285,6 +1304,7 @@ export default function ChatPage({
 	// the local `convId`, not this shared mirror, so background tabs never fight
 	// over it (e.g. tab-strip switching shows each tab's own thread).
 	const isActiveTab = useIsActiveTab();
+	const statsUsage = useAgentUsage(agentId, isActiveTab && statsPluginEnabled);
 	const isActiveTabRef = useRef(isActiveTab);
 	isActiveTabRef.current = isActiveTab;
 	useEffect(() => {
@@ -1678,8 +1698,6 @@ export default function ChatPage({
 					project_environment: projectEnvironment
 						? {
 								name: projectEnvironment.name,
-								setup: projectEnvironment.setup,
-								cleanup: projectEnvironment.cleanup,
 								variables: projectEnvironment.variables.map(
 									({ key, value }) => ({
 										key,
@@ -1722,6 +1740,49 @@ export default function ChatPage({
 			},
 		}),
 	});
+
+	// The AI SDK adds a normal user message optimistically before Core has
+	// acknowledged the turn. Mark only the message that belongs to a settled,
+	// non-temporary Core request so the shared transcript can show its single
+	// delivery tick without granting one to client-only browser/image/goal rows.
+	const previousChatStatusRef = useRef(status);
+	useEffect(() => {
+		const previousStatus = previousChatStatusRef.current;
+		previousChatStatusRef.current = status;
+		const wasBusy =
+			previousStatus === "streaming" || previousStatus === "submitted";
+		const settled = status === "ready";
+		if (!(wasBusy && settled) || ghostModeRef.current) {
+			return;
+		}
+		setMessages((current) => {
+			for (let index = current.length - 1; index >= 0; index -= 1) {
+				const message = current[index];
+				if (message?.role !== "user") {
+					continue;
+				}
+				const candidate = message as UIMessage & {
+					metadata?: unknown;
+					persisted?: unknown;
+				};
+				const metadata =
+					typeof candidate.metadata === "object" && candidate.metadata !== null
+						? (candidate.metadata as Record<string, unknown>)
+						: {};
+				if (candidate.persisted === true || metadata.ryuPersisted === true) {
+					return current;
+				}
+				const next = [...current];
+				next[index] = {
+					...message,
+					metadata: { ...metadata, ryuPersisted: true },
+					persisted: true,
+				} as (typeof current)[number];
+				return next;
+			}
+			return current;
+		});
+	}, [setMessages, status]);
 
 	// A failed model call already persisted the user turn. Clear the AI SDK's
 	// terminal error, mark this as a re-run (so Core does not append that user row
@@ -3609,6 +3670,13 @@ export default function ChatPage({
 		};
 	}, []);
 
+	const {
+		applyRealtimeFrame: applyReadReceiptFrame,
+		byMessage: readReceiptsByMessage,
+		markVisible: markReadMessageVisible,
+		users: readReceiptUsers,
+	} = useMessageReadReceipts(ghostChatActive ? null : convId, myUserId);
+
 	// This connection's room member id (from the join ack), used to drop our own
 	// presence echo so we never show ourselves as "typing".
 	const myMemberIdRef = useRef<string | null>(null);
@@ -3764,6 +3832,10 @@ export default function ChatPage({
 				return;
 			}
 			const frame = data as { type?: string; message?: unknown };
+			if (frame.type === "readReceipt" || frame.type === "read_receipt") {
+				applyReadReceiptFrame(data);
+				return;
+			}
 			// Reactions ride the same named-event channel as messages. Routed before
 			// the message guard below, which would otherwise drop them on the floor.
 			if (frame.type === "reaction") {
@@ -3806,6 +3878,7 @@ export default function ChatPage({
 				metadata: {
 					author: { name: msg.author_name ?? undefined, id: authorId },
 					createdAt: msg.created_at,
+					ryuPersisted: true,
 					origin_server: msg.origin_server ?? undefined,
 					source: msg.source ?? undefined,
 					widget_instance_id: msg.widget_instance_id ?? undefined,
@@ -3818,7 +3891,7 @@ export default function ChatPage({
 				return [...prev, inserted as unknown as (typeof prev)[number]];
 			});
 		},
-		[setMessages, applyReactionFrame]
+		[setMessages, applyReactionFrame, applyReadReceiptFrame]
 	);
 
 	// Apply a presence delta from another member: upsert their name/typing, or
@@ -5881,6 +5954,73 @@ export default function ChatPage({
 				: processedMessages,
 		[merged.messages, processedMessages]
 	);
+	const messageReadReceiptStates = useMemo<
+		ReadonlyMap<string, MessageReadReceiptState>
+	>(() => {
+		const directory = new Map<string, { avatar?: string; name: string }>();
+		for (const user of readReceiptUsers) {
+			directory.set(user.id, user);
+		}
+		for (const user of humanMentionDirectory.users) {
+			directory.set(user.id, {
+				avatar: user.avatarUrl,
+				name: user.name,
+			});
+		}
+		const states = new Map<string, MessageReadReceiptState>();
+		for (const [messageId, records] of readReceiptsByMessage) {
+			const message = renderedMessages.find(
+				(candidate) => candidate.id === messageId
+			);
+			const authorId = message ? messageAuthorId(message) : null;
+			const readers = records
+				.map((record) => {
+					const knownUser = directory.get(record.userId);
+					const name =
+						knownUser?.name ??
+						record.userName ??
+						(record.userId === myUserId
+							? oidcUser?.name || oidcUser?.email || "You"
+							: "Someone");
+					return {
+						avatar: knownUser?.avatar,
+						id: record.userId,
+						name,
+					};
+				})
+				.filter((reader) => reader.id !== authorId);
+			if (readers.length > 0) {
+				states.set(messageId, { delivered: true, readers });
+			}
+		}
+		return states;
+	}, [
+		humanMentionDirectory.users,
+		myUserId,
+		oidcUser?.email,
+		oidcUser?.name,
+		readReceiptsByMessage,
+		readReceiptUsers,
+		renderedMessages,
+	]);
+	const handleMessageVisible = useCallback(
+		(messageId: string) => {
+			const message = renderedMessages.find(
+				(candidate) => candidate.id === messageId
+			);
+			const authorId = message ? messageAuthorId(message) : null;
+			if (
+				message?.role !== "user" ||
+				!myUserId ||
+				authorId === null ||
+				authorId === myUserId
+			) {
+				return;
+			}
+			markReadMessageVisible(messageId);
+		},
+		[markReadMessageVisible, myUserId, renderedMessages]
+	);
 	const chatSearchMatches = useChatSearch(
 		renderedMessages,
 		chatSearch.query,
@@ -7175,8 +7315,17 @@ export default function ChatPage({
 								}}
 								// Pad the message list down by the titlebar height so the
 								// conversation rests below the frosted bar yet scrolls under it.
-								classNames={{ messageList: "pt-12" }}
+								classNames={{
+									messageList: botProduct
+										? ""
+										: "pt-[var(--ryu-titlebar-inset,3rem)]",
+								}}
 								contextSize={contextSize}
+								conversationHeader={
+									botProduct ? (
+										<BotChatHeader agent={botHeaderAgent} />
+									) : undefined
+								}
 								// Opening this thread jumps the transcript to the newest
 								// message; the id is what makes that fire once per
 								// conversation rather than on every history rewrite.
@@ -7259,6 +7408,7 @@ export default function ChatPage({
 								mentionItems={resolvedMentionItems}
 								messageActionStates={messageActionStates}
 								messageActions={contributedMessageActions}
+								messageReadReceipts={messageReadReceiptStates}
 								messages={renderedMessages}
 								onAgentUiSubmit={handleAgentUiSubmit}
 								onBranch={activeConversationId ? handleBranch : undefined}
@@ -7274,6 +7424,7 @@ export default function ChatPage({
 									activeConversationId ? handleEditMessage : undefined
 								}
 								onLoadOlderMessages={loadOlderMessages}
+								onMessageVisible={handleMessageVisible}
 								onOpenContext={handleOpenContext}
 								onOpenFile={handleOpenFileLink}
 								onOpenLink={handleOpenWebsiteLink}

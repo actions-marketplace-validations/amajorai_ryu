@@ -39,6 +39,7 @@ import {
 	subscribeGatewayTraffic,
 	type TrafficEvent,
 } from "@/src/lib/api/gateway.ts";
+import { formatTime as formatDisplayTime } from "@/src/lib/timezone.ts";
 
 const COPIED_RESET_MS = 1500;
 /** How many traffic rows the dashboard keeps in memory. */
@@ -541,7 +542,7 @@ function formatTime(iso: string | undefined): string {
 	if (Number.isNaN(d.getTime())) {
 		return "—";
 	}
-	return d.toLocaleTimeString([], {
+	return formatDisplayTime(d, {
 		hour: "2-digit",
 		minute: "2-digit",
 		second: "2-digit",

@@ -233,11 +233,14 @@ export function useAppsCatalog(
 	// active-source preference, which would otherwise blank Apps/Plugins.
 	const origin = options?.origin;
 	const activeNode = useActiveNode();
-	const target: ApiTarget = {
-		url: activeNode.url,
-		token: activeNode.token ?? null,
-		userJwt: activeNode.userJwt ?? null,
-	};
+	const target = useMemo<ApiTarget>(
+		() => ({
+			url: activeNode.url,
+			token: activeNode.token ?? null,
+			userJwt: activeNode.userJwt ?? null,
+		}),
+		[activeNode.url, activeNode.token, activeNode.userJwt]
+	);
 	const { url, token, userJwt } = target;
 	const qc = useQueryClient();
 
@@ -245,7 +248,9 @@ export function useAppsCatalog(
 	const debouncedQuery = useDebouncedValue(query, SEARCH_DEBOUNCE_MS);
 	const [selectedId, setSelectedId] = useState<string | null>(null);
 
-	const sourcesQuery = useQuery(pluginSourcesQuery(target));
+	const sourcesQuery = useQuery(
+		useMemo(() => pluginSourcesQuery(target), [target])
+	);
 	const sources = useMemo(
 		() =>
 			(sourcesQuery.data?.sources ?? []).filter(
@@ -301,21 +306,33 @@ export function useAppsCatalog(
 		[addMarketplaceMutation]
 	);
 
-	const appsQuery = useQuery(installedAppsQuery(target));
-	const portablePackagesQuery = useQuery({
-		queryKey: ["marketplace", "packages", "installed", url],
-		queryFn: () => fetchInstalledPortablePackages(target),
-	});
+	const appsQuery = useQuery(
+		useMemo(() => installedAppsQuery(target), [target])
+	);
+	const portablePackagesQuery = useQuery(
+		useMemo(
+			() => ({
+				queryKey: ["marketplace", "packages", "installed", url],
+				queryFn: () => fetchInstalledPortablePackages(target),
+			}),
+			[target, url]
+		)
+	);
 
-	const listQuery = useInfiniteQuery({
-		...pluginCatalogQuery(target, {
-			query: debouncedQuery,
-			source: activeSource,
-			origin,
-		}),
-		placeholderData: keepPreviousData,
-		enabled: activeSource.length > 0,
-	});
+	const listQuery = useInfiniteQuery(
+		useMemo(
+			() => ({
+				...pluginCatalogQuery(target, {
+					query: debouncedQuery,
+					source: activeSource,
+					origin,
+				}),
+				placeholderData: keepPreviousData,
+				enabled: activeSource.length > 0,
+			}),
+			[target, debouncedQuery, activeSource, origin]
+		)
+	);
 
 	const catalogEntries = useMemo(
 		() => listQuery.data?.pages.flatMap((p) => p.entries) ?? [],
@@ -391,24 +408,29 @@ export function useAppsCatalog(
 	// (git catalog, then the hosted server, then the local manifest), so the request
 	// is answerable; a source that genuinely has nothing degrades to `detailError`,
 	// which the panel already renders inline without losing the Overview.
-	const detailQuery = useQuery({
-		queryKey: [
-			"plugins",
-			"detail",
-			url,
-			selectedId,
-			activeSource,
-			origin ?? null,
-		],
-		queryFn: () =>
-			fetchPluginCatalogDetail(
-				{ url, token, userJwt },
-				selectedId as string,
-				origin,
-				origin ? undefined : activeSource
-			),
-		enabled: selectedId !== null,
-	});
+	const detailQuery = useQuery(
+		useMemo(
+			() => ({
+				queryKey: [
+					"plugins",
+					"detail",
+					url,
+					selectedId,
+					activeSource,
+					origin ?? null,
+				],
+				queryFn: () =>
+					fetchPluginCatalogDetail(
+						target,
+						selectedId as string,
+						origin,
+						origin ? undefined : activeSource
+					),
+				enabled: selectedId !== null,
+			}),
+			[target, url, selectedId, activeSource, origin]
+		)
+	);
 
 	// The authoritative installed/enabled refresh — the ONE query whose result
 	// decides what the button says next (Add → Enable). Awaited by the mutations,

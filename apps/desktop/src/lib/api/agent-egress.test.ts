@@ -825,9 +825,7 @@ describe("the tool bridge's two terms, mirrored from Core", () => {
 				"tokio::time::timeout(std::time::Duration::from_secs(600), rx)"
 			)
 		).toBe(PRESENT);
-		expect(anchor(ACP_RS, "pool.retain(|_, turns| !turns.is_closed());")).toBe(
-			PRESENT
-		);
+		expect(anchor(ACP_RS, "pool.retain(|_, entry| {")).toBe(PRESENT);
 	});
 });
 

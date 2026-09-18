@@ -36,6 +36,7 @@ import type {
 	SidecarStatusResult,
 } from "../../shared/ipc.ts";
 import { coreHeaders, loadConfig } from "./config.ts";
+import { withResponseDeadline } from "./response-deadline.ts";
 import { SseDecoder } from "./sse.ts";
 
 /** Short timeout for one-shot probes (health, status, tool calls). */
@@ -66,34 +67,21 @@ function reasonFromError(error: unknown): string {
 	return "unreachable";
 }
 
-/** Fetch with an abort-based timeout. Rethrows so callers can map to a reason. */
-async function fetchWithTimeout(
-	url: string,
-	init: RequestInit,
-	timeoutMs: number
-): Promise<Response> {
-	const controller = new AbortController();
-	const timer = setTimeout(() => controller.abort(), timeoutMs);
-	try {
-		return await fetch(url, { ...init, signal: controller.signal });
-	} finally {
-		clearTimeout(timer);
-	}
-}
-
 /** Probe `GET /api/health`. Resolves `{ available }` and never rejects. */
 export async function health(): Promise<AvailabilityResult> {
 	const { coreBaseUrl } = loadConfig();
 	try {
-		const resp = await fetchWithTimeout(
+		return await withResponseDeadline<AvailabilityResult>(
 			`${coreBaseUrl}/api/health`,
 			{ method: "GET", headers: coreHeaders() },
-			PROBE_TIMEOUT_MS
+			PROBE_TIMEOUT_MS,
+			async (resp) => {
+				if (!resp.ok) {
+					return { available: false, reason: `core responded ${resp.status}` };
+				}
+				return { available: true };
+			}
 		);
-		if (!resp.ok) {
-			return { available: false, reason: `core responded ${resp.status}` };
-		}
-		return { available: true };
 	} catch (error) {
 		return { available: false, reason: reasonFromError(error) };
 	}
@@ -153,6 +141,8 @@ async function runChatStream(
 			reason: "error",
 			error: reasonFromError(error),
 		});
+	} finally {
+		controller.abort();
 	}
 }
 
@@ -219,23 +209,25 @@ export async function completions(
 		body.model = req.model;
 	}
 	try {
-		const resp = await fetchWithTimeout(
+		return await withResponseDeadline<CoreCompletionsResult>(
 			`${coreBaseUrl}/v1/chat/completions`,
 			{
 				method: "POST",
 				headers: coreHeaders({ "Content-Type": "application/json" }),
 				body: JSON.stringify(body),
 			},
-			COMPLETION_TIMEOUT_MS
+			COMPLETION_TIMEOUT_MS,
+			async (resp) => {
+				if (!resp.ok) {
+					return { available: false, reason: `core responded ${resp.status}` };
+				}
+				const data = (await resp.json()) as {
+					choices?: { message?: { content?: string } }[];
+				};
+				const text = data.choices?.[0]?.message?.content ?? "";
+				return { available: true, text };
+			}
 		);
-		if (!resp.ok) {
-			return { available: false, reason: `core responded ${resp.status}` };
-		}
-		const data = (await resp.json()) as {
-			choices?: { message?: { content?: string } }[];
-		};
-		const text = data.choices?.[0]?.message?.content ?? "";
-		return { available: true, text };
 	} catch (error) {
 		return { available: false, reason: reasonFromError(error) };
 	}
@@ -280,6 +272,7 @@ export async function runAgentText(
 		return { available: false, reason: reasonFromError(error) };
 	} finally {
 		clearTimeout(timer);
+		controller.abort();
 	}
 }
 
@@ -327,7 +320,7 @@ async function accumulateStreamText(
 export async function speak(req: CoreSpeakRequest): Promise<CoreSpeakResult> {
 	const { coreBaseUrl } = loadConfig();
 	try {
-		const resp = await fetchWithTimeout(
+		return await withResponseDeadline<CoreSpeakResult>(
 			`${coreBaseUrl}/api/voice/speak`,
 			{
 				method: "POST",
@@ -338,14 +331,16 @@ export async function speak(req: CoreSpeakRequest): Promise<CoreSpeakResult> {
 					voice: req.voice,
 				}),
 			},
-			COMPLETION_TIMEOUT_MS
+			COMPLETION_TIMEOUT_MS,
+			async (resp) => {
+				if (!resp.ok) {
+					return { available: false, reason: `core responded ${resp.status}` };
+				}
+				const audio = await resp.arrayBuffer();
+				const mime = resp.headers.get("content-type") ?? "audio/wav";
+				return { available: true, audio, mime };
+			}
 		);
-		if (!resp.ok) {
-			return { available: false, reason: `core responded ${resp.status}` };
-		}
-		const audio = await resp.arrayBuffer();
-		const mime = resp.headers.get("content-type") ?? "audio/wav";
-		return { available: true, audio, mime };
 	} catch (error) {
 		return { available: false, reason: reasonFromError(error) };
 	}
@@ -365,17 +360,19 @@ export async function transcribe(
 	try {
 		const form = new FormData();
 		form.append("file", new Blob([audio], { type: "audio/wav" }), "audio.wav");
-		const resp = await fetchWithTimeout(
+		return await withResponseDeadline<CoreTranscribeResult>(
 			`${coreBaseUrl}/api/voice/transcribe${query}`,
 			// No explicit Content-Type: fetch sets the multipart boundary itself.
 			{ method: "POST", headers: coreHeaders(), body: form },
-			TRANSCRIBE_TIMEOUT_MS
+			TRANSCRIBE_TIMEOUT_MS,
+			async (resp) => {
+				if (!resp.ok) {
+					return { available: false, reason: `core responded ${resp.status}` };
+				}
+				const data = (await resp.json()) as { text?: string };
+				return { available: true, text: data.text ?? "" };
+			}
 		);
-		if (!resp.ok) {
-			return { available: false, reason: `core responded ${resp.status}` };
-		}
-		const data = (await resp.json()) as { text?: string };
-		return { available: true, text: data.text ?? "" };
 	} catch (error) {
 		return { available: false, reason: reasonFromError(error) };
 	}
@@ -391,26 +388,28 @@ export async function processSpeechText(
 ): Promise<CoreSpeechProcessingResult> {
 	const { coreBaseUrl } = loadConfig();
 	try {
-		const resp = await fetchWithTimeout(
+		return await withResponseDeadline<CoreSpeechProcessingResult>(
 			`${coreBaseUrl}/api/voice/speech-processing`,
 			{
 				method: "POST",
 				headers: coreHeaders({ "Content-Type": "application/json" }),
 				body: JSON.stringify(req),
 			},
-			SPEECH_PROCESSING_TIMEOUT_MS
+			SPEECH_PROCESSING_TIMEOUT_MS,
+			async (resp) => {
+				if (!resp.ok) {
+					const data = (await resp.json().catch(() => ({}))) as {
+						error?: string;
+					};
+					return {
+						available: false,
+						reason: data.error ?? `core responded ${resp.status}`,
+					};
+				}
+				const data = (await resp.json()) as { text?: string };
+				return { available: true, text: data.text ?? "" };
+			}
 		);
-		if (!resp.ok) {
-			const data = (await resp.json().catch(() => ({}))) as {
-				error?: string;
-			};
-			return {
-				available: false,
-				reason: data.error ?? `core responded ${resp.status}`,
-			};
-		}
-		const data = (await resp.json()) as { text?: string };
-		return { available: true, text: data.text ?? "" };
 	} catch (error) {
 		return { available: false, reason: reasonFromError(error) };
 	}
@@ -422,7 +421,7 @@ export async function callTool(
 ): Promise<CoreToolCallResult> {
 	const { coreBaseUrl } = loadConfig();
 	try {
-		const resp = await fetchWithTimeout(
+		return await withResponseDeadline<CoreToolCallResult>(
 			`${coreBaseUrl}/api/mcp/tools/call`,
 			{
 				method: "POST",
@@ -433,19 +432,21 @@ export async function callTool(
 					agent_id: req.agent_id,
 				}),
 			},
-			PROBE_TIMEOUT_MS
+			PROBE_TIMEOUT_MS,
+			async (resp) => {
+				const data = (await resp.json().catch(() => ({}))) as {
+					ok?: boolean;
+					output?: unknown;
+					error?: string;
+				};
+				return {
+					available: true,
+					ok: data.ok ?? resp.ok,
+					output: data.output,
+					error: data.error,
+				};
+			}
 		);
-		const data = (await resp.json().catch(() => ({}))) as {
-			ok?: boolean;
-			output?: unknown;
-			error?: string;
-		};
-		return {
-			available: true,
-			ok: data.ok ?? resp.ok,
-			output: data.output,
-			error: data.error,
-		};
 	} catch (error) {
 		return { available: false, reason: reasonFromError(error) };
 	}
@@ -455,16 +456,18 @@ export async function callTool(
 export async function sidecarStatus(): Promise<SidecarStatusResult> {
 	const { coreBaseUrl } = loadConfig();
 	try {
-		const resp = await fetchWithTimeout(
+		return await withResponseDeadline<SidecarStatusResult>(
 			`${coreBaseUrl}/api/sidecar/status`,
 			{ method: "GET", headers: coreHeaders() },
-			PROBE_TIMEOUT_MS
+			PROBE_TIMEOUT_MS,
+			async (resp) => {
+				if (!resp.ok) {
+					return { available: false, reason: `core responded ${resp.status}` };
+				}
+				const data = (await resp.json()) as { sidecars?: SidecarStatus[] };
+				return { available: true, sidecars: data.sidecars ?? [] };
+			}
 		);
-		if (!resp.ok) {
-			return { available: false, reason: `core responded ${resp.status}` };
-		}
-		const data = (await resp.json()) as { sidecars?: SidecarStatus[] };
-		return { available: true, sidecars: data.sidecars ?? [] };
 	} catch (error) {
 		return { available: false, reason: reasonFromError(error) };
 	}
@@ -474,20 +477,22 @@ export async function sidecarStatus(): Promise<SidecarStatusResult> {
 export async function sidecarStart(name: string): Promise<SidecarStartResult> {
 	const { coreBaseUrl } = loadConfig();
 	try {
-		const resp = await fetchWithTimeout(
+		return await withResponseDeadline<SidecarStartResult>(
 			`${coreBaseUrl}/api/sidecar/${encodeURIComponent(name)}/start`,
 			{ method: "POST", headers: coreHeaders() },
-			PROBE_TIMEOUT_MS
+			PROBE_TIMEOUT_MS,
+			async (resp) => {
+				const data = (await resp.json().catch(() => ({}))) as {
+					success?: boolean;
+					error?: string;
+				};
+				return {
+					available: true,
+					success: data.success ?? resp.ok,
+					error: data.error,
+				};
+			}
 		);
-		const data = (await resp.json().catch(() => ({}))) as {
-			success?: boolean;
-			error?: string;
-		};
-		return {
-			available: true,
-			success: data.success ?? resp.ok,
-			error: data.error,
-		};
 	} catch (error) {
 		return { available: false, reason: reasonFromError(error) };
 	}
@@ -497,43 +502,46 @@ export async function sidecarStart(name: string): Promise<SidecarStartResult> {
 export async function agents(): Promise<AgentsResult> {
 	const { coreBaseUrl } = loadConfig();
 	try {
-		const resp = await fetchWithTimeout(
+		return await withResponseDeadline<AgentsResult>(
 			`${coreBaseUrl}/api/agents`,
 			{ method: "GET", headers: coreHeaders() },
-			PROBE_TIMEOUT_MS
-		);
-		if (!resp.ok) {
-			return { available: false, reason: `core responded ${resp.status}` };
-		}
-		const data = (await resp.json()) as {
-			agents?: {
-				built_in?: unknown;
-				description?: unknown;
-				engine?: unknown;
-				id?: unknown;
-				model?: unknown;
-				name?: unknown;
-				recommended?: unknown;
-				transport?: unknown;
-			}[];
-		};
-		const list: CoreAgentSummary[] = [];
-		for (const a of data.agents ?? []) {
-			if (typeof a.id !== "string") {
-				continue;
+			PROBE_TIMEOUT_MS,
+			async (resp) => {
+				if (!resp.ok) {
+					return { available: false, reason: `core responded ${resp.status}` };
+				}
+				const data = (await resp.json()) as {
+					agents?: {
+						built_in?: unknown;
+						description?: unknown;
+						engine?: unknown;
+						id?: unknown;
+						model?: unknown;
+						name?: unknown;
+						recommended?: unknown;
+						transport?: unknown;
+					}[];
+				};
+				const list: CoreAgentSummary[] = [];
+				for (const a of data.agents ?? []) {
+					if (typeof a.id !== "string") {
+						continue;
+					}
+					list.push({
+						id: a.id,
+						name: typeof a.name === "string" ? a.name : a.id,
+						description:
+							typeof a.description === "string" ? a.description : null,
+						recommended: a.recommended === true,
+						transport: typeof a.transport === "string" ? a.transport : null,
+						engine: typeof a.engine === "string" ? a.engine : null,
+						model: typeof a.model === "string" ? a.model : null,
+						builtIn: a.built_in === true || typeof a.transport === "string",
+					});
+				}
+				return { available: true, agents: list };
 			}
-			list.push({
-				id: a.id,
-				name: typeof a.name === "string" ? a.name : a.id,
-				description: typeof a.description === "string" ? a.description : null,
-				recommended: a.recommended === true,
-				transport: typeof a.transport === "string" ? a.transport : null,
-				engine: typeof a.engine === "string" ? a.engine : null,
-				model: typeof a.model === "string" ? a.model : null,
-				builtIn: a.built_in === true || typeof a.transport === "string",
-			});
-		}
-		return { available: true, agents: list };
+		);
 	} catch (error) {
 		return { available: false, reason: reasonFromError(error) };
 	}
@@ -543,16 +551,18 @@ export async function agents(): Promise<AgentsResult> {
 export async function acpConfig(agentId: string): Promise<AcpConfigResult> {
 	const { coreBaseUrl } = loadConfig();
 	try {
-		const resp = await fetchWithTimeout(
+		return await withResponseDeadline<AcpConfigResult>(
 			`${coreBaseUrl}/api/agents/${encodeURIComponent(agentId)}/acp-config`,
 			{ method: "GET", headers: coreHeaders() },
-			PROBE_TIMEOUT_MS
+			PROBE_TIMEOUT_MS,
+			async (resp) => {
+				if (!resp.ok) {
+					return { available: false, reason: `core responded ${resp.status}` };
+				}
+				const config = (await resp.json()) as AcpConfig;
+				return { available: true, config };
+			}
 		);
-		if (!resp.ok) {
-			return { available: false, reason: `core responded ${resp.status}` };
-		}
-		const config = (await resp.json()) as AcpConfig;
-		return { available: true, config };
 	} catch (error) {
 		return { available: false, reason: reasonFromError(error) };
 	}
@@ -562,18 +572,20 @@ export async function acpConfig(agentId: string): Promise<AcpConfigResult> {
 export async function engineModels(): Promise<EngineModelsResult> {
 	const { coreBaseUrl } = loadConfig();
 	try {
-		const resp = await fetchWithTimeout(
+		return await withResponseDeadline<EngineModelsResult>(
 			`${coreBaseUrl}/api/engines/models`,
 			{ method: "GET", headers: coreHeaders() },
-			PROBE_TIMEOUT_MS
+			PROBE_TIMEOUT_MS,
+			async (resp) => {
+				if (!resp.ok) {
+					return { available: false, reason: `core responded ${resp.status}` };
+				}
+				const data = (await resp.json()) as {
+					models?: Record<string, { id: string; name: string }[]>;
+				};
+				return { available: true, models: data.models ?? {} };
+			}
 		);
-		if (!resp.ok) {
-			return { available: false, reason: `core responded ${resp.status}` };
-		}
-		const data = (await resp.json()) as {
-			models?: Record<string, { id: string; name: string }[]>;
-		};
-		return { available: true, models: data.models ?? {} };
 	} catch (error) {
 		return { available: false, reason: reasonFromError(error) };
 	}
@@ -583,31 +595,33 @@ export async function engineModels(): Promise<EngineModelsResult> {
 export async function conversations(): Promise<ConversationsResult> {
 	const { coreBaseUrl } = loadConfig();
 	try {
-		const resp = await fetchWithTimeout(
+		return await withResponseDeadline<ConversationsResult>(
 			`${coreBaseUrl}/api/conversations`,
 			{ method: "GET", headers: coreHeaders() },
-			PROBE_TIMEOUT_MS
-		);
-		if (!resp.ok) {
-			return { available: false, reason: `core responded ${resp.status}` };
-		}
-		const data = (await resp.json()) as {
-			conversations?: { id?: unknown; title?: unknown }[];
-		};
-		const list: CoreConversationSummary[] = [];
-		for (const c of data.conversations ?? []) {
-			if (typeof c.id !== "string") {
-				continue;
+			PROBE_TIMEOUT_MS,
+			async (resp) => {
+				if (!resp.ok) {
+					return { available: false, reason: `core responded ${resp.status}` };
+				}
+				const data = (await resp.json()) as {
+					conversations?: { id?: unknown; title?: unknown }[];
+				};
+				const list: CoreConversationSummary[] = [];
+				for (const c of data.conversations ?? []) {
+					if (typeof c.id !== "string") {
+						continue;
+					}
+					list.push({
+						id: c.id,
+						title:
+							typeof c.title === "string" && c.title.length > 0
+								? c.title
+								: "Untitled",
+					});
+				}
+				return { available: true, conversations: list };
 			}
-			list.push({
-				id: c.id,
-				title:
-					typeof c.title === "string" && c.title.length > 0
-						? c.title
-						: "Untitled",
-			});
-		}
-		return { available: true, conversations: list };
+		);
 	} catch (error) {
 		return { available: false, reason: reasonFromError(error) };
 	}

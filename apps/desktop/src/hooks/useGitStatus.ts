@@ -12,7 +12,8 @@
 // numbers drifted — not because any one of them was wrong, but because they were
 // each right about a different moment.
 //
-// The cache key is the working directory, canonicalised. Branch is *output*, not
+// The cache key includes the node credentials and canonical working directory.
+// Branch is *output*, not
 // part of the key: keying on folder+branch would mint a fresh entry on every
 // checkout and leave the old one behind, still holding the numbers from before
 // the switch. A git worktree is not a third axis either — it is simply a
@@ -59,7 +60,7 @@ import {
 } from "@/src/lib/api/git.ts";
 import { queryClient } from "@/src/lib/query-client.ts";
 
-/** Safety-net poll interval. One timer for the whole app; see the header note on
+/** Safety-net poll interval for the shared queries; see the header note on
  *  why this is a backstop rather than the primary freshness mechanism. */
 const POLL_INTERVAL_MS = 15_000;
 
@@ -85,7 +86,7 @@ export function canonicalCwd(cwd: string): string {
 	return trimmed === "" ? cwd.trim() : trimmed;
 }
 
-/** The shared query key. Exported so callers can invalidate without guessing. */
+/** Logical query prefix, exported for invalidation across node scopes. */
 export function gitStatusKey(cwd: string | null): [string, string] {
 	return ["git-status", cwd ? canonicalCwd(cwd) : ""];
 }
@@ -93,7 +94,8 @@ export function gitStatusKey(cwd: string | null): [string, string] {
 /**
  * Live git status for `cwd`, shared across every component that asks for the
  * same folder: TanStack Query dedupes concurrent mounts onto one in-flight
- * request and one poll timer, and hands them all the identical object.
+ * request and hands them all the identical object. Poll timers are owned by
+ * individual query observers.
  *
  * Returns the non-repo shape (rather than `undefined`) while loading or when the
  * folder is not a repo, so callers can render `status.is_repo` directly.
@@ -103,7 +105,12 @@ export function useGitStatus(
 	cwd: string | null
 ): { isLoading: boolean; status: GitStatus } {
 	const { data, isLoading } = useQuery({
-		queryKey: gitStatusKey(cwd),
+		queryKey: [
+			...gitStatusKey(cwd),
+			target.url,
+			target.token ?? null,
+			target.userJwt ?? null,
+		],
 		queryFn: ({ signal }) =>
 			fetchGitStatus(target, canonicalCwd(cwd ?? ""), signal),
 		enabled: Boolean(cwd),
@@ -156,7 +163,7 @@ const NO_WORKTREE: WorktreeStatus = {
 	changed_files: 0,
 };
 
-/** The shared worktree query key. */
+/** Logical worktree query prefix, shared by all node scopes. */
 export function worktreeStatusKey(
 	conversationId: string | null | undefined
 ): [string, string] {
@@ -172,7 +179,12 @@ export function useWorktreeStatus(
 	conversationId: string | null | undefined
 ): WorktreeStatus {
 	const { data } = useQuery({
-		queryKey: worktreeStatusKey(conversationId),
+		queryKey: [
+			...worktreeStatusKey(conversationId),
+			target.url,
+			target.token ?? null,
+			target.userJwt ?? null,
+		],
 		queryFn: ({ signal }) =>
 			fetchWorktreeStatus(target, conversationId ?? "", signal),
 		enabled: Boolean(conversationId),
@@ -214,7 +226,7 @@ const EMPTY_DIFF: WorktreeDiff = {
 	unified_diff: "",
 };
 
-/** The shared worktree-diff query key. */
+/** Logical worktree-diff query prefix, shared by all node scopes. */
 export function worktreeDiffKey(
 	conversationId: string | null | undefined
 ): [string, string] {
@@ -237,7 +249,12 @@ export function useWorktreeDiff(
 	conversationId: string | null | undefined
 ): WorktreeDiff {
 	const { data } = useQuery({
-		queryKey: worktreeDiffKey(conversationId),
+		queryKey: [
+			...worktreeDiffKey(conversationId),
+			target.url,
+			target.token ?? null,
+			target.userJwt ?? null,
+		],
 		queryFn: ({ signal }) =>
 			fetchWorktreeDiff(target, conversationId ?? "", signal),
 		enabled: Boolean(conversationId),

@@ -10,6 +10,12 @@ use crate::sidecar::{onboarding::SetupManager, HealthStatus, Sidecar, SidecarSta
 
 const HEALTH_INTERVAL: Duration = Duration::from_secs(30);
 const MAX_REQUIRED_RETRIES: u32 = 3;
+/// A sidecar update stops the old child before re-registering its replacement,
+/// but the OS can hold the listening socket for a short interval after the kill.
+/// Retry only that transient bind-probe failure; a permanent squatter still fails
+/// closed and remains visible on the status plane.
+const PORT_BIND_RETRY_ATTEMPTS: u8 = 20;
+const PORT_BIND_RETRY_DELAY: Duration = Duration::from_millis(250);
 /// How often the idle reaper (`spawn_idle_reaper`) checks whether an
 /// idle-configured sidecar is due to be scaled to zero. Coarse on purpose: a
 /// stopped-a-few-seconds-late sidecar costs nothing, and a slow tick keeps the
@@ -593,7 +599,20 @@ impl SidecarManager {
         // own process. The lock is now the complete lifecycle admission boundary.
         let lock = self.start_lock_for(&name);
         let _guard = lock.lock().await;
-        self.register_inner(&sidecar, false)?;
+        let mut retries = 0;
+        loop {
+            match self.register_inner(&sidecar, false) {
+                Ok(_) => break,
+                Err(error)
+                    if error.to_string().contains("bind probe failed")
+                        && retries < PORT_BIND_RETRY_ATTEMPTS =>
+                {
+                    retries += 1;
+                    tokio::time::sleep(PORT_BIND_RETRY_DELAY).await;
+                }
+                Err(error) => return Err(error),
+            }
+        }
         self.start_dynamic_unlocked(&name).await
     }
 
@@ -1626,9 +1645,15 @@ mod tests {
         } else {
             "freetoken"
         };
-        let error = manager.set_active_local_engine(unsupported).await.unwrap_err();
+        let error = manager
+            .set_active_local_engine(unsupported)
+            .await
+            .unwrap_err();
         assert!(error.to_string().contains("not supported on this node"));
-        assert_eq!(manager.active_engine.lock().await.as_deref(), Some("llamacpp"));
+        assert_eq!(
+            manager.active_engine.lock().await.as_deref(),
+            Some("llamacpp")
+        );
     }
 
     #[tokio::test]
@@ -1688,6 +1713,58 @@ mod tests {
                 .await
                 .is_err()
         );
+    }
+
+    #[tokio::test]
+    async fn dashboard_feed_disconnects_when_its_consumer_closes() {
+        use ryu_hardware::feed::DashboardFeed;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        for response_prefix in [
+            "",
+            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n",
+        ] {
+            let manager = SidecarManager::new_noop();
+            let reservation = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+            let port = reservation.local_addr().unwrap().port();
+            drop(reservation);
+            let name = "@ryu/dashboards/ryu-dashboards";
+            manager
+                .register_and_start(FakeSidecar::with_port(name, port))
+                .await
+                .unwrap();
+            let listener = tokio::net::TcpListener::bind(("127.0.0.1", port))
+                .await
+                .unwrap();
+            let (started, ready) = tokio::sync::oneshot::channel();
+            let server = tokio::spawn(async move {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut buffer = [0; 4096];
+                assert!(socket.read(&mut buffer).await.unwrap() > 0);
+                socket.write_all(response_prefix.as_bytes()).await.unwrap();
+                started.send(()).unwrap();
+                loop {
+                    match socket.read(&mut buffer).await {
+                        Ok(0) => break,
+                        Ok(_) => {}
+                        Err(error) if error.kind() == std::io::ErrorKind::ConnectionReset => break,
+                        Err(error) => panic!("unexpected socket read failure: {error}"),
+                    }
+                }
+            });
+            let client = crate::dashboards_client::DashboardsClient::new(manager.clone());
+            let receiver = client.subscribe_changes().await;
+            tokio::time::timeout(Duration::from_secs(3), ready)
+                .await
+                .unwrap()
+                .unwrap();
+            drop(receiver);
+            tokio::time::timeout(Duration::from_secs(2), server)
+                .await
+                .expect("dropping the dashboard consumer must close the HTTP read")
+                .unwrap();
+            manager.stop_and_deregister(name).await.unwrap();
+        }
     }
 
     /// A minimal in-memory [`Sidecar`] for exercising the runtime-registration
@@ -1795,6 +1872,28 @@ mod tests {
                 .all(|s| s.name != "com.acme.tool/engine"),
             "deregistered sidecar must be gone from statuses"
         );
+    }
+
+    #[tokio::test]
+    async fn transient_port_collision_retries_registration() {
+        let mgr = SidecarManager::new_noop();
+        let reservation = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = reservation.local_addr().unwrap().port();
+        let release = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            drop(reservation);
+        });
+        let sidecar = FakeSidecar::with_port("com.acme.transient/engine", port);
+
+        mgr.register_and_start(sidecar.clone())
+            .await
+            .expect("a short-lived old child must not strand the replacement");
+        release.await.unwrap();
+        assert!(sidecar.is_running());
+        assert_eq!(sidecar.start_calls.load(Ordering::SeqCst), 1);
+        mgr.stop_and_deregister("com.acme.transient/engine")
+            .await
+            .unwrap();
     }
 
     /// A register-only sidecar remains the lifecycle owner while its first start is

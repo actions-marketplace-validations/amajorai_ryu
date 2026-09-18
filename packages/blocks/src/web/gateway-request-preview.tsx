@@ -1,7 +1,7 @@
 "use client";
 
 import { Tabs, TabsList, TabsTrigger } from "@ryu/ui/components/tabs";
-import { Check, LockKeyhole, UserRoundCheck } from "lucide-react";
+import { ArrowRight, Check, LockKeyhole, UserRoundCheck } from "lucide-react";
 import { useState } from "react";
 
 const EXAMPLES = {
@@ -40,15 +40,93 @@ const EXAMPLES = {
 
 type ExampleKey = keyof typeof EXAMPLES;
 
-export function GatewayRequestPreview() {
+export function GatewayRequestPreview({
+	compact = false,
+}: {
+	compact?: boolean;
+}) {
 	const [selected, setSelected] = useState<ExampleKey>("send");
 	const example = EXAMPLES[selected];
+
+	if (compact) {
+		return (
+			<div
+				className="relative w-full overflow-hidden rounded-[1.5rem] bg-gradient-to-br from-primary/10 via-card to-muted/40 p-3 text-foreground sm:p-4"
+				data-testid="gateway-request-preview"
+			>
+				<Tabs
+					onValueChange={(value) => {
+						if (value === "read" || value === "send" || value === "delete") {
+							setSelected(value);
+						}
+					}}
+					value={selected}
+				>
+					<TabsList manageLayout={false}>
+						{Object.entries(EXAMPLES).map(([value, item]) => (
+							<TabsTrigger key={value} value={value}>
+								{item.label}
+							</TabsTrigger>
+						))}
+					</TabsList>
+				</Tabs>
+				<div className="mt-4 flex min-w-0 items-center gap-2">
+					<span className="truncate rounded-lg bg-muted/50 px-2.5 py-2 text-xs">
+						Agent
+					</span>
+					<ArrowRight
+						aria-hidden="true"
+						className="size-4 shrink-0 text-muted-foreground"
+					/>
+					<span className="truncate rounded-lg bg-primary/5 px-2.5 py-2 text-xs">
+						Gateway
+					</span>
+					<ArrowRight
+						aria-hidden="true"
+						className="size-4 shrink-0 text-muted-foreground"
+					/>
+					<span className="min-w-0 truncate rounded-lg bg-muted/50 px-2.5 py-2 text-xs">
+						{example.tool}
+					</span>
+				</div>
+				<div
+					aria-live="polite"
+					className="mt-3 flex items-center gap-3 rounded-xl bg-muted/30 px-3 py-3"
+				>
+					<example.Icon
+						aria-hidden="true"
+						className="showcase-loop size-5 shrink-0 animate-pulse text-primary"
+						strokeWidth={1.5}
+					/>
+					<div className="min-w-0">
+						<p className="font-heading font-medium text-lg tracking-tight">
+							{example.decision}
+						</p>
+						<p className="mt-0.5 text-muted-foreground text-xs">
+							{selected === "read"
+								? "Allowed by policy"
+								: selected === "send"
+									? "Approval required"
+									: "Blocked by policy"}
+						</p>
+					</div>
+				</div>
+			</div>
+		);
+	}
+
 	return (
 		<div
 			className="w-full overflow-hidden rounded-[1.5rem] bg-background"
 			data-testid="gateway-request-preview"
 		>
-			<div className="flex flex-wrap items-center justify-between gap-4 bg-muted/50 px-6 py-4">
+			<div
+				className={
+					compact
+						? "flex flex-wrap items-center justify-between gap-3 bg-muted/50 px-4 py-3"
+						: "flex flex-wrap items-center justify-between gap-4 bg-muted/50 px-6 py-4"
+				}
+			>
 				<span className="font-medium text-sm">Policy example</span>
 				<Tabs
 					onValueChange={(value) => {
@@ -58,7 +136,7 @@ export function GatewayRequestPreview() {
 					}}
 					value={selected}
 				>
-					<TabsList>
+					<TabsList manageLayout={!compact}>
 						{Object.entries(EXAMPLES).map(([value, item]) => (
 							<TabsTrigger key={value} value={value}>
 								{item.label}
@@ -67,44 +145,78 @@ export function GatewayRequestPreview() {
 					</TabsList>
 				</Tabs>
 			</div>
-			<div className="grid md:grid-cols-2">
-				<div className="space-y-8 p-6 md:p-8">
+			<div className={compact ? "grid" : "grid md:grid-cols-2"}>
+				<div className={compact ? "space-y-4 p-4" : "space-y-8 p-6 md:p-8"}>
 					<div>
 						<p className="text-muted-foreground text-xs">Task</p>
-						<p className="mt-3 font-medium text-lg leading-relaxed">
+						<p
+							className={
+								compact
+									? "mt-2 font-medium text-sm leading-relaxed"
+									: "mt-3 font-medium text-lg leading-relaxed"
+							}
+						>
 							{example.request}
 						</p>
 					</div>
-					<dl className="space-y-5 text-sm">
-						<div>
+					<dl
+						className={
+							compact
+								? "grid grid-cols-2 gap-x-4 gap-y-3 text-xs"
+								: "space-y-5 text-sm"
+						}
+					>
+						<div className="min-w-0">
 							<dt className="text-muted-foreground">Tool</dt>
-							<dd className="mt-1">{example.tool}</dd>
+							<dd className="mt-1 break-words">{example.tool}</dd>
 						</div>
-						<div>
+						<div className="min-w-0">
 							<dt className="text-muted-foreground">Access rule</dt>
-							<dd className="mt-1">{example.access}</dd>
+							<dd className="mt-1 break-words">{example.access}</dd>
 						</div>
-						<div>
+						<div className={compact ? "col-span-2 min-w-0" : "min-w-0"}>
 							<dt className="text-muted-foreground">Human review</dt>
-							<dd className="mt-1">{example.review}</dd>
+							<dd className="mt-1 break-words">{example.review}</dd>
 						</div>
 					</dl>
 				</div>
 				<div
 					aria-live="polite"
-					className="flex flex-col justify-center bg-muted/30 p-6 md:p-10"
+					className={
+						compact
+							? "flex items-center gap-3 bg-muted/30 px-4 py-3"
+							: "flex flex-col justify-center bg-muted/30 p-6 md:p-10"
+					}
 				>
 					<example.Icon
 						aria-hidden="true"
-						className="mb-6 size-8 text-primary"
+						className={
+							compact
+								? "size-5 shrink-0 text-primary"
+								: "mb-6 size-8 text-primary"
+						}
 						strokeWidth={1.5}
 					/>
-					<p className="font-heading font-medium text-2xl tracking-tight">
-						{example.decision}
-					</p>
-					<p className="mt-4 text-muted-foreground text-sm leading-relaxed">
-						{example.detail}
-					</p>
+					<div className="min-w-0">
+						<p
+							className={
+								compact
+									? "font-heading font-medium text-lg tracking-tight"
+									: "font-heading font-medium text-2xl tracking-tight"
+							}
+						>
+							{example.decision}
+						</p>
+						<p
+							className={
+								compact
+									? "mt-1 text-muted-foreground text-xs leading-relaxed"
+									: "mt-4 text-muted-foreground text-sm leading-relaxed"
+							}
+						>
+							{example.detail}
+						</p>
+					</div>
 				</div>
 			</div>
 		</div>

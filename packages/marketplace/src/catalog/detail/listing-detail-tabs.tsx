@@ -65,6 +65,7 @@ export function ListingDetailTabs({
 	overview,
 	scorecard: scorecardProp,
 	developerDoctor,
+	developerEvals,
 	showTechnical = true,
 	activeTab: activeTabProp,
 	onTabChange,
@@ -91,6 +92,8 @@ export function ListingDetailTabs({
 	scorecard?: Scorecard | null;
 	/** Optional host action for a live installed-artifact doctor. */
 	developerDoctor?: ReactNode;
+	/** Optional host action for package-level behavioral evaluations. */
+	developerEvals?: ReactNode;
 	/** Show the technical tabs (API, Versions, Dependencies, Health).
 	 *
 	 *  Defaults to TRUE so every existing caller — the web marketplace, the desktop
@@ -260,6 +263,7 @@ export function ListingDetailTabs({
 						agentScan={agentScan}
 						developerCommand={`ryu plugin doctor ${entry.id}`}
 						developerDoctor={developerDoctor}
+						developerEvals={developerEvals}
 						key={JSON.stringify([entry, detail])}
 						onOpenConversation={onOpenAuditConversation}
 						scorecard={scorecard}

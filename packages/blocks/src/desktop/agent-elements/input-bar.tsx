@@ -849,22 +849,25 @@ export const InputBar = memo(function InputBar({
 		effectiveInfoBar && (effectiveInfoBar.title || effectiveInfoBar.description)
 	);
 	const infoBarData = effectiveInfoBar ?? {};
+	const hasComposerFrameBars =
+		!seamless && (shouldShowInfoBar || goalBar || workspaceBar || ghost);
 
 	const infoBarNode = shouldShowInfoBar ? (
 		<div
 			aria-live={isDestructiveInfoBar ? undefined : "polite"}
 			className={cn(
-				"mx-3 flex h-[34px] items-center justify-between gap-3 px-3",
+				"flex h-[34px] w-full items-center justify-between gap-3 px-3",
 				"overflow-hidden transition-[max-height,opacity] duration-150 ease-out",
 				isInfoBarOpen ? "max-h-[34px] opacity-100" : "max-h-0 opacity-0",
-				infoBarPosition === "top" ? "rounded-t-2xl" : "rounded-b-2xl",
-				isDestructiveInfoBar && "bg-destructive/10"
+				infoBarPosition === "top" ? "rounded-t-2xl" : "rounded-b-2xl"
 			)}
+			data-position={infoBarPosition}
+			data-slot="composer-info-bar"
 			role={isDestructiveInfoBar ? "alert" : undefined}
 		>
 			<div
 				className={cn(
-					"min-w-0 truncate text-xs",
+					"min-w-0 flex-1 truncate text-xs",
 					isDestructiveInfoBar ? "text-status-destructive" : "text-foreground"
 				)}
 			>
@@ -922,7 +925,7 @@ export const InputBar = memo(function InputBar({
 						type="button"
 						variant="ghost"
 					>
-						<IconX className="h-3.5 w-3.5" strokeWidth={2} />
+						<IconX aria-hidden="true" className="h-3.5 w-3.5" strokeWidth={2} />
 					</Button>
 				)}
 			</div>
@@ -942,7 +945,7 @@ export const InputBar = memo(function InputBar({
 		<div
 			className={cn(
 				"flex h-[34px] min-w-0 items-center gap-0.5 px-2",
-				seamless ? "bg-transparent" : "rounded-b-2xl bg-muted/40"
+				seamless ? "bg-transparent" : "rounded-b-2xl"
 			)}
 		>
 			{workspaceBar}
@@ -1203,6 +1206,9 @@ export const InputBar = memo(function InputBar({
 		: (suggestions?.items ?? []);
 	const showComposerSuggestions =
 		composerSuggestions.length > 0 && !hasInput && !isStreaming;
+	const showPlaceholderSuggestion = Boolean(
+		showComposerSuggestions && placeholderSuggestion && suggestionIndex < 0
+	);
 	const showContextItems =
 		hasContextItems && config.attachmentPreviewStyle !== "hidden";
 	const imageDisplayMode =
@@ -1377,14 +1383,18 @@ export const InputBar = memo(function InputBar({
 	} else {
 		inputContent = (
 			<div className="relative w-full">
-				{showComposerSuggestions &&
-					placeholderSuggestion &&
-					suggestionIndex < 0 && (
-						<div className="pointer-events-none absolute inset-x-0 top-0 z-10 truncate text-[14px] text-muted-foreground/60 leading-[1.6]">
-							{placeholderSuggestion}
-							<span className="ml-2 rounded border px-1 text-[10px]">Tab</span>
-						</div>
-					)}
+				{showPlaceholderSuggestion && (
+					<div
+						aria-hidden="true"
+						className="pointer-events-none absolute inset-x-0 top-0 z-10 truncate text-[14px] text-muted-foreground/60 leading-[1.6]"
+						data-slot="composer-placeholder-suggestion"
+					>
+						{placeholderSuggestion}
+						<span className="ml-2 rounded-md border border-border/60 bg-background/50 px-1.5 py-0.5 text-[10px]">
+							Tab
+						</span>
+					</div>
+				)}
 				{showComposerSuggestions && suggestionIndex >= 0 && (
 					<div className="absolute inset-x-0 top-full z-20 mt-1 rounded-lg border bg-popover p-1 shadow-lg">
 						{composerSuggestions.map((item, index) => (
@@ -1412,8 +1422,9 @@ export const InputBar = memo(function InputBar({
 				)}
 				<textarea
 					className={cn(
-						"relative w-full resize-none border-0 bg-transparent text-transparent leading-[1.6] caret-foreground outline-none placeholder:text-muted-foreground",
+						"relative w-full resize-none border-0 bg-transparent text-[14px] text-transparent leading-[1.6] caret-foreground outline-none placeholder:text-muted-foreground",
 						"overflow-hidden",
+						showPlaceholderSuggestion && "placeholder:text-transparent",
 						disabled && "cursor-not-allowed opacity-50"
 					)}
 					disabled={disabled}
@@ -1612,7 +1623,7 @@ export const InputBar = memo(function InputBar({
 				"composer-container relative cursor-text",
 				seamless
 					? "bg-transparent"
-					: "rounded-2xl border border-border/60 bg-muted/90 shadow-sm",
+					: "rounded-2xl border border-border/60 bg-card shadow-sm",
 				expanded && !seamless && "border-border/80 shadow-md",
 				isDragOver && "ring-2 ring-primary ring-inset",
 				ghost && "ring-1 ring-violet-500/70"
@@ -1841,9 +1852,7 @@ export const InputBar = memo(function InputBar({
 						// (distinct from the input box), so the bars — which carry no bg of
 						// their own — show this color, and the sliver at the input box's
 						// rounded corners is the same color as the bars (seamless).
-						!seamless && (shouldShowInfoBar || goalBar || workspaceBar || ghost)
-							? "rounded-2xl bg-card"
-							: null
+						hasComposerFrameBars ? "rounded-2xl bg-muted/40" : null
 					)}
 				>
 					{goalBar && <GoalBar {...goalBar} />}

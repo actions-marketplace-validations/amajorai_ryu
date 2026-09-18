@@ -47,6 +47,51 @@ function indentGeneratedScript(value: string, prefix: string): string {
 		.join("\n");
 }
 
+/** Inline state projection shared by the two sandbox document builders. */
+const COMPANION_THEME_STATE_SCRIPT = `
+function applyThemeState(tokens) {
+  if (!tokens || typeof tokens !== "object") return;
+  var root = document.documentElement;
+  var mode = tokens["--ryu-theme-mode"];
+  if (mode === "dark" || mode === "light") {
+    root.classList.toggle("dark", mode === "dark");
+    root.classList.toggle("light", mode === "light");
+    root.setAttribute("data-ryu-theme", mode);
+  }
+  var colorScheme = tokens["--ryu-color-scheme"];
+  if (colorScheme === "dark" || colorScheme === "light") {
+    root.style.setProperty("color-scheme", colorScheme);
+  }
+  function setStateAttribute(token, attribute, activeValue) {
+    var value = tokens[token];
+    if (typeof value !== "string") return;
+    if (value === activeValue) root.setAttribute(attribute, activeValue);
+    else root.removeAttribute(attribute);
+  }
+  setStateAttribute("--ryu-pointer-cursor", "data-pointer-cursor", "true");
+  setStateAttribute("--ryu-chrome-shadows", "data-chrome-shadows", "off");
+  setStateAttribute("--ryu-inverted-backgrounds", "data-inverted-backgrounds", "on");
+  setStateAttribute("--ryu-dialog-overlay-mode", "data-dialog-overlay-blur", "off");
+  setStateAttribute("--ryu-popup-overlay-mode", "data-popup-overlay-blur", "on");
+  setStateAttribute("--ryu-animations", "data-ryu-animations", "off");
+  setStateAttribute("--ryu-bg-active", "data-ryu-bg-active", "on");
+  setStateAttribute("--ryu-page-bg-active", "data-ryu-page-bg-active", "on");
+  setStateAttribute("--ryu-high-contrast", "data-high-contrast", "on");
+}`;
+
+// Self-contained app bundles do not necessarily import the shared Companion
+// stylesheet. Keep scale host-owned at the document boundary so those bundles
+// still receive the user's zoom preference. First-party bundles may declare the
+// same rule themselves; the value is identical and this declaration wins over
+// an app-local fixed zoom.
+/** CSS that applies the host's scale exactly once at the Companion boundary. */
+export function buildCompanionThemeLayoutCss(scaleInParent: boolean): string {
+	const zoom = scaleInParent
+		? "html body{zoom:1 !important;}"
+		: "html body{zoom:var(--ryu-ui-scale, 1) !important;}";
+	return `${zoom}html body{font-family:var(--font-sans, system-ui, sans-serif) !important;}html body :where(h1,h2,h3,h4,h5,h6){font-family:var(--font-heading, var(--font-sans, system-ui, sans-serif)) !important;}html body :where(code,pre,kbd,samp){font-family:var(--font-code, var(--font-mono, monospace)) !important;}`;
+}
+
 /** Build a third-party plugin's sandboxed document.
  *
  *  @param nonce        Host-generated per-mount nonce (e.g. `crypto.randomUUID()`),
@@ -60,7 +105,10 @@ function indentGeneratedScript(value: string, prefix: string): string {
  *                      bootstrap (not secret) so the plugin's route claim can be
  *                      scoped to its own `/plugin/<id>` surface. The HOST still
  *                      re-validates every claim against this same id, so a plugin
- *                      that forges a different path is rejected regardless. */
+ *                      that forges a different path is rejected regardless.
+ *  @param themeTokens  Optional complete host appearance snapshot for first paint.
+ *  @param scaleInParent  Whether the containing Ryu root already applies the UI
+ *                        scale; prevents nested iframe zoom from doubling it. */
 export function thirdPartyPluginSrcdoc(
 	nonce: string,
 	uiCodeBase64: string,
@@ -69,7 +117,11 @@ export function thirdPartyPluginSrcdoc(
 	// opened as a Space document). Baked in as `window.ryu.context` so the app knows
 	// which document to load/save via `spaces.getDoc`/`spaces.updateDoc`. Host-
 	// controlled, JSON-serialized (never plugin input).
-	mountContext?: unknown
+	mountContext?: unknown,
+	/** Optional resolved host appearance for a no-flash first paint. */
+	themeTokens?: Record<string, string>,
+	/** True when the containing Ryu root already applies `--ryu-ui-scale`. */
+	scaleInParent = false
 ): string {
 	// JSON.stringify does NOT escape `</script>` or the JS line separators U+2028/9,
 	// so a value baked into the inline <script> could break out of the tag or the
@@ -87,6 +139,12 @@ export function thirdPartyPluginSrcdoc(
 	const codeLiteral = scriptSafe(uiCodeBase64);
 	const pluginIdLiteral = scriptSafe(pluginId);
 	const mountContextLiteral = scriptSafe(mountContext);
+	const themeTokensLiteral = scriptSafe(themeTokens);
+	const themeAliases = JSON.stringify(COMPANION_THEME_ALIASES);
+	const themeStyle = buildThemeTokenStyle(themeTokens);
+	const themeLayoutStyle = themeTokens
+		? `<style>${buildCompanionThemeLayoutCss(scaleInParent)}</style>`
+		: "";
 	return `<!doctype html>
 <html lang="en">
 <head>
@@ -119,6 +177,7 @@ export function thirdPartyPluginSrcdoc(
     background: #27272a; color: #f87171; font-size: 12px; white-space: pre-wrap;
   }
 </style>
+${themeTokens ? `${themeStyle}\n${themeLayoutStyle}` : ""}
 </head>
 <body>
   <div id="ryu-plugin-error"></div>
@@ -129,10 +188,40 @@ export function thirdPartyPluginSrcdoc(
     var UI_CODE_B64 = ${codeLiteral};
     var PLUGIN_ID = ${pluginIdLiteral};
     var MOUNT_CONTEXT = ${mountContextLiteral};
+    var INITIAL_THEME_TOKENS = ${themeTokensLiteral};
+    var THEME_ALIASES = ${themeAliases};
     var port = null;
     var nextId = 1;
     var pending = {};
     var errEl = document.getElementById("ryu-plugin-error");
+
+${indentGeneratedScript(COMPANION_THEME_STATE_SCRIPT, "    ")}
+
+    function applyThemeTokens(tokens) {
+      if (!tokens || typeof tokens !== "object") return;
+      var root = document.documentElement;
+      Object.keys(tokens).forEach(function (name) {
+        var value = tokens[name];
+        if (/^--[a-z0-9-]+$/.test(name) && typeof value === "string" && value.length > 0 && !/[{}<>;]/.test(value)) {
+          root.style.setProperty(name, value);
+        }
+      });
+      Object.keys(THEME_ALIASES).forEach(function (alias) {
+        var source = THEME_ALIASES[alias];
+        var value = tokens[source];
+        if (typeof value === "string" && value.length > 0 && !/[{}<>;]/.test(value)) {
+          root.style.setProperty(alias, value);
+        }
+      });
+      applyThemeState(tokens);
+    }
+
+    applyThemeTokens(INITIAL_THEME_TOKENS);
+    window.addEventListener("message", function (ev) {
+      var msg = ev.data;
+      if (ev.source !== window.parent || !msg || msg.kind !== "ryu-plugin-theme" || msg.nonce !== NONCE) return;
+      applyThemeTokens(msg.tokens);
+    });
 
 ${HORIZONTAL_WHEEL_SCROLL_SCRIPT}
 
@@ -447,7 +536,6 @@ ${indentGeneratedScript(I18N_BRIDGE, "        ")},
         // logos are fetched directly by the app under its per-app CSP allowlist.
         assets: {
           searchGifs: function (a) { return call("assets.searchGifs", [a || {}]); },
-        searchImages: function (a) { return call("assets.searchImages", [a || {}]); },
           searchImages: function (a) { return call("assets.searchImages", [a || {}]); }
         },
         // Fine-tune runs (needs grant finetune:runs). The @ryu/finetune app drives
@@ -488,6 +576,9 @@ ${indentGeneratedScript(I18N_BRIDGE, "        ")},
         // @ryu/workflows companion drives Core's DAG workflow engine; the host
         // calls the existing /workflows* + /api/workflows/catalog* API directly.
         workflows: {
+          connectBindings: function (a) { return call("workflows.connectBindings", [a || {}]); },
+          bindConnectTrigger: function (a) { return call("workflows.bindConnectTrigger", [a || {}]); },
+          removeConnectBinding: function (a) { return call("workflows.removeConnectBinding", [a || {}]); },
           list: function () { return call("workflows.list", []); },
           get: function (a) { return call("workflows.get", [a || {}]); },
           save: function (a) { return call("workflows.save", [a || {}]); },
@@ -650,11 +741,15 @@ ${indentGeneratedScript(I18N_BRIDGE, "        ")},
         // unmount is automatic via the host's activeStreams, dispose is for early release).
         shell: {
           openTab: function (a) { return call("shell.openTab", [a || {}]); },
-          subscribeTheme: function (opts) {
-            opts = opts || {};
-            var h = callStream("shell.themeSubscribe", [{}], function (d) {
-              if (opts.onChange) { try { opts.onChange(JSON.parse(d)); } catch (e) {} }
-            });
+	          subscribeTheme: function (opts) {
+	            opts = opts || {};
+	            var h = callStream("shell.themeSubscribe", [{}], function (d) {
+	              try {
+	                var tokens = JSON.parse(d);
+	                applyThemeTokens(tokens);
+	                if (opts.onChange) opts.onChange(tokens);
+	              } catch (e) {}
+	            });
             h.promise.catch(function () {});
             return { dispose: h.cancel };
           },
@@ -893,7 +988,8 @@ function htmlCompanionHeadFragment(
 	nonceLiteral: string,
 	pluginIdLiteral: string,
 	mountContextLiteral: string,
-	cspString: string
+	cspString: string,
+	initialThemeTokensLiteral: string
 ): string {
 	const themeAliases = JSON.stringify(COMPANION_THEME_ALIASES);
 	return `<meta http-equiv="Content-Security-Policy" content="${cspString}" />
@@ -902,6 +998,7 @@ function htmlCompanionHeadFragment(
     var NONCE = ${nonceLiteral};
     var PLUGIN_ID = ${pluginIdLiteral};
     var MOUNT_CONTEXT = ${mountContextLiteral};
+    var INITIAL_THEME_TOKENS = ${initialThemeTokensLiteral};
     var THEME_ALIASES = ${themeAliases};
     var port = null;
     var nextId = 1;
@@ -909,6 +1006,8 @@ function htmlCompanionHeadFragment(
     // Envelopes queued before the port arrived; flushed on connect. This is the
     // difference from Path A: the app runs before the port is transferred.
     var outbox = [];
+
+${indentGeneratedScript(COMPANION_THEME_STATE_SCRIPT, "    ")}
 
     function call(method, args) {
       return new Promise(function (resolve, reject) {
@@ -952,7 +1051,10 @@ function htmlCompanionHeadFragment(
           root.style.setProperty(alias, value);
         }
       });
+      applyThemeState(tokens);
     }
+
+    applyThemeTokens(INITIAL_THEME_TOKENS);
 
     function onPortMessage(ev) {
       var msg = ev.data;
@@ -1087,7 +1189,8 @@ ${indentGeneratedScript(I18N_BRIDGE, "      ")},
       // Icons/logos are fetched DIRECTLY by the app under its per-app CSP allowlist
       // (csp.connectDomains), so they are NOT bridge methods.
       assets: {
-        searchGifs: function (a) { return call("assets.searchGifs", [a || {}]); }
+        searchGifs: function (a) { return call("assets.searchGifs", [a || {}]); },
+        searchImages: function (a) { return call("assets.searchImages", [a || {}]); }
       },
       finetune: {
         capability: function () { return call("finetune.capability", []); },
@@ -1122,6 +1225,9 @@ ${indentGeneratedScript(I18N_BRIDGE, "      ")},
       // Workflows (needs grants workflows:crud/runstate/catalogs). The
       // @ryu/workflows companion drives Core's DAG workflow engine through these RPCs.
       workflows: {
+        connectBindings: function (a) { return call("workflows.connectBindings", [a || {}]); },
+        bindConnectTrigger: function (a) { return call("workflows.bindConnectTrigger", [a || {}]); },
+        removeConnectBinding: function (a) { return call("workflows.removeConnectBinding", [a || {}]); },
         list: function () { return call("workflows.list", []); },
         get: function (a) { return call("workflows.get", [a || {}]); },
         save: function (a) { return call("workflows.save", [a || {}]); },
@@ -1189,6 +1295,13 @@ ${indentGeneratedScript(I18N_BRIDGE, "      ")},
       // tab for an item's session id).
       activity: {
         list: function (a) { return call("activity.list", [a || {}]); },
+        audit: function (a) { return call("activity.audit", [a || {}]); },
+        prune: function () { return call("activity.prune", []); },
+        score: function (a) { return call("activity.score", [a || {}]); },
+        trace: function (a) { return call("activity.trace", [a || {}]); },
+        redteam: function (a) { return call("activity.redteam", [a || {}]); },
+        eval: function (a) { return call("activity.eval", [a || {}]); },
+        importTrace: function (a) { return call("activity.importTrace", [a || {}]); },
         openSession: function (a) { return call("activity.openSession", [a || {}]); }
       },
       // Timeline (needs grant timeline:read). The @ryu/timeline companion renders
@@ -1590,8 +1703,8 @@ const THEME_TOKEN_VALUE_UNSAFE_RE = /[{}<>;]/;
  *
  * The selector is `html:root` (specificity 0,1,1), not `:root` (0,1,0), so it wins
  * over the companion's own `:root{…}` token block REGARDLESS of source order — the
- * host injects the already-resolved values for the active theme, so the companion
- * needs no `.dark` class of its own.
+ * host injects the already-resolved values for the active theme. The bootstrap also
+ * applies the reserved mode/state values before the app's own styles run.
  *
  * Sanitized hard: only `--kebab` names, only values free of CSS-structural chars,
  * so a (host-controlled, already-trusted) token map can never inject extra
@@ -1645,6 +1758,7 @@ export function buildThemeTokenStyle(
  *                    Widens `connect-src` (fetch targets) + `img-src`/`media-src`
  *                    (remote assets) for the declared hosts; the egress lock is the
  *                    default when omitted.
+ * @param scaleInParent Whether the containing Ryu root already applies the UI scale.
  */
 export function htmlCompanionSrcdoc(
 	nonce: string,
@@ -1652,7 +1766,9 @@ export function htmlCompanionSrcdoc(
 	pluginId: string,
 	mountContext?: unknown,
 	csp?: CompanionCsp,
-	themeTokens?: Record<string, string>
+	themeTokens?: Record<string, string>,
+	/** True when the containing Ryu root already applies `--ryu-ui-scale`. */
+	scaleInParent = false
 ): string {
 	const scriptSafe = (value: unknown): string =>
 		JSON.stringify(value ?? null)
@@ -1665,14 +1781,20 @@ export function htmlCompanionSrcdoc(
 		scriptSafe(nonce),
 		scriptSafe(pluginId),
 		scriptSafe(mountContext),
-		buildHtmlCompanionCsp(csp)
+		buildHtmlCompanionCsp(csp),
+		scriptSafe(themeTokens)
 	);
 	// The theme-token bridge goes AFTER the bridge script but still inside <head>.
 	// It uses an `html:root` selector (higher specificity than the companion's own
 	// `:root{…}`), so its resolved host values win regardless of where the app's own
 	// inlined <style> sits relative to it.
 	const themeStyle = buildThemeTokenStyle(themeTokens);
-	const head = themeStyle ? `${fragment}\n${themeStyle}` : fragment;
+	const themeLayoutStyle = themeTokens
+		? `<style>${buildCompanionThemeLayoutCss(scaleInParent)}</style>`
+		: "";
+	const head = themeTokens
+		? `${fragment}\n${themeStyle}\n${themeLayoutStyle}`
+		: fragment;
 	// A trusted prefix is stronger than searching for the app's <head>: malformed
 	// or hostile HTML may contain an executable token before that tag. Starting the
 	// parser with the CSP and bridge guarantees both exist before ANY app token.

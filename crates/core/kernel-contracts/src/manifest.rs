@@ -1425,6 +1425,8 @@ impl PluginManifest {
         }
         validate_permission_levels(&self.permission_levels)
             .map_err(|e| format!("plugin '{}': {e}", self.id))?;
+        validate_forwarded_cookie_names(&self.id, &self.sidecars)
+            .map_err(|e| format!("plugin '{}': {e}", self.id))?;
         validate_route_permissions(&self.sidecars, &self.permission_levels)
             .map_err(|e| format!("plugin '{}': {e}", self.id))?;
         Ok(())
@@ -6508,6 +6510,87 @@ pub fn validate_route_permissions(
     Ok(())
 }
 
+/// Return the cookie namespace owned by a plugin id.
+///
+/// Cookie names cannot contain an app id's `@` or `/`, so the scoped marker is
+/// removed and the separator becomes `_`. The resulting prefix is deliberately
+/// stable and human-readable (`@ryu/rooms` → `ryu_rooms_`), while still keeping
+/// Core-owned cookies such as Better Auth outside every app's namespace.
+#[must_use]
+pub fn cookie_namespace_prefix(plugin_id: &str) -> String {
+    let id = plugin_id.strip_prefix('@').unwrap_or(plugin_id);
+    let mut prefix = String::new();
+    for character in id.chars() {
+        if character.is_ascii_alphanumeric() || matches!(character, '.' | '-' | '_') {
+            prefix.push(character.to_ascii_lowercase());
+        } else {
+            prefix.push('_');
+        }
+    }
+    prefix.push('_');
+    prefix
+}
+
+/// Validate the app-owned cookie forwarding declarations on every sidecar.
+///
+/// Core strips browser cookies from proxy hops by default. A manifest may opt in
+/// only to cookie names in its own derived namespace, and only with RFC6265's
+/// token-safe characters. This keeps an app's HttpOnly session usable without
+/// allowing it to request Core's authentication cookie or another app's name.
+pub fn validate_forwarded_cookie_names(
+    plugin_id: &str,
+    sidecars: &[crate::schema::SidecarSpec],
+) -> Result<(), String> {
+    let prefix = cookie_namespace_prefix(plugin_id);
+    for sidecar in sidecars {
+        let Some(http) = &sidecar.http else { continue };
+        let mut seen = BTreeSet::new();
+        for name in &http.forward_cookie_names {
+            if name.is_empty()
+                || name.len() > 256
+                || !name.chars().all(|character| {
+                    character.is_ascii_alphanumeric()
+                        || matches!(
+                            character,
+                            '!' | '#'
+                                | '$'
+                                | '%'
+                                | '&'
+                                | '\''
+                                | '*'
+                                | '+'
+                                | '-'
+                                | '.'
+                                | '^'
+                                | '_'
+                                | '`'
+                                | '|'
+                                | '~'
+                        )
+                })
+            {
+                return Err(format!(
+                    "sidecar '{}': http forwarded cookie name '{name}' is not a valid cookie name",
+                    sidecar.name
+                ));
+            }
+            if !name.starts_with(&prefix) {
+                return Err(format!(
+                    "sidecar '{}': http forwarded cookie '{name}' must start with the app-owned namespace '{prefix}'",
+                    sidecar.name
+                ));
+            }
+            if !seen.insert(name) {
+                return Err(format!(
+                    "sidecar '{}': http forwarded cookie '{name}' is declared more than once",
+                    sidecar.name
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -7024,6 +7107,7 @@ mod tests {
                 priority: 0,
                 code: "return {kind:'none'}".to_owned(),
                 code_file: None,
+                mode: None,
                 run_when: None,
             }],
             ..Default::default()
@@ -9334,6 +9418,42 @@ mod tests {
             "[]",
         ))
         .is_err());
+    }
+
+    #[test]
+    fn forwarded_cookie_names_are_scoped_to_the_manifest_id() {
+        assert_eq!(cookie_namespace_prefix("@ryu/rooms"), "ryu_rooms_");
+        assert_eq!(
+            cookie_namespace_prefix("com.example.app"),
+            "com.example.app_"
+        );
+
+        let valid = r#"{
+            "id": "@ryu/rooms",
+            "name": "Rooms",
+            "version": "1.0.0",
+            "runnables": [],
+            "sidecars": [{
+                "name": "api",
+                "process": { "kind": "local", "command": "rooms-api" },
+                "port": 9111,
+                "http": {
+                    "forward_cookie_names": ["ryu_rooms_session"],
+                    "routes": [{ "path": "/guest", "auth": "public" }]
+                }
+            }]
+        }"#;
+        assert!(PluginManifest::parse_and_validate(valid).is_ok());
+
+        let wrong_namespace = valid.replace("ryu_rooms_session", "better-auth.session");
+        let err = PluginManifest::parse_and_validate(&wrong_namespace)
+            .expect_err("Core auth cookies must never be app-forwardable");
+        assert!(err.contains("app-owned namespace"), "{err}");
+
+        let malformed = valid.replace("ryu_rooms_session", "ryu_rooms;session");
+        let err = PluginManifest::parse_and_validate(&malformed)
+            .expect_err("cookie separators must be rejected");
+        assert!(err.contains("valid cookie name"), "{err}");
     }
 
     /// A typo here does not fail loudly at runtime — it silently degrades a rule the

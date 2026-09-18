@@ -4,8 +4,14 @@ import { htmlCompanionSrcdoc } from "@ryu/app-host/third-party-plugin";
 import { Button } from "@ryu/ui/components/button.tsx";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
+import { pluginHostInvokeStream } from "../../src/lib/api/plugins.ts";
 import "../../src/index.css";
-const granted = capabilitiesFromGrants(["warmup:crud", "app:http"]);
+const hostStreamProof = new URLSearchParams(location.search).has("hostStream");
+const granted = capabilitiesFromGrants([
+	"warmup:crud",
+	"app:http",
+	...(hostStreamProof ? ["hook:run-agent"] : []),
+]);
 function App() {
 	const [html, setHtml] = useState("");
 	const [mounted, setMounted] = useState(true);
@@ -37,7 +43,10 @@ function App() {
 		const pendingRead = new URLSearchParams(location.search).has("pendingRead")
 			? `window.ryu.app.request({path:"/status"}).catch(()=>{});`
 			: "";
-		const readyScript = `<script>const observer=new MutationObserver(()=>{if(!document.getElementById("warmup-prompt"))return;observer.disconnect();${pendingRead}requestAnimationFrame(()=>requestAnimationFrame(()=>parent.postMessage({kind:"proof-mounted",version:${version},readyAt:performance.timeOrigin+performance.now()},"*")))});observer.observe(document,{childList:true,subtree:true});</script>`;
+		const streamScript = hostStreamProof
+			? `const status=document.createElement("p");status.id="host-stream-result";status.style.cssText="padding:16px 56px 0;font-weight:600";document.body.prepend(status);window.ryu.agent.runStream({task:"Fixture only"},{onChunk:(text)=>{status.textContent+=text;}}).then(()=>{status.textContent="Stream complete: "+status.textContent;}).catch((error)=>{status.textContent=String(error);});`
+			: "";
+		const readyScript = `<script>const observer=new MutationObserver(()=>{if(!document.getElementById("warmup-prompt"))return;observer.disconnect();${pendingRead}${streamScript}requestAnimationFrame(()=>requestAnimationFrame(()=>parent.postMessage({kind:"proof-mounted",version:${version},readyAt:performance.timeOrigin+performance.now()},"*")))});observer.observe(document,{childList:true,subtree:true});</script>`;
 		const document = htmlCompanionSrcdoc(
 			"stable-test-nonce",
 			html.replace(
@@ -56,6 +65,13 @@ function App() {
 	}, [html, version]);
 
 	const services: HostServices = {
+		runAgentStream: (input, onChunk, signal) =>
+			pluginHostInvokeStream(
+				{ url: location.origin, token: null },
+				"@ryu/warmup",
+				input,
+				{ onChunk, signal }
+			),
 		appRequest: async (_input, signal) => {
 			const response = await fetch("/proof-pending-read", { signal });
 			return await response.json();

@@ -33,6 +33,7 @@
 // first paint rather than one effect later.
 
 import { useSyncExternalStore } from "react";
+import { THEME_APPEARANCE_CHANGE_EVENT } from "../theme/prefs.ts";
 
 /** Historical key — see the file header before renaming it. */
 export const DIALOG_OVERLAY_BLUR_STORAGE_KEY = "ryu_dialog_overlay_blur";
@@ -116,6 +117,9 @@ export function setDialogOverlayBlur(enabled: boolean): void {
 	applyOverlayVars(enabled);
 	for (const cb of listeners) {
 		cb();
+	}
+	if (typeof window !== "undefined") {
+		window.dispatchEvent(new Event(THEME_APPEARANCE_CHANGE_EVENT));
 	}
 }
 

@@ -3,6 +3,16 @@ import { afterAll, beforeEach, describe, expect, it, mock } from "bun:test";
 let externalCustomer: { id: string; externalId: string } | null = null;
 let externalFailure: unknown = null;
 let knownContract: { polarCustomerId: string } | null = null;
+const createdCustomer = {
+	id: "created-org",
+	externalId: "ryu:organization:B",
+	metadata: { scope: "org", orgId: "B" },
+};
+const createCustomer = mock(async (input: { externalId?: string | null }) =>
+	input.externalId?.startsWith("ryu:organization:")
+		? createdCustomer
+		: { id: "created-personal", externalId: input.externalId, metadata: {} }
+);
 let personalCustomers: {
 	id: string;
 	externalId: string | null;
@@ -26,7 +36,11 @@ const emailLookup = mock(() =>
 );
 mock.module("./payments.ts", () => ({
 	polarClient: {
-		customers: { getExternal: externalLookup, list: emailLookup },
+		customers: {
+			create: createCustomer,
+			getExternal: externalLookup,
+			list: emailLookup,
+		},
 	},
 }));
 mock.module("@ryu/db/models/organization-seat-entitlement.model", () => ({
@@ -39,8 +53,11 @@ mock.module("@ryu/db/models/polar-billing-projection.model", () => ({
 		findOne: () => ({ select: () => ({ lean: async () => null }) }),
 	},
 }));
-const { resolveOrganizationPolarCustomerId, resolvePersonalPolarCustomerId } =
-	await import("./polar-customer-identity.ts");
+const {
+	ensurePersonalPolarCustomer,
+	resolveOrganizationPolarCustomerId,
+	resolvePersonalPolarCustomerId,
+} = await import("./polar-customer-identity.ts");
 
 beforeEach(() => {
 	externalCustomer = null;
@@ -49,6 +66,7 @@ beforeEach(() => {
 	personalCustomers = [];
 	externalLookup.mockClear();
 	emailLookup.mockClear();
+	createCustomer.mockClear();
 });
 afterAll(() => mock.restore());
 
@@ -79,6 +97,56 @@ describe("Polar customer ownership", () => {
 			"reconciliation"
 		);
 		expect(emailLookup).not.toHaveBeenCalled();
+	});
+	it("creates a team customer when the organization identity is new", async () => {
+		const { ensureOrganizationPolarCustomer } = await import(
+			"./polar-customer-identity.ts"
+		);
+		expect(
+			await ensureOrganizationPolarCustomer({
+				email: "owner@example.com",
+				organizationId: "B",
+				ownerUserId: "user-B",
+			})
+		).toBe("created-org");
+		expect(createCustomer).toHaveBeenCalledWith(
+			expect.objectContaining({
+				email: "owner@example.com",
+				externalId: "ryu:organization:B",
+				type: "team",
+			})
+		);
+	});
+	it("turns a provider email collision into an explicit reconciliation error", async () => {
+		createCustomer.mockRejectedValueOnce(
+			Object.assign(new Error("email already exists"), { statusCode: 422 })
+		);
+		const { ensureOrganizationPolarCustomer } = await import(
+			"./polar-customer-identity.ts"
+		);
+		await expect(
+			ensureOrganizationPolarCustomer({
+				email: "owner@example.com",
+				organizationId: "B",
+			})
+		).rejects.toMatchObject({
+			code: "polar_customer_identity_reconciliation_required",
+		});
+	});
+	it("creates an individual customer when a personal checkout is new", async () => {
+		expect(
+			await ensurePersonalPolarCustomer({
+				email: "owner@example.com",
+				userId: "user-B",
+			})
+		).toBe("created-personal");
+		expect(createCustomer).toHaveBeenCalledWith(
+			expect.objectContaining({
+				email: "owner@example.com",
+				externalId: "user-B",
+				type: "individual",
+			})
+		);
 	});
 	it("propagates provider outages without an email fallback", async () => {
 		externalFailure = new Error("provider unavailable");

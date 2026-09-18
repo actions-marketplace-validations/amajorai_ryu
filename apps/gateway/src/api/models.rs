@@ -23,13 +23,15 @@ static MODELS_CACHE: OnceLock<Mutex<Option<(Instant, Vec<Value>)>>> = OnceLock::
 
 /// `GET /v1/models` — discovery-first with static fallback.
 ///
-/// Concurrently probes every configured OpenAI-compatible upstream's
+/// Concurrently probes every configured public OpenAI-compatible upstream's
 /// `GET {base}/models`, merges the discovered ids with the static
 /// [`builtin_model_list`] (discovered entries win on id collisions), and caches
 /// the result for [`CACHE_TTL`]. Any provider whose discovery errors, times out,
 /// or has no discovery endpoint simply contributes nothing, so its static
-/// entries remain; if *all* discovery fails the response is the builtin list
-/// unchanged. Never returns an error to the caller.
+/// entries remain only when that provider is configured; if *all* discovery
+/// fails the response is the configured-provider subset of the builtin list.
+/// The internal `classify` tier is never published. Never returns an error to the
+/// caller.
 pub async fn list_models(State(state): State<SharedState>) -> Json<Value> {
     let models = cached_or_discover(&state).await;
     Json(json!({
@@ -63,19 +65,29 @@ async fn discover_and_merge(state: &SharedState) -> Vec<Value> {
     let ids = state.providers.available_providers();
     let probes = ids
         .iter()
+        .filter(|id| is_public_discovery_provider(id))
         .filter_map(|id| state.providers.get(id))
         .map(|provider| provider.discover_models());
     let results = futures_util::future::join_all(probes).await;
     let discovered: Vec<Vec<Value>> = results.into_iter().flatten().collect();
-    merge_models(discovered, builtin_model_list())
+    merge_models(discovered, builtin_model_list(), &ids)
+}
+
+fn is_public_discovery_provider(id: &str) -> bool {
+    id != "classify"
 }
 
 /// Merge per-provider discovered model lists with the static fallback, deduped
-/// by `id`. Discovery-first: discovered entries win on id collisions, and the
-/// builtin list only fills ids discovery did not surface. When `discovered` is
-/// empty (all discovery failed / no discovery endpoints) the result is `builtin`
-/// unchanged.
-fn merge_models(discovered: Vec<Vec<Value>>, builtin: Vec<Value>) -> Vec<Value> {
+/// by `id` (discovery-first). Discovery-first: discovered entries win on id
+/// collisions, and the builtin list only fills ids discovery did not surface for
+/// providers that are actually registered. When `discovered` is empty (all
+/// discovery failed / no discovery endpoints) the result is the configured-
+/// provider subset of `builtin`.
+fn merge_models(
+    discovered: Vec<Vec<Value>>,
+    builtin: Vec<Value>,
+    available_providers: &[String],
+) -> Vec<Value> {
     let mut merged: Vec<Value> = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
 
@@ -91,7 +103,13 @@ fn merge_models(discovered: Vec<Vec<Value>>, builtin: Vec<Value>) -> Vec<Value> 
 
     for model in builtin {
         if let Some(id) = model.get("id").and_then(Value::as_str) {
-            if seen.insert(id.to_string()) {
+            let provider = model.get("owned_by").and_then(Value::as_str);
+            if provider.is_some_and(|provider| {
+                available_providers
+                    .iter()
+                    .any(|available| available == provider)
+            }) && seen.insert(id.to_string())
+            {
                 merged.push(model);
             }
         }
@@ -138,8 +156,33 @@ mod tests {
     #[test]
     fn all_discovery_failed_returns_builtin_unchanged() {
         let builtin = builtin_model_list();
-        let merged = merge_models(Vec::new(), builtin.clone());
+        let available = ["openai", "anthropic", "local", "openrouter", "core"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        let merged = merge_models(Vec::new(), builtin.clone(), &available);
         assert_eq!(merged, builtin);
+    }
+
+    #[test]
+    fn static_models_only_include_registered_providers() {
+        let available = vec!["local".to_owned()];
+        let merged = merge_models(Vec::new(), builtin_model_list(), &available);
+        let ids = ids(&merged);
+        assert!(ids.iter().all(|id| {
+            matches!(
+                id.as_str(),
+                "llama3.2:latest" | "mistral:latest" | "phi4:latest" | "deepseek-r1:latest"
+            )
+        }));
+        assert_eq!(ids.len(), 4);
+    }
+
+    #[test]
+    fn classify_is_not_published_as_a_public_model_provider() {
+        assert!(!is_public_discovery_provider("classify"));
+        assert!(is_public_discovery_provider("local"));
+        assert!(is_public_discovery_provider("openrouter"));
     }
 
     #[test]
@@ -155,7 +198,11 @@ mod tests {
             json!({ "id": "gpt-4o", "object": "model", "owned_by": "openai" }),
             json!({ "id": "static-only", "object": "model", "owned_by": "openai" }),
         ];
-        let merged = merge_models(discovered, builtin);
+        let available = ["openai", "upstream"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        let merged = merge_models(discovered, builtin, &available);
         let merged_ids = ids(&merged);
 
         // Live-only ids present, static-only id retained, no duplicate gpt-4o.

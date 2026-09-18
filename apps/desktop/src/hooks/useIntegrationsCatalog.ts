@@ -57,18 +57,26 @@ export function useIntegrationsCatalog(
 	initialQuery = ""
 ): UseIntegrationsCatalogResult {
 	const activeNode = useActiveNode();
-	const target: ApiTarget = {
-		url: activeNode.url,
-		token: activeNode.token ?? null,
-		userJwt: activeNode.userJwt ?? null,
-	};
+	const target = useMemo<ApiTarget>(
+		() => ({
+			url: activeNode.url,
+			token: activeNode.token ?? null,
+			userJwt: activeNode.userJwt ?? null,
+		}),
+		[activeNode.url, activeNode.token, activeNode.userJwt]
+	);
 	const [query, setQuery] = useState(initialQuery);
 	const debouncedQuery = useDebouncedValue(query, SEARCH_DEBOUNCE_MS);
 
-	const listQuery = useInfiniteQuery({
-		...integrationsListQuery(target, { query: debouncedQuery }),
-		placeholderData: keepPreviousData,
-	});
+	const listQuery = useInfiniteQuery(
+		useMemo(
+			() => ({
+				...integrationsListQuery(target, { query: debouncedQuery }),
+				placeholderData: keepPreviousData,
+			}),
+			[target, debouncedQuery]
+		)
+	);
 
 	const integrations = useMemo(
 		() => listQuery.data?.pages.flatMap((p) => p.integrations) ?? [],

@@ -16,6 +16,7 @@
 import { describe, expect, it } from "bun:test";
 import {
 	asActivityListArg,
+	asActivityScoreArg,
 	asActivitySessionArg,
 	asApprovalDecideArg,
 	asAssetQueryArg,
@@ -428,6 +429,18 @@ describe("optional-arg validators always return a well-formed object", () => {
 		expect(asActivityListArg("x")).toEqual({});
 		expect(asActivityListArg({ limit: Number.NaN })).toEqual({}); // non-finite dropped
 		expect(asActivityListArg({ limit: "5" })).toEqual({});
+	});
+
+	it("asActivityScoreArg requires and bounds a completed response", () => {
+		expect(asActivityScoreArg({ response: "done", agent_id: " agent-1 " })).toEqual({
+			agent_id: "agent-1",
+			response: "done",
+		});
+		expect(asActivityScoreArg({ response: "done", threshold: 1.2 })).toEqual({
+			response: "done",
+		});
+		expect(asActivityScoreArg({})).toBeNull();
+		expect(asActivityScoreArg({ response: "x".repeat(1_000_001) })).toBeNull();
 	});
 
 	it("asMeetingStartArg picks only valid string fields, dropping the rest", () => {

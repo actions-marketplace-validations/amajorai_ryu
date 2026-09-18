@@ -5,22 +5,17 @@ function readComponent(fileName: string) {
 	return readFileSync(new URL(`./${fileName}`, import.meta.url), "utf8");
 }
 
-describe("shared corner shape contract", () => {
-	test("registers the plugin in both shared Tailwind entries", () => {
+describe("shared corner radius contract", () => {
+	test("does not force a squircle treatment in the core UI stylesheet", () => {
 		const globals = readFileSync(
 			new URL("../styles/globals.css", import.meta.url),
 			"utf8"
 		);
-		const companionTheme = readFileSync(
-			new URL("../styles/companion-theme.css", import.meta.url),
-			"utf8"
-		);
 
-		expect(globals).toContain('@plugin "@toolwind/corner-shape";');
-		expect(companionTheme).toContain('@plugin "@toolwind/corner-shape";');
+		expect(globals).not.toContain('@plugin "@toolwind/corner-shape";');
 	});
 
-	test("keeps a rounded fallback on rectangular shared primitives", () => {
+	test("uses shared rounded utilities without a forced corner shape", () => {
 		const components = [
 			"button-variants.ts",
 			"input.tsx",
@@ -53,8 +48,10 @@ describe("shared corner shape contract", () => {
 
 		for (const fileName of components) {
 			const source = readComponent(fileName);
-			expect(source, fileName).toContain("corner-squircle");
 			expect(source, fileName).toMatch(/rounded(?:-|\[)/);
+			expect(source, fileName).not.toMatch(
+				/corner-(?:[trbl](?:[lr])?-)?squircle/
+			);
 		}
 	});
 });

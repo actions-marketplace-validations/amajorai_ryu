@@ -31,6 +31,17 @@ impl Default for GuardedFetchPolicy {
     }
 }
 
+/// The DNS result that a guarded caller is allowed to connect to for one URL.
+///
+/// Keeping the resolved addresses beside the canonical host lets streaming
+/// consumers build their own request body/response pipeline without repeating
+/// the screening logic or re-resolving the hostname at connect time.
+#[derive(Debug, Clone)]
+pub struct GuardedTarget {
+    pub host: String,
+    pub addresses: Vec<SocketAddr>,
+}
+
 fn is_blocked_ipv4(v4: std::net::Ipv4Addr) -> bool {
     let [a, b, _, _] = v4.octets();
     v4.is_loopback()
@@ -154,7 +165,7 @@ async fn resolve_guarded_host(host: &str, port: u16) -> Result<Vec<SocketAddr>, 
 async fn guarded_parts(
     parsed: &url::Url,
     policy: GuardedFetchPolicy,
-) -> Result<(String, Vec<SocketAddr>), String> {
+) -> Result<GuardedTarget, String> {
     if parsed.scheme() != "https" && !(policy.allow_http && parsed.scheme() == "http") {
         return Err(format!(
             "guarded URL must use http or https (got '{}')",
@@ -169,12 +180,26 @@ async fn guarded_parts(
         .port_or_known_default()
         .unwrap_or(if parsed.scheme() == "http" { 80 } else { 443 });
     let resolved = resolve_guarded_host(&host, port).await?;
-    Ok((host, resolved))
+    Ok(GuardedTarget {
+        host,
+        addresses: resolved,
+    })
+}
+
+/// Parse, screen, resolve, and return the exact addresses approved for one
+/// outbound URL. The caller must pass the returned target to its HTTP client's
+/// `resolve_to_addrs` configuration; calling this function and then using a
+/// fresh hostname-based client would reintroduce the DNS-rebinding gap.
+pub async fn resolve_guarded_url(
+    url: &str,
+    policy: GuardedFetchPolicy,
+) -> Result<GuardedTarget, String> {
+    let parsed = url::Url::parse(url.trim()).map_err(|error| format!("invalid url: {error}"))?;
+    guarded_parts(&parsed, policy).await
 }
 
 pub async fn screen_url_with_policy(url: &str, policy: GuardedFetchPolicy) -> Result<(), String> {
-    let parsed = url::Url::parse(url.trim()).map_err(|error| format!("invalid url: {error}"))?;
-    guarded_parts(&parsed, policy).await.map(|_| ())
+    resolve_guarded_url(url, policy).await.map(|_| ())
 }
 
 pub async fn screen_url(url: &str) -> Result<(), String> {
@@ -209,7 +234,7 @@ pub async fn guarded_request(
 ) -> Result<GuardedResponse, String> {
     let parsed =
         url::Url::parse(request.url.trim()).map_err(|error| format!("invalid url: {error}"))?;
-    let (host, resolved) = guarded_parts(&parsed, policy).await?;
+    let target = guarded_parts(&parsed, policy).await?;
     if request
         .body
         .as_ref()
@@ -225,7 +250,7 @@ pub async fn guarded_request(
     let client = reqwest::Client::builder()
         .timeout(policy.timeout)
         .redirect(reqwest::redirect::Policy::none())
-        .resolve_to_addrs(&host, &resolved)
+        .resolve_to_addrs(&target.host, &target.addresses)
         .build()
         .map_err(|error| format!("failed to build guarded HTTP client: {error}"))?;
     let mut builder = client.request(method, parsed.as_str());
@@ -274,11 +299,11 @@ async fn guarded_get_once(
     parsed: &url::Url,
     policy: GuardedFetchPolicy,
 ) -> Result<reqwest::Response, String> {
-    let (host, resolved) = guarded_parts(parsed, policy).await?;
+    let target = guarded_parts(parsed, policy).await?;
     let client = reqwest::Client::builder()
         .timeout(policy.timeout)
         .redirect(reqwest::redirect::Policy::none())
-        .resolve_to_addrs(&host, &resolved)
+        .resolve_to_addrs(&target.host, &target.addresses)
         .build()
         .map_err(|error| format!("failed to build guarded HTTP client: {error}"))?;
     client

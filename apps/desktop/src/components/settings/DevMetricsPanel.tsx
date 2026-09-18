@@ -19,6 +19,7 @@ import {
 	summarizeHttp,
 	summarizeTurns,
 } from "@/src/lib/dev-metrics.ts";
+import { formatTime } from "@/src/lib/timezone.ts";
 import {
 	SettingsCard,
 	SettingsGroup,
@@ -151,9 +152,7 @@ export function DevMetricsPanel() {
 										className="border-border/50 border-t"
 										key={`${turn.at}-${turn.ms}`}
 									>
-										<td className="py-1 pr-3">
-											{new Date(turn.at).toLocaleTimeString()}
-										</td>
+										<td className="py-1 pr-3">{formatTime(turn.at)}</td>
 										<td className="py-1 pr-3">
 											{turn.status === 0 ? "failed" : turn.status}
 										</td>

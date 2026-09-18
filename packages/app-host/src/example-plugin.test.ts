@@ -43,4 +43,16 @@ describe("examplePluginSrcdoc", () => {
 		expect(doc).toContain('call("core.listAgents", [])');
 		expect(doc).not.toContain("fetch(");
 	});
+
+	it("accepts the host's live appearance snapshot", () => {
+		const doc = examplePluginSrcdoc("n", {
+			"--background": "#101114",
+			"--foreground": "#f5f5f5",
+			"--ryu-theme-mode": "dark",
+			"--ryu-ui-scale": "1.25",
+		});
+		expect(doc).toContain("--background: #101114;");
+		expect(doc).toContain('"--ryu-theme-mode":"dark"');
+		expect(doc).toContain("applyThemeTokens(msg.tokens)");
+	});
 });

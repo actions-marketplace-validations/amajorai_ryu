@@ -44,16 +44,7 @@ function reconcile(approvals: ApprovalRequest[]) {
 	const store = useLiveActivityStore.getState();
 	const pending = approvals.filter((a) => a.status === "pending");
 	const desired = pending.map(approvalToActivity);
-	const desiredIds = new Set(desired.map((a) => a.id));
-	const existing = Object.keys(store.activities);
-	for (const id of existing) {
-		if (id.startsWith("approval:") && !desiredIds.has(id)) {
-			store.remove(id);
-		}
-	}
-	for (const activity of desired) {
-		store.upsert(activity);
-	}
+	store.applySourceSnapshot("shell", "approval", desired);
 }
 
 /** Mount ONE app-wide reconciliation of pending approvals → live activities. The

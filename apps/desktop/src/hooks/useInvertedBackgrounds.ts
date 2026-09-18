@@ -1,3 +1,4 @@
+import { THEME_APPEARANCE_CHANGE_EVENT } from "@ryu/ui/theme/prefs";
 import { useEffect, useState } from "react";
 
 const KEY = "ryu_inverted_backgrounds";
@@ -35,4 +36,5 @@ export function setInvertedBackgrounds(enabled: boolean) {
 	localStorage.setItem(KEY, String(enabled));
 	applyInvertedBackgrounds(enabled);
 	window.dispatchEvent(new Event("storage"));
+	window.dispatchEvent(new Event(THEME_APPEARANCE_CHANGE_EVENT));
 }

@@ -20,6 +20,7 @@ import { useUsageStatement } from "@/src/hooks/useUsageStatement.ts";
 import { toTarget } from "@/src/lib/api/client.ts";
 import { useActiveOrgId } from "@/src/lib/api/orgs.ts";
 import { fetchUsageAnalytics } from "@/src/lib/api/usage-analytics.ts";
+import { formatDateTime } from "@/src/lib/timezone.ts";
 import { isLocalNode, useNodeStore } from "@/src/store/useNodeStore.ts";
 
 function startOfDay(date: Date): Date {
@@ -178,9 +179,9 @@ export default function UsageTab() {
 				id: entry.id,
 				reason: entry.reason,
 				// Formatted HERE, not in the block: the block is rendered by the
-				// storyboard too, and a `toLocaleString` there would produce a
-				// different string per machine and make visual diffs noisy.
-				createdAtLabel: new Date(entry.createdAt).toLocaleString(),
+				// storyboard too, and the desktop's shared display contract belongs
+				// at this host boundary so both consumers stay portable.
+				createdAtLabel: formatDateTime(entry.createdAt),
 				delta: entry.delta,
 				isCredit: entry.delta > 0,
 				balanceAfter: entry.balanceAfter,

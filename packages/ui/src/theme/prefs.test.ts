@@ -27,6 +27,7 @@ describe("defaultThemePrefs", () => {
 		expect(p.darkPreset).toBe(DEFAULT_DARK_ID);
 		expect(p.contrast).toBe(DEFAULT_CONTRAST);
 		expect(p.radius).toBe(DEFAULT_RADIUS);
+		expect(p.timezone).toBe("system");
 		expect(p.customThemes).toEqual([]);
 	});
 
@@ -79,6 +80,38 @@ describe("normalizeThemePrefs", () => {
 		const bad = normalizeThemePrefs({ contrast: "80", radius: null });
 		expect(bad.contrast).toBe(DEFAULT_CONTRAST);
 		expect(bad.radius).toBe(DEFAULT_RADIUS);
+	});
+
+	test("normalizes the shared layout and appearance controls", () => {
+		const p = normalizeThemePrefs({
+			spacing: 0.3,
+			scale: 1.25,
+			cardSpacing: null,
+			pointerCursor: true,
+			chromeShadows: false,
+			dialogOverlayBlur: true,
+			popupOverlayBlur: true,
+			invertedBackgrounds: true,
+			animationsEnabled: false,
+		});
+		expect(p.spacing).toBe(0.3);
+		expect(p.scale).toBe(1.25);
+		expect(p.cardSpacing).toBeNull();
+		expect(p.pointerCursor).toBe(true);
+		expect(p.chromeShadows).toBe(false);
+		expect(p.dialogOverlayBlur).toBe(true);
+		expect(p.popupOverlayBlur).toBe(true);
+		expect(p.invertedBackgrounds).toBe(true);
+		expect(p.animationsEnabled).toBe(false);
+	});
+
+	test("normalizes cross-process date and locale preferences", () => {
+		const p = normalizeThemePrefs({
+			locale: "en-GB",
+			timezone: "Asia/Singapore",
+		});
+		expect(p.locale).toBe("en-GB");
+		expect(p.timezone).toBe("Asia/Singapore");
 	});
 
 	test("NaN is a number and passes through (tolerant contract — downstream clamps)", () => {

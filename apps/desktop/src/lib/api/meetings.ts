@@ -69,8 +69,15 @@ export interface DetectionConfig {
 	enabled: boolean;
 }
 
-export async function listMeetings(target: ApiTarget): Promise<Meeting[]> {
-	const json = await request<{ meetings?: Meeting[] }>(target, "/api/meetings");
+export async function listMeetings(
+	target: ApiTarget,
+	signal?: AbortSignal
+): Promise<Meeting[]> {
+	const json = await request<{ meetings?: Meeting[] }>(
+		target,
+		"/api/meetings",
+		{ signal }
+	);
 	return json.meetings ?? [];
 }
 
@@ -294,30 +301,38 @@ export async function streamMeetingEvents(
 	let buffer = "";
 	// SSE frames are separated by a blank line; each `data:` line carries the
 	// JSON of one `MeetingEvent`.
-	for (;;) {
-		const { done, value } = await reader.read();
-		if (done) {
-			break;
-		}
-		buffer += decoder.decode(value, { stream: true });
-		const frames = buffer.split("\n\n");
-		buffer = frames.pop() ?? "";
-		for (const frame of frames) {
-			for (const line of frame.split("\n")) {
-				const trimmed = line.trim();
-				if (!trimmed.startsWith("data:")) {
-					continue;
-				}
-				const payload = trimmed.slice("data:".length).trim();
-				if (!payload) {
-					continue;
-				}
-				try {
-					onEvent(JSON.parse(payload) as MeetingEvent);
-				} catch {
-					// Non-JSON keep-alive or partial frame — ignore; the feed self-heals.
+	try {
+		while (!signal?.aborted) {
+			const { done, value } = await reader.read();
+			if (done) {
+				break;
+			}
+			buffer += decoder.decode(value, { stream: true });
+			const frames = buffer.split("\n\n");
+			buffer = frames.pop() ?? "";
+			for (const frame of frames) {
+				for (const line of frame.split("\n")) {
+					if (signal?.aborted) {
+						return;
+					}
+					const trimmed = line.trim();
+					if (!trimmed.startsWith("data:")) {
+						continue;
+					}
+					const payload = trimmed.slice("data:".length).trim();
+					if (!payload) {
+						continue;
+					}
+					try {
+						onEvent(JSON.parse(payload) as MeetingEvent);
+					} catch {
+						// Non-JSON keep-alive or partial frame — ignore; the feed self-heals.
+					}
 				}
 			}
 		}
+	} finally {
+		await reader.cancel().catch(() => undefined);
+		reader.releaseLock();
 	}
 }

@@ -85,11 +85,13 @@ function toSnapshot(wire: WireSnapshot): ProviderCreditsSnapshot {
 /** Fetch one provider's remaining API credit. */
 export async function fetchProviderCredits(
 	target: ApiTarget,
-	providerId: string
+	providerId: string,
+	signal?: AbortSignal
 ): Promise<ProviderCreditsSnapshot> {
 	const wire = await request<WireSnapshot>(
 		target,
-		`/api/providers/${encodeURIComponent(providerId)}/credits`
+		`/api/providers/${encodeURIComponent(providerId)}/credits`,
+		{ signal }
 	);
 	return toSnapshot(wire);
 }

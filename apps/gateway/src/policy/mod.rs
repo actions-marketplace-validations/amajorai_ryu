@@ -14,8 +14,8 @@
 //!   - `approved_models`: if non-empty, the requested model must be on the list.
 //!   - `locked_guardrails`: guardrails the org requires stay on (the firewall is
 //!     forced enabled when any are present).
-//!   - `allowed_regions`: provider/data regions permitted (carried for callers;
-//!     region tagging of providers is future work, kept in scope as data).
+//!   - `allowed_regions`: provider/data regions permitted; routing must resolve a
+//!     provider region before dispatch and rejects unknown regions.
 
 use std::time::Duration;
 
@@ -35,8 +35,12 @@ const ENV_GATEWAY_KEY: &str = "GATEWAY_KEY";
 /// The effective policy the data plane enforces. Mirrors the control plane's
 /// `EffectivePolicy.rules` plus the locked-field list (advisory here: the
 /// cascade already applied the locks).
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct EffectivePolicy {
+    /// Whether the gateway has a verified effective policy. Standalone gateways
+    /// use the available empty policy; an unavailable managed policy denies.
+    #[serde(skip, default = "default_policy_available")]
+    pub available: bool,
     /// Guardrail names that must stay enabled (e.g. "pii", "secrets").
     #[serde(default)]
     pub locked_guardrails: Vec<String>,
@@ -59,16 +63,71 @@ pub struct EffectivePolicy {
     pub agent_overlays: std::collections::HashMap<String, crate::config::FirewallOverlay>,
 }
 
+fn default_policy_available() -> bool {
+    true
+}
+
+impl Default for EffectivePolicy {
+    fn default() -> Self {
+        Self {
+            available: default_policy_available(),
+            locked_guardrails: Vec::new(),
+            approved_models: Vec::new(),
+            allowed_regions: Vec::new(),
+            firewall: None,
+            agent_overlays: std::collections::HashMap::new(),
+        }
+    }
+}
+
 impl EffectivePolicy {
     /// Whether a model id is permitted. An empty allowlist permits everything.
     pub fn allows_model(&self, model: &str) -> bool {
-        self.approved_models.is_empty() || self.approved_models.iter().any(|m| m == model)
+        self.available
+            && (self.approved_models.is_empty() || self.approved_models.iter().any(|m| m == model))
+    }
+
+    /// Whether a routed provider's verified region is permitted. A configured
+    /// region policy fails closed when the route has no region metadata.
+    pub fn allows_region(&self, region: Option<&str>) -> bool {
+        if !self.available {
+            return false;
+        }
+        self.allowed_regions.is_empty()
+            || region.is_some_and(|candidate| {
+                self.allowed_regions
+                    .iter()
+                    .any(|allowed| regions_match(allowed, candidate))
+            })
     }
 
     /// Whether the firewall must be force-enabled to honour locked guardrails.
     pub fn requires_firewall(&self) -> bool {
         !self.locked_guardrails.is_empty()
     }
+}
+
+fn regions_match(allowed: &str, candidate: &str) -> bool {
+    let allowed = allowed.trim().to_ascii_lowercase();
+    let candidate = candidate.trim().to_ascii_lowercase();
+    allowed == candidate
+        || candidate.starts_with(&format!("{allowed}-"))
+        || matches!(
+            (allowed.as_str(), candidate.as_str()),
+            ("eu", value) if value.starts_with("europe-")
+                || value.starts_with("eu-")
+                || value.starts_with("eu_")
+        )
+        || matches!(
+            (allowed.as_str(), candidate.as_str()),
+            ("us", value) if value.starts_with("us-")
+                || value.starts_with("us_")
+        )
+        || matches!(
+            (allowed.as_str(), candidate.as_str()),
+            ("asia", value) if value.starts_with("asia-")
+                || value.starts_with("asia_")
+        )
 }
 
 /// One org resolved from an arbitrary `rgw_` gateway token (the multi-tenant
@@ -214,6 +273,7 @@ impl ResolveResponse {
             unrestricted_budget_micro_usd: self.unrestricted_budget_micro_usd,
             pool_budgets_micro_usd: self.pool_budgets_micro_usd,
             policy: EffectivePolicy {
+                available: true,
                 locked_guardrails: self.policy.rules.locked_guardrails,
                 approved_models: self.policy.rules.approved_models,
                 allowed_regions: self.policy.rules.allowed_regions,
@@ -436,6 +496,28 @@ mod tests {
         };
         assert!(policy.allows_model("gpt-4o"));
         assert!(!policy.allows_model("gpt-4o-mini"));
+    }
+
+    #[test]
+    fn unavailable_policy_denies_models_and_regions() {
+        let policy = EffectivePolicy {
+            available: false,
+            ..Default::default()
+        };
+        assert!(!policy.allows_model("gpt-4o"));
+        assert!(!policy.allows_region(Some("global")));
+    }
+
+    #[test]
+    fn non_empty_region_policy_requires_verified_route_metadata() {
+        let policy = EffectivePolicy {
+            allowed_regions: vec!["eu".to_owned()],
+            ..Default::default()
+        };
+        assert!(policy.allows_region(Some("EU-WEST-1")));
+        assert!(policy.allows_region(Some("europe-west4")));
+        assert!(!policy.allows_region(None));
+        assert!(!policy.allows_region(Some("global")));
     }
 
     #[test]

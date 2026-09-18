@@ -1,80 +1,75 @@
 "use client";
 
 import { buttonVariants } from "@ryu/ui/components/button";
-import { ChromaticTextReveal } from "@ryu/ui/components/motion/chromatic-text-reveal";
+import { Logo } from "@ryu/ui/components/logo.tsx";
 import PageHeader from "@ryu/ui/components/page-header";
 import { cn } from "@ryu/ui/lib/utils";
-import { DOCS_URL } from "./data/resources.tsx";
+import {
+	DISCORD_INVITE_HREF,
+	SETUP_RYU_HREF,
+	SETUP_RYU_LABEL,
+} from "./data/resources.tsx";
 import { DownloadMenu } from "./download-menu.tsx";
-import { HomeCapabilitySections } from "./home-capability-sections.tsx";
-import { landingHeadlineClass } from "./landing-typography.ts";
-import ProductLandingCtas from "./product-landing-ctas.tsx";
 import { ProductRealmSelector } from "./product-realm-selector.tsx";
-import { SectionTitle } from "./sections.tsx";
-import { StandaloneServicesSection } from "./standalone-services-section.tsx";
 import StartupPrograms from "./startup-programs.tsx";
 
 export default function RealmsHero() {
 	return (
 		<div className="bg-background text-foreground" data-testid="realms-hero">
 			<section
-				className="mx-auto flex max-w-6xl flex-col items-center px-6 pt-20 pb-10 text-center md:pt-28 md:pb-12"
-				data-testid="hero-viewport"
+				className="border-border border-b bg-muted/30 text-foreground"
+				data-testid="hero-surface"
 			>
-				<div className="w-full max-w-3xl">
-					<PageHeader
-						className="mx-auto max-w-2xl text-center"
-						stagger={false}
-						title={
-							<>
-								We deploy and run AI agents
-								<br />
-								<ChromaticTextReveal
-									delay={0.3}
-									loop={false}
-									once
-									prefix="safely in the"
-									startOnView
-									words={["cloud"]}
-								/>
-							</>
-						}
-						titleClassName={cn(
-							landingHeadlineClass,
-							"text-center text-2xl sm:text-3xl md:text-3xl"
-						)}
-					/>
-					<div className="mt-7 flex flex-wrap items-center justify-center gap-2.5">
-						<DownloadMenu
-							className="rounded-full"
-							label="Download"
-							showSeparator={false}
-							size="sm"
+				<div
+					className="relative isolate mx-auto grid max-w-4xl items-center gap-12 overflow-hidden px-6 pt-20 pb-16 md:pt-28 md:pb-24 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)] lg:gap-12"
+					data-testid="hero-viewport"
+				>
+					<div className="max-w-2xl">
+						<PageHeader
+							className="max-w-2xl"
+							stagger={false}
+							title="The simplest way to deploy and run agents in the cloud 24/7"
+							titleClassName="!text-xl"
 						/>
-						<a
-							className={cn(
-								buttonVariants({ variant: "ghost" }),
-								"rounded-full"
-							)}
-							href={DOCS_URL}
-							rel="noopener noreferrer"
-							target="_blank"
-						>
-							Documentation
-						</a>
+						<div className="mt-8 flex flex-wrap items-center gap-3">
+							<DownloadMenu
+								className="rounded-full"
+								label="Download"
+								showSeparator={false}
+								size="lg"
+							/>
+							<a
+								className={cn(
+									buttonVariants({ size: "lg", variant: "secondary" }),
+									"rounded-full"
+								)}
+								href={SETUP_RYU_HREF}
+							>
+								{SETUP_RYU_LABEL}
+							</a>
+							<a
+								className={cn(
+									buttonVariants({ size: "lg", variant: "outline" }),
+									"rounded-full"
+								)}
+								href={DISCORD_INVITE_HREF}
+								rel="noopener noreferrer"
+								target="_blank"
+							>
+								Join our Discord
+							</a>
+						</div>
+					</div>
+					<div
+						className="flex min-w-0 items-center justify-center"
+						data-testid="hero-3d-logo"
+					>
+						<Logo className="mx-auto" size="min(70vw, 380px)" variant="3d" />
 					</div>
 				</div>
 			</section>
-			<StartupPrograms className="mt-0 pb-12 md:mt-2 md:pb-16" />
-			<div className="mx-auto max-w-6xl px-6 py-16">
-				<ProductRealmSelector />
-			</div>
-			<HomeCapabilitySections />
-			<StandaloneServicesSection />
-			<section className="mx-auto max-w-6xl px-6 py-16 md:py-24">
-				<SectionTitle title="Try Ryu with your team" />
-				<ProductLandingCtas className="mt-8 items-start" />
-			</section>
+			<StartupPrograms className="mt-0 px-6 pb-0 md:mt-0 md:pb-0" />
+			<ProductRealmSelector />
 		</div>
 	);
 }

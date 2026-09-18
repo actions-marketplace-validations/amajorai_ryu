@@ -37,7 +37,12 @@ test("meeting and task actions preserve outcomes and bound stalled bodies", asyn
 		},
 	});
 	try {
-		for (const name of ["meetings.ts", "quests.ts", "response-deadline.ts"]) {
+		for (const name of [
+			"meetings.ts",
+			"quests.ts",
+			"response-deadline.ts",
+			"reconnect-delay.ts",
+		]) {
 			await copyFile(join(import.meta.dirname, name), join(root, name));
 		}
 		await writeFile(

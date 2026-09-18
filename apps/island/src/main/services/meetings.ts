@@ -13,6 +13,7 @@ import type {
 	IslandStartMeetingInput,
 } from "../../shared/ipc.ts";
 import { coreHeaders, loadConfig } from "./config.ts";
+import { waitForReconnect } from "./reconnect-delay.ts";
 import { withResponseDeadline } from "./response-deadline.ts";
 
 /** Reconnect delay for the meeting event stream. */
@@ -102,9 +103,7 @@ export function subscribeMeetingEvents(
 			if (signal.aborted) {
 				return;
 			}
-			await new Promise<void>((resolve) =>
-				setTimeout(resolve, RECONNECT_DELAY_MS)
-			);
+			await waitForReconnect(signal, RECONNECT_DELAY_MS);
 		}
 	};
 	run().catch(() => undefined);
@@ -124,34 +123,40 @@ async function pumpEventStream(
 		signal,
 	});
 	if (!(resp.ok && resp.body)) {
+		await resp.body?.cancel();
 		throw new Error(`core responded ${resp.status}`);
 	}
 	const reader = resp.body.getReader();
 	const decoder = new TextDecoder();
 	let buffer = "";
-	for (;;) {
-		const { done, value } = await reader.read();
-		if (done) {
-			return;
-		}
-		buffer += decoder.decode(value, { stream: true });
-		let sep = buffer.indexOf(SSE_FRAME_SEPARATOR);
-		while (sep !== -1) {
-			const frame = buffer.slice(0, sep);
-			const data = frame
-				.split("\n")
-				.filter((line) => line.startsWith(DATA_PREFIX))
-				.map((line) => line.slice(DATA_PREFIX.length).trim())
-				.join("\n");
-			if (data) {
-				try {
-					onEvent(JSON.parse(data) as IslandMeetingEvent);
-				} catch {
-					// Ignore malformed frames; the next event self-heals the feed.
-				}
+	try {
+		for (;;) {
+			const { done, value } = await reader.read();
+			if (done) {
+				return;
 			}
-			buffer = buffer.slice(sep + SSE_FRAME_SEPARATOR.length);
-			sep = buffer.indexOf(SSE_FRAME_SEPARATOR);
+			buffer += decoder.decode(value, { stream: true });
+			let sep = buffer.indexOf(SSE_FRAME_SEPARATOR);
+			while (sep !== -1 && !signal.aborted) {
+				const frame = buffer.slice(0, sep);
+				const data = frame
+					.split("\n")
+					.filter((line) => line.startsWith(DATA_PREFIX))
+					.map((line) => line.slice(DATA_PREFIX.length).trim())
+					.join("\n");
+				if (data) {
+					try {
+						onEvent(JSON.parse(data) as IslandMeetingEvent);
+					} catch {
+						// Ignore malformed frames; the next event self-heals the feed.
+					}
+				}
+				buffer = buffer.slice(sep + SSE_FRAME_SEPARATOR.length);
+				sep = buffer.indexOf(SSE_FRAME_SEPARATOR);
+			}
 		}
+	} finally {
+		await reader.cancel().catch(() => undefined);
+		reader.releaseLock();
 	}
 }

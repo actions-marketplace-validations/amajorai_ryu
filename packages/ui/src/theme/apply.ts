@@ -45,6 +45,32 @@ const MUTED_DERIVED_VARS = new Set(["--popover", "--popover-foreground"]);
 export const DEFAULT_CONTRAST = 50;
 export const DEFAULT_RADIUS = 0.625;
 
+/** Set the shared spacing unit used by Tailwind v4 utilities. */
+export function applySpacing(spacingRem: number) {
+	document.documentElement.style.setProperty("--spacing", `${spacingRem}rem`);
+}
+
+/** Set the shared UI zoom and expose it to sandboxed Companion documents. */
+export function applyScale(scale: number) {
+	const root = document.documentElement;
+	root.style.setProperty("--ryu-ui-scale", String(scale));
+	root.style.zoom = String(scale);
+}
+
+/** Set the shared Card padding override and its compact companion value. */
+export function applyCardSpacing(spacingRem: number) {
+	const root = document.documentElement.style;
+	root.setProperty("--card-pad", `${spacingRem}rem`);
+	root.setProperty("--card-pad-sm", `${spacingRem * 0.75}rem`);
+}
+
+/** Remove the explicit Card padding so it follows the shared spacing unit. */
+export function clearCardSpacing() {
+	const root = document.documentElement.style;
+	root.removeProperty("--card-pad");
+	root.removeProperty("--card-pad-sm");
+}
+
 /** Adjust muted/muted-foreground around the neutral 50 midpoint. */
 export function applyContrastToMuted(value: number) {
 	const el = document.documentElement;

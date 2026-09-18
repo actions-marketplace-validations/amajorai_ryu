@@ -74,6 +74,21 @@ test("shows canonical gateway rollup totals beside the credit ledger", async ({
 		"375 ms"
 	);
 	await expect(page.getByTestId("usage-kpi-active-nodes")).toContainText("1");
+	await expect(page.getByTestId("usage-trend-metric")).toBeVisible();
+	await expect(page.getByTestId("usage-trend-selected")).toContainText("6");
+	await page
+		.getByTestId("usage-trend-metric")
+		.getByRole("button", { name: "Tokens", exact: true })
+		.click();
+	await expect(page.getByTestId("usage-trend-selected")).toContainText("150");
+	await expect(page.getByTestId("usage-analytics-chart-trend")).toContainText(
+		"Tokens at"
+	);
+	await page
+		.getByTestId("usage-trend-metric")
+		.getByRole("button", { name: "Requests", exact: true })
+		.click();
+	await expect(page.getByTestId("usage-trend-selected")).toContainText("6");
 
 	for (const kind of [
 		"trend",
@@ -130,11 +145,7 @@ test("keeps totals stable across controls, empties, and recovery", async ({
 	await expect(averageLatency).toContainText("375 ms");
 
 	await page.getByRole("button", { name: "15 min", exact: true }).click();
-	await expect(
-		page.getByText(
-			"Requests, tokens, errors, and billed spend at 15 min resolution."
-		)
-	).toBeVisible();
+	await expect(page.getByText("Requests at 15 min resolution.")).toBeVisible();
 	await expect(requests).toContainText("6");
 	await expect(errors).toContainText("3");
 	await expect(averageLatency).toContainText("375 ms");
@@ -156,14 +167,14 @@ test("keeps totals stable across controls, empties, and recovery", async ({
 	await expect(requests).toContainText("0");
 	await expect(errors).toContainText("0");
 	await expect(averageLatency).toContainText("—");
-	await expect(page.getByText("No activity in this range.")).toBeVisible();
+	await expect(page.getByText("No requests in this range.")).toBeVisible();
 
 	await page.getByRole("combobox", { name: "Filter by model" }).click();
 	await page.getByRole("option", { name: "All models", exact: true }).click();
 	await expect(requests).toContainText("6");
 	await expect(errors).toContainText("3");
 	await expect(averageLatency).toContainText("375 ms");
-	await expect(page.getByText("No activity in this range.")).toHaveCount(0);
+	await expect(page.getByText("No requests in this range.")).toHaveCount(0);
 	await expect(page.getByTestId("proof-status")).toContainText(
 		"provider/model filters"
 	);

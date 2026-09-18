@@ -214,20 +214,25 @@ export async function streamUserNotifications(
 	const reader = resp.body.getReader();
 	const decoder = new TextDecoder();
 	let buffer = "";
-	for (;;) {
-		const { done, value } = await reader.read();
-		if (done) {
-			break;
-		}
-		buffer += decoder.decode(value, { stream: true });
-		let sep = buffer.indexOf(FRAME_SEP);
-		while (sep !== -1) {
-			const event = parseFrame(buffer.slice(0, sep));
-			if (event) {
-				onEvent(event);
+	try {
+		while (!signal?.aborted) {
+			const { done, value } = await reader.read();
+			if (done) {
+				break;
 			}
-			buffer = buffer.slice(sep + FRAME_SEP.length);
-			sep = buffer.indexOf(FRAME_SEP);
+			buffer += decoder.decode(value, { stream: true });
+			let sep = buffer.indexOf(FRAME_SEP);
+			while (sep !== -1 && !signal?.aborted) {
+				const event = parseFrame(buffer.slice(0, sep));
+				if (event) {
+					onEvent(event);
+				}
+				buffer = buffer.slice(sep + FRAME_SEP.length);
+				sep = buffer.indexOf(FRAME_SEP);
+			}
 		}
+	} finally {
+		await reader.cancel().catch(() => undefined);
+		reader.releaseLock();
 	}
 }

@@ -17,6 +17,7 @@ test("microphone action parser rejects path traversal and extra authority", () =
 test("recording requires its own approved grant before requesting the OS microphone", async () => {
 	let calls = 0;
 	const services = {
+		listAgents: async () => [],
 		mediaRecording: async () => {
 			calls += 1;
 			return {
@@ -25,6 +26,7 @@ test("recording requires its own approved grant before requesting the OS microph
 				state: "recording" as const,
 			};
 		},
+		registerRoute: async () => ({}),
 	};
 	await expect(
 		dispatchRpc(
@@ -49,13 +51,15 @@ test("missing capture implementation reports unavailable without claiming record
 			"media.recording",
 			[{ action: "status" }],
 			capabilitiesFromGrants(["media:record"]),
-			{}
+			{ listAgents: async () => [], registerRoute: async () => ({}) }
 		)
 	).toMatchObject({ available: false, state: "idle" });
 });
 test("speech history rejects unbounded requests before touching Shadow", async () => {
 	let called = false;
 	const service = {
+		listAgents: async () => [],
+		registerRoute: async () => ({}),
 		timelineTranscripts: async () => {
 			called = true;
 			return { segments: [], nextOffset: null };

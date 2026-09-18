@@ -87,6 +87,10 @@ function clipsFromBody(body: unknown): GeneratedVideo[] {
 
 /** Options for {@link generateVideo}. */
 export interface GenerateVideoOptions {
+	/** Host attribution for app-level generation ACLs. */
+	appId?: string;
+	/** Human-facing app permission required for this host-direct call. */
+	appPermission?: string;
 	/** Cloud model id (required when `provider` is set). */
 	model?: string;
 	/** Poll interval while a cloud job runs, in ms. Default: 3000. */
@@ -158,6 +162,13 @@ export async function generateVideo(
 
 	const resp = await authenticatedFetch(target, "/api/video/generate", {
 		method: "POST",
+		headers:
+			options.appId && options.appPermission
+				? {
+						"x-ryu-app-id": options.appId,
+						"x-ryu-app-permission": options.appPermission,
+					}
+				: undefined,
 		body: JSON.stringify(body),
 	});
 

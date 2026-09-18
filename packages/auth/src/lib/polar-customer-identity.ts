@@ -3,6 +3,18 @@ import { PolarBillingProjection } from "@ryu/db/models/polar-billing-projection.
 import { polarClient } from "./payments.ts";
 import { polarOrganizationExternalId } from "./polar-credits.ts";
 
+/** A provider customer id cannot be safely reused until its Ryu owner is proven. */
+export class OrganizationPolarCustomerReconciliationError extends Error {
+	readonly code = "polar_customer_identity_reconciliation_required";
+
+	constructor(
+		message = "Organization billing needs customer identity reconciliation before it can be managed or purchased again"
+	) {
+		super(message);
+		this.name = "OrganizationPolarCustomerReconciliationError";
+	}
+}
+
 /** Payer email is contact information, never an organization ownership proof. */
 export async function resolveOrganizationPolarCustomerId(
 	organizationId: string
@@ -38,11 +50,117 @@ export async function resolveOrganizationPolarCustomerId(
 			.lean<{ polarCustomerId?: string | null }>(),
 	]);
 	if (contract?.polarCustomerId || projection?.polarCustomerId) {
-		throw new Error(
-			"Organization billing needs customer identity reconciliation before it can be managed or purchased again"
-		);
+		throw new OrganizationPolarCustomerReconciliationError();
 	}
 	return null;
+}
+
+/**
+ * Resolve the canonical organization customer before starting a checkout.
+ *
+ * Polar's checkout API can select an existing payer by email. That is unsafe
+ * for an organization because the email may already belong to a personal
+ * customer. Creating the team customer first lets checkout use `customerId`
+ * and makes the provider identity unambiguous. A provider-side email collision
+ * is deliberately surfaced to the caller for reconciliation; it is never
+ * silently linked to the personal payer.
+ */
+export async function ensureOrganizationPolarCustomer(input: {
+	organizationId: string;
+	email: string;
+	ownerName?: string | null;
+	ownerUserId?: string | null;
+}): Promise<string> {
+	const organizationId = input.organizationId.trim();
+	const email = input.email.trim().toLowerCase();
+	if (!(organizationId && email)) {
+		throw new Error("organization billing requires an id and email");
+	}
+
+	const existing = await resolveOrganizationPolarCustomerId(organizationId);
+	if (existing) {
+		return existing;
+	}
+
+	const externalId = polarOrganizationExternalId(organizationId);
+	let customer: Awaited<ReturnType<typeof polarClient.customers.create>>;
+	try {
+		customer = await polarClient.customers.create({
+			email,
+			externalId,
+			metadata: { orgId: organizationId, scope: "org" },
+			name: input.ownerName?.trim() || undefined,
+			owner: input.ownerUserId?.trim()
+				? {
+						email,
+						externalId: input.ownerUserId.trim(),
+						name: input.ownerName?.trim() || undefined,
+					}
+				: undefined,
+			type: "team",
+		});
+	} catch (error) {
+		const status =
+			typeof error === "object" && error !== null
+				? ((error as { statusCode?: unknown }).statusCode ??
+					(error as { status?: unknown }).status)
+				: undefined;
+		if (status === 409 || status === 422) {
+			throw new OrganizationPolarCustomerReconciliationError(
+				"Polar already has a customer for this organization contact; reconcile the provider customer identity before retrying checkout"
+			);
+		}
+		throw error;
+	}
+	if (customer.externalId !== externalId || !customer.id) {
+		throw new Error("Polar returned an invalid organization customer identity");
+	}
+	return customer.id;
+}
+
+/** Resolve or create the personal customer used by an individual checkout. */
+export async function ensurePersonalPolarCustomer(input: {
+	userId: string;
+	email: string;
+	name?: string | null;
+}): Promise<string> {
+	const userId = input.userId.trim();
+	const email = input.email.trim().toLowerCase();
+	if (!(userId && email)) {
+		throw new Error("personal billing requires a user id and email");
+	}
+
+	const existing = await resolvePersonalPolarCustomerId(userId);
+	if (existing) {
+		return existing;
+	}
+
+	let customer: Awaited<ReturnType<typeof polarClient.customers.create>>;
+	try {
+		customer = await polarClient.customers.create({
+			email,
+			externalId: userId,
+			metadata: { scope: "user", userId },
+			name: input.name?.trim() || undefined,
+			type: "individual",
+		});
+	} catch (error) {
+		const status =
+			typeof error === "object" && error !== null
+				? ((error as { statusCode?: unknown }).statusCode ??
+					(error as { status?: unknown }).status)
+				: undefined;
+		if (status === 409 || status === 422) {
+			throw new OrganizationPolarCustomerReconciliationError(
+				"Polar already has a customer for this personal contact; reconcile the provider customer identity before retrying checkout"
+			);
+		}
+		throw error;
+	}
+	if (customer.externalId !== userId || !customer.id) {
+		throw new Error("Polar returned an invalid personal customer identity");
+	}
+	return customer.id;
 }
 
 /** Personal billing follows the authenticated user identity, never payer email. */

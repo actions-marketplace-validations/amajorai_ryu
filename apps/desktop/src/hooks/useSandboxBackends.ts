@@ -41,7 +41,7 @@ export function useSandboxBackends(): UseSandboxBackendsResult {
 			token: activeNode.token ?? null,
 			userJwt: activeNode.userJwt ?? null,
 		}),
-		[activeNode.url, activeNode.token]
+		[activeNode.url, activeNode.token, activeNode.userJwt]
 	);
 
 	const [backends, setBackends] = useState<SandboxBackendEntry[]>([]);

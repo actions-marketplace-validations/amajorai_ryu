@@ -291,3 +291,109 @@ test("a sandboxed app can call the grant-gated toast bridge", async ({
 		fullPage: true,
 	});
 });
+
+test("a mounted Companion follows live palette and appearance changes", async ({
+	page,
+}) => {
+	const appHtml = `<!doctype html><html><head><style>
+    html, body { height: 100%; margin: 0; }
+    body { display: grid; place-items: center; gap: 12px; background: var(--background); color: var(--foreground); font: 16px/1.5 sans-serif; }
+    #probe { padding: 16px; background: var(--card); color: var(--foreground); border: 1px solid var(--border); }
+    #action { padding: 8px 14px; color: var(--primary-foreground); background: var(--primary); border: 0; border-radius: var(--radius); }
+  </style></head><body><div id="probe">Theme-aware Companion</div><button id="action" type="button">Action</button></body></html>`;
+
+	await page.goto("/companion-host-story.html");
+	await page.waitForSelector("body[data-harness-ready='1']");
+	await page.evaluate(() => {
+		const root = document.documentElement;
+		root.className = "light";
+		root.style.setProperty("--background", "rgb(247 250 252)");
+		root.style.setProperty("--foreground", "rgb(15 23 42)");
+		root.style.setProperty("--card", "rgb(255 255 255)");
+		root.style.setProperty("--primary", "rgb(37 99 235)");
+		root.style.setProperty("--primary-foreground", "rgb(255 255 255)");
+		root.style.setProperty("--border", "rgb(203 213 225)");
+		root.style.setProperty("--radius", "0.625rem");
+		root.style.setProperty("--ryu-ui-scale", "1");
+	});
+	await page.evaluate((options) => window.__ryuCompanion.mount(options), {
+		appHtml,
+		grants: [],
+		pluginId: "@ryu/appearance-e2e",
+	});
+	await expect
+		.poll(() => page.evaluate(() => window.__ryuCompanion.connected()), {
+			timeout: 15_000,
+		})
+		.toBe(true);
+
+	const frame = page
+		.frames()
+		.find((candidate) => candidate !== page.mainFrame());
+	if (!frame) {
+		throw new Error("Companion iframe did not mount");
+	}
+	await expect(frame.locator("#probe")).toHaveText("Theme-aware Companion");
+	const before = await frame.locator("#probe").evaluate((element) => ({
+		background: getComputedStyle(element).backgroundColor,
+		mode: document.documentElement.getAttribute("data-ryu-theme"),
+	}));
+	expect(before.background).toBe("rgb(255, 255, 255)");
+	expect(before.mode).toBe("light");
+
+	await page.evaluate(() => {
+		const root = document.documentElement;
+		root.className = "dark";
+		root.style.setProperty("--background", "rgb(11 17 32)");
+		root.style.setProperty("--foreground", "rgb(248 250 252)");
+		root.style.setProperty("--card", "rgb(30 41 59)");
+		root.style.setProperty("--primary", "rgb(217 70 239)");
+		root.style.setProperty("--primary-foreground", "rgb(255 255 255)");
+		root.style.setProperty("--border", "rgb(71 85 105)");
+		root.style.setProperty("--radius", "1.25rem");
+		root.style.setProperty("--ryu-ui-scale", "1.25");
+		root.setAttribute("data-pointer-cursor", "true");
+		root.setAttribute("data-dialog-overlay-blur", "off");
+		root.setAttribute("data-popup-overlay-blur", "on");
+		root.setAttribute("data-ryu-animations", "off");
+	});
+
+	await expect
+		.poll(
+			() =>
+				frame.locator("#probe").evaluate((element) => ({
+					background: getComputedStyle(element).backgroundColor,
+					mode: document.documentElement.getAttribute("data-ryu-theme"),
+					radius: document.documentElement.style.getPropertyValue("--radius"),
+					zoom: document.documentElement.style.getPropertyValue(
+						"--ryu-ui-scale"
+					),
+					pointer: document.documentElement.getAttribute("data-pointer-cursor"),
+					dialog: document.documentElement.getAttribute(
+						"data-dialog-overlay-blur"
+					),
+					popup: document.documentElement.getAttribute(
+						"data-popup-overlay-blur"
+					),
+					animations: document.documentElement.getAttribute(
+						"data-ryu-animations"
+					),
+				})),
+			{ timeout: 15_000 }
+		)
+		.toEqual({
+			background: "rgb(30, 41, 59)",
+			mode: "dark",
+			radius: "1.25rem",
+			zoom: "1.25",
+			pointer: "true",
+			dialog: "off",
+			popup: "on",
+			animations: "off",
+		});
+
+	await page.screenshot({
+		path: "/Users/jiawei/.codex/visualizations/2026/09/10/01a08b79-8639-7523-b7d9-851de1081c44/companion-appearance-proof.png",
+		fullPage: true,
+	});
+});

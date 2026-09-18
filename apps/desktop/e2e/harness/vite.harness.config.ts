@@ -129,6 +129,10 @@ export default defineConfig({
 					harnessDir,
 					"pinned-summary-scroll-proof.html"
 				),
+				pluginDoctorScorecard: path.resolve(
+					harnessDir,
+					"plugin-doctor-scorecard-proof.html"
+				),
 				storeChromeStory: path.resolve(harnessDir, "store-chrome-story.html"),
 				marketplaceStabilityVersionHistory: path.resolve(
 					harnessDir,

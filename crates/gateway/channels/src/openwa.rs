@@ -10,7 +10,6 @@
 //! per-session webhook, verifies OpenWA's HMAC delivery signature, and maps
 //! OpenWA messages into the shared access/media/Core turn path.
 
-use std::collections::{HashSet, VecDeque};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -28,8 +27,7 @@ use base64::{engine::general_purpose::STANDARD, Engine};
 use hmac::{Hmac, Mac};
 use serde::{de::DeserializeOwned, Deserialize};
 use serde_json::{json, Value};
-use sha2::Sha256;
-use tokio::sync::Mutex;
+use sha2::{Digest, Sha256};
 use tracing::{debug, info, warn};
 
 use crate::commands::{self, ChannelCommand};
@@ -38,36 +36,13 @@ use crate::pairing::{Decision, PairingStore};
 use crate::status::StatusReporter;
 use crate::whatsapp_format;
 use crate::{
-    handle_turn, Channel, ChannelCaps, ChannelHost, ChannelRuntime, InboundMessage,
-    OpenWaChannelConfig,
+    claim_inbound_delivery, handle_turn_with_delivery, run_claimed_delivery_with_permit,
+    try_reserve_delivery, Channel, ChannelCaps, ChannelHost, ChannelRuntime, ChannelTurnOutcome,
+    InboundMessage, OpenWaChannelConfig,
 };
 
 const PLATFORM: &str = "whatsapp_personal";
 const TYPING_INTERVAL: Duration = Duration::from_secs(8);
-const MAX_DELIVERY_KEYS: usize = 4096;
-
-/// State used to make OpenWA's at-least-once webhook delivery idempotent.
-#[derive(Default)]
-struct DeliveryDeduper {
-    seen: HashSet<String>,
-    order: VecDeque<String>,
-}
-
-impl DeliveryDeduper {
-    fn accept(&mut self, key: String) -> bool {
-        if self.seen.contains(&key) {
-            return false;
-        }
-        if self.order.len() >= MAX_DELIVERY_KEYS {
-            if let Some(oldest) = self.order.pop_front() {
-                self.seen.remove(&oldest);
-            }
-        }
-        self.seen.insert(key.clone());
-        self.order.push_back(key);
-        true
-    }
-}
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -96,7 +71,6 @@ pub struct OpenWaChannel {
     webhook_bind: String,
     webhook_path: String,
     self_chat_only: bool,
-    deliveries: Mutex<DeliveryDeduper>,
 }
 
 impl OpenWaChannel {
@@ -161,7 +135,6 @@ impl OpenWaChannel {
             webhook_bind: cfg.webhook_bind,
             webhook_path: cfg.webhook_path,
             self_chat_only: cfg.self_chat_only,
-            deliveries: Mutex::new(DeliveryDeduper::default()),
         })
     }
 
@@ -294,10 +267,6 @@ impl OpenWaChannel {
             )
             .await
         }
-    }
-
-    async fn accept_delivery(&self, key: String) -> bool {
-        self.deliveries.lock().await.accept(key)
     }
 
     async fn access_allows(&self, message: &InboundMessage) -> bool {
@@ -567,25 +536,64 @@ async fn receive_webhook(
         return StatusCode::OK;
     }
 
-    let delivery_key = headers
+    let webhook_delivery_id = headers
         .get("x-openwa-idempotency-key")
         .and_then(|value| value.to_str().ok())
         .or_else(|| payload["idempotencyKey"].as_str())
         .or_else(|| payload["deliveryId"].as_str())
-        .unwrap_or_default();
-    if !delivery_key.is_empty()
-        && !state
-            .channel
-            .accept_delivery(delivery_key.to_string())
-            .await
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    for (index, inbound) in parse_inbound(&payload["data"], state.channel.self_chat_only)
+        .into_iter()
+        .enumerate()
     {
-        return StatusCode::OK;
-    }
-
-    for inbound in parse_inbound(&payload["data"], state.channel.self_chat_only) {
+        let provider_id = inbound_delivery_id(&inbound, webhook_delivery_id, &body, index);
+        let (delivery_id, claim) = match claim_inbound_delivery(&*state.channel, &provider_id).await
+        {
+            Ok(result) => result,
+            Err(error) => {
+                warn!(%error, "OpenWA webhook delivery could not be durably claimed");
+                return StatusCode::SERVICE_UNAVAILABLE;
+            }
+        };
+        if !matches!(claim, crate::pairing::DeliveryClaim::Claimed) {
+            debug!(
+                delivery_id = %delivery_id,
+                ?claim,
+                "duplicate OpenWA webhook delivery suppressed"
+            );
+            continue;
+        }
+        let Some(permit) = try_reserve_delivery(&*state.channel) else {
+            if let Err(error) = state
+                .channel
+                .runtime
+                .pairing
+                .fail_delivery(PLATFORM, &delivery_id)
+                .await
+            {
+                warn!(%error, "OpenWA webhook capacity failure could not be persisted");
+            }
+            warn!("OpenWA webhook capacity is exhausted; asking OpenWA to retry");
+            return StatusCode::SERVICE_UNAVAILABLE;
+        };
         let channel = Arc::clone(&state.channel);
         let host = Arc::clone(&state.host);
-        tokio::spawn(dispatch(channel, host, inbound));
+        tokio::spawn(async move {
+            let mut inbound = inbound;
+            prepare_message(&channel, &mut inbound).await;
+            let work_channel = Arc::clone(&channel);
+            let work_host = Arc::clone(&host);
+            let work_delivery_id = delivery_id.clone();
+            run_claimed_delivery_with_permit(channel, delivery_id, permit, move || {
+                let channel = Arc::clone(&work_channel);
+                let host = Arc::clone(&work_host);
+                let inbound = inbound.clone();
+                let delivery_id = work_delivery_id.clone();
+                async move { dispatch(channel, host, inbound, &delivery_id).await }
+            })
+            .await;
+        });
     }
     StatusCode::OK
 }
@@ -593,28 +601,53 @@ async fn receive_webhook(
 async fn dispatch(
     channel: Arc<OpenWaChannel>,
     host: Arc<dyn ChannelHost>,
-    mut message: InboundMessage,
-) {
+    message: InboundMessage,
+    delivery_id: &str,
+) -> ChannelTurnOutcome {
+    if is_help_request(&message.text) && channel.access_allows(&message).await {
+        let help = format_command_help(&channel.runtime.commands().await);
+        return match channel.send_message(&message.chat_id, &help).await {
+            Ok(()) => ChannelTurnOutcome::Completed,
+            Err(err) => {
+                warn!(channel = PLATFORM, %err, "failed to deliver WhatsApp Personal command list");
+                ChannelTurnOutcome::Failed
+            }
+        };
+    }
+    handle_turn_with_delivery(channel, host, message, Some(delivery_id)).await
+}
+
+async fn prepare_message(channel: &OpenWaChannel, message: &mut InboundMessage) {
     if !message.attachments.is_empty()
         && channel
             .runtime
-            .already_admitted(channel.name(), &message)
+            .already_admitted(channel.name(), message)
             .await
     {
         let downloaded = channel
             .fetch_media(&message.chat_id, &message.attachments)
             .await;
-        channel.runtime.ingest_media(&mut message, downloaded).await;
+        channel.runtime.ingest_media(message, downloaded).await;
     }
+}
 
-    if is_help_request(&message.text) && channel.access_allows(&message).await {
-        let help = format_command_help(&channel.runtime.commands().await);
-        if let Err(err) = channel.send_message(&message.chat_id, &help).await {
-            warn!(channel = PLATFORM, %err, "failed to deliver WhatsApp Personal command list");
-        }
-        return;
+fn inbound_delivery_id(
+    message: &InboundMessage,
+    webhook_delivery_id: Option<&str>,
+    body: &[u8],
+    index: usize,
+) -> String {
+    if let Some(message_id) = message
+        .message_id
+        .as_deref()
+        .filter(|message_id| !message_id.trim().is_empty())
+    {
+        return format!("message:{message_id}");
     }
-    handle_turn(channel, host, message).await;
+    if let Some(webhook_delivery_id) = webhook_delivery_id {
+        return format!("delivery:{webhook_delivery_id}:{index}");
+    }
+    format!("payload:{}:{index}", hex::encode(Sha256::digest(body)))
 }
 
 fn parse_inbound(data: &Value, self_chat_only: bool) -> Vec<InboundMessage> {
@@ -890,11 +923,22 @@ mod tests {
     }
 
     #[test]
-    fn dedupes_webhook_delivery_keys_with_a_bounded_queue() {
-        let mut deduper = DeliveryDeduper::default();
-        assert!(deduper.accept("one".to_string()));
-        assert!(!deduper.accept("one".to_string()));
-        assert!(deduper.accept("two".to_string()));
+    fn inbound_delivery_id_prefers_the_provider_message_id() {
+        let message = InboundMessage {
+            message_id: Some("msg-1".to_string()),
+            ..InboundMessage::default()
+        };
+        assert_eq!(
+            inbound_delivery_id(&message, Some("delivery-1"), b"body", 0),
+            "message:msg-1"
+        );
+
+        let anonymous = InboundMessage::default();
+        assert_eq!(
+            inbound_delivery_id(&anonymous, Some("delivery-1"), b"body", 2),
+            "delivery:delivery-1:2"
+        );
+        assert!(inbound_delivery_id(&anonymous, None, b"body", 0).starts_with("payload:"));
     }
 
     #[test]

@@ -144,6 +144,112 @@ async fn resolve_sleep_idle_secs() -> Option<u32> {
     }
 }
 
+fn process_is_running(process: &Mutex<Option<LlamaCppProcess>>) -> bool {
+    process
+        .lock()
+        .unwrap()
+        .as_mut()
+        .map(|process| process.is_running())
+        .unwrap_or(false)
+}
+
+fn normalized_model_id(value: &str) -> Option<String> {
+    let value = value.trim().replace('\\', "/");
+    let leaf = value.rsplit('/').next().unwrap_or_default();
+    let leaf = leaf.strip_suffix(".gguf").unwrap_or(leaf).trim();
+    (!leaf.is_empty()).then(|| leaf.to_ascii_lowercase())
+}
+
+fn served_model_ids(payload: &serde_json::Value) -> Vec<String> {
+    payload
+        .get("data")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|entry| entry.get("id").and_then(serde_json::Value::as_str))
+        .map(str::to_owned)
+        .collect()
+}
+
+fn model_identity_matches(expected: &str, payload: &serde_json::Value) -> bool {
+    let Some(expected) = normalized_model_id(expected) else {
+        return false;
+    };
+    served_model_ids(payload)
+        .iter()
+        .filter_map(|id| normalized_model_id(id))
+        .any(|id| id == expected)
+}
+
+/// Wait for the newly spawned llama-server child and verify the model it actually
+/// serves. A TCP listener alone is insufficient: when a previous Core left a
+/// llama-server on the port, a new child can fail its bind while the readiness
+/// probe connects to the stale listener and labels it with the new model.
+async fn wait_for_ready(
+    client: &reqwest::Client,
+    process: &Mutex<Option<LlamaCppProcess>>,
+    port: u16,
+    expected_model: Option<&str>,
+) -> anyhow::Result<()> {
+    let health_url = format!("http://127.0.0.1:{port}/health");
+    let models_url = format!("http://127.0.0.1:{port}/v1/models");
+    tokio::time::timeout(std::time::Duration::from_secs(120), async {
+        loop {
+            if !process_is_running(process) {
+                anyhow::bail!("llama.cpp process exited before becoming ready");
+            }
+
+            let health_ready = client
+                .get(&health_url)
+                .send()
+                .await
+                .map(|response| response.status().is_success())
+                .unwrap_or(false);
+            if !health_ready {
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                continue;
+            }
+
+            // A no-model process is an intentional install-only/degraded mode:
+            // health is the readiness contract because there is no expected model
+            // id to compare. It still must be backed by the child we just spawned.
+            let Some(expected_model) = expected_model else {
+                if process_is_running(process) {
+                    return Ok(());
+                }
+                anyhow::bail!("llama.cpp process exited before becoming ready");
+            };
+
+            let response = client.get(&models_url).send().await;
+            let Ok(response) = response else {
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                continue;
+            };
+            if !response.status().is_success() {
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                continue;
+            }
+            let payload = response
+                .json::<serde_json::Value>()
+                .await
+                .context("llama.cpp returned invalid /v1/models JSON")?;
+            if !model_identity_matches(expected_model, &payload) {
+                let served = served_model_ids(&payload);
+                anyhow::bail!(
+                    "llama.cpp served model mismatch: expected '{expected_model}', got [{}]",
+                    served.join(", ")
+                );
+            }
+            if process_is_running(process) {
+                return Ok(());
+            }
+            anyhow::bail!("llama.cpp process exited after reporting its model");
+        }
+    })
+    .await
+    .context("llama.cpp did not become ready within 120s")?
+}
+
 impl Sidecar for LlamaCppManager {
     fn name(&self) -> &'static str {
         "llamacpp"
@@ -156,6 +262,7 @@ impl Sidecar for LlamaCppManager {
     fn start(&self) -> BoxFuture<anyhow::Result<()>> {
         let process = Arc::clone(&self.process);
         let running = Arc::clone(&self.running);
+        let client = self.client.clone();
         let downloads = self.downloads.clone();
         Box::pin(async move {
             // Download binary if not already installed — through the download
@@ -249,6 +356,7 @@ impl Sidecar for LlamaCppManager {
 
             tracing::info!("llama.cpp sidecar starting");
             let mut proc = LlamaCppProcess::new(binary_path);
+            let expected_model = model_path.as_ref().map(|_| chat_model_id.as_str());
             let opts = process::LlamaCppStartOptions {
                 // Profile-aware chat-engine port; the client resolves the same
                 // `profile::port(8080)` in `active_engine`.
@@ -265,22 +373,23 @@ impl Sidecar for LlamaCppManager {
                 .context("spawning llama.cpp process")?;
             *process.lock().unwrap() = Some(proc);
 
-            // Wait for the HTTP port to accept connections. Model loading can be
-            // slow (tens of seconds for a 806 MB Q4 file), so we allow up to
-            // 120 s before giving up. Probe the SAME profile-aware port the engine
-            // was spawned on (release 8080, dev 9080, …) — a hardcoded :8080 here
-            // would hang forever under a non-release profile.
-            let health_addr = format!("127.0.0.1:{}", crate::profile::port(8080));
-            tokio::time::timeout(std::time::Duration::from_secs(120), async {
-                loop {
-                    if tokio::net::TcpStream::connect(&health_addr).await.is_ok() {
-                        break;
-                    }
-                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-                }
-            })
+            // Model loading can be slow (tens of seconds for a 806 MB Q4 file),
+            // so readiness allows up to 120s. The probe verifies both the child
+            // liveness and the model returned by the actual OpenAI endpoint.
+            if let Err(error) = wait_for_ready(
+                &client,
+                &process,
+                crate::profile::port(8080),
+                expected_model,
+            )
             .await
-            .context("llama.cpp did not start within 120s")?;
+            {
+                let failed_child = process.lock().unwrap().take();
+                if let Some(mut child) = failed_child {
+                    let _ = child.stop().await;
+                }
+                return Err(error).context("llama.cpp readiness check failed");
+            }
 
             running.store(true, Ordering::Relaxed);
             tracing::info!("llama.cpp sidecar started");
@@ -355,5 +464,142 @@ impl Sidecar for LlamaCppManager {
             tracing::info!("llamacpp uninstalled");
             Ok(())
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::{extract::Json, http::StatusCode, routing::get, Router};
+    use serde_json::json;
+    use tokio::net::TcpListener;
+
+    #[cfg(unix)]
+    async fn readiness_fixture(models: serde_json::Value) -> (u16, tokio::task::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind readiness fixture");
+        let port = listener
+            .local_addr()
+            .expect("read readiness fixture address")
+            .port();
+        let models = Arc::new(models);
+        let app = Router::new()
+            .route("/health", get(|| async { StatusCode::OK }))
+            .route(
+                "/v1/models",
+                get({
+                    let models = Arc::clone(&models);
+                    move || {
+                        let models = Arc::clone(&models);
+                        async move { Json((*models).clone()) }
+                    }
+                }),
+            );
+        let task = tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        (port, task)
+    }
+
+    #[cfg(unix)]
+    fn sleeping_process() -> Mutex<Option<LlamaCppProcess>> {
+        let child = std::process::Command::new("/bin/sleep")
+            .arg("30")
+            .spawn()
+            .expect("spawn sleep fixture");
+        Mutex::new(Some(LlamaCppProcess::from_child_for_test(child)))
+    }
+
+    #[cfg(unix)]
+    async fn stop_process(process: &Mutex<Option<LlamaCppProcess>>) {
+        let child = process.lock().unwrap().take();
+        if let Some(mut child) = child {
+            child.stop().await.expect("stop fixture child");
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn readiness_accepts_the_model_reported_by_the_openai_endpoint() {
+        let (port, fixture) = readiness_fixture(json!({
+            "data": [{ "id": "/tmp/gemma-4-E2B-it-Q4_K_M.gguf" }]
+        }))
+        .await;
+        let process = sleeping_process();
+
+        wait_for_ready(
+            &reqwest::Client::new(),
+            &process,
+            port,
+            Some("gemma-4-E2B-it-Q4_K_M"),
+        )
+        .await
+        .expect("matching model should be ready");
+
+        stop_process(&process).await;
+        fixture.abort();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn readiness_rejects_a_stale_listener_serving_another_model() {
+        let (port, fixture) = readiness_fixture(json!({
+            "data": [{ "id": "gemma-3-270m-it-qat-Q4_0" }]
+        }))
+        .await;
+        let process = sleeping_process();
+
+        let error = wait_for_ready(
+            &reqwest::Client::new(),
+            &process,
+            port,
+            Some("gemma-4-E2B-it-Q4_K_M"),
+        )
+        .await
+        .expect_err("a stale model must not satisfy readiness");
+        assert!(error.to_string().contains("served model mismatch"));
+        assert!(error.to_string().contains("gemma-4-E2B-it-Q4_K_M"));
+        assert!(error.to_string().contains("gemma-3-270m-it-qat-Q4_0"));
+
+        stop_process(&process).await;
+        fixture.abort();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn no_model_mode_uses_health_readiness_without_an_identity_requirement() {
+        let (port, fixture) = readiness_fixture(json!({ "data": [] })).await;
+        let process = sleeping_process();
+
+        wait_for_ready(&reqwest::Client::new(), &process, port, None)
+            .await
+            .expect("no-model install mode should use health readiness");
+
+        stop_process(&process).await;
+        fixture.abort();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn readiness_fails_when_the_new_child_exits_before_the_listener_answers() {
+        let (port, fixture) = readiness_fixture(json!({ "data": [] })).await;
+        let mut child = std::process::Command::new("/usr/bin/true")
+            .spawn()
+            .expect("spawn exited child fixture");
+        child.wait().expect("wait exited child fixture");
+        let process = Mutex::new(Some(LlamaCppProcess::from_child_for_test(child)));
+
+        let error = wait_for_ready(&reqwest::Client::new(), &process, port, None)
+            .await
+            .expect_err("an exited child must not satisfy TCP readiness");
+        assert!(error.to_string().contains("process exited"));
+        assert!(process
+            .lock()
+            .unwrap()
+            .as_ref()
+            .is_some_and(|process| process.pid().is_none()));
+
+        fixture.abort();
     }
 }

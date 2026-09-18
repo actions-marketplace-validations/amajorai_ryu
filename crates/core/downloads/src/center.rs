@@ -30,6 +30,7 @@ use super::{
 /// Max HTTP attempts per active streaming pass before a task is marked
 /// `Failed{retryable}`. The `.part` is kept so a Retry resumes from offset.
 const MAX_ATTEMPTS: u32 = 4;
+const MAX_TRANSFER_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 /// Min interval between progress broadcasts per task (bytes still accrue every
 /// chunk; we just don't flood SSE/persist on every read).
 const PROGRESS_THROTTLE: Duration = Duration::from_millis(250);
@@ -934,6 +935,13 @@ async fn drive(
             }
         }
 
+        // A failed pass publishes an error to blocking callers but keeps the
+        // driver parked so the UI can retry the same task. Clear that result
+        // only when a retry actually wakes the driver; otherwise a new
+        // `download_blocking` call would immediately replay the old failure
+        // instead of awaiting the retry's terminal state.
+        let _ = done_tx.send(None);
+
         // FAST PATH: already installed with a matching checksum → Completed.
         if let Some(path) = fast_path(&spec).await {
             finish_completed(&inner, &id, &spec, &done_tx, path).await;
@@ -979,11 +987,16 @@ async fn drive(
                 drop(_permit);
                 patch(&inner, &id, true, |t| {
                     t.state = DownloadState::Failed;
-                    t.error = Some(error);
+                    t.error = Some(error.clone());
                     t.retryable = retryable;
                     t.speed_bps = None;
                 })
                 .await;
+                // Failed transfers remain parked and retryable when allowed,
+                // but the synchronous `download_blocking` contract still needs
+                // a result so installers cannot hang forever on a checksum,
+                // redirect, or network error.
+                let _ = done_tx.send(Some(Err(error)));
                 // Re-arm to parked so we don't hot-loop; a Retry sets Run.
                 let _ = control_tx.send(Control::Pause);
                 continue;
@@ -1015,6 +1028,15 @@ async fn attempt(
     spec: &DownloadSpec,
     control_rx: &mut watch::Receiver<Control>,
 ) -> AttemptOutcome {
+    if requires_checksum(spec.role) && expected_checksum(spec).is_none() {
+        return AttemptOutcome::Failed {
+            error: format!(
+                "download '{}' requires a SHA-256 checksum before execution",
+                spec.label
+            ),
+            retryable: false,
+        };
+    }
     let mut attempts = 0u32;
     loop {
         attempts += 1;
@@ -1067,6 +1089,28 @@ async fn attempt(
     }
 }
 
+fn requires_checksum(role: DownloadRole) -> bool {
+    matches!(
+        role,
+        DownloadRole::Engine
+            | DownloadRole::Agent
+            | DownloadRole::Tool
+            | DownloadRole::Plugin
+            | DownloadRole::McpServer
+    )
+}
+
+fn expected_checksum(spec: &DownloadSpec) -> Option<String> {
+    spec.sha256
+        .clone()
+        .filter(|value| !value.is_empty())
+        .or_else(|| {
+            spec.version_record
+                .as_ref()
+                .and_then(|record| host().installed_checksum(&record.store_key))
+        })
+}
+
 /// One streaming pass: open `.part`, send Range+If-Range when resuming, write
 /// chunks to disk while polling the control channel.
 async fn stream_once(
@@ -1086,26 +1130,83 @@ async fn stream_once(
         .await
         .map(|m| m.len())
         .unwrap_or(0);
+    if existing > MAX_TRANSFER_BYTES {
+        return Err(StreamErr::Io(format!(
+            "partial download exceeds the {}-byte transfer cap",
+            MAX_TRANSFER_BYTES
+        )));
+    }
     let etag = {
         let tasks = inner.tasks.read().await;
         tasks.get(id).and_then(|t| t.etag.clone())
     };
 
     // Build the request (Range + If-Range when resuming a non-empty .part).
-    // Host attaches any auth for this URL (Core folds the HF-host check + bearer
-    // token in here; a non-HF host is a pass-through).
-    let mut req = host().authorize(&spec.url, inner.client.get(&spec.url));
-    if existing > 0 {
-        req = req.header(reqwest::header::RANGE, format!("bytes={existing}-"));
-        if let Some(tag) = &etag {
-            req = req.header(reqwest::header::IF_RANGE, tag.clone());
+    // Production downloads are screened and DNS-pinned at the transfer sink,
+    // immediately before each connection is made. Redirects are followed here,
+    // one hop at a time, so a GitHub release asset can move to its CDN without
+    // allowing an un-screened redirect target or leaking host-specific auth.
+    let download_policy = ryu_egress::GuardedFetchPolicy {
+        allow_http: true,
+        max_body_bytes: MAX_TRANSFER_BYTES,
+        ..ryu_egress::GuardedFetchPolicy::default()
+    };
+    let mut current_url = spec.url.clone();
+    let mut redirect_hops = 0usize;
+    let resp = loop {
+        #[cfg(test)]
+        let mut req = host().authorize(&current_url, inner.client.get(&current_url));
+        #[cfg(not(test))]
+        let mut req = {
+            let target = ryu_egress::resolve_guarded_url(&current_url, download_policy)
+                .await
+                .map_err(|error| StreamErr::Io(format!("download URL rejected: {error}")))?;
+            let client = reqwest::Client::builder()
+                .redirect(reqwest::redirect::Policy::none())
+                .resolve_to_addrs(&target.host, &target.addresses)
+                .build()
+                .map_err(|error| {
+                    StreamErr::Io(format!("building guarded download client: {error}"))
+                })?;
+            host().authorize(&current_url, client.get(&current_url))
+        };
+        if existing > 0 {
+            req = req.header(reqwest::header::RANGE, format!("bytes={existing}-"));
+            if let Some(tag) = &etag {
+                req = req.header(reqwest::header::IF_RANGE, tag.clone());
+            }
         }
-    }
 
-    let resp = req
-        .send()
-        .await
-        .map_err(|e| StreamErr::Network(format!("GET {}: {e}", spec.url)))?;
+        let response = req
+            .send()
+            .await
+            .map_err(|e| StreamErr::Network(format!("GET {}: {e}", current_url)))?;
+        if !(300..400).contains(&response.status().as_u16()) {
+            break response;
+        }
+        if redirect_hops >= download_policy.max_redirect_hops {
+            return Err(StreamErr::Network(format!(
+                "too many redirects (more than {}) for {}",
+                download_policy.max_redirect_hops, spec.url
+            )));
+        }
+        let location = response
+            .headers()
+            .get(reqwest::header::LOCATION)
+            .and_then(|value| value.to_str().ok())
+            .ok_or_else(|| {
+                StreamErr::Network(format!(
+                    "HTTP {} for {} without a Location header",
+                    response.status(),
+                    current_url
+                ))
+            })?;
+        current_url = url::Url::parse(&current_url)
+            .and_then(|base| base.join(location))
+            .map_err(|error| StreamErr::Io(format!("invalid download redirect: {error}")))?
+            .to_string();
+        redirect_hops += 1;
+    };
     let status = resp.status();
     if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
         // Gated (e.g. HF) — not resolvable by retrying.
@@ -1138,6 +1239,12 @@ async fn stream_once(
         (false, Some(len)) => Some(len),
         _ => None,
     };
+    if total.is_some_and(|bytes| bytes > MAX_TRANSFER_BYTES) {
+        return Err(StreamErr::Io(format!(
+            "download exceeds the {}-byte transfer cap",
+            MAX_TRANSFER_BYTES
+        )));
+    }
 
     let file = if resuming {
         tokio::fs::OpenOptions::new().append(true).open(&part).await
@@ -1182,6 +1289,12 @@ async fn stream_once(
                     }
                     Some(Err(e)) => return Err(StreamErr::Network(format!("stream error: {e}"))),
                     Some(Ok(bytes)) => {
+                        if received.saturating_add(bytes.len() as u64) > MAX_TRANSFER_BYTES {
+                            return Err(StreamErr::Io(format!(
+                                "download exceeds the {}-byte transfer cap",
+                                MAX_TRANSFER_BYTES
+                            )));
+                        }
                         file.write_all(&bytes)
                             .await
                             .map_err(|e| StreamErr::Io(format!("writing {}: {e}", part.display())))?;
@@ -1226,7 +1339,7 @@ async fn finalize(
     let part = part_path(&spec.dest);
     let actual = sha256_file(&part).await.map_err(|e| e.to_string())?;
 
-    if let Some(expected) = spec.sha256.as_ref().filter(|s| !s.is_empty()) {
+    if let Some(expected) = expected_checksum(spec).as_deref() {
         if &actual != expected {
             return Err(format!(
                 "checksum mismatch: expected {expected}, got {actual}"
@@ -1353,6 +1466,16 @@ mod tests {
     }
 
     #[test]
+    fn executable_download_roles_require_integrity_metadata() {
+        assert!(requires_checksum(DownloadRole::Engine));
+        assert!(requires_checksum(DownloadRole::Agent));
+        assert!(requires_checksum(DownloadRole::Tool));
+        assert!(requires_checksum(DownloadRole::Plugin));
+        assert!(requires_checksum(DownloadRole::McpServer));
+        assert!(!requires_checksum(DownloadRole::ChatModel));
+    }
+
+    #[test]
     fn part_path_appends_suffix() {
         assert_eq!(
             part_path(Path::new("/m/x.gguf")),
@@ -1377,6 +1500,40 @@ mod tests {
         let mut bad = spec(dest.clone());
         bad.sha256 = Some("deadbeef".to_string());
         assert_eq!(fast_path(&bad).await, None);
+
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    #[tokio::test]
+    async fn blocking_download_returns_a_failed_transfer_without_hanging() {
+        ensure_host();
+        let dir = std::env::temp_dir().join(format!("ryu-dl-failure-{}", std::process::id()));
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        let dest = dir.join("engine.bin");
+        let mut s = spec(dest);
+        s.kind = DownloadKind::Engine;
+        s.role = DownloadRole::Engine;
+
+        let center = DownloadCenter::with_default_client();
+        let error =
+            tokio::time::timeout(Duration::from_secs(2), center.download_blocking(s.clone()))
+                .await
+                .expect("a failed download must resolve its blocking waiter")
+                .expect_err("an engine without integrity metadata must fail");
+        assert!(error.to_string().contains("requires a SHA-256 checksum"));
+
+        let id = derive_id(&s.dest);
+        let task = center
+            .snapshot()
+            .await
+            .into_iter()
+            .find(|task| task.id == id)
+            .expect("failed task remains visible for retry");
+        assert_eq!(task.state, DownloadState::Failed);
+        assert!(
+            !task.retryable,
+            "missing integrity metadata is not retryable"
+        );
 
         let _ = tokio::fs::remove_dir_all(&dir).await;
     }
@@ -1454,6 +1611,47 @@ mod tests {
         let path = center.download_blocking(s).await.unwrap();
         let got = tokio::fs::read(&path).await.unwrap();
         assert_eq!(got, body, "resumed file must equal the full body");
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    #[tokio::test]
+    async fn follows_redirects_with_a_fresh_download_guard_per_hop() {
+        ensure_host();
+        use axum::response::Redirect;
+        use axum::routing::get;
+        use axum::Router;
+
+        let body = b"redirected archive".to_vec();
+        let served = body.clone();
+        let app = Router::new()
+            .route("/start", get(|| async { Redirect::temporary("/file") }))
+            .route(
+                "/file",
+                get(move || {
+                    let body = served.clone();
+                    async move { body }
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        let dir = std::env::temp_dir().join(format!("ryu-dl-redirect-{}", std::process::id()));
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        let dest = dir.join("redirected.bin");
+        let mut s = spec(dest.clone());
+        s.url = format!("http://{addr}/start");
+        s.sha256 = Some({
+            let mut hasher = Sha256::new();
+            hasher.update(&body);
+            hex::encode(hasher.finalize())
+        });
+
+        let center = DownloadCenter::with_default_client();
+        let path = center.download_blocking(s).await.unwrap();
+        assert_eq!(tokio::fs::read(path).await.unwrap(), body);
         let _ = tokio::fs::remove_dir_all(&dir).await;
     }
 

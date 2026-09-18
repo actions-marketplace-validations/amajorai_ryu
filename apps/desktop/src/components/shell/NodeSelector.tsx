@@ -67,7 +67,13 @@ import {
 } from "@ryu/ui/components/tooltip.tsx";
 import { buildRyuDeepLink, parseRyuDeepLink } from "@ryuhq/protocol/deep-link";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { type ReactNode, useEffect, useId, useState } from "react";
+import {
+	type ComponentProps,
+	type ReactNode,
+	useEffect,
+	useId,
+	useState,
+} from "react";
 import { sileo } from "sileo";
 import { WEB_URL } from "@/lib/app-urls.ts";
 import { openExternal } from "@/lib/tauri-bridge.ts";
@@ -3623,6 +3629,49 @@ function AutoSelectRow({ compact = false }: { compact?: boolean }) {
 	);
 }
 
+function NodeMenuHardware({
+	target,
+	enabled,
+}: {
+	target: ApiTarget;
+	enabled: boolean;
+}) {
+	const { data: info } = useNodeSystemInfo(target, enabled);
+	return info ? (
+		<div className="px-3 pt-1 pb-1.5">
+			<NodeStats info={info} />
+		</div>
+	) : null;
+}
+
+function NodeMenuGateway({
+	coreReachable,
+	target,
+	...props
+}: Omit<ComponentProps<typeof ServiceRow>, "label" | "target"> & {
+	coreReachable: boolean;
+	target: ApiTarget;
+}) {
+	const { data } = useQuery({
+		queryKey: [
+			"node-gateway-status",
+			target.url,
+			target.token ?? null,
+			target.userJwt ?? null,
+		],
+		queryFn: ({ signal }) => fetchGatewayStatus(target, signal),
+		enabled: coreReachable,
+		refetchInterval: 30_000,
+		retry: false,
+	});
+	const count = data?.health?.providers.length ?? 0;
+	const label =
+		props.running && count > 0
+			? `Gateway · ${count} provider${count === 1 ? "" : "s"}`
+			: "Gateway";
+	return <ServiceRow {...props} label={label} target={target} />;
+}
+
 export function NodeSelector({ mode }: NodeSelectorProps) {
 	const { nodes, defaultNode, setDefault, removeNode, addNode } =
 		useNodeStore();
@@ -3671,22 +3720,6 @@ export function NodeSelector({ mode }: NodeSelectorProps) {
 	// const handleIslandLaunch = async () => {
 	// 	await installAndLaunchIsland();
 	// };
-
-	// Live specs for the active node, surfaced in the compact dropdown header.
-	const { data: activeInfo } = useNodeSystemInfo(
-		target,
-		coreReachable === true
-	);
-
-	// Gateway provider count for the badge (only when the gateway is reachable).
-	const { data: gatewayStatus } = useQuery({
-		queryKey: ["node-gateway-status", target.url],
-		queryFn: ({ signal }) => fetchGatewayStatus(target, signal),
-		enabled: coreReachable === true,
-		refetchInterval: 30_000,
-		retry: false,
-	});
-	const providerCount = gatewayStatus?.health?.providers.length ?? 0;
 
 	// Installed version + update verdict for Core/Gateway (single release train):
 	// drives the version badge on both rows and the shared app-wide "Update"
@@ -3936,10 +3969,11 @@ export function NodeSelector({ mode }: NodeSelectorProps) {
 							</DropdownMenuItem>
 						))}
 					</div>
-					{showDetail && activeInfo && (
-						<div className="px-3 pt-1 pb-1.5">
-							<NodeStats info={activeInfo} />
-						</div>
+					{showDetail && (
+						<NodeMenuHardware
+							enabled={coreReachable === true}
+							target={target}
+						/>
 					)}
 					{/* Full hardware detail sits right beneath the live usage bars it
 					    expands on. */}
@@ -3974,13 +4008,9 @@ export function NodeSelector({ mode }: NodeSelectorProps) {
 							updateAvailable={appUpdateAvailable}
 							version={appVersion}
 						/>
-						<ServiceRow
+						<NodeMenuGateway
+							coreReachable={coreReachable === true}
 							icon={Router01Icon}
-							label={
-								gatewayReachable && providerCount > 0
-									? `Gateway · ${providerCount} provider${providerCount === 1 ? "" : "s"}`
-									: "Gateway"
-							}
 							onChanged={refresh}
 							onUpdate={handleAppUpdate}
 							running={gatewayReachable}

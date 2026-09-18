@@ -5,6 +5,7 @@ import {
 	storeTotalFromResponse,
 } from "@ryu/app-host/views";
 import { useQuery } from "@tanstack/react-query";
+import { useMemo } from "react";
 import { useActiveNode } from "@/src/hooks/useActiveNode.ts";
 import { apiUrl, requestHeaders, toTarget } from "@/src/lib/api/client.ts";
 import type { PluginStoreTab } from "@/src/lib/api/plugins.ts";
@@ -31,6 +32,7 @@ export function contributedStoreCatalogQuery(
 			tab.id,
 			target.url,
 			target.token,
+			target.userJwt ?? null,
 			sourceRequest?.path ?? "",
 		],
 		queryFn: async (): Promise<ContributedStoreCatalogData> => {
@@ -59,6 +61,13 @@ export function useContributedStoreCatalog(
 	enabled = tab.app_enabled
 ) {
 	const node = useActiveNode();
-	const target = toTarget(node);
-	return useQuery(contributedStoreCatalogQuery(tab, target, enabled));
+	const target = useMemo(
+		() => toTarget(node),
+		[node.url, node.token, node.userJwt]
+	);
+	const queryOptions = useMemo(
+		() => contributedStoreCatalogQuery(tab, target, enabled),
+		[enabled, tab, target]
+	);
+	return useQuery(queryOptions);
 }

@@ -167,6 +167,12 @@ pub fn builtin_prefixes() -> Vec<(String, String)> {
         // `state.providers.get(...)` sites either skip the candidate or return
         // `AllProvidersUnavailable`. Reaching the wrong provider's 404 was never
         // the better outcome.
+        // llama.cpp reports a loaded filesystem-backed model with its absolute
+        // path as the `/v1/models` id. Preserve that id when forwarding, but route
+        // path-shaped ids to the local provider so discovery and completion agree.
+        // User model-map entries still outrank this fallback, as with every other
+        // builtin prefix.
+        ("/", "local"),
         ("llama", "local"),
         ("mistral", "local"),
         ("mixtral", "local"),
@@ -726,6 +732,16 @@ mod tests {
     fn apple_foundationmodel_routes_to_local() {
         let t = bare("openai");
         assert_eq!(t.route("apple-foundationmodel").0, "local");
+    }
+
+    #[test]
+    fn absolute_local_model_paths_route_to_local() {
+        let t = bare("openai");
+        let requested = "/Users/ryu/models/gemma-4-E2B-it-Q4_K_M.gguf";
+        assert_eq!(
+            t.route(requested),
+            ("local".to_owned(), requested.to_owned())
+        );
     }
 
     #[test]

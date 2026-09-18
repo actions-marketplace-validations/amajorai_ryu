@@ -23,6 +23,7 @@ import {
 import { cn } from "@ryu/ui/lib/utils";
 import type { ReactNode } from "react";
 import type { PluginSidebarSection } from "@/src/lib/api/plugins.ts";
+import { formatDate } from "@/src/lib/timezone.ts";
 
 interface LibraryViewProps {
 	error: Error | null;
@@ -212,7 +213,7 @@ function CalendarRenderer({
 		const date = rawDate ? new Date(String(rawDate)) : null;
 		const label =
 			date && !Number.isNaN(date.valueOf())
-				? date.toLocaleDateString(undefined, { dateStyle: "medium" })
+				? formatDate(date, { dateStyle: "medium" })
 				: "Undated";
 		groups.set(label, [...(groups.get(label) ?? []), row]);
 	}
