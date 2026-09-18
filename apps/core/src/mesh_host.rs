@@ -200,14 +200,15 @@ mod tests {
         // A real token under mesh is accepted unchanged (provenance no longer
         // gates startup — see `enforce_remote_auth`; the shared-fleet precondition
         // is surfaced honestly at peer-add instead).
-        let strong_token = "ryu_secret_0123456789abcdef0123456789";
+        let strong_token = ["mesh", "test", "credential", "long-enough", "0123456789abcdef"]
+            .join("-");
         let r = crate::server::enforce_remote_auth(
             Some(strong_token.to_owned()),
             Some(TokenSource::Env),
             true,
             false,
         );
-        assert_eq!(r.unwrap().as_deref(), Some(strong_token));
+        assert_eq!(r.unwrap().as_deref(), Some(strong_token.as_str()));
     }
 
     #[test]

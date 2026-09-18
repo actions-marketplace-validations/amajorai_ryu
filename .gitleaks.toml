@@ -7,6 +7,9 @@ description = "Known-safe test fixtures (no real secrets)"
 # Dummy API key used in the gateway audit unit tests to verify redaction.
 regexes = [
   '''sk-secret-1234567890''',
+  # Historical mesh-auth unit-test fixture. It is assembled at runtime now;
+  # this exact value remains only in older public mirror commits.
+  '''ryu_secret_0123456789abcdef0123456789''',
   # Documentation-only placeholder retained in older public mirror commits.
   '''ryu-sk-your-secret-key''',
   # Non-secret JWT-shaped adapter sentinel retained in older public mirror commits.
