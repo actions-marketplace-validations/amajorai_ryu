@@ -1486,7 +1486,7 @@ async fn resolve_local_sidecar_program(
                         label: format!("app sidecar: {command}"),
                         url: url.clone(),
                         dest: dest.clone(),
-                        sha256,
+                        sha256: Some(sha256),
                         version_record: None,
                     })
                     .await
