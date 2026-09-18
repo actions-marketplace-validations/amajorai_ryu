@@ -23,6 +23,7 @@ use std::fs;
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
+use futures_util::StreamExt;
 use ryu_kernel_contracts::schema::{ProviderRegistrationSpec, PROVIDER_OWNER_FIELD};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
@@ -71,6 +72,7 @@ pub const MANAGED_BEDROCK_ID: &str = "managed-bedrock";
 pub const CHATGPT_PROVIDER_ID: &str = "chatgpt";
 pub const CHATGPT_AUTH_KEY: &str = "openai-chatgpt";
 const CHATGPT_SUGGESTED_MODELS: &[&str] = &["gpt-5.5", "gpt-5.4", "gpt-5.4-mini"];
+const MAX_MODEL_DISCOVERY_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
 // `@earendil-works/pi-ai` extracts an account id from the Codex adapter's
 // `apiKey` before it sends a request. The actual ChatGPT bearer is intentionally
 // resolved inside Core, so this non-secret JWT-shaped sentinel satisfies that
@@ -557,8 +559,12 @@ fn gateway_model_entry(id: &str, existing: Option<&Value>) -> Value {
         .or_insert_with(|| Value::String("Gemma 4 E2B IT Q4_K_M".to_owned()));
     obj.entry("api".to_owned())
         .or_insert_with(|| Value::String("openai-completions".to_owned()));
-    obj.entry("input".to_owned())
-        .or_insert_with(|| json!(["text"]));
+    // The bundled Gemma 4 model is multimodal when its companion `mmproj`
+    // artifact is present. Keep that capability in Pi's model metadata even
+    // when an older settings file already declared the model as text-only;
+    // otherwise Pi replaces the image with an "image omitted" placeholder
+    // before the request reaches the local Gateway.
+    obj.insert("input".to_owned(), json!(["text", "image"]));
     obj.entry("cost".to_owned()).or_insert_with(|| {
         json!({
             "input": 0,
@@ -3882,7 +3888,26 @@ async fn fetch_models(
     if !resp.status().is_success() {
         anyhow::bail!("discovery endpoint returned {}", resp.status());
     }
-    let body: Value = resp.json().await.context("parse discovery response")?;
+    if resp
+        .content_length()
+        .is_some_and(|length| length > MAX_MODEL_DISCOVERY_RESPONSE_BYTES as u64)
+    {
+        anyhow::bail!(
+            "discovery response exceeds {MAX_MODEL_DISCOVERY_RESPONSE_BYTES} bytes"
+        );
+    }
+    let mut stream = resp.bytes_stream();
+    let mut raw = Vec::new();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.context("read discovery response")?;
+        if raw.len().saturating_add(chunk.len()) > MAX_MODEL_DISCOVERY_RESPONSE_BYTES {
+            anyhow::bail!(
+                "discovery response exceeds {MAX_MODEL_DISCOVERY_RESPONSE_BYTES} bytes"
+            );
+        }
+        raw.extend_from_slice(&chunk);
+    }
+    let body: Value = serde_json::from_slice(&raw).context("parse discovery response")?;
     // OpenAI + Anthropic both use `{ data: [ { id, ... } ] }`; OpenRouter too.
     let mut items = body
         .get("data")
@@ -4633,6 +4658,15 @@ mod tests {
         // An OpenAI id (auto-caches, Pi sends prompt_cache_key) stays bare.
         let openai = gateway_model_entry("gpt-4o", None);
         assert!(openai.get("compat").is_none());
+    }
+
+    #[test]
+    fn bundled_local_model_preserves_vision_capability_on_existing_settings() {
+        let local_id = crate::registry::DEFAULT_LOCAL_CHAT_MODEL_ID;
+        let existing = json!({ "id": local_id, "input": ["text"] });
+        let entry = gateway_model_entry(local_id, Some(&existing));
+
+        assert_eq!(entry["input"], json!(["text", "image"]));
     }
 
     #[test]

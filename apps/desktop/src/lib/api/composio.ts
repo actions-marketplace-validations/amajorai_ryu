@@ -18,6 +18,7 @@ import { type ApiTarget, request } from "./client.ts";
 export interface ComposioStatus {
 	baseUrl: string;
 	configured: boolean;
+	executionOwner?: "connect";
 }
 
 /** A Composio toolkit (an integration like GitHub, Gmail, Slack). */
@@ -88,13 +89,14 @@ interface TriggerWire {
 export async function fetchComposioStatus(
 	target: ApiTarget
 ): Promise<ComposioStatus> {
-	const json = await request<{ configured?: boolean; base_url?: string }>(
+	const json = await request<{ configured?: boolean; base_url?: string; execution_owner?: string }>(
 		target,
 		"/api/composio/status"
 	);
 	return {
 		configured: json.configured ?? false,
 		baseUrl: json.base_url ?? "",
+		...(json.execution_owner === "connect" ? {executionOwner:"connect" as const} : {}),
 	};
 }
 

@@ -1121,6 +1121,13 @@
     "HttpProxySpec": {
       "description": "Declares the reverse-proxy front Core mounts onto a [`SidecarSpec`]. This is the\n**data** form of what `apps/core/src/sidecar/mail.rs` hand-codes: the exact set of\nexternal routes and their per-route auth posture. Core rejects any request whose\nsub-path is not one of [`routes`] (404), preserving mail's exact-route safety as a\ndeclaration instead of a hardcoded router.\n\n[`routes`]: HttpProxySpec::routes",
       "properties": {
+        "forward_cookie_names": {
+          "description": "Cookie names Core may forward to this sidecar. Browser cookies are stripped\nfrom every proxy hop by default; an app must explicitly declare its own\nnamespaced session cookies when a public route needs an HttpOnly session.\nThe manifest-level validator requires each name to use the plugin's cookie\nnamespace, so a sidecar cannot opt into Core's Better Auth cookie.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
         "max_body_bytes": {
           "default": null,
           "description": "Maximum request body Core will buffer and forward, in bytes. Absent ⇒ Core's\nconservative default. Caps the proxy's memory exposure per request.",

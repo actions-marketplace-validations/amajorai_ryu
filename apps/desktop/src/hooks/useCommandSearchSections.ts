@@ -130,13 +130,16 @@ export function useCommandSearchSections(): {
 	const { companions, sidebar_sections: contributedSections } =
 		usePluginContributions();
 	const activeNode = useActiveNode();
-	const installedSkillsResult = useQuery(
-		installedSkillsQuery({
-			token: activeNode.token ?? null,
-			userJwt: activeNode.userJwt ?? null,
-			url: activeNode.url,
-		})
+	const installedSkillsOptions = useMemo(
+		() =>
+			installedSkillsQuery({
+				token: activeNode.token ?? null,
+				userJwt: activeNode.userJwt ?? null,
+				url: activeNode.url,
+			}),
+		[activeNode.token, activeNode.url, activeNode.userJwt]
 	);
+	const installedSkillsResult = useQuery(installedSkillsOptions);
 	const installedSkills = installedSkillsResult.data ?? [];
 	const workspaceFolder = useWorkspaceStore((state) => state.folder);
 	const recentFolders = useWorkspaceStore((state) => state.recentFolders);

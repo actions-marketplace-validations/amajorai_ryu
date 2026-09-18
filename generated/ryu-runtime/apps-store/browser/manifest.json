@@ -696,6 +696,7 @@
           {
             "path": "/health"
           },
+          { "path": "/theme", "method": "PUT", "permission": "browser.view" },
           { "path": "/tabs", "method": "GET", "permission": "browser.view" },
           {
             "path": "/tabs",

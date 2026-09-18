@@ -176,6 +176,12 @@ const MAX_GRAPH_CHUNKS_PER_DOCUMENT: usize = 256;
 const MAX_GRAPH_ROWS_PER_SPACE: usize = 2_000_000;
 const MAX_DOCUMENT_TITLE_BYTES: usize = 512;
 const MAX_DOCUMENT_MIME_BYTES: usize = 255;
+/// Durable file-storage ceilings checked inside the same SQLite transaction as
+/// the document insert. The node ceiling bounds aggregate disk growth while the
+/// owner ceiling prevents one local user/org from consuming the whole node.
+pub const MAX_FILE_BYTES_PER_OWNER: i64 = 512 * 1024 * 1024;
+pub const MAX_FILE_COUNT_PER_OWNER: i64 = 10_000;
+pub const MAX_FILE_BYTES_PER_NODE: i64 = 4 * 1024 * 1024 * 1024;
 
 /// A validated graph-extraction implementation.
 ///
@@ -569,6 +575,51 @@ fn validate_document_metadata(title: &str, mime: Option<&str>) -> Result<()> {
         anyhow::ensure!(
             mime.len() <= MAX_DOCUMENT_MIME_BYTES,
             "document MIME type exceeds the {MAX_DOCUMENT_MIME_BYTES}-byte limit"
+        );
+    }
+    Ok(())
+}
+
+/// Reserve the next file's durable quota before any document/blob row is
+/// committed. The caller holds SpaceStore's SQLite mutex and invokes this from
+/// an active transaction, so concurrent uploads cannot both observe the same
+/// remaining capacity. `existing_doc_id` is used by file replacement to remove
+/// the old revision from the accounting before adding the new one.
+fn ensure_file_quota(
+    conn: &Connection,
+    byte_size: i64,
+    tenancy: &DocOwner,
+    existing_doc_id: Option<&str>,
+) -> Result<()> {
+    anyhow::ensure!(byte_size >= 0, "file size cannot be negative");
+    let (owner_user_id, org_id) = tenancy.parts();
+    let (owner_bytes, owner_count, node_bytes): (i64, i64, i64) = conn.query_row(
+        "SELECT
+            COALESCE(SUM(CASE WHEN owner_user_id IS ?1 AND org_id IS ?2
+                              THEN COALESCE(byte_size, 0) ELSE 0 END), 0),
+            COALESCE(SUM(CASE WHEN owner_user_id IS ?1 AND org_id IS ?2
+                              THEN 1 ELSE 0 END), 0),
+            COALESCE(SUM(COALESCE(byte_size, 0)), 0)
+         FROM documents
+         WHERE kind = 'file'
+           AND (?3 IS NULL OR id <> ?3)",
+        params![owner_user_id, org_id, existing_doc_id],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+    )?;
+
+    if owner_count >= MAX_FILE_COUNT_PER_OWNER
+        || owner_bytes.saturating_add(byte_size) > MAX_FILE_BYTES_PER_OWNER
+    {
+        anyhow::bail!(
+            "file quota exceeded for this owner ({} files or {} bytes)",
+            MAX_FILE_COUNT_PER_OWNER,
+            MAX_FILE_BYTES_PER_OWNER
+        );
+    }
+    if node_bytes.saturating_add(byte_size) > MAX_FILE_BYTES_PER_NODE {
+        anyhow::bail!(
+            "file quota exceeded for this node ({} bytes)",
+            MAX_FILE_BYTES_PER_NODE
         );
     }
     Ok(())
@@ -3735,6 +3786,8 @@ impl SpaceStore {
         let mode_str = mode_str.ok_or_else(|| anyhow::anyhow!("space '{space_id}' not found"))?;
         let mode = RetrievalMode::from_str(&mode_str);
 
+        ensure_file_quota(&tx, byte_size, tenancy, None)?;
+
         upsert_document_row(
             &tx,
             document_id,
@@ -3810,9 +3863,19 @@ impl SpaceStore {
             let tx = conn
                 .transaction()
                 .context("starting file blob replacement")?;
-            let row: Option<(String, String, String, i64, String)> = tx
+            let row: Option<(
+                String,
+                String,
+                String,
+                i64,
+                String,
+                Option<String>,
+                Option<String>,
+                Option<i64>,
+            )> = tx
                 .query_row(
-                    "SELECT d.space_id, d.kind, s.retrieval_mode, d.created_at, d.title
+                    "SELECT d.space_id, d.kind, s.retrieval_mode, d.created_at, d.title,
+                            d.owner_user_id, d.org_id, d.byte_size
                      FROM documents d JOIN spaces s ON s.id = d.space_id
                      WHERE d.id = ?1",
                     params![doc_id],
@@ -3823,12 +3886,15 @@ impl SpaceStore {
                             row.get(2)?,
                             row.get(3)?,
                             row.get(4)?,
+                            row.get(5)?,
+                            row.get(6)?,
+                            row.get(7)?,
                         ))
                     },
                 )
                 .optional()
                 .context("resolving file for blob replacement")?;
-            let (space_id, kind, mode_str, created_at, current_title) =
+            let (space_id, kind, mode_str, created_at, current_title, owner_user_id, org_id, _) =
                 row.ok_or_else(|| anyhow::anyhow!("document '{doc_id}' not found"))?;
             if kind != "file" {
                 anyhow::bail!("document '{doc_id}' is kind '{kind}', not 'file'");
@@ -3838,6 +3904,8 @@ impl SpaceStore {
                     "file document '{doc_id}' changed while its replacement was prepared"
                 );
             }
+            let tenancy = DocOwner::owned(owner_user_id.as_deref(), org_id.as_deref());
+            ensure_file_quota(&tx, byte_size, &tenancy, Some(&doc_id))?;
 
             tx.execute(
                 "DELETE FROM chunk_vectors WHERE rowid IN
@@ -8193,6 +8261,37 @@ fn vec_to_bytes(vec: &[f32]) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn file_quota_is_atomic_and_replacement_excludes_current_row() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE documents (
+                id TEXT PRIMARY KEY,
+                kind TEXT NOT NULL,
+                owner_user_id TEXT,
+                org_id TEXT,
+                byte_size INTEGER
+            )",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO documents (id, kind, owner_user_id, org_id, byte_size)
+             VALUES ('owner-file', 'file', 'alice', 'org1', ?1)",
+            rusqlite::params![MAX_FILE_BYTES_PER_OWNER],
+        )
+        .unwrap();
+        assert!(ensure_file_quota(&conn, 1, &owned("alice"), None).is_err());
+        assert!(ensure_file_quota(&conn, 1, &owned("alice"), Some("owner-file")).is_ok());
+
+        conn.execute(
+            "UPDATE documents SET byte_size = ?1 WHERE id = 'owner-file'",
+            rusqlite::params![MAX_FILE_BYTES_PER_NODE],
+        )
+        .unwrap();
+        assert!(ensure_file_quota(&conn, 1, &owned("alice"), Some("owner-file")).is_ok());
+        assert!(ensure_file_quota(&conn, 1, &owned("bob"), None).is_err());
+    }
 
     fn owned(uid: &str) -> DocOwner {
         DocOwner {

@@ -8,6 +8,7 @@ import {
 	SelectTrigger,
 	SelectValue,
 } from "@ryu/ui/components/select.tsx";
+import { StaggerReveal } from "@ryu/ui/components/stagger-reveal.tsx";
 import { Toggle } from "@ryu/ui/components/toggle.tsx";
 import type { ReactNode } from "react";
 import { createRoot } from "react-dom/client";
@@ -44,6 +45,28 @@ function TriggerCard({
 }
 
 function Story() {
+	if (new URLSearchParams(location.search).has("many")) {
+		const buttons = Array.from({ length: 200 }, (_, index) => (
+			<Button key={index} variant="outline">{`Label ${index}`}</Button>
+		));
+		return (
+			<main className="min-h-screen bg-background p-6 text-foreground">
+				<h1 className="mb-4 text-xl">Shared button labels</h1>
+				<div className="grid grid-cols-10 gap-2" data-testid="reveal-grid">
+					{new URLSearchParams(location.search).has("reveal") ? (
+						<StaggerReveal
+							step={0}
+							wrap={!new URLSearchParams(location.search).has("clone")}
+						>
+							{buttons}
+						</StaggerReveal>
+					) : (
+						buttons
+					)}
+				</div>
+			</main>
+		);
+	}
 	return (
 		<main className="min-h-screen bg-background p-6 text-foreground">
 			<div className="mx-auto flex max-w-xl flex-col gap-6">

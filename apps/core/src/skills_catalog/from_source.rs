@@ -22,11 +22,10 @@
 //! | `/abs/path` or `./rel/path` (existing dir)          | local copy                       |
 //!
 //! Remote https tarball hosts go through the same SSRF guard the rest of Core uses
-//! before any fetch. `git@`/SSH clones shell out to the `git` CLI via
-//! `std::process::Command` with **separate args** (never a shell string), so a
-//! crafted source can't inject extra commands. A `.tar.gz` fetch is always tried
-//! first; `git clone --depth 1` is the fallback when no archive endpoint applies
-//! (SSH) or the archive fetch fails.
+//! before any fetch. Remote sources are fetched only through Core's pinned,
+//! redirect-rechecking client. Unsupported remote Git clone forms fail closed;
+//! a `git` child process cannot inherit Core's DNS pin and would reopen the SSRF
+//! window after the initial screen.
 
 use std::path::{Path, PathBuf};
 
@@ -34,6 +33,8 @@ use anyhow::{Context, Result};
 
 use crate::skills_catalog::InstallResult;
 use crate::win_process::NoWindow;
+
+const MAX_DIRECT_SKILL_MD_BYTES: usize = 4 * 1024 * 1024;
 
 /// How to obtain the repository contents for a parsed source.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -264,34 +265,46 @@ pub(crate) fn temp_workdir() -> Result<PathBuf> {
     Ok(dir)
 }
 
-/// SSRF guard for a remote tarball URL: only https, host must not resolve to a
-/// private/loopback address. The resolve + IP screen is the shared
-/// `server::resolve_guarded_host`; this only adds the https-scheme check.
-async fn guard_remote_url(raw: &str) -> Result<()> {
-    let parsed = url::Url::parse(raw).with_context(|| format!("invalid URL: {raw}"))?;
-    if parsed.scheme() != "https" {
-        anyhow::bail!("remote skill source must use https");
-    }
-    let host = parsed.host_str().context("URL has no host")?.to_string();
-    let port = parsed.port_or_known_default().unwrap_or(443);
-    crate::server::resolve_guarded_host(&host, port)
-        .await
-        .map_err(|e| anyhow::anyhow!("skill source rejected: {e}"))?;
-    Ok(())
-}
-
 /// Download a `.tar.gz` and extract it into `dest`, returning the extracted root.
-async fn fetch_tarball(client: &reqwest::Client, url: &str, dest: &Path) -> Result<PathBuf> {
-    guard_remote_url(url).await?;
-    let resp = client
-        .get(url)
-        .header("User-Agent", super::USER_AGENT)
-        .send()
-        .await
-        .with_context(|| format!("requesting tarball {url}"))?;
-    if !resp.status().is_success() {
-        anyhow::bail!("tarball fetch returned HTTP {} for {url}", resp.status());
-    }
+/// Every redirect is resolved, screened, and pinned again before the next hop.
+async fn fetch_tarball(_client: &reqwest::Client, url: &str, dest: &Path) -> Result<PathBuf> {
+    const MAX_REDIRECT_HOPS: usize = 3;
+    let mut current = url.to_owned();
+    let mut redirects = 0usize;
+    let resp = loop {
+        let (client, parsed) = crate::server::guarded_client(&current)
+            .await
+            .map_err(|error| anyhow::anyhow!("skill source rejected: {error}"))?;
+        let resp = client
+            .get(parsed.as_str())
+            .header("User-Agent", super::USER_AGENT)
+            .send()
+            .await
+            .with_context(|| {
+                format!(
+                    "requesting tarball {}",
+                    crate::server::redact_url_for_display(&current)
+                )
+            })?;
+        if !(300..400).contains(&resp.status().as_u16()) {
+            break resp;
+        }
+        if redirects >= MAX_REDIRECT_HOPS {
+            anyhow::bail!(
+                "skill source followed more than {MAX_REDIRECT_HOPS} redirects"
+            );
+        }
+        let location = resp
+            .headers()
+            .get(reqwest::header::LOCATION)
+            .and_then(|value| value.to_str().ok())
+            .ok_or_else(|| anyhow::anyhow!("skill source redirect has no valid location"))?;
+        let next = parsed
+            .join(location)
+            .context("skill source redirect target is invalid")?;
+        current = next.to_string();
+        redirects += 1;
+    };
     // Cap the download so a host can't stream an unbounded body at us. Check the
     // advertised Content-Length first, then enforce a running counter as we read
     // (a lying/absent length can't bypass the cap).
@@ -342,16 +355,13 @@ pub(crate) fn clone_host_port(url: &str) -> Result<(String, u16)> {
     Ok((host.to_string(), 22))
 }
 
-/// SSRF guard for a `git clone` target host: resolve it and reject if any
-/// resolved IP is private/loopback/link-local (also catching a literal blocked
-/// IP host). Reuses the shared server-side screen so https/ssh/scp clone URLs
-/// can't be pointed at internal addresses.
+/// Remote `git clone` cannot consume Core's in-process DNS pin. Refuse it rather
+/// than screening once and handing the URL to a child that resolves it again.
 async fn guard_clone_url(url: &str) -> Result<()> {
-    let (host, port) = clone_host_port(url)?;
-    crate::server::resolve_guarded_host(&host, port)
-        .await
-        .map_err(|e| anyhow::anyhow!("clone target rejected: {e}"))?;
-    Ok(())
+    let _ = clone_host_port(url)?;
+    anyhow::bail!(
+        "remote git clone is disabled because the git child cannot consume Core's pinned egress; use an HTTPS GitHub or GitLab source"
+    )
 }
 
 /// git env vars that let a clone run an arbitrary command (SSH transport, askpass
@@ -369,12 +379,9 @@ const GIT_UNSAFE_ENV: &[&str] = &[
     "GIT_EXTERNAL_DIFF",
 ];
 
-/// `git clone --depth 1 <url> <dest/repo>` using the git CLI. Args are passed
-/// separately (no shell) so a malicious source can't inject commands. The target
-/// host is SSRF-screened before the clone so a `git@`/`ssh://` or non-github/gitlab
-/// https source can't be aimed at an internal address. Command-execution env vars
-/// are stripped and credential prompts disabled so the clone can't be coerced into
-/// running a helper or hanging on input. Returns the checkout directory.
+/// Legacy child-process clone seam. It is retained for source compatibility but
+/// fails closed before spawning `git`; remote child resolution cannot be pinned by
+/// Core's SSRF boundary.
 pub(crate) async fn git_clone(url: &str, dest: &Path) -> Result<PathBuf> {
     guard_clone_url(url).await?;
     let target = dest.join("repo");
@@ -586,24 +593,59 @@ fn copy_dir_guarded(src: &Path, dest: &Path) -> Result<()> {
 /// note is logged; this keeps the single-id return contract simple. Callers can
 /// invoke per-skill if they need finer control.
 pub async fn install_from_source(client: &reqwest::Client, source: &str) -> Result<InstallResult> {
+    install_from_source_named(client, source, None).await
+}
+
+/// Install a repository-root skill with a caller-supplied stable directory name.
+/// Pack member ids are stable (`owner/repo/repo`), while a tarball's extracted
+/// root is often named `<repo>-HEAD`; the explicit hint keeps the filesystem
+/// slug aligned with the pack catalog and its origin ledger.
+pub(crate) async fn install_from_source_named(
+    client: &reqwest::Client,
+    source: &str,
+    root_name: Option<&str>,
+) -> Result<InstallResult> {
     // Form 7: a direct `SKILL.md` over HTTP(S). There is no repo to clone — the
     // URL *is* the skill — so this is handled before `parse_source`, which would
-    // otherwise treat it as a generic git remote and fail. Goes through the same
-    // `guard_remote_url` SSRF screen as every other remote form; skipping it here
-    // would make this the one fetch that could be pointed at the loopback
-    // interface.
+    // otherwise treat it as a generic git remote and fail. It uses the same
+    // pinned Core client as archive sources; skipping it would make this the one
+    // fetch that could be pointed at the loopback interface.
     if is_direct_skill_md_url(source) {
         let url = source.trim();
-        guard_remote_url(url).await?;
         tracing::info!(source = %url, "installing skill from a direct SKILL.md URL");
-        let resp = super::get(client, url)
+        let (guarded_client, parsed_url) = crate::server::guarded_client(url)
+            .await
+            .map_err(|error| anyhow::anyhow!("skill source rejected: {error}"))?;
+        let resp = guarded_client
+            .get(parsed_url.as_str())
             .send()
             .await
-            .with_context(|| format!("requesting SKILL.md ({url})"))?;
+            .with_context(|| {
+                format!(
+                    "requesting SKILL.md ({})",
+                    crate::server::redact_url_for_display(url)
+                )
+            })?;
         if !resp.status().is_success() {
             anyhow::bail!("SKILL.md URL returned HTTP {}", resp.status());
         }
-        let markdown = resp.text().await.context("reading SKILL.md body")?;
+        if resp
+            .content_length()
+            .is_some_and(|length| length > MAX_DIRECT_SKILL_MD_BYTES as u64)
+        {
+            anyhow::bail!("SKILL.md response exceeds the {MAX_DIRECT_SKILL_MD_BYTES}-byte cap");
+        }
+        let mut bytes = Vec::new();
+        let mut resp = resp;
+        while let Some(chunk) = resp.chunk().await.context("reading SKILL.md body")? {
+            if bytes.len().saturating_add(chunk.len()) > MAX_DIRECT_SKILL_MD_BYTES {
+                anyhow::bail!(
+                    "SKILL.md response exceeds the {MAX_DIRECT_SKILL_MD_BYTES}-byte cap"
+                );
+            }
+            bytes.extend_from_slice(&chunk);
+        }
+        let markdown = String::from_utf8(bytes).context("SKILL.md body is not UTF-8")?;
         return install_skill_md_text(&skill_name_from_md_url(url), &markdown).await;
     }
 
@@ -616,7 +658,15 @@ pub async fn install_from_source(client: &reqwest::Client, source: &str) -> Resu
     }
 
     let workdir = temp_workdir()?;
-    let result = install_remote(client, &parsed, &workdir).await;
+    let root_name_hint = root_name.map(|name| format!("{name}-HEAD"));
+    let result = install_remote(
+        client,
+        &parsed,
+        &workdir,
+        root_name,
+        root_name_hint.as_deref(),
+    )
+    .await;
     // Best-effort cleanup of the temp working tree regardless of outcome.
     let _ = std::fs::remove_dir_all(&workdir);
     result
@@ -649,23 +699,22 @@ pub fn install_from_tarball_bytes(bytes: &[u8]) -> Result<InstallResult> {
     result
 }
 
-/// Fetch a remote source into `workdir` then install. Tarball is tried first; a
-/// clone is the fallback for tarball-failure or SSH/other-host strategies.
+/// Fetch a remote source into `workdir` then install. Only HTTPS archive sources
+/// are supported so the fetch can remain inside Core's pinned egress boundary.
 async fn install_remote(
     client: &reqwest::Client,
     parsed: &ParsedSource,
     workdir: &Path,
+    exact_root_name: Option<&str>,
+    root_name_hint: Option<&str>,
 ) -> Result<InstallResult> {
     let (repo_root, subdir) = match &parsed.strategy {
-        FetchStrategy::Tarball { url, subdir } => match fetch_tarball(client, url, workdir).await {
-            Ok(root) => (root, subdir.clone()),
-            Err(tar_err) => {
-                // Fall back to a git clone of the same repo (derive a clone URL).
-                tracing::warn!("tarball fetch failed ({tar_err}); falling back to git clone");
-                let clone_url = clone_url_for(parsed)?;
-                (git_clone(&clone_url, workdir).await?, subdir.clone())
-            }
-        },
+        FetchStrategy::Tarball { url, subdir } => {
+            let root = fetch_tarball(client, url, workdir)
+                .await
+                .context("fetching skill source tarball")?;
+            (root, subdir.clone())
+        }
         FetchStrategy::GitClone { url, subdir } => (git_clone(url, workdir).await?, subdir.clone()),
         FetchStrategy::LocalPath { .. } => unreachable!("local handled in install_from_source"),
     };
@@ -673,7 +722,13 @@ async fn install_remote(
     // Scope to the requested subdir, if any. A tarball expands to a single
     // `<repo>-<ref>/` top dir, so resolve the subdir beneath that.
     let search_root = resolve_subdir(&repo_root, subdir.as_deref())?;
-    install_from_dir(&search_root, repo_root_name(&repo_root))
+    install_from_dir_named(
+        &search_root,
+        root_name_hint
+            .map(ToOwned::to_owned)
+            .or_else(|| repo_root_name(&repo_root)),
+        exact_root_name,
+    )
 }
 
 /// Derive a `git clone` URL from a parsed source (for the tarball→clone fallback).
@@ -759,6 +814,18 @@ pub(crate) fn install_from_dir(
     dir: &Path,
     root_name_hint: Option<String>,
 ) -> Result<InstallResult> {
+    install_from_dir_named(dir, root_name_hint, None)
+}
+
+/// Install a source directory, optionally forcing the stable name for a skill
+/// that lives at the repository root. `root_name_hint` retains the historical
+/// tarball-name behavior; `exact_root_name` is for pack ids and never applies
+/// to nested skills.
+pub(crate) fn install_from_dir_named(
+    dir: &Path,
+    root_name_hint: Option<String>,
+    exact_root_name: Option<&str>,
+) -> Result<InstallResult> {
     let mut found = find_skills(dir);
     if found.is_empty() {
         anyhow::bail!("no SKILL.md found in source (looked for SKILL.md, skills/<name>/, skills/<category>/<name>/)");
@@ -773,15 +840,20 @@ pub(crate) fn install_from_dir(
 
     // If the skill dir is the search root itself, prefer the repo-name hint over
     // the raw `repo-ref` directory name.
-    let name = if skill.dir == dir {
-        root_name_hint
-            .as_deref()
-            .map(|n| sanitize_name(n.rsplit_once('-').map(|(a, _)| a).unwrap_or(n)))
-            .filter(|n| !n.is_empty())
-            .unwrap_or(skill.name)
-    } else {
-        skill.name
-    };
+    let name = exact_root_name
+        .map(sanitize_name)
+        .filter(|n| !n.is_empty())
+        .or_else(|| {
+            (skill.dir == dir)
+                .then(|| {
+                    root_name_hint
+                        .as_deref()
+                        .map(|n| sanitize_name(n.rsplit_once('-').map(|(a, _)| a).unwrap_or(n)))
+                        .filter(|n| !n.is_empty())
+                })
+                .flatten()
+        })
+        .unwrap_or(skill.name);
 
     let dest = ryu_skills::SkillRegistry::skills_dir().join(&name);
     // Replace any existing install of the same name so updates are clean.
@@ -1031,6 +1103,35 @@ mod tests {
         assert_eq!(sanitize_name("my-skill_v2.1"), "my-skill_v2.1");
         assert_eq!(sanitize_name("weird name!@#"), "weird-name");
         assert_eq!(sanitize_name("---"), "skill");
+    }
+
+    #[test]
+    fn exact_root_name_keeps_a_pack_slug_stable() {
+        let _env = ryu_skills::SKILLS_ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let root = std::env::temp_dir().join(format!("ryu-root-name-src-{}", uniq()));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(
+            root.join("SKILL.md"),
+            "---\nname: Unlazy\ndescription: stable\n---\nInstructions.",
+        )
+        .unwrap();
+        let skills_home = std::env::temp_dir().join(format!("ryu-root-name-dest-{}", uniq()));
+        let active_file = skills_home.join("active.json");
+        std::env::set_var("RYU_SKILLS_DIR", &skills_home);
+        std::env::set_var("RYU_SKILLS_ACTIVE_FILE", &active_file);
+
+        let result =
+            install_from_dir_named(&root, Some("unlazy-HEAD".to_owned()), Some("unlazy")).unwrap();
+
+        std::env::remove_var("RYU_SKILLS_DIR");
+        std::env::remove_var("RYU_SKILLS_ACTIVE_FILE");
+        assert_eq!(result.slug, "unlazy");
+        assert!(skills_home.join("unlazy/SKILL.md").is_file());
+        assert!(!skills_home.join("unlazy-HEAD").exists());
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&skills_home);
     }
 
     #[test]

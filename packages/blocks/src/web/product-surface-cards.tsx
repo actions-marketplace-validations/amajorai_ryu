@@ -9,9 +9,9 @@ const SURFACES = [
 		id: "apps",
 		Visual: MarketplaceVisual,
 		label: "Ryu Apps",
-		href: "/marketplace",
+		href: "/products/apps",
 		description:
-			"Applications for research, documents, and other business workflows.",
+			"Official app surfaces for publishing, monitoring, production, and knowledge work.",
 	},
 	{
 		id: "bot",

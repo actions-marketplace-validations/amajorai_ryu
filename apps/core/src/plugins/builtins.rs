@@ -510,7 +510,7 @@ pub const WEBHOOKS_PLUGIN_ID: &str = "@ryu/webhooks";
 /// `webhooks` this is NOT a route gate: `/api/activity` (+ its `/stream`) is
 /// read-only and stays ungated on the main router (the desktop host calls it
 /// directly, monitors pattern). The manifest exists only to seed the companion's UI
-/// bundle + `activity:read` grant. Pre-installed so the companion is present on every
+/// bundle + `activity:read`/`activity:run` grants. Pre-installed so the companion is present on every
 /// fresh install (the page it replaced was always-on).
 pub const ACTIVITY_PLUGIN_ID: &str = "@ryu/activity";
 
@@ -761,6 +761,20 @@ pub const CORE_PLUGINS: &[&str] = &[
     // Mail (Agent Inboxes) — manifest-driven app; its `ryu-mail` sidecar is spawned
     // by the generic loader (see MAIL_PLUGIN_ID).
     MAIL_PLUGIN_ID,
+    // Security owns a local-first security workbench and its bounded static
+    // analysis sidecar. It remains opt-in; Core tier lets the generic lifecycle
+    // spawn the reviewed first-party process without adding an app-specific Core
+    // route, transport, or credential boundary.
+    "@ryu/security",
+
+    // Video Studio is a compiled-in first-party sidecar app. It remains opt-in
+    // (absent from CORE_PREINSTALLED), but Core tier is required for its managed
+    // process to pass the reserved `sidecar:process` gate.
+    "@ryu/video-studio",
+    // Checks owns both a local control-plane sidecar and MCP-backed test tools.
+    // It remains opt-in, but Core tier is required for the compiled-in app to
+    // pass the reserved sidecar/MCP process gates.
+    "@ryu/checks",
     // Payments (MPP) — its local `ryu-mpp` sidecar also needs the Core tier so the
     // generic loader can spawn the manifest-declared process and its reviewed host
     // capabilities can reach Core-owned encrypted custody. It remains opt-in and
@@ -1878,6 +1892,24 @@ mod tests {
     }
 
     #[test]
+    fn blueprint_has_reviewed_core_http_authority_but_remains_opt_in() {
+        assert!(CORE_PLUGINS.contains(&BLUEPRINT_PLUGIN_ID));
+        assert!(!CORE_PREINSTALLED.contains(&BLUEPRINT_PLUGIN_ID));
+        let manifest = crate::plugin_manifest::PluginManifestLoader::load_builtins()
+            .into_iter()
+            .find(|manifest| manifest.id == BLUEPRINT_PLUGIN_ID)
+            .expect("blueprint manifest is compiled in");
+        assert_eq!(
+            tier_for_manifest(&manifest),
+            crate::plugin_manifest::PluginTier::Core
+        );
+        manifest
+            .validate_declarative_http_policy(true)
+            .expect("Blueprint's reviewed Core routes are allowed");
+        assert!(manifest.validate_declarative_http_policy(false).is_err());
+    }
+
+    #[test]
     fn memory_is_preinstalled_for_fresh_installs() {
         assert!(CORE_PLUGINS.contains(&MEMORY_PLUGIN_ID));
         assert!(CORE_PREINSTALLED.contains(&MEMORY_PLUGIN_ID));
@@ -2073,6 +2105,28 @@ mod tests {
             .push("preferences:write".to_owned());
         assert!(!is_exact_compiled_manifest(&changed));
         assert!(is_exact_compiled_manifest(&original));
+    }
+
+    #[test]
+    fn clips_bundle_round_trip_retains_core_tier() {
+        // Bundle JSON may use the legacy bare `shadow` dependency id. The
+        // production loader canonicalizes that edge before activation; exercise
+        // the loaded representation here because that is what update paths must
+        // feed back into the runtime trust decision.
+        let manifest = crate::plugin_manifest::PluginManifestLoader::load_builtins()
+            .into_iter()
+            .find(|candidate| candidate.id == CLIPS_PLUGIN_ID)
+            .expect("compiled Clips manifest");
+        let round_trip: crate::plugin_manifest::PluginManifest =
+            serde_json::from_str(&serde_json::to_string(&manifest).expect("Clips serializes"))
+                .expect("serialized Clips manifest re-parses");
+
+        assert_eq!(manifest, round_trip);
+        assert_eq!(
+            tier_for_manifest(&round_trip),
+            crate::plugin_manifest::PluginTier::Core,
+            "a self-contained built-in bundle must not lose its reviewed sidecar tier"
+        );
     }
 
     #[test]

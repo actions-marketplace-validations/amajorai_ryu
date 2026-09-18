@@ -1858,6 +1858,9 @@ export interface AgentSettingsFormProps {
 	memoryWriteEnabled: boolean;
 	// Identity
 	name: string;
+	/** Injected: the traceable identity + activity ledger for this agent,
+	 *  rendered as its own tab beside run history. */
+	observabilityPanel?: ReactNode;
 	onAcpCommandChange?: (v: string) => void;
 	/** Open the Customize store on the Agents tab to install more engines. */
 	onAddMoreAgentProviders?: () => void;
@@ -1898,8 +1901,6 @@ export interface AgentSettingsFormProps {
 	onTriggerSlugChange?: (v: string) => void;
 	onWeeklyDayChange?: (v: string) => void;
 	onWeeklyTimeChange?: (v: string) => void;
-	/** Injected: the traceable identity + activity ledger for this agent,
-	 *  rendered as its own tab beside run history. */
 	passportPanel?: ReactNode;
 
 	// Persona
@@ -1956,6 +1957,8 @@ export interface AgentSettingsFormProps {
 	triggerError?: string | null;
 	triggerSlug: string;
 	triggerSubs: TriggerSubRow[];
+	/** Injected: complete agent-definition history with diff and restore. */
+	versionHistoryPanel?: ReactNode;
 	weeklyDay: string;
 	weeklyTime: string;
 }
@@ -2257,9 +2260,11 @@ export function AgentSettingsForm(props: AgentSettingsFormProps) {
 		historyPanel,
 		healthPanel,
 		healthBadge,
+		observabilityPanel,
 		passportPanel,
 		routinesPanel,
 		systemPrompt,
+		versionHistoryPanel,
 		onOpenPromptStudio,
 		rules,
 		onRuleChange,
@@ -3331,6 +3336,13 @@ export function AgentSettingsForm(props: AgentSettingsFormProps) {
 			label: "Agent passport",
 		});
 	}
+	if (observabilityPanel) {
+		activityViews.push({
+			content: observabilityPanel,
+			id: "observability",
+			label: "Observability",
+		});
+	}
 	if (evalsPanel) {
 		activityViews.push({
 			content: evalsPanel,
@@ -3375,7 +3387,7 @@ export function AgentSettingsForm(props: AgentSettingsFormProps) {
 			</Tabs>
 		) : null;
 
-	// Nine groups, each answering one question a person actually has, with the
+	// Editor groups each answer one question a person actually has, with the
 	// answer spelled out under the strip. This replaces an eleven-pill row whose
 	// labels (Behavior · Health · Model · Tools & knowledge · Connections · Integrations ·
 	// Triggers · Activity · Advanced) gave no hint which
@@ -3457,6 +3469,16 @@ export function AgentSettingsForm(props: AgentSettingsFormProps) {
 						hint: "Write and version the full instructions with the editor.",
 						id: "prompt-studio",
 						label: "Prompt Studio",
+					},
+				]
+			: []),
+		...(versionHistoryPanel
+			? [
+					{
+						content: versionHistoryPanel,
+						hint: "Compare and restore complete saved agent configurations for regression testing.",
+						id: "versions",
+						label: "Versions",
 					},
 				]
 			: []),

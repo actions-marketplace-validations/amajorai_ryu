@@ -1,6 +1,10 @@
-use axum::{extract::State, http::StatusCode, Json};
+use axum::{extract::State, http::{HeaderMap, StatusCode}, Json};
 use serde_json::{json, Value};
 
+use crate::{
+    error::GatewayError,
+    pipeline::{authenticate, AuthInputs},
+};
 use crate::state::SharedState;
 
 /// GET /v1/tools/composio
@@ -13,7 +17,14 @@ use crate::state::SharedState;
 /// When Composio is disabled or no actions are configured the response is
 /// an empty list (not a 404) so the caller can distinguish "no actions
 /// allowed" from "endpoint missing."
-pub async fn list_composio_tools(State(state): State<SharedState>) -> (StatusCode, Json<Value>) {
+pub async fn list_composio_tools(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+) -> Result<(StatusCode, Json<Value>), GatewayError> {
+    let raw_key = headers
+        .get("authorization")
+        .and_then(|value| value.to_str().ok());
+    authenticate(&state, AuthInputs::with_key(raw_key)).await?;
     let actions: Vec<Value> = match &state.composio {
         Some(composio) => composio
             .actions()
@@ -39,7 +50,7 @@ pub async fn list_composio_tools(State(state): State<SharedState>) -> (StatusCod
         "composio_enabled": state.composio.is_some(),
     });
 
-    (StatusCode::OK, Json(body))
+    Ok((StatusCode::OK, Json(body)))
 }
 
 #[cfg(test)]
@@ -49,9 +60,17 @@ mod tests {
     use std::sync::Arc;
 
     #[tokio::test]
-    async fn empty_list_when_composio_disabled_not_a_404() {
-        let state = Arc::new(AppState::new_for_test_default());
-        let (status, Json(body)) = list_composio_tools(State(state)).await;
+    async fn empty_list_when_composio_disabled_requires_gateway_auth() {
+        let mut state = AppState::new_for_test_default();
+        state
+            .auth
+            .write()
+            .expect("test auth lock")
+            .require_auth = false;
+        let state = Arc::new(state);
+        let (status, Json(body)) = list_composio_tools(State(state), HeaderMap::new())
+            .await
+            .expect("no-auth test gateway should allow the request");
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body["object"], "list");
         assert_eq!(body["composio_enabled"], false);

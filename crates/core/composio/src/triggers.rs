@@ -52,6 +52,68 @@ pub struct TriggerSubscription {
     pub created_at: String,
 }
 
+/// Identity carried by Connect's verified V3 trigger envelope. This is routing
+/// metadata, not permission to execute a Core target: the caller must also
+/// authorize the selected agent/workflow for the verified Core user.
+pub struct ConnectEventIdentity<'a> {
+    pub trigger_id: &'a str,
+    pub trigger_slug: &'a str,
+    pub connected_account_id: &'a str,
+    pub provider_user_id: &'a str,
+    pub auth_config_id: &'a str,
+}
+
+pub enum ConnectTarget<'a> {
+    Agent(&'a str),
+    Workflow(&'a str),
+}
+
+fn subscription_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TriggerSubscription> {
+    Ok(TriggerSubscription {
+        id: row.get(0)?,
+        agent_id: row.get(1)?,
+        toolkit: row.get(2)?,
+        trigger_slug: row.get(3)?,
+        connected_account_id: row.get(4)?,
+        composio_trigger_id: row.get(5)?,
+        target_kind: row.get(6)?,
+        workflow_id: row.get(7)?,
+        created_at: row.get(8)?,
+    })
+}
+
+pub fn connect_event_identity(payload: &Value) -> Result<ConnectEventIdentity<'_>> {
+    if payload.get("type").and_then(Value::as_str) != Some("composio.trigger.message")
+        || payload.get("data").is_none()
+    {
+        anyhow::bail!("Unsupported Connect trigger event");
+    }
+    let metadata = payload
+        .get("metadata")
+        .and_then(Value::as_object)
+        .context("Missing Connect event metadata")?;
+    let field = |name| {
+        metadata
+            .get(name)
+            .and_then(Value::as_str)
+            .filter(|value| {
+                !value.is_empty()
+                    && value.len() <= 256
+                    && !value
+                        .chars()
+                        .any(|character| character.is_whitespace() || character.is_control())
+            })
+            .context("Invalid Connect event identity")
+    };
+    Ok(ConnectEventIdentity {
+        trigger_id: field("trigger_id")?,
+        trigger_slug: field("trigger_slug")?,
+        connected_account_id: field("connected_account_id")?,
+        provider_user_id: field("user_id")?,
+        auth_config_id: field("auth_config_id")?,
+    })
+}
+
 /// SQLite-backed subscription store. Cheap to clone (`Arc` inside).
 #[derive(Clone)]
 pub struct ComposioTriggerStore {
@@ -339,6 +401,32 @@ impl ComposioTriggerStore {
         if !existing.contains("workflow_id") {
             conn.execute("ALTER TABLE subscriptions ADD COLUMN workflow_id TEXT", [])?;
         }
+        for (name, statement) in [
+            (
+                "owner_user_id",
+                "ALTER TABLE subscriptions ADD COLUMN owner_user_id TEXT NOT NULL DEFAULT ''",
+            ),
+            (
+                "provider_user_id",
+                "ALTER TABLE subscriptions ADD COLUMN provider_user_id TEXT NOT NULL DEFAULT ''",
+            ),
+            (
+                "auth_config_id",
+                "ALTER TABLE subscriptions ADD COLUMN auth_config_id TEXT NOT NULL DEFAULT ''",
+            ),
+        ] {
+            if !existing.contains(name) {
+                conn.execute(statement, [])?;
+            }
+        }
+        if !existing.contains("removed_at") {
+            conn.execute("ALTER TABLE subscriptions ADD COLUMN removed_at TEXT", [])?;
+        }
+        let index_sql: Option<String> = conn.query_row("SELECT sql FROM sqlite_master WHERE type='index' AND name='connect_target_binding'", [], |row| row.get(0)).optional()?;
+        if index_sql.is_some_and(|sql| !sql.contains("removed_at IS NULL")) {
+            conn.execute("DROP INDEX connect_target_binding", [])?;
+        }
+        conn.execute_batch("CREATE UNIQUE INDEX IF NOT EXISTS connect_target_binding ON subscriptions(owner_user_id,composio_trigger_id,target_kind,agent_id,coalesce(workflow_id,'')) WHERE owner_user_id<>'' AND removed_at IS NULL")?;
         Ok(())
     }
 
@@ -348,6 +436,9 @@ impl ComposioTriggerStore {
     /// already enabled. Returns the signing secret so Core can place it in the
     /// encrypted plugin-secret store before any trigger instance is created.
     pub async fn reconcile_webhook_subscription(&self, webhook_url: &str) -> Result<String> {
+        if crate::service::is_configured() {
+            return Err(anyhow!("Connect owns provider webhook subscriptions"));
+        }
         let key = crate::auth::key()
             .ok_or_else(|| anyhow!("Composio API key not set (Settings → Integrations)"))?;
         let collection_url = format!("{}/webhook_subscriptions", crate::catalog::base_url());
@@ -543,6 +634,9 @@ impl ComposioTriggerStore {
         connected_account_id: &str,
         config: Value,
     ) -> Result<TriggerSubscription> {
+        if crate::service::is_configured() {
+            return Err(anyhow!("Connect owns provider triggers; use its management API and bind the Core target"));
+        }
         let key = crate::auth::key()
             .ok_or_else(|| anyhow!("Composio API key not set (Settings → Integrations)"))?;
         let url = format!(
@@ -617,22 +711,10 @@ impl ComposioTriggerStore {
         let mut stmt = conn.prepare(
             "SELECT id, agent_id, toolkit, trigger_slug, connected_account_id,
                     composio_trigger_id, target_kind, workflow_id, created_at
-             FROM subscriptions ORDER BY created_at DESC",
+             FROM subscriptions WHERE removed_at IS NULL ORDER BY created_at DESC",
         )?;
         let rows = stmt
-            .query_map([], |row| {
-                Ok(TriggerSubscription {
-                    id: row.get(0)?,
-                    agent_id: row.get(1)?,
-                    toolkit: row.get(2)?,
-                    trigger_slug: row.get(3)?,
-                    connected_account_id: row.get(4)?,
-                    composio_trigger_id: row.get(5)?,
-                    target_kind: row.get(6)?,
-                    workflow_id: row.get(7)?,
-                    created_at: row.get(8)?,
-                })
-            })?
+            .query_map([], subscription_row)?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(rows)
     }
@@ -642,6 +724,9 @@ impl ComposioTriggerStore {
     /// caller: a missing key, an absent instance id, or an API error are logged
     /// and swallowed (the local row is still deleted by the caller).
     async fn remote_disable(&self, composio_trigger_id: Option<&str>) {
+        if crate::service::is_configured() {
+            return;
+        }
         let Some(trigger_id) = composio_trigger_id else {
             return;
         };
@@ -677,15 +762,21 @@ impl ComposioTriggerStore {
     /// the remote trigger instance so it stops firing into the void.
     pub async fn delete(&self, id: &str) -> Result<bool> {
         // Resolve the remote instance id first (before we drop the row).
-        let trigger_id: Option<String> = {
+        let row: Option<(Option<String>, String)> = {
             let conn = self.conn.lock().await;
             conn.query_row(
-                "SELECT composio_trigger_id FROM subscriptions WHERE id = ?1",
+                "SELECT composio_trigger_id,owner_user_id FROM subscriptions WHERE id = ?1",
                 params![id],
-                |row| row.get::<_, Option<String>>(0),
+                |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .optional()?
-            .flatten()
+        };
+        let trigger_id = match row {
+            Some((_, owner)) if !owner.is_empty() => {
+                anyhow::bail!("Connect-owned target requires scoped removal")
+            }
+            Some((trigger_id, _)) => trigger_id,
+            None => None,
         };
         self.remote_disable(trigger_id.as_deref()).await;
         let conn = self.conn.lock().await;
@@ -706,32 +797,182 @@ impl ComposioTriggerStore {
     }
 
     /// Delete every workflow-target subscription for a workflow. Returns the
-    /// number of rows removed. Used by reconcile + workflow delete. Best-effort
+    /// number of rows removed. Used by explicit workflow deletion. Best-effort
     /// remote teardown: each removed instance is disabled on Composio first so it
     /// stops firing into the void (an orphaned remote trigger whose local mapping
     /// is gone).
     pub async fn delete_for_workflow(&self, workflow_id: &str) -> Result<usize> {
+        let embedded = self.delete_embedded_for_workflow(workflow_id).await?;
+        let conn = self.conn.lock().await;
+        let removed = conn.execute("UPDATE subscriptions SET removed_at=? WHERE target_kind='workflow' AND workflow_id=? AND owner_user_id<>'' AND removed_at IS NULL", params![chrono::Utc::now().to_rfc3339(),workflow_id])?;
+        Ok(embedded + removed)
+    }
+
+    /// Workflow definition reconciliation owns only its legacy embedded rows.
+    /// Connect bindings have a separate lifecycle and survive ordinary saves.
+    pub async fn delete_embedded_for_workflow(&self, workflow_id: &str) -> Result<usize> {
         // Disable the remote instances before dropping the local rows.
-        for sub in self.list_for_workflow(workflow_id).await {
+        for sub in self
+            .embedded_subscriptions()
+            .await?
+            .into_iter()
+            .filter(|row| {
+                row.target_kind == "workflow" && row.workflow_id.as_deref() == Some(workflow_id)
+            })
+        {
             self.remote_disable(sub.composio_trigger_id.as_deref())
                 .await;
         }
         let conn = self.conn.lock().await;
         let n = conn.execute(
-            "DELETE FROM subscriptions WHERE target_kind = 'workflow' AND workflow_id = ?1",
+            "DELETE FROM subscriptions WHERE target_kind = 'workflow' AND workflow_id = ?1 AND owner_user_id=''",
             params![workflow_id],
         )?;
         Ok(n)
     }
 
-    /// Subscriptions matching a fired event, by Composio trigger id (preferred) or
-    /// trigger slug (fallback).
+    /// Exact candidate lookup for Connect inbox consumption. Unlike legacy
+    /// webhook matching, a shared slug never substitutes for another trigger or
+    /// account. Lookup failures propagate; they are not an empty-success result.
+    pub async fn connect_targets(
+        &self,
+        owner_user_id: &str,
+        payload: &Value,
+    ) -> Result<Vec<TriggerSubscription>> {
+        if owner_user_id.is_empty() {
+            anyhow::bail!("Connect target owner is required");
+        }
+        let identity = connect_event_identity(payload)?;
+        let conn = self.conn.lock().await;
+        let mut statement = conn.prepare("SELECT id,agent_id,toolkit,trigger_slug,connected_account_id,composio_trigger_id,target_kind,workflow_id,created_at FROM subscriptions WHERE owner_user_id=? AND provider_user_id=? AND auth_config_id=? AND composio_trigger_id=? AND connected_account_id=? AND trigger_slug=? AND removed_at IS NULL ORDER BY created_at,id")?;
+        let rows = statement
+            .query_map(
+                params![
+                    owner_user_id,
+                    identity.provider_user_id,
+                    identity.auth_config_id,
+                    identity.trigger_id,
+                    identity.connected_account_id,
+                    identity.trigger_slug
+                ],
+                subscription_row,
+            )?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    /// Persist only a Core orchestration target after the caller has authorized
+    /// it and obtained the provider identity through Connect's management API.
+    /// No provider credential or provider mutation belongs in this method.
+    pub async fn bind_connect_target(
+        &self,
+        owner_user_id: &str,
+        identity: &ConnectEventIdentity<'_>,
+        toolkit: &str,
+        target: ConnectTarget<'_>,
+    ) -> Result<TriggerSubscription> {
+        let (kind, agent, workflow) = match target {
+            ConnectTarget::Agent(id) => ("agent", id, None),
+            ConnectTarget::Workflow(id) => ("workflow", "", Some(id)),
+        };
+        for value in [
+            owner_user_id,
+            identity.trigger_id,
+            identity.trigger_slug,
+            identity.connected_account_id,
+            identity.provider_user_id,
+            identity.auth_config_id,
+            toolkit,
+            workflow.unwrap_or(agent),
+        ] {
+            if value.is_empty()
+                || value.len() > 256
+                || value.chars().any(|c| c.is_whitespace() || c.is_control())
+            {
+                anyhow::bail!("Invalid Connect target binding");
+            }
+        }
+        let mut conn = self.conn.lock().await;
+        let transaction =
+            conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let previous: Option<(String,String)> = transaction.query_row("SELECT id,created_at FROM subscriptions WHERE owner_user_id=? AND composio_trigger_id=? AND target_kind=? AND agent_id=? AND coalesce(workflow_id,'')=? AND removed_at IS NULL", params![owner_user_id,identity.trigger_id,kind,agent,workflow.unwrap_or("")], |row| Ok((row.get(0)?,row.get(1)?))).optional()?;
+        let (id, created_at) = previous.unwrap_or_else(|| {
+            (
+                format!("ctrig_{}", uuid::Uuid::new_v4().simple()),
+                chrono::Utc::now().to_rfc3339(),
+            )
+        });
+        transaction.execute("INSERT INTO subscriptions(id,agent_id,toolkit,trigger_slug,connected_account_id,composio_trigger_id,target_kind,workflow_id,created_at,owner_user_id,provider_user_id,auth_config_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET toolkit=excluded.toolkit,trigger_slug=excluded.trigger_slug,connected_account_id=excluded.connected_account_id,provider_user_id=excluded.provider_user_id,auth_config_id=excluded.auth_config_id", params![id,agent,toolkit,identity.trigger_slug,identity.connected_account_id,identity.trigger_id,kind,workflow,created_at,owner_user_id,identity.provider_user_id,identity.auth_config_id])?;
+        transaction.commit()?;
+        Ok(TriggerSubscription {
+            id,
+            agent_id: agent.to_owned(),
+            toolkit: toolkit.to_owned(),
+            trigger_slug: identity.trigger_slug.to_owned(),
+            connected_account_id: identity.connected_account_id.to_owned(),
+            composio_trigger_id: Some(identity.trigger_id.to_owned()),
+            target_kind: kind.to_owned(),
+            workflow_id: workflow.map(str::to_owned),
+            created_at,
+        })
+    }
+
+    /// Remove only the caller's Core target mapping. Provider instance teardown
+    /// is a separate Connect operation, never a local Composio-key request.
+    pub async fn remove_connect_target(&self, owner_user_id: &str, id: &str) -> Result<bool> {
+        if owner_user_id.is_empty() {
+            anyhow::bail!("Connect target owner is required");
+        }
+        let conn = self.conn.lock().await;
+        Ok(conn.execute(
+            "UPDATE subscriptions SET removed_at=? WHERE id=? AND owner_user_id=? AND removed_at IS NULL",
+            params![chrono::Utc::now().to_rfc3339(), id, owner_user_id],
+        )? == 1)
+    }
+
+    pub async fn list_connect_targets(
+        &self,
+        owner_user_id: &str,
+    ) -> Result<Vec<TriggerSubscription>> {
+        if owner_user_id.is_empty() {
+            anyhow::bail!("Connect target owner is required");
+        }
+        let conn = self.conn.lock().await;
+        let mut statement = conn.prepare("SELECT id,agent_id,toolkit,trigger_slug,connected_account_id,composio_trigger_id,target_kind,workflow_id,created_at FROM subscriptions WHERE owner_user_id=? AND removed_at IS NULL ORDER BY created_at DESC,id")?;
+        let rows = statement
+            .query_map(params![owner_user_id], subscription_row)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    async fn embedded_subscriptions(&self) -> Result<Vec<TriggerSubscription>> {
+        let conn = self.conn.lock().await;
+        let mut statement = conn.prepare("SELECT id,agent_id,toolkit,trigger_slug,connected_account_id,composio_trigger_id,target_kind,workflow_id,created_at FROM subscriptions WHERE owner_user_id='' ORDER BY created_at DESC")?;
+        let rows = statement
+            .query_map([], subscription_row)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    pub async fn connect_event_was_unbound(
+        &self,
+        owner_user_id: &str,
+        payload: &Value,
+    ) -> Result<bool> {
+        if owner_user_id.is_empty() {
+            anyhow::bail!("Connect target owner is required");
+        }
+        let identity = connect_event_identity(payload)?;
+        let conn = self.conn.lock().await;
+        Ok(conn.query_row("SELECT 1 FROM subscriptions WHERE owner_user_id=? AND provider_user_id=? AND auth_config_id=? AND composio_trigger_id=? AND connected_account_id=? AND trigger_slug=? AND removed_at IS NOT NULL LIMIT 1", params![owner_user_id,identity.provider_user_id,identity.auth_config_id,identity.trigger_id,identity.connected_account_id,identity.trigger_slug], |_| Ok(())).optional()?.is_some())
+    }
+
     async fn matching(
         &self,
         trigger_id: Option<&str>,
         slug: Option<&str>,
     ) -> Vec<TriggerSubscription> {
-        let all = self.list().await.unwrap_or_default();
+        let all = self.embedded_subscriptions().await.unwrap_or_default();
         all.into_iter()
             .filter(|s| {
                 trigger_id.is_some_and(|t| s.composio_trigger_id.as_deref() == Some(t))
@@ -746,6 +987,10 @@ impl ComposioTriggerStore {
     /// raw event payload injected as `trigger` state. Returns how many runs were
     /// started.
     pub async fn handle_webhook(&self, payload: &Value) -> usize {
+        if crate::service::is_configured() {
+            tracing::warn!("Legacy Core Composio delivery ignored: Connect owns ingress");
+            return 0;
+        }
         // V3 (the current default) nests trigger identity under `metadata`.
         // Retain the flat aliases as a fallback for existing V1/V2 subscriptions.
         let metadata = payload.get("metadata").and_then(Value::as_object);
@@ -845,6 +1090,174 @@ fn required_webhook_secret(secret: Option<String>) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn workflow_reconcile_preserves_separately_owned_connect_binding() {
+        let (store, _dir) = temp_store().await;
+        let payload = json!({"type":"composio.trigger.message","metadata":{"trigger_id":"ti_a","trigger_slug":"SLACK_MSG","connected_account_id":"ca_a","user_id":"provider-a","auth_config_id":"ac_a"},"data":{}});
+        let identity = connect_event_identity(&payload).unwrap();
+        let binding = store.bind_connect_target("owner-a", &identity, "slack", ConnectTarget::Workflow("workflow-a")).await.unwrap();
+        store.conn.lock().await.execute("INSERT INTO subscriptions(id,agent_id,toolkit,trigger_slug,connected_account_id,target_kind,workflow_id,created_at) VALUES('legacy-workflow','','slack','SLACK_MSG','ca_a','workflow','workflow-a','original')", []).unwrap();
+        assert_eq!(store.delete_embedded_for_workflow("workflow-a").await.unwrap(), 1);
+        assert_eq!(store.connect_targets("owner-a", &payload).await.unwrap()[0].id, binding.id);
+        assert!(!store.connect_event_was_unbound("owner-a", &payload).await.unwrap());
+        assert_eq!(store.delete_for_workflow("workflow-a").await.unwrap(), 1);
+        assert!(store.connect_targets("owner-a", &payload).await.unwrap().is_empty());
+        assert!(store.connect_event_was_unbound("owner-a", &payload).await.unwrap());
+    }
+
+    #[test]
+    fn connect_events_require_complete_identity() {
+        let payload = json!({"type":"composio.trigger.message","metadata":{"trigger_id":"ti_a","trigger_slug":"SLACK_MSG","connected_account_id":"ca_a","user_id":"provider-a","auth_config_id":"ac_a"},"data":{"text":"fixture"}});
+        let identity = connect_event_identity(&payload).unwrap();
+        assert_eq!(identity.provider_user_id, "provider-a");
+        assert_eq!(identity.auth_config_id, "ac_a");
+        for key in [
+            "trigger_id",
+            "trigger_slug",
+            "connected_account_id",
+            "user_id",
+            "auth_config_id",
+        ] {
+            let mut missing = payload.clone();
+            missing["metadata"].as_object_mut().unwrap().remove(key);
+            assert!(connect_event_identity(&missing).is_err());
+        }
+        assert!(connect_event_identity(&json!({"trigger_slug":"SLACK_MSG"})).is_err());
+    }
+
+    #[tokio::test]
+    async fn connect_target_store_preserves_owner_binding_and_excludes_legacy_rows() {
+        let (store, dir) = temp_store().await;
+        let payload = json!({"type":"composio.trigger.message","metadata":{"trigger_id":"ti_a","trigger_slug":"SLACK_MSG","connected_account_id":"ca_a","user_id":"provider-a","auth_config_id":"ac_a"},"data":{}});
+        let identity = connect_event_identity(&payload).unwrap();
+        store.conn.lock().await.execute("INSERT INTO subscriptions(id,agent_id,toolkit,trigger_slug,connected_account_id,composio_trigger_id,created_at) VALUES('legacy','legacy-agent','slack','SLACK_MSG','ca_a','ti_a','original')", []).unwrap();
+        assert!(store
+            .connect_targets("local", &payload)
+            .await
+            .unwrap()
+            .is_empty());
+        let a = store
+            .bind_connect_target(
+                "owner-a",
+                &identity,
+                "slack",
+                ConnectTarget::Agent("agent-a"),
+            )
+            .await
+            .unwrap();
+        let again = store
+            .bind_connect_target(
+                "owner-a",
+                &identity,
+                "slack",
+                ConnectTarget::Agent("agent-a"),
+            )
+            .await
+            .unwrap();
+        assert_eq!(a.id, again.id);
+        store
+            .bind_connect_target(
+                "owner-b",
+                &identity,
+                "slack",
+                ConnectTarget::Agent("agent-b"),
+            )
+            .await
+            .unwrap();
+        store
+            .bind_connect_target(
+                "owner-a",
+                &identity,
+                "slack",
+                ConnectTarget::Workflow("workflow-a"),
+            )
+            .await
+            .unwrap();
+        let owned = store.connect_targets("owner-a", &payload).await.unwrap();
+        assert_eq!(owned.len(), 2);
+        let legacy_matches = store.matching(Some("ti_a"), Some("SLACK_MSG")).await;
+        assert_eq!(legacy_matches.len(), 1);
+        assert_eq!(legacy_matches[0].id, "legacy");
+        assert!(store.delete(&a.id).await.is_err());
+        assert!(!store.remove_connect_target("owner-b", &a.id).await.unwrap());
+        assert!(owned
+            .iter()
+            .all(|row| row.agent_id != "agent-b" && row.id != "legacy"));
+        assert_eq!(
+            store.connect_targets("owner-b", &payload).await.unwrap()[0].agent_id,
+            "agent-b"
+        );
+        for field in [
+            "trigger_id",
+            "trigger_slug",
+            "connected_account_id",
+            "user_id",
+            "auth_config_id",
+        ] {
+            let mut wrong = payload.clone();
+            wrong["metadata"][field] = json!("different");
+            assert!(store
+                .connect_targets("owner-a", &wrong)
+                .await
+                .unwrap()
+                .is_empty());
+        }
+        assert!(store.connect_targets("", &payload).await.is_err());
+        drop(store);
+        let reopened =
+            ComposioTriggerStore::open(Client::new(), dir.path().join("composio-triggers.db"))
+                .unwrap();
+        assert_eq!(
+            reopened
+                .connect_targets("owner-a", &payload)
+                .await
+                .unwrap()
+                .len(),
+            2
+        );
+        assert_eq!(reopened.list().await.unwrap().len(), 4);
+        assert!(reopened
+            .remove_connect_target("owner-a", &a.id)
+            .await
+            .unwrap());
+        assert_eq!(reopened.delete_for_workflow("workflow-a").await.unwrap(), 1);
+        assert_eq!(
+            reopened
+                .connect_targets("owner-b", &payload)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(reopened.list().await.unwrap().len(), 2);
+        assert!(reopened
+            .connect_event_was_unbound("owner-a", &payload)
+            .await
+            .unwrap());
+        assert!(!reopened
+            .connect_event_was_unbound("owner-b", &payload)
+            .await
+            .unwrap());
+        let rebound = reopened
+            .bind_connect_target(
+                "owner-a",
+                &identity,
+                "slack",
+                ConnectTarget::Agent("agent-a"),
+            )
+            .await
+            .unwrap();
+        assert_ne!(rebound.id, a.id);
+        assert_eq!(
+            reopened
+                .list_connect_targets("owner-a")
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+    }
 
     /// Serializes the two tests that mutate the process-global
     /// `COMPOSIO_WEBHOOK_SECRET` env var. cargo runs tests in one process in

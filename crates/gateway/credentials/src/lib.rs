@@ -99,6 +99,8 @@ pub struct InferenceScope {
     pub agent_id: String,
     pub user_id: Option<String>,
     pub session_id: Option<String>,
+    /// Unix timestamp after which the scoped credential must be rejected.
+    pub expires_at: u64,
 }
 
 impl InferenceScope {
@@ -118,6 +120,9 @@ impl InferenceScope {
             {
                 bail!("invalid scoped inference identity");
             }
+        }
+        if self.expires_at <= unix_now() {
+            bail!("scoped inference credential is expired");
         }
         Ok(())
     }
@@ -154,6 +159,13 @@ impl InferenceScope {
         scope.validate()?;
         Ok(scope)
     }
+}
+
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(u64::MAX)
 }
 
 pub fn fingerprint(key: &str) -> String {
@@ -373,6 +385,7 @@ mod tests {
             agent_id: "agent-a".into(),
             user_id: Some("user-a".into()),
             session_id: Some("session-a".into()),
+            expires_at: unix_now() + 3600,
         };
         let token = scope.sign("core-only-signing-key").unwrap();
         assert_eq!(
@@ -391,5 +404,16 @@ mod tests {
         .is_err());
         other.agent_id = " ".into();
         assert!(other.sign("core-only-signing-key").is_err());
+    }
+
+    #[test]
+    fn scoped_inference_credentials_expire() {
+        let scope = InferenceScope {
+            agent_id: "agent-a".into(),
+            user_id: None,
+            session_id: None,
+            expires_at: unix_now().saturating_sub(1),
+        };
+        assert!(scope.sign("core-only-signing-key").is_err());
     }
 }

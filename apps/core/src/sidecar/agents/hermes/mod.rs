@@ -93,19 +93,9 @@ impl Sidecar for HermesManager {
             };
 
             if needs_install {
-                tracing::info!("hermes: installing Hermes Agent");
-                let status = tokio::process::Command::new("bash")
-                    .args([
-                        "-c",
-                        "curl -fsSL https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.sh | bash -s -- --skip-setup",
-                    ])
-                    .no_window()
-                    .status()
-                    .await
-                    .map_err(|e| anyhow::anyhow!("install script failed: {e}"))?;
-                if !status.success() {
-                    anyhow::bail!("Hermes Agent install exited with {status}");
-                }
+                anyhow::bail!(
+                    "Hermes Agent is not installed; the mutable remote installer is disabled. Install a pinned, independently verified Hermes release and retry"
+                );
             }
 
             ensure_api_server_enabled().await?;

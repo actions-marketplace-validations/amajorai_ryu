@@ -28,6 +28,7 @@
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::{
     extract::{
@@ -158,8 +159,18 @@ async fn handle_socket(socket: WebSocket, state: ServerState, bearer: Option<Str
     let (mut ws_tx, mut ws_rx) = socket.split();
 
     // ── Handshake: the first frame must be `hello` ──────────────────────────
+    const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+    let handshake_deadline = tokio::time::Instant::now() + HANDSHAKE_TIMEOUT;
     let hello = loop {
-        match ws_rx.next().await {
+        let remaining = handshake_deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            let _ = ws_tx
+                .send(error_frame("hello_timeout", "hello frame was not received in time"))
+                .await;
+            return;
+        }
+        match tokio::time::timeout(remaining, ws_rx.next()).await {
+            Ok(frame) => match frame {
             Some(Ok(Message::Text(text))) => match serde_json::from_str::<RhpClientMsg>(&text) {
                 Ok(msg @ RhpClientMsg::Hello { .. }) => break msg,
                 Ok(_) => {
@@ -179,6 +190,13 @@ async fn handle_socket(socket: WebSocket, state: ServerState, bearer: Option<Str
             // Ignore pings/binary before hello.
             Some(Ok(_)) => continue,
             Some(Err(_)) => return,
+            },
+            Err(_) => {
+                let _ = ws_tx
+                    .send(error_frame("hello_timeout", "hello frame was not received in time"))
+                    .await;
+                return;
+            }
         }
     };
 
@@ -270,7 +288,8 @@ async fn handle_socket(socket: WebSocket, state: ServerState, bearer: Option<Str
     // Register this device's outbound sender so out-of-band producers (the
     // dashboard nudge loop, the ambient rolling-summary) can push a `display`
     // re-poll signal to it without holding the socket (review gap #4).
-    live::register(&device_id, out_tx.clone()).await;
+    let (connection_generation, mut revoked) =
+        live::register(&device_id, out_tx.clone()).await;
     // Shared barge-in flag: set by the recv side on `abort`, read by the send
     // side to drop queued TTS audio mid-stream.
     let abort = Arc::new(AtomicBool::new(false));
@@ -301,11 +320,29 @@ async fn handle_socket(socket: WebSocket, state: ServerState, bearer: Option<Str
     let mut turn_handle: Option<tokio::task::JoinHandle<()>> = None;
 
     // ── Receive loop ────────────────────────────────────────────────────────
-    while let Some(frame) = ws_rx.next().await {
+    loop {
+        let frame = tokio::select! {
+            changed = revoked.changed() => {
+                if changed.is_ok() && *revoked.borrow() {
+                    let _ = out_tx
+                        .send(SessionOutput::Control(RhpServerMsg::Error {
+                            code: "device_revoked".to_string(),
+                            message: "device access revoked; reconnect required".to_string(),
+                        }))
+                        .await;
+                }
+                break;
+            }
+            frame = ws_rx.next() => frame,
+        };
+        let Some(frame) = frame else { break };
         let frame = match frame {
             Ok(f) => f,
             Err(_) => break,
         };
+        if *revoked.borrow() {
+            break;
+        }
         match frame {
             Message::Text(text) => {
                 let msg = match serde_json::from_str::<RhpClientMsg>(&text) {
@@ -358,7 +395,7 @@ async fn handle_socket(socket: WebSocket, state: ServerState, bearer: Option<Str
 
     // Tear down: signal abort, drop the sender so the send task ends, and wait for
     // any in-flight turn + the send task to finish.
-    live::unregister(&device_id).await;
+    live::unregister(&device_id, connection_generation).await;
     abort.store(true, Ordering::SeqCst);
     drop(out_tx);
     if let Some(handle) = turn_handle.take() {

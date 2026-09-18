@@ -19,9 +19,13 @@ import {
 	pluginContributions,
 	pluginCoreHttp,
 	pluginHostInvoke,
-	pluginUiBundle,
 	startPluginHostStream,
 } from "../services/plugin-host.ts";
+
+import {
+	abortUiBundleRead,
+	readUiBundle,
+} from "../services/ui-bundle-reads.ts";
 
 /**
  * Register the plugin-host IPC handlers. `getWindow` returns the live renderer
@@ -33,8 +37,13 @@ export function registerPluginsIpc(
 ): void {
 	ipcMain.handle(IPC.plugins.contributions, () => pluginContributions());
 
-	ipcMain.handle(IPC.plugins.uiBundle, (_event, pluginId: string) =>
-		pluginUiBundle(pluginId)
+	ipcMain.handle(
+		IPC.plugins.uiBundle,
+		(event, pluginId: string, requestId?: string) =>
+			readUiBundle(event.sender, pluginId, requestId)
+	);
+	ipcMain.handle(IPC.plugins.uiBundleAbort, (event, requestId: string) =>
+		abortUiBundleRead(event.sender.id, requestId)
 	);
 
 	ipcMain.handle(

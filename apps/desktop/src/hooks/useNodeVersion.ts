@@ -31,17 +31,23 @@ export function useNodeVersion(
 	enabled: boolean
 ): NodeVersion {
 	const { data } = useQuery({
-		queryKey: ["node-version", target.url],
-		queryFn: async () => {
+		queryKey: [
+			"node-version",
+			target.url,
+			target.token ?? null,
+			target.userJwt ?? null,
+		],
+		queryFn: async ({ signal }) => {
 			// Version is best-effort (an older Core may lack `/api/version`); the
 			// update check already fails soft to a "no update" verdict.
 			const [info, check] = await Promise.all([
-				getVersionInfo(target).catch(() => null),
-				checkForUpdate(target),
+				getVersionInfo(target, signal).catch(() => null),
+				checkForUpdate(target, { signal }),
 			]);
 			return { info, check };
 		},
 		enabled,
+		subscribed: enabled,
 		refetchInterval: REFRESH_MS,
 		retry: false,
 	});

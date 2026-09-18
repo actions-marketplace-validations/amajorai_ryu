@@ -59,17 +59,7 @@ function reconcile(tasks: Record<string, DownloadTask>) {
 		.sort((a, b) => b.created_at - a.created_at)
 		.filter((t) => isInFlight(t.state))
 		.map(downloadToActivity);
-	const desiredIds = new Set(desired.map((a) => a.id));
-	// Remove cards whose task settled.
-	const existing = Object.keys(store.activities);
-	for (const id of existing) {
-		if (id.startsWith("download:") && !desiredIds.has(id)) {
-			store.remove(id);
-		}
-	}
-	for (const activity of desired) {
-		store.upsert(activity);
-	}
+	store.applySourceSnapshot("shell", "download", desired);
 }
 
 /** Mount ONE app-wide reconciliation of downloads → live activities. Reads the

@@ -405,6 +405,7 @@ mod tests {
         RequestContext {
             request_id: "nr-test".into(),
             api_key: "rgw_org:acme".into(),
+            owner_binding: ryu_gw_credentials::fingerprint("rgw_org:acme"),
             is_master_key: false,
             org_id: Some("acme".into()),
             team_id: None,

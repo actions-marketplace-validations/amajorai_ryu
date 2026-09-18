@@ -15,12 +15,12 @@ const skills = [
 ];
 
 describe("agent capability defaults", () => {
-	test("new and legacy-empty agents hydrate with all available access", () => {
+	test("new and legacy-empty agents hydrate with no tool access", () => {
 		expect(
 			hydrateToolSelection([], ["browser.open", "files.read"], true)
-		).toEqual(new Set(["browser.open", "files.read"]));
+		).toEqual(new Set());
 		expect(hydrateToolSelection([], ["browser.open"], false)).toEqual(
-			new Set(["browser.open"])
+			new Set()
 		);
 		expect(hydrateSkillSelection([], skills, true)).toEqual(
 			new Set(["browser", "writer"])

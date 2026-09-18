@@ -34,6 +34,10 @@ import type {
 } from "@pierre/trees";
 import { FileTree, useFileTree, useFileTreeSearch } from "@pierre/trees/react";
 import {
+	COMPANION_THEME_MUTATION_ATTRIBUTES,
+	readCompanionThemeTokens,
+} from "@ryu/app-host/companion-theme";
+import {
 	ContextMenu,
 	ContextMenuContent,
 	ContextMenuItem,
@@ -2346,6 +2350,26 @@ function BrowserSidecarPanel({
 	const [error, setError] = useState<string | null>(null);
 	const [isAnnotating, setIsAnnotating] = useState(false);
 	const [isFrozen, setIsFrozen] = useState(false);
+	const [themeTokens, setThemeTokens] = useState(() =>
+		readCompanionThemeTokens(undefined, { includeStoredPreferences: true })
+	);
+	useEffect(() => {
+		if (typeof MutationObserver === "undefined") {
+			return;
+		}
+		const observer = new MutationObserver(() => {
+			setThemeTokens(
+				readCompanionThemeTokens(undefined, {
+					includeStoredPreferences: true,
+				})
+			);
+		});
+		observer.observe(document.documentElement, {
+			attributeFilter: [...COMPANION_THEME_MUTATION_ATTRIBUTES],
+			attributes: true,
+		});
+		return () => observer.disconnect();
+	}, []);
 
 	const base = "/api/ext/@ryu/browser";
 	const headers = useMemo(
@@ -2374,6 +2398,14 @@ function BrowserSidecarPanel({
 		},
 		[node.url, node.token, headers]
 	);
+
+	useEffect(() => {
+		call(`${base}/theme`, {
+			body: JSON.stringify({ tokens: themeTokens }),
+			headers: { ...headers, "Content-Type": "application/json" },
+			method: "PUT",
+		}).catch(() => undefined);
+	}, [call, headers, themeTokens]);
 
 	const publishBrowserImage = useCallback(
 		(id: string, image: string, title?: string) => {

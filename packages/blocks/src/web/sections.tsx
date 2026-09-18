@@ -124,8 +124,11 @@ export interface Highlight {
 
 export function Highlights({ items }: { items: Highlight[] }) {
 	return (
-		<section className="container mx-auto px-4">
-			<div className="mx-auto max-w-6xl pt-10">
+		<section aria-label="Key product points" className="container mx-auto px-4">
+			<div
+				className="mx-auto max-w-6xl border-border border-y py-8 md:py-10"
+				data-testid="product-highlights"
+			>
 				<div className="grid grid-cols-1 gap-x-8 gap-y-8 sm:grid-cols-2 lg:grid-cols-4">
 					{items.map((item, i) => (
 						<Reveal delay={(i % 4) * 0.06} key={item.title}>

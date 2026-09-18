@@ -324,7 +324,11 @@ export function useSystemStatus(): SystemStatus {
 			return;
 		}
 		activeNodeUrlRef.current = activeNodeUrl;
-		wasReachableRef.current = false;
+		// A node switch already changes the node-scoped query keys, so their
+		// observers refetch on their own. Keep this first status result neutral;
+		// treating it as a down→up recovery would invalidate every query a second
+		// time and duplicate the catalog burst during a fast node switch.
+		wasReachableRef.current = null;
 		setNodeReachable(null);
 		setActiveNodeOnline(null);
 		setLoading(true);

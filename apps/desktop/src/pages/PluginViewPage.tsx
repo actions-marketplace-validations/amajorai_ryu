@@ -66,16 +66,20 @@ export default function PluginViewPage({
 		() => views.find((v) => v.plugin === pluginId && v.id === viewId),
 		[views, pluginId, viewId]
 	);
+	const { url, token, userJwt } = node;
+	const canReadSource = (contribution?.approved_grants ?? []).includes(
+		DECLARATIVE_HTTP_GRANT
+	);
+	const sourcePolicy = contribution?.http_policy;
+	const sourceOwner = contribution?.plugin ?? pluginId;
 
 	// The host's authenticated Core seam a `source`-carrying view fetches through.
 	// Same node/token plumbing as every typed api module; the spec never sees it.
 	const fetchJson = useCallback<ViewSourceFetcher>(
-		async (method, path) => {
+		async (method, path, signal) => {
 			if (
 				!(
-					(contribution?.approved_grants ?? []).includes(
-						DECLARATIVE_HTTP_GRANT
-					) &&
+					canReadSource &&
 					isViewSourceHttpMethod(method) &&
 					isCoreReadPath(path)
 				)
@@ -86,8 +90,8 @@ export default function PluginViewPage({
 			}
 			const sourceRequest = contributionSourceRequest(
 				{
-					http_policy: contribution?.http_policy,
-					plugin: contribution?.plugin ?? pluginId,
+					http_policy: sourcePolicy,
+					plugin: sourceOwner,
 				},
 				{ http: { method, path } }
 			);
@@ -96,23 +100,18 @@ export default function PluginViewPage({
 					`view source is outside its owning app authority: ${path}`
 				);
 			}
-			const target = toTarget(node);
+			const target = toTarget({ url, token, userJwt });
 			const resp = await fetch(apiUrl(target, sourceRequest.path), {
 				method: sourceRequest.method,
 				headers: await requestHeaders(target),
+				signal,
 			});
 			if (!resp.ok) {
 				throw new Error(`${path} failed: ${resp.status}`);
 			}
 			return resp.json();
 		},
-		[
-			node,
-			contribution?.http_policy,
-			contribution?.plugin,
-			contribution,
-			pluginId,
-		]
+		[url, token, userJwt, canReadSource, sourcePolicy, sourceOwner]
 	);
 
 	const handleAction = useCallback(

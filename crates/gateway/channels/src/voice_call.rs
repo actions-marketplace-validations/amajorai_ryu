@@ -366,8 +366,8 @@ pub fn resample_pcm16(samples: &[i16], input_rate: u32, output_rate: u32) -> Vec
         return samples.to_vec();
     }
 
-    let output_len = ((samples.len() as u64 * u64::from(output_rate)) + u64::from(input_rate) - 1)
-        / u64::from(input_rate);
+    let output_len =
+        (samples.len() as u64 * u64::from(output_rate)).div_ceil(u64::from(input_rate));
     let output_len = output_len as usize;
     let mut output = Vec::with_capacity(output_len);
     for index in 0..output_len {

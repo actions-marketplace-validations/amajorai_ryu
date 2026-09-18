@@ -418,6 +418,75 @@ struct RyuMcpHandler {
 }
 
 impl RyuMcpHandler {
+    async fn current_identity_profiles(&self) -> Result<Vec<String>, McpError> {
+        if !crate::mcp_oauth::remote_configured() {
+            return Ok(self.identity_profile_ids.clone());
+        }
+        let unavailable = || {
+            McpError::new(
+                rmcp::model::ErrorCode::INTERNAL_ERROR,
+                "saved agent identity binding is unavailable",
+                None,
+            )
+        };
+        match self.mcp.agent_store.as_ref() {
+            Some(store) => match store.get(&self.agent_id).await.map_err(|_| unavailable())? {
+                Some(record) => Ok(record.identity_profile_ids),
+                None if self.identity_profile_ids.is_empty() => Ok(Vec::new()),
+                None => Err(unavailable()),
+            },
+            None if self.identity_profile_ids.is_empty() => Ok(Vec::new()),
+            None => Err(unavailable()),
+        }
+    }
+    async fn catalog_identity(
+        &self,
+    ) -> (
+        Option<String>,
+        Option<crate::sidecar::mcp::catalog::AgentDiscovery>,
+    ) {
+        use crate::sidecar::mcp::ToolPrincipal;
+        let principal = if crate::sidecar::control_plane::is_managed_node()
+            && crate::sidecar::control_plane::registered_org().is_none()
+        {
+            ToolPrincipal::Unresolved
+        } else {
+            match self.mcp.conversations.as_ref() {
+                Some(store) => {
+                    ToolPrincipal::resolve(store, self.permission_scope_id.as_deref()).await
+                }
+                None if crate::sidecar::control_plane::registered_org().is_none() => {
+                    ToolPrincipal::Unrestricted
+                }
+                None => ToolPrincipal::Unresolved,
+            }
+        };
+        let owner = match principal {
+            ToolPrincipal::Unrestricted => Some("local".to_owned()),
+            ToolPrincipal::Owned { user_id, .. } => Some(user_id),
+            ToolPrincipal::Unresolved => None,
+        };
+        let identity =
+            if crate::mcp_oauth::remote_configured() {
+                match (owner.as_ref(), self.mcp.agent_store.as_ref()) {
+                    (Some(owner), Some(store)) => store
+                        .get(&self.agent_id)
+                        .await
+                        .ok()
+                        .flatten()
+                        .map(|record| crate::sidecar::mcp::catalog::AgentDiscovery {
+                            owner_user_id: owner.clone(),
+                            agent_id: self.agent_id.clone(),
+                            profile_ids: record.identity_profile_ids,
+                            allowlist: self.allowlist.clone(),
+                        }),
+                    _ => None,
+                }
+            } else {
+                None
+            };
+        (owner, identity)
+    }
     /// Build the full offered tool list (registry + Composio + meta-tools). Split
     /// out of `list_tools` so it is unit-testable without an rmcp
     /// `RequestContext` (which has no public constructor).
@@ -455,7 +524,10 @@ impl RyuMcpHandler {
                 .filter(|tool| tool.server == "plans")
                 .collect()
         } else {
-            self.mcp.tools_for_agent(self.allowlist.as_deref()).await
+            match self.catalog_identity().await.1 {
+                Some(identity) => self.mcp.tools_for_discovery_identity(&identity).await,
+                None => self.mcp.tools_for_agent(self.allowlist.as_deref()).await,
+            }
         };
         let registry_tools =
             crate::sidecar::mcp::filter_capability_tools(registry_tools, self.caps);
@@ -570,9 +642,17 @@ impl RyuMcpHandler {
         // and this plane knows which agent is asking, so it can apply that agent's
         // skill allowlist instead of showing it skills it cannot load.
         let skills_allowlist = self.skills_allowlist().await;
+        let (owner, identity) = self.catalog_identity().await;
         let results = self
             .mcp
-            .search_scoped(query, kind, limit, &skills_allowlist)
+            .search_scoped_for_identity(
+                query,
+                kind,
+                limit,
+                &skills_allowlist,
+                owner.as_deref(),
+                identity.as_ref(),
+            )
             .await;
         Ok(json!({ "results": results }))
     }
@@ -586,7 +666,17 @@ impl RyuMcpHandler {
         // plane's search just withheld from it, simply by guessing `skills.<slug>`.
         // Only the skill branch is affected — tool descriptions are unchanged.
         let skills_allowlist = self.skills_allowlist().await;
-        match self.mcp.describe_scoped(id, &skills_allowlist).await {
+        let (owner, identity) = self.catalog_identity().await;
+        match self
+            .mcp
+            .describe_scoped_for_identity(
+                id,
+                &skills_allowlist,
+                owner.as_deref(),
+                identity.as_ref(),
+            )
+            .await
+        {
             Some(d) => serde_json::to_value(d).map_err(|e| {
                 McpError::new(rmcp::model::ErrorCode::INTERNAL_ERROR, e.to_string(), None)
             }),
@@ -641,6 +731,22 @@ impl RyuMcpHandler {
             ));
         }
 
+        // `execute` and `resume` are meta-tools, not registry entries, so the
+        // normal registry allowlist check below cannot see them. An explicit
+        // agent allowlist must opt into each programmatic surface; otherwise a
+        // model could invoke PTC even when the agent excludes it.
+        if matches!(tool_id, "execute" | "resume")
+            && self.allowlist.as_ref().is_some_and(|allowlist| {
+                !allowlist.iter().any(|entry| entry == "*" || entry == tool_id)
+            })
+        {
+            return Err(McpError::new(
+                rmcp::model::ErrorCode::INVALID_REQUEST,
+                format!("meta-tool '{tool_id}' is not in this agent's allowlist"),
+                None,
+            ));
+        }
+
         // Capability gate (defense in depth): these tools are filtered out of the
         // advertised set for an agent that lacks the capability, but a model can
         // still emit a call to a tool it was never offered — refuse it here too.
@@ -685,6 +791,14 @@ impl RyuMcpHandler {
             ));
         }
         if tool_id == "agent_builder.configure_agent" {
+            if crate::sidecar::control_plane::is_managed_node() {
+                return Err(McpError::new(
+                    rmcp::model::ErrorCode::INVALID_REQUEST,
+                    "agent-builder configuration is disabled on managed nodes until agent ownership is bound to the verified caller"
+                        .to_owned(),
+                    None,
+                ));
+            }
             require_agent_builder_configure_permission(
                 &self.permission_tx,
                 self.permission_scope_id.as_deref(),
@@ -710,7 +824,7 @@ impl RyuMcpHandler {
                         self.agent_id.clone(),
                         self.allowlist.clone(),
                         None,
-                        self.identity_profile_ids.clone(),
+                        self.current_identity_profiles().await?,
                         self.permission_scope_id.clone(),
                     ),
                 );
@@ -752,7 +866,7 @@ impl RyuMcpHandler {
                     args,
                     self.allowlist.as_deref(),
                     None,
-                    &self.identity_profile_ids,
+                    &self.current_identity_profiles().await?,
                     // Reuse the server-derived conversation id as the ACP
                     // session marker. The registry uses this to notify the
                     // Gateway when a Composio action executes inside the

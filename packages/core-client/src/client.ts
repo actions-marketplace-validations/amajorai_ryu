@@ -114,6 +114,40 @@ export interface RequestOptions {
 	signal?: AbortSignal;
 }
 
+/** Binding requested when exchanging HTTP authentication for a WS ticket. */
+export interface WebSocketTicketRequest {
+	appId?: string;
+	kind?: "conversation" | "document" | "application";
+	path?: string;
+	roomId?: string;
+	route: "realtime" | "voice" | "ext";
+}
+
+/** Exchange normal HTTP credentials for a short-lived, one-use WS ticket. */
+export async function requestWebSocketTicket(
+	target: ApiTarget,
+	binding: WebSocketTicketRequest
+): Promise<string> {
+	const response = await request<{ ticket?: unknown }>(target, "/api/ws/ticket", {
+		method: "POST",
+		body: binding,
+	});
+	if (typeof response.ticket !== "string" || response.ticket.trim() === "") {
+		throw new Error("Core returned an invalid WebSocket ticket");
+	}
+	return response.ticket;
+}
+
+/** Add an opaque ticket to a WS URL without ever adding bearer credentials. */
+export function appendWebSocketTicket(url: string, ticket: string): string {
+	if (ticket.trim() === "") {
+		throw new Error("WebSocket ticket cannot be empty");
+	}
+	const parsed = new URL(url);
+	parsed.searchParams.set("ticket", ticket);
+	return parsed.toString();
+}
+
 /** A structured non-2xx response from Core. The message intentionally keeps the
  * historical status-only shape while typed callers inspect the status/body. */
 export class ApiError extends Error {

@@ -337,7 +337,7 @@ export default function StorePage({
 					<InstalledOnlyProvider value={installedOnly}>
 						<MarketplaceSurface
 							active={section}
-							className="h-full overflow-hidden pt-12"
+							className="h-full overflow-hidden"
 							contentClassName="min-h-0 min-w-0 flex-1 overflow-hidden"
 							fullBleed={fullBleed}
 							onSearch={setSearchQuery}

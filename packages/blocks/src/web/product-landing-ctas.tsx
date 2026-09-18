@@ -1,6 +1,6 @@
 import { buttonVariants } from "@ryu/ui/components/button";
 import { cn } from "@ryu/ui/lib/utils";
-import { DEMO_HREF } from "./data/resources.tsx";
+import { SETUP_RYU_HREF, SETUP_RYU_LABEL } from "./data/resources.tsx";
 import { DownloadMenu } from "./download-menu.tsx";
 
 /** The shared conversion pair used by every focused product landing page. */
@@ -15,12 +15,10 @@ export default function ProductLandingCtas({
 		>
 			<DownloadMenu label="Download" showSeparator={false} size="default" />
 			<a
-				className={cn(buttonVariants({ variant: "ghost" }), "rounded-full")}
-				href={DEMO_HREF}
-				rel="noopener noreferrer"
-				target="_blank"
+				className={cn(buttonVariants({ variant: "secondary" }), "rounded-full")}
+				href={SETUP_RYU_HREF}
 			>
-				Request a Demo
+				{SETUP_RYU_LABEL}
 			</a>
 		</div>
 	);

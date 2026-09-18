@@ -479,6 +479,25 @@ pub struct ComposioConnectionBinding {
     pub toolkit: String,
 }
 
+/// Server-owned authorization context carried through the final chat routing
+/// choke point. The adapter must re-check the concrete agent after auto-routing,
+/// policy fallback, and agent-control handoff have all settled; a collection-level
+/// permission check at the HTTP boundary is not sufficient for those late changes.
+#[derive(Clone)]
+pub(crate) struct AgentResourceAuthorization {
+    pub(crate) state: crate::server::ServerState,
+    pub(crate) caller: Option<crate::identity_verify::VerifiedCaller>,
+}
+
+impl std::fmt::Debug for AgentResourceAuthorization {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("AgentResourceAuthorization")
+            .field("caller", &self.caller)
+            .finish_non_exhaustive()
+    }
+}
+
 /// Incoming request body from the UI (matches Vercel AI SDK v6 UIMessage format).
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ChatStreamRequest {
@@ -722,6 +741,10 @@ pub struct ChatStreamRequest {
     /// loopback (anonymous) flow, preserving current behavior.
     #[serde(skip)]
     pub author_user_id: Option<String>,
+    /// Full verified caller kept inside Core for hook-side authorization. It is
+    /// never serialized into an adapter request or exposed to the model.
+    #[serde(skip)]
+    pub verified_caller: Option<crate::identity_verify::VerifiedCaller>,
     /// Opaque UUID shared by the realtime join and this HTTP mutation. Core
     /// validates and stamps it only for local-echo correlation, never for auth.
     #[serde(skip)]
@@ -741,6 +764,11 @@ pub struct ChatStreamRequest {
     /// same caller partition for background-process operations.
     #[serde(skip)]
     pub user_jwt: Option<String>,
+    /// Core-only final resource authorization. This is populated by the HTTP
+    /// chat entry point and intentionally absent for agent-less internal work.
+    /// It is never serialized into an adapter request or exposed to a model.
+    #[serde(skip)]
+    pub(crate) agent_resource_authorization: Option<Arc<AgentResourceAuthorization>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -772,6 +800,17 @@ impl PlatformScripts {
         };
         (!selected.trim().is_empty()).then_some(selected.as_str())
     }
+
+    fn is_non_empty(&self) -> bool {
+        [
+            self.default.as_str(),
+            self.macos.as_str(),
+            self.linux.as_str(),
+            self.windows.as_str(),
+        ]
+        .iter()
+        .any(|script| !script.trim().is_empty())
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -792,12 +831,31 @@ pub struct ProjectEnvironmentRequest {
     pub variables: Vec<ProjectEnvironmentVariable>,
 }
 
+impl ProjectEnvironmentRequest {
+    fn contains_scripts(&self) -> bool {
+        self.setup.is_non_empty() || self.cleanup.is_non_empty()
+    }
+}
+
 fn valid_environment_key(key: &str) -> bool {
     let mut chars = key.chars();
     chars
         .next()
         .is_some_and(|first| first == '_' || first.is_ascii_alphabetic())
         && chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
+}
+
+fn reserved_environment_key(key: &str) -> bool {
+    let upper = key.to_ascii_uppercase();
+    matches!(
+        upper.as_str(),
+        "RYU_TOKEN"
+            | "RYU_PROJECT_PATH"
+            | "RYU_WORKTREE_PATH"
+            | "PI_CODING_AGENT_DIR"
+    ) || upper.starts_with("RYU_MCP_")
+        || upper.starts_with("OPENAI_")
+        || upper.starts_with("ANTHROPIC_")
 }
 
 fn request_environment_variables(req: &ChatStreamRequest) -> Vec<(String, String)> {
@@ -809,7 +867,8 @@ fn request_environment_variables(req: &ChatStreamRequest) -> Vec<(String, String
                 .iter()
                 .filter_map(|variable| {
                     let key = variable.key.trim();
-                    valid_environment_key(key).then(|| (key.to_owned(), variable.value.clone()))
+                    (valid_environment_key(key) && !reserved_environment_key(key))
+                        .then(|| (key.to_owned(), variable.value.clone()))
                 })
                 .collect()
         })
@@ -2686,12 +2745,17 @@ async fn resolve_agent_tool_allowlist(
     if let Some(allowlist) = registry.allowlist_for(id) {
         return Some(allowlist);
     }
-    store
-        .get(id)
-        .await
-        .ok()
-        .flatten()
-        .and_then(|record| record.mcp_tool_allowlist())
+    match store.get(id).await {
+        Ok(Some(record)) => record.mcp_tool_allowlist(),
+        Ok(None) => None,
+        Err(error) => {
+            // `None` means unrestricted to the registry. A failed store read
+            // must therefore fail closed rather than turning a transient DB
+            // error into access to every tool.
+            tracing::warn!(agent = id, error = %error, "agent allowlist lookup failed");
+            Some(Vec::new())
+        }
+    }
 }
 
 /// Build a persona tone prefix for the system prompt from a [`PersonaSlot`].
@@ -4524,6 +4588,7 @@ async fn run_text_turn_in_with_metadata(
             parts: vec![],
         }],
         agent_id,
+        agent_resource_authorization: None,
         response_mode: RyuResponseMode::Everyday,
         model: None,
         conversation_id: Some(conversation_id),
@@ -4573,6 +4638,7 @@ async fn run_text_turn_in_with_metadata(
         output_style: None,
         // Programmatic turn, no verified human author to attribute.
         author_user_id: None,
+        verified_caller: None,
         // Connector-supplied sender display name (group/channel chats); None for
         // non-channel programmatic turns.
         author_name,
@@ -4640,6 +4706,7 @@ pub async fn run_proactive_opening_text(
             parts: vec![],
         }],
         agent_id,
+        agent_resource_authorization: None,
         response_mode: RyuResponseMode::Everyday,
         model: None,
         conversation_id: Some(conversation_id),
@@ -4682,6 +4749,7 @@ pub async fn run_proactive_opening_text(
         plugin_flags: std::collections::HashMap::new(),
         output_style: None,
         author_user_id: None,
+        verified_caller: None,
         author_name: None,
         user_jwt: None,
     };
@@ -4744,6 +4812,7 @@ pub(crate) async fn run_text_turn_stream(
             parts: vec![],
         }],
         agent_id,
+        agent_resource_authorization: None,
         response_mode: RyuResponseMode::Everyday,
         model: None,
         conversation_id: Some(conversation_id),
@@ -4783,6 +4852,7 @@ pub(crate) async fn run_text_turn_stream(
         // Unstyled, same scope rule as [`run_text_turn_in`].
         output_style: None,
         author_user_id: None,
+        verified_caller: None,
         author_name: None,
         user_jwt: None,
     };
@@ -5020,6 +5090,7 @@ async fn run_member_text_with_flags(
         fresh_session: false,
         messages,
         agent_id: Some(member_id.to_owned()),
+        agent_resource_authorization: None,
         response_mode: RyuResponseMode::Everyday,
         model: None,
         conversation_id,
@@ -5062,6 +5133,7 @@ async fn run_member_text_with_flags(
         output_style: None,
         // Programmatic per-member turn, no human author to attribute.
         author_user_id: None,
+        verified_caller: None,
         author_name: None,
         user_jwt: None,
     };
@@ -5822,6 +5894,16 @@ pub async fn route_chat_stream(
     // no-op, so only the failover wrapper pays for this.
     watch: crate::routing_policy::reactive::TurnWatch,
 ) -> Response {
+    if req
+        .project_environment
+        .as_ref()
+        .is_some_and(ProjectEnvironmentRequest::contains_scripts)
+    {
+        return error_stream(
+            "Project environment setup and cleanup scripts are disabled for security; use a local action or a reviewed project instruction instead".to_owned(),
+        );
+    }
+
     tracing::info!(
         agent_id = ?req.agent_id,
         conversation_id = ?req.conversation_id,
@@ -6303,6 +6385,21 @@ pub async fn route_chat_stream(
     // path; all background/channel/delegated requests require active. Keep the
     // shared helpers as the authority so direct chat, team members, and future
     // callers cannot drift into subtly different lifecycle rules.
+    if let (Some(authorization), Some(agent_id)) = (
+        req.agent_resource_authorization.as_ref(),
+        effective_agent_id.as_deref(),
+    ) {
+        if let Err(response) = crate::server::enforce_agent_resource_permission(
+            &authorization.state,
+            &authorization.caller,
+            crate::identity_verify::permissions::AGENT_RUN,
+            agent_id,
+        )
+        .await
+        {
+            return response;
+        }
+    }
     if let Some(agent_id) = effective_agent_id.as_deref() {
         let lifecycle = if req.background {
             crate::agent_execution::ensure_noninteractive_run_allowed(&agent_store, Some(agent_id))
@@ -7127,6 +7224,7 @@ pub async fn route_chat_stream(
                         sampling.clone(),
                         sampling_engine,
                         Arc::clone(&mcp),
+                        traces.clone(),
                         chat_tools_enabled,
                         tool_allowlist,
                         smart_route_override,
@@ -7192,6 +7290,7 @@ pub async fn route_chat_stream(
                 sampling.clone(),
                 sampling_engine,
                 Arc::clone(&mcp),
+                traces.clone(),
                 false,
                 None,
                 // Direct-to-provider (no gateway hop) → never inject the
@@ -7256,6 +7355,7 @@ pub async fn route_chat_stream(
                 sampling.clone(),
                 sampling_engine,
                 Arc::clone(&mcp),
+                traces.clone(),
                 false,
                 None,
                 // Local engine goes direct (no gateway hop) → no `ryu_smart_route`.
@@ -7456,6 +7556,7 @@ pub async fn route_chat_stream(
                 sampling,
                 sampling_engine,
                 Arc::clone(&mcp),
+                traces.clone(),
                 false,
                 None,
                 // SDK app owns its own provider routing (injected OPENAI_BASE_URL);
@@ -8089,6 +8190,10 @@ async fn route_openai_stream<F, Fut>(
     // The tool registry, for resolving a widget-rendering tool's binding when the
     // governed chat tool loop emits its widget part (R1 / A0-A6).
     mcp: Arc<McpRegistry>,
+    // Core-owned model-call spans pair with the Gateway audit session id. The
+    // trace keeps model identity, timing, and failure state only; prompts and
+    // completions remain in the conversation transcript.
+    traces: TraceStore,
     // Enable the governed chat tool loop for this turn. Set ONLY by the caller on
     // the `via_gateway && gateway_healthy` OpenAI-compat branch, so every tool
     // dispatch is governed by the Gateway `/v1/exec/tool` front (D5). `false`
@@ -8302,6 +8407,33 @@ where
             let offer_tools = tool_loop_active && iteration < MAX_TOOL_ITERATIONS;
             let request_tools: &[Value] = if offer_tools { &tools_payload } else { &[] };
 
+            // Pair each Gateway attempt with a Core model-call span. Keep the
+            // span deliberately content-free: the transcript owns prompts and
+            // completions, while this store owns sequencing and failure timing.
+            let mut model_span_id = if let Some(conversation_id) = session_id
+                .as_deref()
+                .filter(|value| !value.is_empty())
+            {
+                match traces
+                    .open_span(
+                        conversation_id,
+                        "model-call",
+                        &model,
+                        None,
+                        Some(conversation_id),
+                    )
+                    .await
+                {
+                    Ok(span_id) => Some(span_id),
+                    Err(cause) => {
+                        tracing::warn!("trace model span open failed: {cause:#}");
+                        None
+                    }
+                }
+            } else {
+                None
+            };
+
             // Connect (with self-healing fallback, AC1–AC4).
             let upstream = match connect_with_fallback(
                 &oai_messages,
@@ -8328,6 +8460,9 @@ where
             {
                 Ok(r) => r,
                 Err(e) => {
+                    if let Some(span_id) = model_span_id.take() {
+                        let _ = traces.close_span(&span_id, Some(&e)).await;
+                    }
                     watch.record_failure(
                         watch_agent_id.as_deref().unwrap_or_default(),
                         Some(&watch_model),
@@ -8378,6 +8513,9 @@ where
                         }
                     })
                     .unwrap_or_else(|| format!("Agent returned HTTP {status}"));
+                if let Some(span_id) = model_span_id.take() {
+                    let _ = traces.close_span(&span_id, Some(&detail)).await;
+                }
                 // Unlike the ACP plane, the Gateway names the reason in a typed
                 // field (`apps/gateway/src/error.rs`), so classify on that and on
                 // the status — never on the human message, which is prose.
@@ -8424,6 +8562,9 @@ where
                 let chunk = match chunk {
                     Ok(c) => c,
                     Err(e) => {
+                        if let Some(span_id) = model_span_id.take() {
+                            let _ = traces.close_span(&span_id, Some(&e.to_string())).await;
+                        }
                         reply_all.push_str(&iter_reply);
                         if let Some(p) = persist.take() {
                             let _ = p(std::mem::take(&mut reply_all), "failed").await;
@@ -8553,6 +8694,12 @@ where
                 buf.drain(..start);
                 if saw_done {
                     break;
+                }
+            }
+
+            if let Some(span_id) = model_span_id.take() {
+                if let Err(cause) = traces.close_span(&span_id, None).await {
+                    tracing::warn!("trace model span close failed: {cause:#}");
                 }
             }
 
@@ -9734,6 +9881,23 @@ async fn route_acp_stream(
         .collect::<Vec<_>>();
 
     // ACP event channel — the completion task is the sole consumer.
+    let tool_authority = if acp::is_managed_pi_extension(&spawn_cmd, &agent_id) {
+        crate::server::acp_tool_broker::AcpToolSessionAuthority::authorize_managed_pi_session(
+            &persist_store,
+            &agent_id,
+            conversation_id.as_deref(),
+            req.verified_caller.clone(),
+            allowlist.clone(),
+            composio_actions.clone(),
+            identity_profile_ids.clone(),
+            req.composio_connection_scope.clone(),
+            req.profile_conversation_scope.clone(),
+        )
+        .await
+    } else {
+        None
+    };
+
     let mut acp_rx = acp::spawn_acp_task(
         spawn_cmd,
         prompt,
@@ -9752,6 +9916,7 @@ async fn route_acp_stream(
         identity_profile_ids,
         req.composio_connection_scope.clone(),
         req.profile_conversation_scope.clone(),
+        tool_authority,
         turn,
         conversation_id.clone(),
     );
@@ -11076,6 +11241,31 @@ mod tests {
         for bad in ["", "1H", "10m", "forever", "3600"] {
             assert!(!is_prompt_cache_ttl(bad), "{bad}");
         }
+    }
+
+    #[test]
+    fn project_environment_rejects_host_shell_scripts() {
+        let mut environment = ProjectEnvironmentRequest::default();
+        assert!(!environment.contains_scripts());
+        environment.setup.linux = "echo unsafe".to_owned();
+        assert!(environment.contains_scripts());
+        environment.setup.linux.clear();
+        environment.cleanup.windows = "Write-Output unsafe".to_owned();
+        assert!(environment.contains_scripts());
+    }
+
+    #[test]
+    fn project_environment_rejects_reserved_core_keys() {
+        for key in [
+            "RYU_TOKEN",
+            "RYU_MCP_CORE_TOKEN",
+            "OPENAI_API_KEY",
+            "ANTHROPIC_BASE_URL",
+            "PI_CODING_AGENT_DIR",
+        ] {
+            assert!(reserved_environment_key(key), "{key} must stay Core-owned");
+        }
+        assert!(!reserved_environment_key("RUST_LOG"));
     }
 
     /// A hook-handled turn is framed exactly like a streamed one. Getting this
@@ -12531,13 +12721,12 @@ mod tests {
     #[test]
     fn both_pi_roads_render_the_extension_env_from_one_source() {
         let _pi_guard = crate::pi_config::lock_pi_config_test_env();
-        // Pi cannot take the in-process MCP bridge, so the `ryu-mcp` extension dialling
-        // Core over HTTP is its ONLY road to Ryu's tools, and these vars are how it
-        // finds Core. TWO spawn paths reach the same agent — the managed binary and
+        // Pi cannot take the in-process MCP bridge, so the managed extension still
+        // needs the Core location. The session capability is added only after the
+        // ACP pool selects the exact session. TWO spawn paths reach the same agent — the managed binary and
         // this PATH fallback — and only the managed one injected them, so the
         // fallback's Pi silently used the extension's compiled-in
-        // `http://127.0.0.1:7980` (wrong under any non-release `RYU_PROFILE`) with no
-        // bearer. The agent still started and answered; it just never had a tool.
+        // `http://127.0.0.1:7980` (wrong under any non-release `RYU_PROFILE`).
         //
         // Asserting over a resolved spawn command CANNOT catch that: which of the two
         // roads `ryu_agent_route` takes depends on whether the managed binary happens
@@ -12554,21 +12743,16 @@ mod tests {
         assert!(env.iter().any(|(name, value)| {
             name == "RYU_MCP_CORE_URL" && value == &crate::sidecar::gateway::core_self_url()
         }));
-        assert!(env
-            .iter()
-            .any(|(name, value)| { name == "RYU_MCP_USER_JWT" && value == "verified-user-jwt" }));
-        assert!(env.iter().any(|(name, value)| {
-            name == "RYU_MCP_HOST_CONVERSATION_ID" && value == "profile-conversation"
-        }));
-
-        // A shell metacharacter is rejected before it can become an environment
-        // value. Valid values are serialized through ACP's structured stdio
-        // transport for both platform launch shapes.
-        let malicious =
-            acp::pi_mcp_extension_env(None, None, None, Some("x&whoami>%TEMP%/ryu-pwned&rem"));
-        assert!(!malicious
+        assert!(!env.iter().any(|(name, _)| name == "RYU_MCP_CORE_TOKEN"));
+        assert!(!env.iter().any(|(name, _)| name == "RYU_MCP_USER_JWT"));
+        assert!(env.iter().all(|(_, value)| value != "verified-user-jwt"));
+        assert!(!env
             .iter()
             .any(|(name, _)| name == "RYU_MCP_HOST_CONVERSATION_ID"));
+
+        // Both platform launch shapes serialize the base metadata as structured
+        // environment entries. The session capability is inserted later through
+        // this same ACP structure, never into command text.
         let posix = acp::acp_stdio_spawn_json(
             "ryu-pi",
             PathBuf::from("npx"),
@@ -12594,14 +12778,12 @@ mod tests {
                 panic!("expected stdio ACP config")
             };
             assert!(stdio.args.iter().all(|arg| !arg.contains("whoami")));
-            assert!(stdio.env.iter().any(|entry| {
-                entry.name == "RYU_MCP_HOST_CONVERSATION_ID"
-                    && entry.value == "profile-conversation"
-            }));
+            assert!(stdio.env.iter().any(|entry| entry.name == "RYU_MCP_CORE_URL"));
         }
         let extension = include_str!("../../../../core/assets/pi-extensions/ryu-mcp.ts");
-        assert!(extension.contains("x-ryu-user-jwt"));
-        assert!(extension.contains("host_conversation_id"));
+        assert!(extension.contains("/api/acp/tools"));
+        assert!(!extension.contains("x-ryu-user-jwt"));
+        assert!(!extension.contains("host_conversation_id"));
     }
 
     #[test]
@@ -12731,11 +12913,20 @@ mod tests {
         .expect("acp-exec route");
         match on {
             AgentRoute::Acp { ref spawn_cmd } => {
+                let value: serde_json::Value =
+                    serde_json::from_str(spawn_cmd).expect("gateway ACP command is structured JSON");
+                let env = value["env"].as_array().expect("structured env array");
+                let base_url = env
+                    .iter()
+                    .find(|entry| entry["name"] == "OPENAI_BASE_URL")
+                    .and_then(|entry| entry["value"].as_str())
+                    .unwrap_or_default();
                 assert!(
-                    spawn_cmd.contains("OPENAI_BASE_URL="),
-                    "toggled-on BYO agent must inject the gateway base URL, got: {spawn_cmd}"
+                    base_url.contains("/v1/agents/byo-openai-agent"),
+                    "toggled-on BYO agent must inject the scoped gateway base URL, got: {spawn_cmd}"
                 );
-                assert!(spawn_cmd.contains("my-agent --acp"));
+                assert_eq!(value["command"], "my-agent");
+                assert_eq!(value["args"], serde_json::json!(["--acp"]));
             }
             _ => panic!("acp-exec engine must resolve to an ACP route"),
         }

@@ -7,7 +7,11 @@ export default defineConfig({
 	main: {
 		// Workspace packages publish TypeScript source. Keep the Node-only token
 		// resolver in the main bundle instead of asking Electron to load .ts.
-		plugins: [externalizeDepsPlugin({ exclude: ["@ryuhq/core-client"] })],
+		plugins: [
+			externalizeDepsPlugin({
+				exclude: ["@ryuhq/core-client", "@ryu/i18n"],
+			}),
+		],
 		build: {
 			rollupOptions: {
 				input: resolve(import.meta.dirname, "src/main/index.ts"),

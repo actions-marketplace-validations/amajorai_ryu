@@ -28,7 +28,10 @@
 // content-level defenses (nonce-only scripts, no eval, pinned CSP, proxied egress).
 
 import { HOST_API_VERSION } from "./rpc.ts";
-import { sanitizeCspOrigin } from "./third-party-plugin.ts";
+import {
+	buildCompanionThemeLayoutCss,
+	sanitizeCspOrigin,
+} from "./third-party-plugin.ts";
 
 /** A widget's optional CSP hints (spec §1.1 `WidgetCsp`). Defined locally so this
  *  module is self-contained. `resource_domains` is the widget's declared remote
@@ -111,6 +114,8 @@ export interface WidgetInitialGlobals {
 	maxHeight: number | null;
 	safeArea: { bottom: number; left: number; right: number; top: number };
 	theme: "light" | "dark";
+	/** The complete host appearance snapshot, including custom palette values. */
+	themeTokens?: Record<string, string>;
 	toolInput: unknown;
 	toolOutput: unknown;
 	toolResponseMetadata: unknown;
@@ -186,6 +191,40 @@ function bridgeSource(
   var G = ${scriptLiteral(initial)};
   var port = null, nextId = 1, pending = {};
 
+  function applyThemeTokens(tokens){
+    if(!tokens || typeof tokens !== "object") return;
+    var root = document.documentElement;
+    Object.keys(tokens).forEach(function(name){
+      var value = tokens[name];
+      if(/^--[a-z0-9-]+$/.test(name) && typeof value === "string" && value.length > 0 && !/[{}<>;]/.test(value)){
+        root.style.setProperty(name, value);
+      }
+    });
+    var mode = tokens["--ryu-theme-mode"];
+    if(mode === "dark" || mode === "light"){
+      root.classList.toggle("dark", mode === "dark");
+      root.classList.toggle("light", mode === "light");
+      root.setAttribute("data-ryu-theme", mode);
+    }
+    var scheme = tokens["--ryu-color-scheme"];
+    if(scheme === "dark" || scheme === "light") root.style.colorScheme = scheme;
+    function setStateAttribute(token, attribute, activeValue) {
+      var state = tokens[token];
+      if (typeof state !== "string") return;
+      if (state === activeValue) root.setAttribute(attribute, activeValue);
+      else root.removeAttribute(attribute);
+    }
+    setStateAttribute("--ryu-pointer-cursor", "data-pointer-cursor", "true");
+    setStateAttribute("--ryu-chrome-shadows", "data-chrome-shadows", "off");
+    setStateAttribute("--ryu-inverted-backgrounds", "data-inverted-backgrounds", "on");
+    setStateAttribute("--ryu-dialog-overlay-mode", "data-dialog-overlay-blur", "off");
+    setStateAttribute("--ryu-popup-overlay-mode", "data-popup-overlay-blur", "on");
+    setStateAttribute("--ryu-animations", "data-ryu-animations", "off");
+    setStateAttribute("--ryu-page-bg-active", "data-ryu-page-bg-active", "on");
+  }
+
+  applyThemeTokens(G.themeTokens);
+
   function call(method, args){
     return new Promise(function(resolve, reject){
       if(!port){ reject(new Error("bridge not ready")); return; }
@@ -214,6 +253,7 @@ function bridgeSource(
     toolInput: G.toolInput, toolOutput: G.toolOutput,
     toolResponseMetadata: G.toolResponseMetadata, widgetState: G.widgetState,
     theme: G.theme, locale: G.locale, displayMode: G.displayMode,
+    themeTokens: G.themeTokens,
     maxHeight: G.maxHeight, safeArea: G.safeArea,
     i18n: {
       get: function(){ return call("i18n.get", []); },
@@ -281,6 +321,7 @@ function bridgeSource(
 
   function applyGlobals(partial){
     if(!partial) return;
+    applyThemeTokens(partial.themeTokens);
     for(var k in partial){
       if(Object.prototype.hasOwnProperty.call(partial, k)){ api[k] = partial[k]; }
     }
@@ -316,6 +357,10 @@ function bridgeSource(
 
   window.addEventListener("message", function(ev){
     var msg = ev.data;
+    if(ev.source === window.parent && msg && msg.kind === "ryu-plugin-theme" && msg.nonce === NONCE){
+      applyThemeTokens(msg.tokens);
+      return;
+    }
     if(!msg || msg.kind !== "ryu-plugin-host-port" || msg.nonce !== NONCE) return;
     var p = ev.ports && ev.ports[0];
     if(!p || port) return;
@@ -354,7 +399,9 @@ export function widgetBootstrapSrcdoc(
 	htmlBase64: string,
 	serverId: string,
 	initialGlobals: WidgetInitialGlobals,
-	assetProxy?: WidgetAssetProxy
+	assetProxy?: WidgetAssetProxy,
+	/** True when the containing Ryu root already applies `--ryu-ui-scale`. */
+	scaleInParent = false
 ): string {
 	const html = decodeBase64Utf8(htmlBase64);
 	const doc = new DOMParser().parseFromString(html, "text/html");
@@ -402,6 +449,11 @@ export function widgetBootstrapSrcdoc(
 	}
 
 	const head = doc.head ?? doc.documentElement;
+	if (initialGlobals.themeTokens) {
+		const themeLayout = doc.createElement("style");
+		themeLayout.textContent = buildCompanionThemeLayoutCss(scaleInParent);
+		head.insertBefore(themeLayout, head.firstChild);
+	}
 
 	// (3) The synchronous bridge, then the CSP meta, inserted at the TOP of <head>
 	// so both precede the widget's module script (which sits at the end of <body>).

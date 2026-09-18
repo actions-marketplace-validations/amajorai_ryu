@@ -98,12 +98,14 @@ opensrc/
 /apps/desktop/e2e/artifacts/
 /apps/desktop/e2e/proof/
 /apps/desktop/e2e/harness/dist-*/
+/apps/web/e2e/harness/dist-*/
 /apps/desktop/e2e/harness/media-proof-dist/
 /apps/desktop/e2e/harness/.proof-screenshot.cjs
 /apps/desktop/e2e/harness/*proof*.png
 /apps/desktop/e2e/*proof.png
 /apps/desktop/apps/desktop/e2e/harness/*proof.png
 /apps/fumadocs/artifacts/
+/apps/fumadocs/.next-*/
 /apps/fumadocs/ste-*-proof.png
 /apps/web/artifacts/
 /docs/proof/*.png
@@ -117,6 +119,7 @@ opensrc/
 # One-off root-level proof captures and scratch entrypoints
 /.codex-composer-selection-proof.png
 /.codex-island-dev.png
+/.pnpm-store/
 /.codex-mcp-proof.html
 /.codex-referrals-verification.png
 /animator-agent-proof.html

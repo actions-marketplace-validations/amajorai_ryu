@@ -31,6 +31,9 @@ export interface MentionTarget {
 /** A source row that can optionally open a concrete host destination. */
 export interface MentionSourceItem {
 	accentColor?: string;
+	/** Safe remote avatar URL for consumers that need a larger visual than the
+	 * compact mention token. */
+	avatarUrl?: string;
 	description?: string;
 	id: string;
 	name: string;

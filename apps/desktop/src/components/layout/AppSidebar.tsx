@@ -23,6 +23,8 @@ import {
 	ImageAdd01Icon,
 	LayerIcon,
 	LibraryIcon,
+	Mail01Icon,
+	MailReply01Icon,
 	Mic01Icon,
 	MoreHorizontalIcon,
 	Package01Icon,
@@ -133,6 +135,7 @@ import { formatCount } from "@ryu/ui/lib/number-format.ts";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
 	type Dispatch,
+	memo,
 	type DragEvent as ReactDragEvent,
 	type ReactNode,
 	type SetStateAction,
@@ -143,6 +146,7 @@ import {
 	useState,
 } from "react";
 import { UsageBar } from "@/components/agent-elements/input/usage-bar.tsx";
+import { StandaloneAppContextMenuItems } from "@/src/components/apps/standalone-app-menu.tsx";
 import { NewAutomationDialog } from "@/src/components/calendar/NewAutomationDialog.tsx";
 import { AddChannelDialog } from "@/src/components/channels/AddChannelDialog.tsx";
 import { ImportSetupDialog } from "@/src/components/chat/ImportSetupDialog.tsx";
@@ -166,6 +170,7 @@ import {
 import { ProjectSettingsDialog } from "@/src/components/layout/ProjectSettingsDialog.tsx";
 import { ResourceVisibilityConfirmationDialog } from "@/src/components/layout/ResourceVisibilityConfirmationDialog.tsx";
 import { ResourceVisibilityIndicator } from "@/src/components/layout/ResourceVisibilityIndicator.tsx";
+import { RemoteProjectStatus } from "@/src/components/layout/remote-project-status.tsx";
 import { SplitPresetMenuItems } from "@/src/components/layout/SplitPresetMenu.tsx";
 import { NodeSelector } from "@/src/components/shell/NodeSelector.tsx";
 import { AddToSpaceDialog } from "@/src/components/spaces/AddToSpaceDialog.tsx";
@@ -182,7 +187,7 @@ import type {
 import {
 	findSplit,
 	splitPaneTabs,
-	useTabsContext,
+	useTabSelector,
 } from "@/src/contexts/TabsContext.tsx";
 import { APPROVALS_ALIAS } from "@/src/contributions/companion-alias.ts";
 import { parseContributedTarget } from "@/src/contributions/contributed-target.ts";
@@ -214,11 +219,17 @@ import { useEngines } from "@/src/hooks/useEngines.ts";
 import { useCanManagePermission } from "@/src/hooks/useGatewayConfigurable.ts";
 import { useIdentities } from "@/src/hooks/useIdentities.ts";
 import { useMcp } from "@/src/hooks/useMcp.ts";
+import { useModifierClickHold } from "@/src/hooks/useModifierClickHold.ts";
 import { usePersistedToggle } from "@/src/hooks/usePersistedToggle.ts";
 import {
 	pluginCompanionPath,
 	usePluginContributions,
 } from "@/src/hooks/usePluginContributions.ts";
+import { useQuickPreviewModifier } from "@/src/hooks/useQuickPreviewModifier.ts";
+import {
+	quickReplyModifierMatches,
+	readQuickReplyModifier,
+} from "@/src/hooks/useQuickReplyModifier.ts";
 import { useSidebarChatPreview } from "@/src/hooks/useSidebarChatPreview.ts";
 import { useSidebarGroupedNav } from "@/src/hooks/useSidebarGroupedNav.ts";
 import {
@@ -229,6 +240,7 @@ import {
 import { useSidebarModes } from "@/src/hooks/useSidebarModes.ts";
 import { sidebarSectionQueryOptions } from "@/src/hooks/useSidebarSectionSource.ts";
 import { useSidebarVariant } from "@/src/hooks/useSidebarVariant.ts";
+import { useStandaloneApps } from "@/src/hooks/useStandaloneApps.ts";
 import { setTabLayout, useTabLayout } from "@/src/hooks/useTabLayout.ts";
 import { useTeams } from "@/src/hooks/useTeams.ts";
 import { useTimezoneRevision } from "@/src/hooks/useTimezone.ts";
@@ -325,13 +337,14 @@ import { useChannelSetupDialog } from "@/src/store/useChannelSetupDialog.ts";
 import { useConversationFlagsStore } from "@/src/store/useConversationFlagsStore.ts";
 import { useCreateAgentDialog } from "@/src/store/useCreateAgentDialog.ts";
 import { useGatewayDialog } from "@/src/store/useGatewayDialog.ts";
-import { useNodeStore } from "@/src/store/useNodeStore.ts";
+import { isLocalNode, useNodeStore } from "@/src/store/useNodeStore.ts";
 import {
 	useWorkspaceStore,
 	type WorkspaceProject,
 } from "@/src/store/useWorkspaceStore.ts";
 import type { Conversation } from "@/types/chat.ts";
 import { BotConnectionBadge } from "../bot/BotConnectionBadge.tsx";
+import { BotProfileCard } from "../bot/BotProfileCard.tsx";
 import { AnnouncementsSection } from "./AnnouncementsSection.tsx";
 import { AnimatedTitle } from "./animated-title.tsx";
 import {
@@ -1552,6 +1565,8 @@ interface SectionProps {
 	/** Shared section glyph used by both the stacked header and tabbed selector. */
 	icon?: IconSvgElement;
 	menu: SectionMenu;
+	onOpenQuickPreview?: ChatRowHandlers["onOpenQuickPreview"];
+	onOpenQuickReply?: ChatRowHandlers["onOpenQuickReply"];
 	onToggleCollapsed: (key: SectionKey) => void;
 	/** Items to show before a "Show more" control (0 means show all). */
 	pageSize: number;
@@ -1864,18 +1879,16 @@ function SidebarSection({
     hover × to close, right-click for pin/split/duplicate/close. Split members
     get a left accent so a contiguous split reads as one block in the list. */
 function VerticalTabRow({ tab, isActive }: { tab: Tab; isActive: boolean }) {
-	const {
-		tabs,
-		splits,
-		activeTabId,
-		activateTab,
-		closeTab,
-		openTab,
-		togglePin,
-		unloadTab,
-		splitTabs,
-		unsplit,
-	} = useTabsContext();
+	const tabs = useTabSelector((state) => state.tabs);
+	const splits = useTabSelector((state) => state.splits);
+	const activeTabId = useTabSelector((state) => state.activeTabId);
+	const activateTab = useTabSelector((state) => state.activateTab);
+	const closeTab = useTabSelector((state) => state.closeTab);
+	const openTab = useTabSelector((state) => state.openTab);
+	const togglePin = useTabSelector((state) => state.togglePin);
+	const unloadTab = useTabSelector((state) => state.unloadTab);
+	const splitTabs = useTabSelector((state) => state.splitTabs);
+	const unsplit = useTabSelector((state) => state.unsplit);
 	const inSplit = !!tab.splitId;
 	const tabLayout = useTabLayout();
 	const activeSplit = findSplit(tabs, splits, activeTabId);
@@ -2070,8 +2083,12 @@ function VerticalSplitBlock({
 	members: Tab[];
 	split: Split;
 }) {
-	const { tabs, addTabToSplit, setSplitOrientation, unsplit } =
-		useTabsContext();
+	const tabs = useTabSelector((state) => state.tabs);
+	const addTabToSplit = useTabSelector((state) => state.addTabToSplit);
+	const setSplitOrientation = useTabSelector(
+		(state) => state.setSplitOrientation
+	);
+	const unsplit = useTabSelector((state) => state.unsplit);
 	const dnd = useTabDnd();
 	const [joinHover, setJoinHover] = useState(false);
 	const canJoin =
@@ -2173,7 +2190,10 @@ function TabsSection({
 	pageSize,
 	sort,
 }: SectionProps) {
-	const { tabs, splits, activeTabId, openTab } = useTabsContext();
+	const tabs = useTabSelector((state) => state.tabs);
+	const splits = useTabSelector((state) => state.splits);
+	const activeTabId = useTabSelector((state) => state.activeTabId);
+	const openTab = useTabSelector((state) => state.openTab);
 	// Bracket contiguous split runs (tabs are normalized, so members are always
 	// adjacent) the way the horizontal strip does; everything else stays a row.
 	const items: ReactNode[] = [];
@@ -2415,20 +2435,192 @@ export function MessagingAgentRowBody({
 	);
 }
 
+function AgentThreadRow({
+	loadMessages,
+	nodeUrl,
+	onMarkRead,
+	onMarkUnread,
+	onOpen,
+	onOpenQuickPreview,
+	onOpenQuickReply,
+	thread,
+	unreadIds,
+}: {
+	loadMessages?: ChatRowHandlers["loadMessages"];
+	nodeUrl?: string;
+	onMarkRead?: ChatRowHandlers["onMarkRead"];
+	onMarkUnread?: ChatRowHandlers["onMarkUnread"];
+	onOpen: (conversationId: string) => void;
+	onOpenQuickPreview?: ChatRowHandlers["onOpenQuickPreview"];
+	onOpenQuickReply?: ChatRowHandlers["onOpenQuickReply"];
+	thread: Conversation;
+	unreadIds?: Set<string>;
+}) {
+	const forked = isForkedConversation(thread);
+	const preview = thread.lastMessage?.trim();
+	const isUnread = unreadIds?.has(thread.id) === true;
+	const hasActions = Boolean(onMarkRead && onMarkUnread && onOpenQuickReply);
+	const [quickPreviewModifier] = useQuickPreviewModifier();
+	const handleOpenQuickPreview = useCallback(
+		() => onOpenQuickPreview?.(thread.id),
+		[onOpenQuickPreview, thread.id]
+	);
+	const quickPreviewHold = useModifierClickHold({
+		modifier: onOpenQuickPreview ? quickPreviewModifier : "none",
+		onTrigger: handleOpenQuickPreview,
+	});
+
+	return (
+		<SidebarMenuItem>
+			<ContextMenu>
+				<ContextMenuTrigger>
+					{/* biome-ignore lint/a11y/noStaticElementInteractions: thread row owns nested menu controls */}
+					<div
+						aria-label={`Open thread: ${thread.title}`}
+						className="group/thread relative flex min-h-9 w-full items-center gap-2 overflow-hidden rounded-md px-2 py-1.5 text-left transition-colors hover:bg-muted"
+						data-testid={`agent-thread-row-${thread.id}`}
+						onClick={(event) => {
+							if (quickPreviewHold.consumeTriggered()) {
+								event.preventDefault();
+								return;
+							}
+							if (
+								onOpenQuickReply &&
+								quickReplyModifierMatches(event, readQuickReplyModifier())
+							) {
+								event.preventDefault();
+								onOpenQuickReply(thread.id);
+								return;
+							}
+							onOpen(thread.id);
+						}}
+						onKeyDown={(event) => {
+							if (event.key === "Enter") {
+								onOpen(thread.id);
+							}
+						}}
+						onPointerCancel={quickPreviewHold.onPointerCancel}
+						onPointerDown={quickPreviewHold.onPointerDown}
+						onPointerUp={quickPreviewHold.onPointerUp}
+						role="button"
+						tabIndex={0}
+					>
+						{nodeUrl ? (
+							<SidebarTodoProgress
+								celebrate={isUnread}
+								conversation={thread}
+								loadMessages={loadMessages}
+								nodeUrl={nodeUrl}
+							/>
+						) : null}
+						<span
+							aria-hidden="true"
+							className="absolute top-1/2 -left-[5px] size-2 -translate-y-1/2 rounded-full bg-sidebar-foreground/35 ring-2 ring-sidebar"
+						/>
+						<HugeiconsIcon
+							className={`size-3.5 shrink-0 ${forked ? "text-primary" : "text-muted-foreground"}`}
+							icon={GitBranchIcon}
+						/>
+						<span className="min-w-0 flex-1">
+							<span className="flex min-w-0 items-center gap-1.5">
+								<span className="min-w-0 flex-1 truncate text-foreground/85 text-xs">
+									<AnimatedTitle text={thread.title} />
+								</span>
+								<span className="shrink-0 text-[10px] text-muted-foreground/60 tabular-nums">
+									{compactAge(thread.updatedAt)}
+								</span>
+							</span>
+							{preview ? (
+								<span className="mt-0.5 block truncate text-[10px] text-muted-foreground/70">
+									{preview}
+								</span>
+							) : null}
+						</span>
+						{hasActions ? (
+							<DropdownMenu>
+								<DropdownMenuTrigger
+									aria-label={`More actions for ${thread.title}`}
+									className="flex size-5 shrink-0 items-center justify-center rounded text-muted-foreground opacity-0 hover:bg-accent hover:text-foreground group-hover/thread:opacity-100"
+									onClick={(event) => event.stopPropagation()}
+								>
+									<HugeiconsIcon icon={MoreHorizontalIcon} size={12} />
+								</DropdownMenuTrigger>
+								<DropdownMenuContent align="end">
+									<DropdownMenuItem
+										onClick={(event) => {
+											event.stopPropagation();
+											onOpenQuickReply?.(thread.id);
+										}}
+									>
+										<HugeiconsIcon
+											className="mr-2"
+											icon={MailReply01Icon}
+											size={12}
+										/>
+										Quick reply
+									</DropdownMenuItem>
+									<DropdownMenuItem
+										onClick={() =>
+											isUnread
+												? onMarkRead?.(thread.id)
+												: onMarkUnread?.(thread.id)
+										}
+									>
+										<HugeiconsIcon
+											className="mr-2"
+											icon={Mail01Icon}
+											size={12}
+										/>
+										{isUnread ? "Mark as read" : "Mark as unread"}
+									</DropdownMenuItem>
+								</DropdownMenuContent>
+							</DropdownMenu>
+						) : null}
+					</div>
+				</ContextMenuTrigger>
+				{hasActions ? (
+					<ContextMenuContent>
+						<ContextMenuItem onClick={() => onOpenQuickReply?.(thread.id)}>
+							<HugeiconsIcon className="mr-2 size-4" icon={MailReply01Icon} />
+							Quick reply
+						</ContextMenuItem>
+						<ContextMenuItem
+							onClick={() =>
+								isUnread ? onMarkRead?.(thread.id) : onMarkUnread?.(thread.id)
+							}
+						>
+							<HugeiconsIcon className="mr-2 size-4" icon={Mail01Icon} />
+							{isUnread ? "Mark as read" : "Mark as unread"}
+						</ContextMenuItem>
+					</ContextMenuContent>
+				) : null}
+			</ContextMenu>
+		</SidebarMenuItem>
+	);
+}
+
 /** A branch-tree list beneath one bot in Bot mode. Forked conversations are
  *  ordinary Core summaries, so a new fork appears here as soon as the history
  *  context receives the fork response; no second thread registry is needed. */
 export function AgentThreadList({
 	loadMessages,
 	nodeUrl,
+	onMarkRead,
+	onMarkUnread,
 	onOpen,
+	onOpenQuickPreview,
+	onOpenQuickReply,
 	pageSize,
 	threads,
 	unreadIds,
 }: {
 	loadMessages?: ChatRowHandlers["loadMessages"];
 	nodeUrl?: string;
+	onMarkRead?: ChatRowHandlers["onMarkRead"];
+	onMarkUnread?: ChatRowHandlers["onMarkUnread"];
 	onOpen: (conversationId: string) => void;
+	onOpenQuickPreview?: ChatRowHandlers["onOpenQuickPreview"];
+	onOpenQuickReply?: ChatRowHandlers["onOpenQuickReply"];
 	pageSize: number;
 	threads: Conversation[];
 	unreadIds?: Set<string>;
@@ -2437,52 +2629,20 @@ export function AgentThreadList({
 	const renderList = (list: Conversation[]) => (
 		<div className="relative ml-5 border-sidebar-border/70 border-l pl-2">
 			<SidebarMenu className="gap-0.5">
-				{list.map((thread) => {
-					const forked = isForkedConversation(thread);
-					const preview = thread.lastMessage?.trim();
-					return (
-						<SidebarMenuItem key={thread.id}>
-							<button
-								aria-label={`Open thread: ${thread.title}`}
-								className="group/thread relative flex min-h-9 w-full items-center gap-2 overflow-hidden rounded-md px-2 py-1.5 text-left transition-colors hover:bg-muted"
-								onClick={() => onOpen(thread.id)}
-								type="button"
-							>
-								{nodeUrl ? (
-									<SidebarTodoProgress
-										celebrate={unreadIds?.has(thread.id) === true}
-										conversation={thread}
-										loadMessages={loadMessages}
-										nodeUrl={nodeUrl}
-									/>
-								) : null}
-								<span
-									aria-hidden="true"
-									className="absolute top-1/2 -left-[5px] size-2 -translate-y-1/2 rounded-full bg-sidebar-foreground/35 ring-2 ring-sidebar"
-								/>
-								<HugeiconsIcon
-									className={`size-3.5 shrink-0 ${forked ? "text-primary" : "text-muted-foreground"}`}
-									icon={GitBranchIcon}
-								/>
-								<span className="min-w-0 flex-1">
-									<span className="flex min-w-0 items-center gap-1.5">
-										<span className="min-w-0 flex-1 truncate text-foreground/85 text-xs">
-											<AnimatedTitle text={thread.title} />
-										</span>
-										<span className="shrink-0 text-[10px] text-muted-foreground/60 tabular-nums">
-											{compactAge(thread.updatedAt)}
-										</span>
-									</span>
-									{preview ? (
-										<span className="mt-0.5 block truncate text-[10px] text-muted-foreground/70">
-											{preview}
-										</span>
-									) : null}
-								</span>
-							</button>
-						</SidebarMenuItem>
-					);
-				})}
+				{list.map((thread) => (
+					<AgentThreadRow
+						key={thread.id}
+						loadMessages={loadMessages}
+						nodeUrl={nodeUrl}
+						onMarkRead={onMarkRead}
+						onMarkUnread={onMarkUnread}
+						onOpen={onOpen}
+						onOpenQuickPreview={onOpenQuickPreview}
+						onOpenQuickReply={onOpenQuickReply}
+						thread={thread}
+						unreadIds={unreadIds}
+					/>
+				))}
 			</SidebarMenu>
 		</div>
 	);
@@ -2518,12 +2678,14 @@ function AgentsSection({
 	collapsed,
 	dnd,
 	menu,
+	onOpenQuickPreview,
+	onOpenQuickReply,
 	onToggleCollapsed,
 	pageSize,
 	sort,
 }: SectionProps) {
 	const { openCreateAgent } = useCreateAgentDialog();
-	const { openTab } = useTabsContext();
+	const openTab = useTabSelector((state) => state.openTab);
 	const { agents, loading } = useAgents();
 	// App-contributed rows anchored to `agent`. The sidebar is where agents are
 	// listed, so an app anchoring here previously had its row reachable only from
@@ -2537,6 +2699,8 @@ function AgentsSection({
 	const { conversations, loadMessages } = useChatHistoryContext();
 	const activeNode = useActiveNode();
 	const unreadIds = useConversationFlagsStore((state) => state.unreadIds);
+	const markRead = useConversationFlagsStore((state) => state.markRead);
+	const markUnread = useConversationFlagsStore((state) => state.markUnread);
 	const pinnedAgents = useMemo(() => {
 		const agentsById = new Map(agents.map((agent) => [agent.id, agent]));
 		return favorites
@@ -2755,7 +2919,11 @@ function AgentsSection({
 						<AgentThreadList
 							loadMessages={loadMessages}
 							nodeUrl={activeNode.url}
+							onMarkRead={markRead}
+							onMarkUnread={markUnread}
 							onOpen={openThread}
+							onOpenQuickPreview={onOpenQuickPreview}
+							onOpenQuickReply={onOpenQuickReply}
 							pageSize={pageSize}
 							threads={threads}
 							unreadIds={unreadIds}
@@ -3016,7 +3184,9 @@ function SpaceDocRows({
 		icon: GlyphValue
 	) => Promise<void>;
 }) {
-	const { updateTabsIconWhere } = useTabsContext();
+	const updateTabsIconWhere = useTabSelector(
+		(state) => state.updateTabsIconWhere
+	);
 	const [iconTarget, setIconTarget] = useState<SpaceDocument | null>(null);
 	return (
 		<>
@@ -3249,7 +3419,9 @@ export function SpaceSidebarRow({
 	setSpaceIcon: (id: string, icon: GlyphValue) => Promise<void>;
 	space: Space;
 }) {
-	const { updateTabsIconWhere } = useTabsContext();
+	const updateTabsIconWhere = useTabSelector(
+		(state) => state.updateTabsIconWhere
+	);
 	// Contributed `space`-anchored rows — see the note in AgentsSection.
 	const spaceContributedRows = useContributedRowsFor("space", "space_id");
 	const [expanded, setExpanded] = useState(false);
@@ -3499,7 +3671,7 @@ function SpacesSection({
 	pageSize,
 	sort,
 }: SectionProps) {
-	const { openTab } = useTabsContext();
+	const openTab = useTabSelector((state) => state.openTab);
 	const {
 		spaces,
 		loading,
@@ -3954,7 +4126,7 @@ function ChannelsSection({
 	const { channels, loading, authed, create, refresh } = useChannels();
 	const { agents } = useAgents();
 	const { teams } = useTeams();
-	const { openTab } = useTabsContext();
+	const openTab = useTabSelector((state) => state.openTab);
 	const {
 		open: addDialogOpen,
 		request: channelSetupRequest,
@@ -4304,7 +4476,7 @@ function IdentitiesSection({
 	sort,
 }: SectionProps) {
 	const { profiles, loading, error, refetch, create } = useIdentities();
-	const { openTab } = useTabsContext();
+	const openTab = useTabSelector((state) => state.openTab);
 	const [addDialogOpen, setAddDialogOpen] = useState(false);
 	const rows = useMemo(
 		() =>
@@ -4464,7 +4636,7 @@ function SkillsSection({
 	pageSize,
 	sort,
 }: SectionProps) {
-	const { openTab } = useTabsContext();
+	const openTab = useTabSelector((state) => state.openTab);
 	const node = useActiveNode();
 	const target: ApiTarget = {
 		url: node.url,
@@ -4604,7 +4776,7 @@ function McpSection({
 	pageSize,
 	sort,
 }: SectionProps) {
-	const { openTab } = useTabsContext();
+	const openTab = useTabSelector((state) => state.openTab);
 	const { servers, loading, error, reload } = useMcp();
 	const paged = usePaged(
 		sortItems(servers, sort, NAMED_SORT_ACCESSORS),
@@ -4730,7 +4902,7 @@ function ToolsSection({
 	pageSize,
 	sort,
 }: SectionProps) {
-	const { openTab } = useTabsContext();
+	const openTab = useTabSelector((state) => state.openTab);
 	const { tools, loading, error, reload } = useMcp();
 	const paged = usePaged(
 		sortItems(tools, sort, NAMED_SORT_ACCESSORS),
@@ -4853,8 +5025,14 @@ function PluginsSection({
 	pageSize,
 	sort,
 }: SectionProps) {
-	const { openTab } = useTabsContext();
+	const openTab = useTabSelector((state) => state.openTab);
 	const { apps, loading, error, reload } = useApps();
+	const {
+		install: installStandalone,
+		installedAppIds,
+		open: openStandalone,
+		uninstall: uninstallStandalone,
+	} = useStandaloneApps();
 	const installed = useMemo(() => apps.filter((a) => a.installed), [apps]);
 	const paged = usePaged(
 		sortItems(installed, sort, NAMED_SORT_ACCESSORS),
@@ -4939,6 +5117,54 @@ function PluginsSection({
 							Open in new tab
 						</ContextMenuItem>
 						<OpenInNewWindowContextMenuItem onClick={openPluginsInNewWindow} />
+						<StandaloneAppContextMenuItems
+							enabled={app.enabled}
+							hasCompanion={app.runnables.some(
+								(runnable) => runnable.kind === "companion"
+							)}
+							installed={installedAppIds.has(app.id)}
+							onInstall={() => {
+								const target = {
+									appId: app.id,
+									name: app.name,
+									version: app.version,
+								};
+								installStandalone(target)
+									.then(() => openStandalone(target))
+									.catch((error: unknown) => {
+										toast.error("Couldn't install the standalone app", {
+											description:
+												error instanceof Error
+													? error.message
+													: "Please try again.",
+										});
+									});
+							}}
+							onOpen={() => {
+								openStandalone({
+									appId: app.id,
+									name: app.name,
+									version: app.version,
+								}).catch((error: unknown) => {
+									toast.error("Couldn't open the standalone app", {
+										description:
+											error instanceof Error
+												? error.message
+												: "Please try again.",
+									});
+								});
+							}}
+							onRemove={() => {
+								uninstallStandalone(app.id).catch((error: unknown) => {
+									toast.error("Couldn't remove the standalone app", {
+										description:
+											error instanceof Error
+												? error.message
+												: "Please try again.",
+									});
+								});
+							}}
+						/>
 					</ContextMenuContent>
 				</ContextMenu>
 			</SidebarMenuItem>
@@ -5007,9 +5233,15 @@ function AppsSection({
 	pageSize,
 	sort,
 }: SectionProps & { apps: AppInfo[] }) {
-	const { openTab } = useTabsContext();
+	const openTab = useTabSelector((state) => state.openTab);
 	const { companions, sidebar_buttons: sidebarButtons } =
 		usePluginContributions();
+	const {
+		install: installStandalone,
+		installedAppIds,
+		open: openStandalone,
+		uninstall: uninstallStandalone,
+	} = useStandaloneApps();
 	const report = useOptionalReport();
 	const appItems = useMemo<PinnedAppItem[]>(() => {
 		const coreAppIds = new Set(
@@ -5069,11 +5301,12 @@ function AppsSection({
 						id: app.id,
 						label: app.name,
 						seedId: app.id,
+						standaloneInstalled: installedAppIds.has(app.id),
 						target,
 					},
 				];
 			});
-	}, [apps, companions, sidebarButtons]);
+	}, [apps, companions, installedAppIds, sidebarButtons]);
 
 	if (appItems.length === 0) {
 		return null;
@@ -5093,6 +5326,39 @@ function AppsSection({
 			source: "installed",
 		});
 	};
+	const standaloneTarget = (app: PinnedAppItem) => ({
+		appId: app.id,
+		name: app.label,
+		version:
+			apps.find((candidate) => candidate.id === app.id)?.version ?? "unknown",
+	});
+	const handleInstallStandalone = (app: PinnedAppItem) => {
+		const target = standaloneTarget(app);
+		installStandalone(target)
+			.then(() => openStandalone(target))
+			.catch((error: unknown) => {
+				toast.error("Couldn't install the standalone app", {
+					description:
+						error instanceof Error ? error.message : "Please try again.",
+				});
+			});
+	};
+	const handleOpenStandalone = (app: PinnedAppItem) => {
+		openStandalone(standaloneTarget(app)).catch((error: unknown) => {
+			toast.error("Couldn't open the standalone app", {
+				description:
+					error instanceof Error ? error.message : "Please try again.",
+			});
+		});
+	};
+	const handleRemoveStandalone = (app: PinnedAppItem) => {
+		uninstallStandalone(app.id).catch((error: unknown) => {
+			toast.error("Couldn't remove the standalone app", {
+				description:
+					error instanceof Error ? error.message : "Please try again.",
+			});
+		});
+	};
 
 	return (
 		<SidebarSection
@@ -5107,8 +5373,11 @@ function AppsSection({
 		>
 			<PinnedAppStage
 				apps={appItems}
+				onInstallStandalone={handleInstallStandalone}
 				onOpen={handleOpen}
 				onOpenNewWindow={handleOpenNewWindow}
+				onOpenStandalone={handleOpenStandalone}
+				onRemoveStandalone={handleRemoveStandalone}
 				onReport={report ? handleReport : undefined}
 			/>
 		</SidebarSection>
@@ -5147,7 +5416,7 @@ export function DynamicSidebarSection({
 	pageSize,
 	sort,
 }: SectionProps & { contribution: PluginSidebarSection }) {
-	const { openTab } = useTabsContext();
+	const openTab = useTabSelector((state) => state.openTab);
 	const node = useActiveNode();
 	const queryClient = useQueryClient();
 	const spec = contribution.spec;
@@ -5161,13 +5430,23 @@ export function DynamicSidebarSection({
 		spec?.entity?.idKey ?? "id"
 	);
 	const source = spec?.source;
-	const target = toTarget(node);
-	const sourceOptions = sidebarSectionQueryOptions(contribution, target);
+	const target = useMemo(
+		() => toTarget(node),
+		[node.url, node.token, node.userJwt]
+	);
+	const sourceOptions = useMemo(
+		() => sidebarSectionQueryOptions(contribution, target),
+		[contribution, target]
+	);
 	const queryKey = sourceOptions.queryKey;
-	const { data: payload } = useQuery({
-		...sourceOptions,
-		refetchInterval: collapsed ? false : sourceOptions.refetchInterval,
-	});
+	const queryOptions = useMemo(
+		() => ({
+			...sourceOptions,
+			refetchInterval: collapsed ? false : sourceOptions.refetchInterval,
+		}),
+		[collapsed, sourceOptions]
+	);
+	const { data: payload } = useQuery(queryOptions);
 
 	const rows = useMemo(
 		() => (source && payload ? sourceItemsFromResponse(source, payload) : []),
@@ -5726,7 +6005,7 @@ function EnginesSection({
 	pageSize,
 	sort,
 }: SectionProps) {
-	const { openTab } = useTabsContext();
+	const openTab = useTabSelector((state) => state.openTab);
 	const { engines, loading, error, reload } = useEngines();
 	const {
 		engines: runAlongside,
@@ -6161,6 +6440,7 @@ export function SubSection({
 	sectionKey,
 	size = "sm",
 	testId,
+	trailing,
 	visibilityDrop,
 	wrapHeader,
 }: {
@@ -6187,6 +6467,8 @@ export function SubSection({
 	size?: "sm" | "md";
 	/** Optional resource visibility drop target for this group header/body. */
 	visibilityDrop?: VisibilitySubSectionDrop;
+	/** Optional metadata kept beside the label, such as remote node status. */
+	trailing?: ReactNode;
 	/** Optional wrapper for the header row — e.g. a right-click "Delete all
 	 *  chats" context menu. Defaults to identity (no wrapper). */
 	wrapHeader?: (header: ReactNode) => ReactNode;
@@ -6323,6 +6605,7 @@ export function SubSection({
 									/>
 								))}
 							<span className="min-w-0 truncate">{localizedLabel}</span>
+							{trailing}
 							{typeof count === "number" && (
 								<span
 									className={`shrink-0 text-muted-foreground/60 ${action ? "transition-opacity group-hover/subsection:opacity-0" : ""}`}
@@ -7015,6 +7298,9 @@ function ProjectRow({
 	onToggleCollapsed: (key: string) => void;
 }) {
 	const count = bucket.conversations.length;
+	const activeNode = useActiveNode();
+	const activeNodeOnline = useNodeStore((state) => state.activeNodeOnline);
+	const remote = !isLocalNode(activeNode);
 	const customIcon = useWorkspaceStore(
 		(state) => state.projectIcons[bucket.path]
 	);
@@ -7025,7 +7311,7 @@ function ProjectRow({
 	const [iconDialogOpen, setIconDialogOpen] = useState(false);
 	const [settingsOpen, setSettingsOpen] = useState(false);
 	const [confirmDeleteOpen, setConfirmDeleteOpen] = useState(false);
-	const { openTab } = useTabsContext();
+	const openTab = useTabSelector((state) => state.openTab);
 	const openProjectView = (kind: "diff" | "files" | "graph") => {
 		const path = `/project/${kind}/${encodeURIComponent(bucket.path)}`;
 		const title =
@@ -7077,6 +7363,14 @@ function ProjectRow({
 						onToggleCollapsed={onToggleCollapsed}
 						sectionKey={bucket.path}
 						size="md"
+						trailing={
+							remote ? (
+								<RemoteProjectStatus
+									nodeName={activeNode.name}
+									online={activeNodeOnline}
+								/>
+							) : undefined
+						}
 					>
 						{bucket.sourceFolders.length > 1 && (
 							<div className="mb-1 space-y-0.5 px-2 text-[10px] text-muted-foreground">
@@ -7293,7 +7587,9 @@ export function SpaceScopeMenu({
 	setSpaceIcon: (id: string, icon: GlyphValue) => Promise<void>;
 	space: Space;
 }) {
-	const { updateTabsIconWhere } = useTabsContext();
+	const updateTabsIconWhere = useTabSelector(
+		(state) => state.updateTabsIconWhere
+	);
 	const [iconDialogOpen, setIconDialogOpen] = useState(false);
 	const [renameOpen, setRenameOpen] = useState(false);
 	return (
@@ -7579,7 +7875,7 @@ function ProjectsSection({
 	projects: ProjectBucket[];
 }) {
 	const { setFolder, removeProject } = useWorkspaceStore();
-	const { openTab } = useTabsContext();
+	const openTab = useTabSelector((state) => state.openTab);
 	const [groupedNav] = useSidebarGroupedNav();
 	const projectNames = useWorkspaceStore((state) => state.projectNames);
 	const options = useMemo(
@@ -8024,7 +8320,9 @@ function NavTabButton({
 	menu: ChromeMenu;
 	path: string;
 }) {
-	const { openTab, tabs, activeTabId } = useTabsContext();
+	const openTab = useTabSelector((state) => state.openTab);
+	const tabs = useTabSelector((state) => state.tabs);
+	const activeTabId = useTabSelector((state) => state.activeTabId);
 	const open = (forceNew: boolean) => openTab(path, { title: label, forceNew });
 	const openInNewWindow = () => {
 		void openEntityInNewWindow({ path, title: label });
@@ -8077,7 +8375,7 @@ function DynamicSidebarButton({
 	button: PluginSidebarButton;
 	menu: ChromeMenu;
 }) {
-	const { openTab } = useTabsContext();
+	const openTab = useTabSelector((state) => state.openTab);
 	const chromeKey = `plugin:${button.plugin}:${button.id}` as ChromeKey;
 	const open = (forceNew: boolean) =>
 		openTab(button.target, {
@@ -8135,6 +8433,8 @@ interface AppSidebarProps {
 	activeConversationId?: string | null;
 	onDeleteConversation?: (id: string) => void;
 	onNewConversation?: () => void;
+	onOpenQuickPreview?: (id: string) => void;
+	onOpenQuickReply?: (id: string) => void;
 	onSelectConversation?: (id: string) => void;
 }
 
@@ -8188,11 +8488,13 @@ function TabbedSectionNav({
 }
 
 /** Shared panel content — rendered inside either the docked Sidebar or the floating overlay. */
-export function SidebarPanelContent({
+export const SidebarPanelContent = memo(function SidebarPanelContent({
 	activeConversationId = null,
 	onSelectConversation,
 	onNewConversation,
 	onDeleteConversation,
+	onOpenQuickPreview,
+	onOpenQuickReply,
 }: AppSidebarProps) {
 	const productMode = useProductMode();
 	const { t } = useI18n();
@@ -8209,8 +8511,13 @@ export function SidebarPanelContent({
 		loadMessages,
 	} = useChatHistoryContext();
 	const { canMakePrivate } = useVisibilityAdminAccess();
-	const { openTab, updateTabsIconWhere, requestScrollToMessage } =
-		useTabsContext();
+	const openTab = useTabSelector((state) => state.openTab);
+	const updateTabsIconWhere = useTabSelector(
+		(state) => state.updateTabsIconWhere
+	);
+	const requestScrollToMessage = useTabSelector(
+		(state) => state.requestScrollToMessage
+	);
 	const activeNode = useActiveNode();
 	const { canSwitchToConsole } = useConsoleAccess(activeNode);
 	const { agents } = useAgents();
@@ -9020,6 +9327,8 @@ export function SidebarPanelContent({
 		onJumpToMessage: handleJumpToMessage,
 		onMarkRead: markRead,
 		onMarkUnread: markUnread,
+		onOpenQuickPreview,
+		onOpenQuickReply: onOpenQuickReply ?? (() => undefined),
 		onOpenInNewTab: handleOpenConversationInNewTab,
 		onOpenInNewWindow: handleOpenConversationInNewWindow,
 		onOpenNewSideChat: handleOpenNewSideChat,
@@ -9195,6 +9504,8 @@ export function SidebarPanelContent({
 			dnd: sectionDnd,
 			icon: isDynamicSectionKey(key) ? undefined : SECTION_ICONS[key],
 			menu: sectionMenu,
+			onOpenQuickPreview,
+			onOpenQuickReply,
 			pageSize: sectionPageSizes[key] ?? DEFAULT_PAGE_SIZE,
 			sort: sectionSorts[key] ?? DEFAULT_SORT,
 			onToggleCollapsed: handleToggleSection,
@@ -9374,6 +9685,7 @@ export function SidebarPanelContent({
 						className={hiddenChrome.has("node-selector") ? "pt-2" : ""}
 					/>
 				)}
+				{botProduct ? <BotProfileCard conversations={conversations} /> : null}
 				<div
 					className="scroll-fade max-h-[min(50vh,28rem)] min-h-0 overflow-y-auto overscroll-contain"
 					data-testid="sidebar-header-actions"
@@ -9606,13 +9918,15 @@ export function SidebarPanelContent({
 			/>
 		</>
 	);
-}
+});
 
-export function AppSidebar({
+export const AppSidebar = memo(function AppSidebar({
 	activeConversationId = null,
 	onSelectConversation,
 	onNewConversation,
 	onDeleteConversation,
+	onOpenQuickPreview,
+	onOpenQuickReply,
 }: AppSidebarProps) {
 	const [sidebarVariant] = useSidebarVariant();
 	return (
@@ -9621,9 +9935,11 @@ export function AppSidebar({
 				activeConversationId={activeConversationId}
 				onDeleteConversation={onDeleteConversation}
 				onNewConversation={onNewConversation}
+				onOpenQuickPreview={onOpenQuickPreview}
+				onOpenQuickReply={onOpenQuickReply}
 				onSelectConversation={onSelectConversation}
 			/>
 			<SidebarRail />
 		</Sidebar>
 	);
-}
+});

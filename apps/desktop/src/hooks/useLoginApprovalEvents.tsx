@@ -67,7 +67,11 @@ export function LoginApprovalEvents() {
 		const run = async () => {
 			while (!cancelled) {
 				try {
-					const snapshot = await listLoginApprovals(BACKEND_URL, auth);
+					const snapshot = await listLoginApprovals(
+						BACKEND_URL,
+						auth,
+						controller.signal
+					);
 					if (!cancelled) {
 						setActiveRequest((current) =>
 							current && snapshot.some((request) => request.id === current.id)
@@ -76,6 +80,9 @@ export function LoginApprovalEvents() {
 										(request) => !dismissed.current.has(request.id)
 									) ?? null)
 						);
+					}
+					if (cancelled) {
+						break;
 					}
 					await streamLoginApprovals(
 						BACKEND_URL,

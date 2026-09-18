@@ -298,8 +298,9 @@ impl AppState {
         let admission = ConcurrencyLimiter::new(&config.concurrency);
         let skills = SkillsRegistry::new(config.skills.skills.clone());
 
-        let mut audit =
-            AuditRegistry::from_logger(AuditLogger::new(&config.audit).unwrap_or_default());
+        let audit_logger = AuditLogger::new(&config.audit)
+            .map_err(|error| format!("audit initialization failed: {error}"))?;
+        let mut audit = AuditRegistry::from_logger(audit_logger);
         let budget = BudgetRegistry::new(config.budgets.clone());
         let exec_budget = ExecBudgetEnforcer::new(config.exec_budget.clone());
         let mut evals = EvalsRegistry::new(config.evals.clone());
@@ -422,10 +423,16 @@ impl AppState {
             .as_ref()
     }
 
-    /// Snapshot the current effective policy. Cheap clone; recovers from a
-    /// poisoned lock by returning the default (fail-open) policy.
+    /// Snapshot the current effective policy. Cheap clone; a poisoned policy
+    /// lock returns an unavailable policy so managed requests fail closed.
     pub fn policy_snapshot(&self) -> EffectivePolicy {
-        self.policy.read().map(|p| p.clone()).unwrap_or_default()
+        self.policy
+            .read()
+            .map(|policy| policy.clone())
+            .unwrap_or_else(|_| EffectivePolicy {
+                available: false,
+                ..EffectivePolicy::default()
+            })
     }
 
     /// Replace the effective policy (called by the control-plane refresh task).
@@ -728,8 +735,9 @@ mod stage_backend_selection_tests {
     /// ignored.
     #[test]
     fn default_config_selects_builtin_for_every_stage() {
-        let state =
-            AppState::new(GatewayConfig::default()).expect("default stage backends must build");
+        let mut config = GatewayConfig::default();
+        config.audit.enabled = false;
+        let state = AppState::new(config).expect("default stage backends must build");
         assert_eq!(state.cache.active_id(), CacheRegistry::BUILTIN);
         assert_eq!(state.budget.active_id().as_str(), "builtin");
         // W6c: the four newly-inverted stages are read + applied to their built-in.
@@ -739,12 +747,30 @@ mod stage_backend_selection_tests {
         assert_eq!(state.passthrough.active_id().as_str(), "builtin");
     }
 
+    #[test]
+    fn audit_storage_open_failure_refuses_state_creation() {
+        let path = std::env::temp_dir().join(format!("ryu-audit-init-dir-{}", std::process::id()));
+        std::fs::create_dir_all(&path).expect("create test directory");
+        let mut config = GatewayConfig::default();
+        config.audit.enabled = true;
+        config.audit.db_path = path.to_string_lossy().into_owned();
+
+        let error = match AppState::new(config) {
+            Err(error) => error,
+            Ok(_) => panic!("audit directory must not become disabled audit"),
+        };
+        assert!(error.contains("audit initialization failed"), "{error}");
+
+        std::fs::remove_dir(&path).expect("remove test directory");
+    }
+
     /// A config that names a backend NOT registered in a stage's registry refuses
     /// the whole build (fail-closed), and the error names the stage + the
     /// registered ids so a typo is diagnosable.
     #[test]
     fn unknown_stage_backend_refuses_build() {
         let mut config = GatewayConfig::default();
+        config.audit.enabled = false;
         config.backends.cache = "ghost".to_string();
         // `AppState` is not `Debug`, so match rather than `expect_err`.
         let err = match AppState::new(config) {

@@ -40,7 +40,6 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_yml::Value as YamlValue;
 
-use crate::win_process::NoWindow;
 
 /// The OKF specification version this module targets.
 pub const OKF_VERSION: &str = "0.1";
@@ -509,33 +508,10 @@ impl Bundle {
     /// `root` therefore points at a path that no longer exists, so callers that
     /// need the files on disk should clone themselves and call `from_dir`.
     pub async fn from_git(url: &str, git_ref: Option<&str>) -> Result<Self> {
-        let tmp = tempfile::tempdir().context("failed to create temp dir for clone")?;
-        let dest = tmp.path().join("repo");
-        let dest_str = dest.to_string_lossy().to_string();
-        let url = url.to_owned();
-        let git_ref = git_ref.map(str::to_owned);
-
-        let status = tokio::task::spawn_blocking(move || {
-            let mut cmd = std::process::Command::new("git");
-            cmd.args(["clone", "--depth", "1"]);
-            if let Some(r) = git_ref.as_deref() {
-                cmd.args(["--branch", r]);
-            }
-            cmd.args(["--", &url, &dest_str])
-                .env("GIT_TERMINAL_PROMPT", "0");
-            cmd.no_window();
-            cmd.output()
-        })
-        .await
-        .context("git clone task panicked")?
-        .context("failed to spawn git (is the git CLI installed and on PATH?)")?;
-
-        if !status.status.success() {
-            let stderr = String::from_utf8_lossy(&status.stderr);
-            anyhow::bail!("git clone failed: {}", stderr.trim());
-        }
-
-        Self::from_dir(&dest)
+        let _ = (url, git_ref);
+        anyhow::bail!(
+            "remote knowledge git clones are disabled until Core can provide pinned, redirect-safe egress and a trusted artifact binding"
+        )
     }
 
     /// Write the bundle to a directory: every concept at its `file_path`, plus

@@ -7,6 +7,7 @@
 
 import { useQueries, useQueryClient } from "@tanstack/react-query";
 import { useCallback, useMemo } from "react";
+import { useIsActiveTab } from "@/src/contexts/TabsContext.tsx";
 import { toTarget } from "@/src/lib/api/client.ts";
 import type {
 	PiAccount,
@@ -65,29 +66,43 @@ function subscriptionAccountRefs(
 export function useSubscriptionUsage(
 	catalog: PiCatalog | null
 ): UseSubscriptionUsageResult {
+	const active = useIsActiveTab();
 	const node = useActiveNode();
-	const target = useMemo(() => toTarget(node), [node]);
+	const target = useMemo(
+		() => toTarget(node),
+		[node.token, node.url, node.userJwt]
+	);
 	const queryClient = useQueryClient();
 	const refs = useMemo(() => subscriptionAccountRefs(catalog), [catalog]);
-	const queries = useQueries({
-		queries: refs.map(({ account, provider }) => ({
-			enabled: account.kind === "oauth",
-			queryFn: () =>
-				fetchProviderAccountUsage(target, provider.id, account.accountId),
-			queryKey: [
-				"provider-account-usage",
-				node.url,
-				provider.id,
-				account.accountId,
-			],
-			refetchInterval: FIVE_MINUTES_MS,
-			refetchOnWindowFocus: true,
-			staleTime: FIVE_MINUTES_MS,
-		})),
-	});
+	const queries = useMemo(
+		() =>
+			refs.map(({ account, provider }) => ({
+				enabled: active && account.kind === "oauth",
+				queryFn: ({ signal }: { signal: AbortSignal }) =>
+					fetchProviderAccountUsage(
+						target,
+						provider.id,
+						account.accountId,
+						signal
+					),
+				queryKey: [
+					"provider-account-usage",
+					node.url,
+					node.token ?? null,
+					node.userJwt ?? null,
+					provider.id,
+					account.accountId,
+				],
+				refetchInterval: FIVE_MINUTES_MS,
+				refetchOnWindowFocus: true,
+				staleTime: FIVE_MINUTES_MS,
+			})),
+		[active, node.token, node.url, node.userJwt, refs, target]
+	);
+	const results = useQueries({ subscribed: active, queries });
 
 	const accounts = refs.map(({ account, provider }, index) => {
-		const query = queries[index];
+		const query = results[index];
 		return {
 			accountId: account.accountId,
 			accountLabel: account.label,
@@ -110,13 +125,18 @@ export function useSubscriptionUsage(
 
 	const refresh = useCallback(() => {
 		void queryClient.invalidateQueries({
-			queryKey: ["provider-account-usage", node.url],
+			queryKey: [
+				"provider-account-usage",
+				node.url,
+				node.token ?? null,
+				node.userJwt ?? null,
+			],
 		});
-	}, [node.url, queryClient]);
+	}, [node.url, node.token, node.userJwt, queryClient]);
 
 	return {
 		accounts,
 		refresh,
-		refreshing: queries.some((query) => query.isFetching),
+		refreshing: results.some((query) => query.isFetching),
 	};
 }

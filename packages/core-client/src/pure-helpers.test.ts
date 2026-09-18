@@ -363,12 +363,12 @@ describe("chat URL + headers", () => {
 });
 
 describe("voiceWsUrl", () => {
-	test("upgrades http→ws and attaches token + jwt", () => {
+	test("upgrades http→ws without placing credentials in the URL", () => {
 		const url = new URL(voiceWsUrl(target({ token: "node" }), "jwt-1"));
 		expect(url.protocol).toBe("ws:");
 		expect(url.pathname).toBe("/api/voice/ws");
-		expect(url.searchParams.get("token")).toBe("node");
-		expect(url.searchParams.get("jwt")).toBe("jwt-1");
+		expect(url.searchParams.get("token")).toBeNull();
+		expect(url.searchParams.get("jwt")).toBeNull();
 	});
 
 	test("upgrades https→wss and omits an absent token/jwt", () => {

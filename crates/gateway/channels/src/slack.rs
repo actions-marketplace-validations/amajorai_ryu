@@ -52,10 +52,11 @@ use tokio_tungstenite::tungstenite::Message as WsMessage;
 use tracing::{debug, info, warn};
 
 use crate::{
-    handle_turn,
+    claim_inbound_delivery, handle_turn_with_delivery,
     media::{self, Attachment, AttachmentKind, VoiceDelivery},
     pack_thread,
     pairing::PairingStore,
+    run_claimed_delivery, scoped_delivery_id,
     status::{StatusReporter, HEARTBEAT_INTERVAL},
     unpack_thread, Channel, ChannelCaps, ChannelHost, ChannelRuntime, GroupReplyMode,
     InboundMessage, SlackChannelConfig, SlackChannelOptions,
@@ -743,7 +744,8 @@ impl Channel for SlackChannel {
 
                         // Slack requires an ack envelope echoing the envelope_id
                         // for every events_api / interactive payload it sends.
-                        if let Some(envelope_id) = parse_envelope_id(&payload) {
+                        let envelope_id = parse_envelope_id(&payload);
+                        if let Some(envelope_id) = envelope_id.as_deref() {
                             let ack = json!({ "envelope_id": envelope_id }).to_string();
                             let _ = ws.send(WsMessage::Text(ack)).await;
                         }
@@ -841,16 +843,77 @@ impl Channel for SlackChannel {
                             is_group: !parsed.is_dm,
                             attachments: parsed.attachments,
                         };
+                        let provider_id = inbound.message_id.clone().map_or_else(
+                            || {
+                                envelope_id
+                                    .clone()
+                                    .unwrap_or_else(|| "frame:unknown".to_string())
+                            },
+                            |message_id| format!("message:{message_id}"),
+                        );
 
                         // Handle each message on its own task so a slow agent
                         // call does not stall the socket read loop.
                         let channel = Arc::clone(&self);
                         let host = Arc::clone(&host);
                         tokio::spawn(async move {
+                            let (delivery_id, claim) = match claim_inbound_delivery(
+                                &*channel,
+                                &provider_id,
+                            )
+                            .await
+                            {
+                                Ok(result) => result,
+                                Err(error) => {
+                                    warn!(
+                                        channel = "slack",
+                                        %error,
+                                        "slack delivery could not be durably claimed; processing once without dedupe"
+                                    );
+                                    let delivery_id = scoped_delivery_id(&*channel, &provider_id);
+                                    let mut inbound = inbound;
+                                    channel.ingest_attachments(&mut inbound).await;
+                                    let _ = handle_turn_with_delivery(
+                                        channel,
+                                        host,
+                                        inbound,
+                                        Some(&delivery_id),
+                                    )
+                                    .await;
+                                    return;
+                                }
+                            };
+                            if !matches!(claim, crate::pairing::DeliveryClaim::Claimed) {
+                                debug!(
+                                    channel = "slack",
+                                    delivery_id = %delivery_id,
+                                    ?claim,
+                                    "duplicate slack delivery suppressed"
+                                );
+                                return;
+                            }
                             let mut inbound = inbound;
                             // Voice notes become text before the gate sees them.
                             channel.ingest_attachments(&mut inbound).await;
-                            handle_turn(channel, host, inbound).await;
+                            let work_channel = Arc::clone(&channel);
+                            let work_host = Arc::clone(&host);
+                            let work_delivery_id = delivery_id.clone();
+                            run_claimed_delivery(channel, delivery_id, move || {
+                                let channel = Arc::clone(&work_channel);
+                                let host = Arc::clone(&work_host);
+                                let message = inbound.clone();
+                                let delivery_id = work_delivery_id.clone();
+                                async move {
+                                    handle_turn_with_delivery(
+                                        channel,
+                                        host,
+                                        message,
+                                        Some(&delivery_id),
+                                    )
+                                    .await
+                                }
+                            })
+                            .await;
                         });
                     }
                     debug!("slack socket-mode websocket closed, reconnecting");
@@ -2177,7 +2240,9 @@ mod tests {
     /// of an infinite retry loop.
     #[test]
     fn reconnect_budget_is_bounded() {
-        assert!(MAX_RECONNECT_ATTEMPTS > 0);
+        const {
+            assert!(MAX_RECONNECT_ATTEMPTS > 0);
+        }
         let total: Duration = (1..MAX_RECONNECT_ATTEMPTS).map(backoff_for).sum();
         // Generous enough to ride out a real outage, finite enough to surface a
         // permanent misconfiguration to the operator.

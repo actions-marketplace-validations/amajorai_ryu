@@ -715,6 +715,29 @@ impl PluginStore {
         self.get(id).await
     }
 
+    /// Reconcile grants after an installed manifest changes without toggling
+    /// the app. Persisted approvals are capabilities for the old manifest and
+    /// must never survive when the new declaration no longer requests them.
+    pub async fn set_approved_grants(
+        &self,
+        id: &str,
+        approved_grants: &[String],
+    ) -> Result<Option<PluginRecord>> {
+        let grants_json =
+            serde_json::to_string(approved_grants).unwrap_or_else(|_| "[]".to_owned());
+        let now = chrono::Utc::now().to_rfc3339();
+        let conn = self.conn.lock().await;
+        let rows_affected = conn.execute(
+            "UPDATE apps SET approved_grants = ?2, updated_at = ?3 WHERE id = ?1",
+            params![id, grants_json, now],
+        )?;
+        drop(conn);
+        if rows_affected == 0 {
+            return Ok(None);
+        }
+        self.get(id).await
+    }
+
     /// Flip `enabled` to false and clear the approved grants.
     pub async fn set_disabled(&self, id: &str) -> Result<Option<PluginRecord>> {
         let now = chrono::Utc::now().to_rfc3339();

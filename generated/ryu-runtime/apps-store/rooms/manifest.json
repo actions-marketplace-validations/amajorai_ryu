@@ -52,6 +52,7 @@
       "http": {
         "mount": "/api/rooms",
         "public_mount": "/api/rooms",
+        "forward_cookie_names": ["ryu_rooms_session"],
         "routes": [
           { "path": "/", "method": "GET", "permission": "rooms.view" },
           { "path": "/", "method": "POST", "permission": "rooms.create" },

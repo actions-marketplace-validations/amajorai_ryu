@@ -85,7 +85,8 @@ export type ViewActionHandler = (
  *  Resolves parsed JSON; rejects on a non-2xx. The spec never sees a token. */
 export type ViewSourceFetcher = (
 	method: ViewActionHttpMethod,
-	path: string
+	path: string,
+	signal?: AbortSignal
 ) => Promise<unknown>;
 
 type BadgeVariant = React.ComponentProps<typeof Badge>["variant"];
@@ -184,20 +185,20 @@ function useSourceItems(
 			setItems(null);
 			return;
 		}
-		let cancelled = false;
-		fetchJson(source.http.method ?? "GET", source.http.path)
+		const controller = new AbortController();
+		fetchJson(source.http.method ?? "GET", source.http.path, controller.signal)
 			.then((payload) => {
-				if (!cancelled) {
+				if (!controller.signal.aborted) {
 					setItems(sourceItemsFromResponse(source, payload));
 				}
 			})
 			.catch(() => {
-				if (!cancelled) {
+				if (!controller.signal.aborted) {
 					setItems([]);
 				}
 			});
 		return () => {
-			cancelled = true;
+			controller.abort();
 		};
 	}, [source, fetchJson, reloadToken]);
 	return items;

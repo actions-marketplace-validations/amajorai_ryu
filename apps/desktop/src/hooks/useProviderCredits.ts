@@ -34,13 +34,21 @@ export function useProviderCredits(
 	const node = useActiveNode();
 	const enabled = supportsProviderCredits(providerId);
 	const { data } = useQuery({
-		queryKey: ["provider-credits", node.url, providerId],
-		queryFn: () =>
+		queryKey: [
+			"provider-credits",
+			node.url,
+			node.token ?? null,
+			node.userJwt ?? null,
+			providerId,
+		],
+		queryFn: ({ signal }) =>
 			fetchProviderCredits(
 				{ url: node.url, token: node.token, userJwt: node.userJwt ?? null },
-				providerId ?? ""
+				providerId ?? "",
+				signal
 			),
 		enabled,
+		subscribed: enabled,
 		staleTime: FIVE_MINUTES_MS,
 		refetchInterval: FIVE_MINUTES_MS,
 		refetchOnWindowFocus: true,

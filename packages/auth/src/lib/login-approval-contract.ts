@@ -39,6 +39,11 @@ export interface LoginApprovalStart {
 	verificationUriComplete: string | null;
 }
 
+export interface LoginApprovalQrPayload {
+	userCode: string;
+	verificationUri: string;
+}
+
 export interface LoginApprovalRequest {
 	clientId: string;
 	createdAt: string;
@@ -55,6 +60,47 @@ export interface LoginApprovalRequest {
 export type LoginApprovalEvent =
 	| { request: LoginApprovalRequest; type: "created" }
 	| { requestId: string; type: "approved" | "denied" };
+
+/** Normalize the Better Auth user code without accepting arbitrary QR payloads. */
+export function normalizeLoginApprovalUserCode(value: string): string {
+	return value.replace(/[^a-zA-Z0-9]/g, "").toUpperCase();
+}
+
+/**
+ * Parse the URL returned as Better Auth's `verification_uri_complete`.
+ *
+ * The QR contains only the expiring, human-visible user code. Requiring the
+ * `/device` verification path keeps the native scanner from treating unrelated
+ * QR links as sign-in requests, while HTTP is retained for local development.
+ */
+export function parseLoginApprovalQr(
+	value: string
+): LoginApprovalQrPayload | null {
+	const raw = value.trim();
+	if (!raw || raw.length > 2000) {
+		return null;
+	}
+	let url: URL;
+	try {
+		url = new URL(raw);
+	} catch {
+		return null;
+	}
+	if (url.protocol !== "https:" && url.protocol !== "http:") {
+		return null;
+	}
+	const path = url.pathname.replace(/\/+$/, "");
+	if (!path.endsWith("/device")) {
+		return null;
+	}
+	const userCode = normalizeLoginApprovalUserCode(
+		url.searchParams.get("user_code") ?? ""
+	);
+	if (!(userCode.length >= 4 && userCode.length <= 191)) {
+		return null;
+	}
+	return { userCode, verificationUri: url.toString() };
+}
 
 export function clientIdForLoginApprovalSurface(
 	surface: LoginApprovalSurface

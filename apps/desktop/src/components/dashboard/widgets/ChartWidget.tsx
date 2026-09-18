@@ -5,6 +5,8 @@
 import {
 	type ChartConfig,
 	ChartContainer,
+	ChartLegend,
+	ChartLegendContent,
 	ChartTooltip,
 	ChartTooltipContent,
 } from "@ryu/ui/components/chart";
@@ -57,6 +59,12 @@ function firstKeyWhere(
 	return Object.keys(row).find((k) => predicate(row[k]));
 }
 
+function humanizeKey(key: string): string {
+	return key
+		.replaceAll("_", " ")
+		.replace(/\b\w/g, (character) => character.toUpperCase());
+}
+
 function EmptyChart() {
 	return (
 		<div className="flex h-full items-center justify-center text-muted-foreground text-sm">
@@ -79,6 +87,7 @@ export function ChartBody({
 	const gradientId = useId();
 	const cfg = parseConfig(chartConfigSchema, config);
 	const data = rows(value, cfg.data_key);
+	const ariaLabel = `${humanizeKey(kind)} dashboard chart`;
 	if (data.length === 0) {
 		return <EmptyChart />;
 	}
@@ -102,9 +111,15 @@ export function ChartBody({
 			])
 		);
 		return (
-			<ChartContainer className="h-full w-full" config={chartConfig}>
-				<PieChart>
+			<ChartContainer
+				aria-label={ariaLabel}
+				className="h-full w-full"
+				config={chartConfig}
+				role="img"
+			>
+				<PieChart accessibilityLayer>
 					<ChartTooltip content={<ChartTooltipContent />} />
+					<ChartLegend content={<ChartLegendContent />} />
 					<Pie data={data} dataKey={valueKey} nameKey={nameKey}>
 						{data.map((row, i) => (
 							<Cell
@@ -128,25 +143,65 @@ export function ChartBody({
 					(k) => k !== xKey && toNumber(data[0][k]) !== null
 				);
 	const chartConfig: ChartConfig = Object.fromEntries(
-		series.map((s, i) => [s, { label: s, color: PALETTE[i % PALETTE.length] }])
+		series.map((s, i) => [
+			s,
+			{ label: humanizeKey(s), color: PALETTE[i % PALETTE.length] },
+		])
 	);
 
-	const axes = (
-		<>
-			<CartesianGrid vertical={false} />
-			<XAxis axisLine={false} dataKey={xKey} tickLine={false} tickMargin={8} />
-			<YAxis axisLine={false} tickLine={false} width={32} />
-			<ChartTooltip content={<ChartTooltipContent />} />
-		</>
-	);
+	// Recharts does not reliably flatten a fragment supplied as a child. Keep
+	// these as keyed elements so the grid, axes, tooltip, and legend all survive
+	// the shared renderer path.
+	const axes = [
+		<CartesianGrid key="grid" strokeOpacity={0.35} vertical={false} />,
+		<XAxis
+			axisLine={false}
+			dataKey={xKey}
+			key="x-axis"
+			minTickGap={32}
+			tickLine={false}
+			tickMargin={8}
+		/>,
+		<YAxis axisLine={false} key="y-axis" tickLine={false} width={40} />,
+		<ChartTooltip
+			content={<ChartTooltipContent indicator="line" />}
+			cursor={false}
+			key="tooltip"
+		/>,
+		...(series.length > 1
+			? [
+					<ChartLegend
+						content={<ChartLegendContent />}
+						key="legend"
+						verticalAlign="top"
+					/>,
+				]
+			: []),
+	];
 
 	if (kind === "bar_chart") {
 		return (
-			<ChartContainer className="h-full w-full" config={chartConfig}>
-				<BarChart data={data}>
+			<ChartContainer
+				aria-label={ariaLabel}
+				className="h-full w-full"
+				config={chartConfig}
+				role="img"
+			>
+				<BarChart
+					accessibilityLayer
+					barCategoryGap="24%"
+					data={data}
+					margin={{ bottom: 4, left: 0, right: 8, top: 8 }}
+				>
 					{axes}
 					{series.map((s) => (
-						<Bar dataKey={s} fill={`var(--color-${s})`} key={s} radius={4} />
+						<Bar
+							dataKey={s}
+							fill={`var(--color-${s})`}
+							key={s}
+							maxBarSize={28}
+							radius={4}
+						/>
 					))}
 				</BarChart>
 			</ChartContainer>
@@ -155,8 +210,17 @@ export function ChartBody({
 
 	if (kind === "area_chart") {
 		return (
-			<ChartContainer className="h-full w-full" config={chartConfig}>
-				<AreaChart data={data}>
+			<ChartContainer
+				aria-label={ariaLabel}
+				className="h-full w-full"
+				config={chartConfig}
+				role="img"
+			>
+				<AreaChart
+					accessibilityLayer
+					data={data}
+					margin={{ bottom: 4, left: 0, right: 8, top: 8 }}
+				>
 					<defs>
 						{series.map((s) => {
 							const id = `${gradientId}-${s}`;
@@ -194,11 +258,21 @@ export function ChartBody({
 
 	// default: line
 	return (
-		<ChartContainer className="h-full w-full" config={chartConfig}>
-			<LineChart data={data}>
+		<ChartContainer
+			aria-label={ariaLabel}
+			className="h-full w-full"
+			config={chartConfig}
+			role="img"
+		>
+			<LineChart
+				accessibilityLayer
+				data={data}
+				margin={{ bottom: 4, left: 0, right: 8, top: 8 }}
+			>
 				{axes}
 				{series.map((s) => (
 					<Line
+						activeDot={{ r: 3 }}
 						dataKey={s}
 						dot={false}
 						key={s}

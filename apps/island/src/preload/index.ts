@@ -151,8 +151,13 @@ const api: IslandApi = {
 			ipcRenderer.invoke(IPC.plugins.contributions),
 		onShortcut: (listener: (id: string) => void): (() => void) =>
 			subscribe(IPC.plugins.shortcut, listener),
-		uiBundle: (pluginId: string): Promise<PluginUiBundleResult> =>
-			ipcRenderer.invoke(IPC.plugins.uiBundle, pluginId),
+		uiBundle: (
+			pluginId: string,
+			requestId?: string
+		): Promise<PluginUiBundleResult> =>
+			ipcRenderer.invoke(IPC.plugins.uiBundle, pluginId, requestId),
+		abortUiBundle: (requestId: string): Promise<void> =>
+			ipcRenderer.invoke(IPC.plugins.uiBundleAbort, requestId),
 		hostInvoke: (
 			req: PluginHostInvokeRequest
 		): Promise<PluginHostInvokeResult> =>

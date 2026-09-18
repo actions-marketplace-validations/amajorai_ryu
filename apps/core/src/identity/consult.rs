@@ -176,10 +176,34 @@ pub async fn consult_for_tool_call_with_agent(
     if tool_id.starts_with("composio.") {
         return ConsultOutcome::Proceed;
     }
-    let Some(store) = super::global() else {
+    let Some(domain) = extract_domain(args) else {
         return ConsultOutcome::Proceed;
     };
-    let Some(domain) = extract_domain(args) else {
+    if std::env::var_os("RYU_PASSPORT_URL").is_some() {
+        let status = async {
+            let base = std::env::var("RYU_PASSPORT_URL").map_err(|_| ())?;
+            let agent = agent_id.ok_or(())?;
+            if is_injection_capable(tool_id) {
+                return Err(());
+            }
+            super::passport::runtime_needs_auth(&base, agent, profile_ids, &domain)
+                .await
+                .map_err(|_| ())
+        }
+        .await;
+        let message = match status {
+            Ok(false) => return ConsultOutcome::Proceed,
+            Ok(true) => format!("This action needs a connection to `{domain}`. Complete the connection in Passport, then retry."),
+            Err(()) => "Passport identity consultation is unavailable. Restore the configured runtime connection before retrying this action.".to_owned(),
+        };
+        return ConsultOutcome::Elicit(super::to_envelope(&crate::tool_exec::Elicitation {
+            kind: "url".to_owned(),
+            message,
+            url: None,
+            requested_schema: None,
+        }));
+    }
+    let Some(store) = super::global() else {
         return ConsultOutcome::Proceed;
     };
     consult_with_agent(

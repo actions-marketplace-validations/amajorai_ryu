@@ -31,13 +31,13 @@ import {
 } from "@ryu/ui/components/menubar.tsx";
 import { cn } from "@ryu/ui/lib/utils.ts";
 import {
-	ArrowRight,
 	Bot,
 	LayoutGrid,
 	Maximize2,
 	Minimize2,
 	Minus,
 	Shuffle,
+	SlidersHorizontal,
 	X,
 } from "lucide-react";
 import {
@@ -54,6 +54,8 @@ import {
 	pluginCompanionPath,
 	usePluginContributions,
 } from "@/src/hooks/usePluginContributions.ts";
+
+import { OsHome, OsHomeSettings } from "./OsHome.tsx";
 
 type OsAppAction = "app-launcher" | "open-window";
 
@@ -194,7 +196,7 @@ export const OS_APPS: readonly OsApp[] = [
 	},
 	{
 		description: "Keep reusable agent instructions close at hand.",
-		iconId: "sparkles",
+		iconId: "potion",
 		id: "skills",
 		label: "Skills",
 		manifestId: "@ryu/skills",
@@ -209,7 +211,7 @@ export const OS_APPS: readonly OsApp[] = [
 	},
 	{
 		description: "Review outcomes and decide what happens next.",
-		iconId: "checkmark-badge-03",
+		iconId: "pie-chart",
 		id: "review",
 		label: "Review",
 		path: "/review",
@@ -236,7 +238,7 @@ export function resolveOsApp(
 			: null,
 		iconBackground: record.iconBackground,
 		iconDither: record.iconDither,
-		iconId: record.companion?.icon ?? record.icon ?? app.iconId,
+		iconId: record.icon ?? record.companion?.icon ?? app.iconId,
 		iconPadding: record.iconPadding,
 		iconUrl: record.iconUrl,
 	};
@@ -265,7 +267,7 @@ function OsAppIcon({
 			iconPadding={app.iconPadding}
 			iconUrl={app.iconUrl}
 			name={app.label}
-			seedId={app.id}
+			seedId={app.manifestId ?? app.id}
 			seedPlate
 			size={size}
 		/>
@@ -539,6 +541,7 @@ export function OsDesktopSurface({
 	windows,
 }: OsDesktopSurfaceProps) {
 	const [appLauncherOpen, setAppLauncherOpen] = useState(false);
+	const [customizationOpen, setCustomizationOpen] = useState(false);
 	const [minimizedWindowIds, setMinimizedWindowIds] = useState<Set<string>>(
 		() => new Set()
 	);
@@ -719,6 +722,11 @@ export function OsDesktopSurface({
 						</MenubarTrigger>
 						<MenubarContent className="min-w-52" withBackdrop={false}>
 							<MenubarGroup>
+								<MenubarItem onClick={() => setCustomizationOpen(true)}>
+									<SlidersHorizontal aria-hidden="true" />
+									Customize desktop…
+								</MenubarItem>
+								<MenubarSeparator />
 								<MenubarLabel>Wallpaper sets</MenubarLabel>
 							</MenubarGroup>
 							<MenubarRadioGroup
@@ -761,12 +769,24 @@ export function OsDesktopSurface({
 						{wallpaper.label}
 					</span>
 				</button>
+				<button
+					aria-label="Customize desktop"
+					className="inline-flex size-8 shrink-0 items-center justify-center rounded-full text-white/65 transition-colors hover:bg-white/10 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/70"
+					onClick={() => setCustomizationOpen(true)}
+					type="button"
+				>
+					<SlidersHorizontal aria-hidden="true" className="size-4" />
+				</button>
 				<div className="hidden items-center gap-2 text-white/45 text-xs md:flex">
 					<span className="size-1.5 rounded-full bg-success" />
 					Ready
 				</div>
 			</div>
 
+			<OsHomeSettings
+				onOpenChange={setCustomizationOpen}
+				open={customizationOpen}
+			/>
 			<div className="relative z-10 min-h-0 flex-1">
 				{windows.map((item) => (
 					<OsWindowCard
@@ -779,30 +799,7 @@ export function OsDesktopSurface({
 						window={item}
 					/>
 				))}
-				{windows.length === 0 ? (
-					<div className="absolute inset-0 flex items-center justify-center p-6 pb-28">
-						<div className="max-w-md text-center">
-							<div className="mx-auto flex size-16 items-center justify-center rounded-[1.5rem] border border-white/15 bg-white/10 shadow-2xl backdrop-blur">
-								<Bot aria-hidden="true" className="size-7 text-white/80" />
-							</div>
-							<p className="mt-6 font-medium text-3xl tracking-[-0.04em]">
-								Welcome to Ryu OS
-							</p>
-							<p className="mt-3 text-sm text-white/55 leading-relaxed">
-								Open an App from the dock, or press ⌘K to find a live window and
-								keep your workspace moving.
-							</p>
-							<button
-								className="mt-6 inline-flex items-center gap-2 rounded-full bg-white px-4 py-2 font-medium text-[#121126] text-sm transition-colors hover:bg-white/90"
-								onClick={() => setAppLauncherOpen(true)}
-								type="button"
-							>
-								Open {APP_LAUNCHER_LABEL}
-								<ArrowRight aria-hidden="true" className="size-4" />
-							</button>
-						</div>
-					</div>
-				) : null}
+				<OsHome visible={visibleWindows.length === 0} />
 			</div>
 
 			<div
@@ -845,11 +842,11 @@ export function OsDesktopSurface({
 									title={app.description}
 								>
 									<DockLabel>{app.label}</DockLabel>
-									<DockIcon>
+									<DockIcon scale={0.9}>
 										<OsAppIcon
 											app={app}
 											className="size-full rounded-[0.7rem] shadow-lg"
-											size={18}
+											size={24}
 										/>
 									</DockIcon>
 									<span

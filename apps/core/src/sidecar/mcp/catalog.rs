@@ -31,6 +31,14 @@ pub use ryu_tool_registry::{
 
 use super::{AppToolBackendTag, McpRegistry, RegistryTool};
 
+/// Host-constructed only. Never deserialize owner/profile bindings from tool args.
+pub struct AgentDiscovery {
+    pub owner_user_id: String,
+    pub agent_id: String,
+    pub profile_ids: Vec<String>,
+    pub allowlist: Option<Vec<String>>,
+}
+
 /// Built-in server names — their tools are classified [`ToolKind::Builtin`].
 const BUILTIN_SERVERS: &[&str] = &[
     super::sandbox::SERVER_NAME,
@@ -42,6 +50,7 @@ const BUILTIN_SERVERS: &[&str] = &[
     super::delegate::SERVER_NAME,
     super::skills_tool::SERVER_NAME,
     super::ui_tool::SERVER_NAME,
+    super::usage_tool::SERVER_NAME,
 ];
 
 /// Classify a fully-qualified tool id (`<server>.<tool>`) into a [`ToolKind`].
@@ -178,12 +187,81 @@ impl McpRegistry {
         skills_allowlist: &[String],
         user_id: Option<&str>,
     ) -> Vec<ToolDescriptor> {
-        let mut builtins: Vec<ToolDescriptor> = self
-            .list_all_tools()
+        self.search_scoped_for_identity(query, kind, limit, skills_allowlist, user_id, None)
             .await
-            .iter()
-            .map(descriptor_from)
-            .collect();
+    }
+
+    pub async fn tools_for_discovery_identity(
+        &self,
+        identity: &AgentDiscovery,
+    ) -> Vec<RegistryTool> {
+        if identity.allowlist.as_ref().is_some_and(Vec::is_empty) {
+            return Vec::new();
+        }
+        let mut tools = self.list_all_tools().await;
+        if crate::mcp_oauth::remote_configured() && !identity.profile_ids.is_empty() {
+            let names: Vec<String> = self
+                .servers
+                .read()
+                .expect("mcp servers lock poisoned")
+                .iter()
+                .filter(|(_, config)| config.enabled && config.auth.is_some())
+                .map(|(name, _)| name.clone())
+                .collect();
+            tools.retain(|tool| !names.contains(&tool.server));
+            for name in names {
+                let possible = identity.allowlist.as_ref().is_none_or(|entries| {
+                    entries.iter().any(|entry| {
+                        let normalized = self.canonical_tool_id_for_registry(entry);
+                        normalized == "*"
+                            || normalized == name
+                            || normalized.starts_with(&format!("{name}."))
+                            || !normalized.contains('.')
+                    })
+                });
+                if !possible {
+                    continue;
+                }
+                match self
+                    .tools_for_server_for_identity(
+                        &name,
+                        &identity.owner_user_id,
+                        &identity.agent_id,
+                        &identity.profile_ids,
+                    )
+                    .await
+                {
+                    Ok(scoped) => tools.extend(scoped),
+                    Err(_) => {
+                        tracing::warn!(server = %name, "Scoped OAuth discovery unavailable; no identity fallback")
+                    }
+                }
+            }
+        }
+        if let Some(allowlist) = &identity.allowlist {
+            let normalized: Vec<String> = allowlist
+                .iter()
+                .map(|entry| self.canonical_tool_id_for_registry(entry))
+                .collect();
+            tools.retain(|tool| super::tool_allowed(tool, &normalized));
+        }
+        tools
+    }
+
+    pub async fn search_scoped_for_identity(
+        &self,
+        query: &str,
+        kind: Option<ToolKind>,
+        limit: usize,
+        skills_allowlist: &[String],
+        user_id: Option<&str>,
+        identity: Option<&AgentDiscovery>,
+    ) -> Vec<ToolDescriptor> {
+        let tools = match identity {
+            Some(identity) => self.tools_for_discovery_identity(identity).await,
+            None => self.list_all_tools().await,
+        };
+        let mut builtins: Vec<ToolDescriptor> = tools.iter().map(descriptor_from).collect();
         // Core self-API tools (agents driving Ryu itself): OpenAPI-derived, always
         // present, merged HERE so they rank through the same BM25/semantic pass as
         // everything else rather than being appended after truncation. Kind-filtered
@@ -212,7 +290,10 @@ impl McpRegistry {
 
         // Composio: searchable-not-listed. Pull live, capped, key-gated.
         let want_composio = matches!(kind, None | Some(ToolKind::Composio));
-        let composio = if want_composio && super::composio::is_configured() {
+        let caller_resolved = user_id.is_some()
+            || (!crate::sidecar::control_plane::is_managed_node()
+                && crate::sidecar::control_plane::registered_org().is_none());
+        let composio = if want_composio && caller_resolved && super::composio::is_configured() {
             composio_candidates(&self.http, query, user_id).await
         } else {
             Vec::new()
@@ -347,10 +428,50 @@ impl McpRegistry {
         id: &str,
         skills_allowlist: &[String],
     ) -> Option<DescribedTool> {
+        self.describe_scoped_for_user(id, skills_allowlist, None)
+            .await
+    }
+
+    pub async fn describe_scoped_for_user(
+        &self,
+        id: &str,
+        skills_allowlist: &[String],
+        user_id: Option<&str>,
+    ) -> Option<DescribedTool> {
+        self.describe_scoped_for_identity(id, skills_allowlist, user_id, None)
+            .await
+    }
+
+    pub async fn describe_scoped_for_identity(
+        &self,
+        id: &str,
+        skills_allowlist: &[String],
+        user_id: Option<&str>,
+        identity: Option<&AgentDiscovery>,
+    ) -> Option<DescribedTool> {
         let normalized_id = super::canonical_tool_id(id);
         let id = normalized_id.as_str();
         // Composio: not in list_all_tools — describe shallowly.
-        if id.starts_with("composio.") {
+        if let Some(slug) = id.strip_prefix("composio.") {
+            if user_id.is_none()
+                && (crate::sidecar::control_plane::is_managed_node()
+                    || crate::sidecar::control_plane::registered_org().is_some())
+            {
+                return None;
+            }
+            if let Some(result) = ryu_composio::service::describe(slug, user_id).await {
+                let metadata = result.ok()?;
+                return Some(ryu_tool_registry::describe_from_parts(
+                    id,
+                    slug,
+                    metadata
+                        .get("description")
+                        .and_then(Value::as_str)
+                        .unwrap_or(""),
+                    ToolKind::Composio,
+                    metadata.get("input_schema"),
+                ));
+            }
             return Some(ryu_tool_registry::describe_composio(id));
         }
 
@@ -375,7 +496,11 @@ impl McpRegistry {
             return self.describe_ext_api(id);
         }
 
-        if let Some(tool) = self.list_all_tools().await.into_iter().find(|t| t.id == id) {
+        let tools = match identity {
+            Some(identity) => self.tools_for_discovery_identity(identity).await,
+            None => self.list_all_tools().await,
+        };
+        if let Some(tool) = tools.into_iter().find(|t| t.id == id) {
             return Some(ryu_tool_registry::describe_from_parts(
                 &tool.id,
                 &tool.name,
@@ -533,6 +658,42 @@ async fn composio_candidates(
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn list_all_tools_includes_provider_usage_tools() {
+        let registry = McpRegistry::empty();
+        let tools = registry.list_all_tools().await;
+        let ids: Vec<&str> = tools
+            .iter()
+            .filter(|tool| tool.server == super::super::usage_tool::SERVER_NAME)
+            .map(|tool| tool.id.as_str())
+            .collect();
+        assert_eq!(ids, vec!["usage.current", "usage.query"]);
+    }
+
+    #[tokio::test]
+    async fn identity_discovery_preserves_exact_agent_tool_scope() {
+        let registry = McpRegistry::empty();
+        let mut identity = AgentDiscovery {
+            owner_user_id: "local".into(),
+            agent_id: "agent-a".into(),
+            profile_ids: Vec::new(),
+            allowlist: Some(Vec::new()),
+        };
+        assert!(registry
+            .tools_for_discovery_identity(&identity)
+            .await
+            .is_empty());
+        identity.allowlist = Some(vec!["web_fetch.get".into()]);
+        let tools = registry.tools_for_discovery_identity(&identity).await;
+        assert_eq!(
+            tools
+                .iter()
+                .map(|tool| tool.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["web_fetch.get"]
+        );
+    }
+
     #[test]
     fn classify_kind_by_server() {
         assert_eq!(
@@ -549,6 +710,10 @@ mod tests {
         assert_eq!(classify_kind("app.thing", "app"), ToolKind::App);
         assert_eq!(
             classify_kind("skills.load", super::super::skills_tool::SERVER_NAME),
+            ToolKind::Builtin
+        );
+        assert_eq!(
+            classify_kind("usage.current", super::super::usage_tool::SERVER_NAME),
             ToolKind::Builtin
         );
     }

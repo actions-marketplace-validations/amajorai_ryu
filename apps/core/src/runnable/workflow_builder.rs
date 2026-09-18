@@ -217,6 +217,11 @@ fn configure_workflow_schema() -> Value {
 /// handler. No store handle is needed: the workflow store is a set of global
 /// file-backed functions ([`crate::workflow::store`]).
 pub async fn dispatch(tool: &str, arguments: Value) -> Result<Value> {
+    if crate::sidecar::control_plane::registered_org().is_some() {
+        return Err(anyhow!(
+            "workflow_builder is disabled on organization-bound nodes until workflow ownership is resolved"
+        ));
+    }
     match tool {
         "get_workflow" => get_workflow(arguments),
         "create_workflow" => create_workflow(arguments).await,
@@ -290,12 +295,24 @@ fn str_array(args: &Value, key: &str) -> Vec<String> {
         .unwrap_or_default()
 }
 
+fn workflow_for_model(mut workflow: Workflow) -> Workflow {
+    for trigger in &mut workflow.triggers {
+        if let WorkflowTrigger::Webhook { secret } = trigger {
+            // The signing key authenticates external callers and must never be
+            // reflected into a model/tool result. Secret rotation has its own
+            // explicit protected route.
+            *secret = None;
+        }
+    }
+    workflow
+}
+
 fn get_workflow(args: Value) -> Result<Value> {
     let id = require_str(&args, "workflow_id")?;
     match crate::workflow::store::load_workflow(id) {
         Ok(workflow) => Ok(json!({
             "found": true,
-            "workflow": serde_json::to_value(&workflow).unwrap_or_default(),
+            "workflow": serde_json::to_value(workflow_for_model(workflow)).unwrap_or_default(),
         })),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             Ok(json!({ "found": false, "workflow_id": id }))
@@ -344,7 +361,7 @@ async fn create_workflow(args: Value) -> Result<Value> {
         Ok(saved) => Ok(json!({
             "success": true,
             "workflow_id": saved.id,
-            "workflow": serde_json::to_value(&saved).unwrap_or_default(),
+            "workflow": serde_json::to_value(workflow_for_model(saved.clone())).unwrap_or_default(),
             "message": format!("Created workflow '{}' with id '{}'.", saved.name, saved.id),
         })),
         Err(e) => Ok(soft_error(e)),
@@ -446,7 +463,7 @@ async fn configure_workflow(args: Value) -> Result<Value> {
     match crate::workflow::persist_workflow(workflow).await {
         Ok(saved) => Ok(json!({
             "success": true,
-            "workflow": serde_json::to_value(&saved).unwrap_or_default(),
+            "workflow": serde_json::to_value(workflow_for_model(saved.clone())).unwrap_or_default(),
             "message": format!(
                 "Updated workflow '{}' ({} nodes, {} edges).",
                 saved.name,
@@ -519,6 +536,24 @@ mod tests {
         let triggers = parse_triggers(&value).expect("valid triggers");
         assert_eq!(triggers.len(), 1);
         assert!(matches!(triggers[0], WorkflowTrigger::Schedule { .. }));
+    }
+
+    #[test]
+    fn workflow_model_projection_redacts_webhook_secrets() {
+        let workflow = Workflow {
+            id: "wf_test".to_owned(),
+            name: "Test".to_owned(),
+            description: None,
+            nodes: Vec::new(),
+            edges: Vec::new(),
+            triggers: vec![WorkflowTrigger::Webhook {
+                secret: Some("secret-value".to_owned()),
+            }],
+            created_at: None,
+            updated_at: None,
+        };
+        let projected = serde_json::to_value(workflow_for_model(workflow)).unwrap();
+        assert_eq!(projected["triggers"][0]["secret"], Value::Null);
     }
 
     #[test]

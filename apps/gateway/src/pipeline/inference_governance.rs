@@ -37,6 +37,131 @@ pub(super) fn authorize_model(
     Ok(())
 }
 
+/// Enforce the resolved provider/data-region policy immediately before a
+/// provider can be selected for dispatch. Providers without verified metadata
+/// are denied when the policy contains an allowed-region restriction.
+pub(super) fn authorize_provider_region(
+    state: &AppState,
+    ctx: &RequestContext,
+    provider: &crate::config::ProviderId,
+) -> Result<(), GatewayError> {
+    if ctx.is_master_key {
+        return Ok(());
+    }
+    let policy = ctx
+        .resolved_policy
+        .clone()
+        .unwrap_or_else(|| state.policy_snapshot());
+    let region = state.providers.region_for(provider.as_str());
+    if !policy.allows_region(region.as_deref()) {
+        return Err(GatewayError::PolicyViolation(format!(
+            "Provider '{}' is not authorized for the control-plane region policy",
+            provider.as_str()
+        )));
+    }
+    Ok(())
+}
+
+/// Apply tenant-locked guardrails using the resolved request scanner. This is
+/// shared by text, multimodal, and job-based media paths so modality routes
+/// cannot silently fall back to the node-only firewall.
+pub(super) fn enforce_locked_guardrails(
+    state: &AppState,
+    ctx: &RequestContext,
+    text: &str,
+) -> Result<(), GatewayError> {
+    if ctx.is_master_key {
+        return Ok(());
+    }
+    let policy = ctx
+        .resolved_policy
+        .clone()
+        .unwrap_or_else(|| state.policy_snapshot());
+    if !policy.available {
+        return Err(GatewayError::PolicyViolation(
+            "Control-plane policy is unavailable".into(),
+        ));
+    }
+    if policy.requires_firewall()
+        && state
+            .resolved_scanner(ctx)
+            .scan_locked_guardrails(text, &policy.locked_guardrails)
+            .is_some()
+    {
+        return Err(GatewayError::PolicyViolation(
+            "Provider input violates a locked guardrail".into(),
+        ));
+    }
+    Ok(())
+}
+
+/// Inspect and transform the text-bearing fields of a non-chat request using
+/// the same resolved tenant scanner as chat/embedding input. This is deliberately
+/// separate from `enforce_locked_guardrails`: locked rules always see the
+/// original input, while a normal `Sanitize` policy must rewrite what reaches the
+/// provider instead of merely logging a match.
+pub(super) fn inspect_multimodal_input(
+    state: &AppState,
+    ctx: &RequestContext,
+    body: &mut Value,
+    modality: &Modality,
+) -> Result<Option<PolicyAlert>, GatewayError> {
+    let original = super::multimodal_input_text(body, modality);
+    enforce_locked_guardrails(state, ctx, &original)?;
+    let scanner = state.resolved_scanner(ctx);
+    let mut alert = None;
+    if let Some(hit) = scanner.scan_inbound(&original) {
+        match scanner.policy() {
+            FirewallPolicy::Block => {
+                return Err(GatewayError::FirewallBlocked(
+                    format!("Provider input blocked: {}", hit.pattern_name),
+                    firewall_policy_alert(scanner.config(), ctx, "block"),
+                ));
+            }
+            FirewallPolicy::Sanitize => {
+                sanitize_multimodal_text(body, modality, scanner.as_ref());
+            }
+            FirewallPolicy::WarnAndContinue => {
+                alert = firewall_policy_alert(scanner.config(), ctx, "notify");
+            }
+        }
+    }
+    if ctx.companion_source {
+        redact_companion_multimodal_text(body, modality, scanner.as_ref());
+    }
+    Ok(alert)
+}
+
+fn sanitize_multimodal_text(
+    body: &mut Value,
+    modality: &Modality,
+    scanner: &dyn crate::firewall::FirewallBackend,
+) {
+    let key = match modality {
+        Modality::Image | Modality::Video => "prompt",
+        Modality::Tts => "input",
+        Modality::Stt | Modality::Chat => return,
+    };
+    if let Some(text) = body[key].as_str().map(str::to_owned) {
+        body[key] = Value::String(scanner.sanitize(&text));
+    }
+}
+
+fn redact_companion_multimodal_text(
+    body: &mut Value,
+    modality: &Modality,
+    scanner: &crate::firewall::FirewallScanner,
+) {
+    let key = match modality {
+        Modality::Image | Modality::Video => "prompt",
+        Modality::Tts => "input",
+        Modality::Stt | Modality::Chat => return,
+    };
+    if let Some(text) = body[key].as_str().map(str::to_owned) {
+        body[key] = Value::String(scanner.redact_companion_egress(&text).0);
+    }
+}
+
 #[derive(Clone, Copy)]
 pub(super) enum InputShape {
     Chat,
@@ -86,20 +211,7 @@ pub(super) fn inspect_input(
     };
     let scanner = state.resolved_scanner(ctx);
     let text = extract_text_for_scanning(&projection);
-    let policy = ctx
-        .resolved_policy
-        .clone()
-        .unwrap_or_else(|| state.policy_snapshot());
-    if !ctx.is_master_key
-        && policy.requires_firewall()
-        && scanner
-            .scan_locked_guardrails(&text, &policy.locked_guardrails)
-            .is_some()
-    {
-        return Err(GatewayError::PolicyViolation(
-            "Provider input violates a locked guardrail".into(),
-        ));
-    }
+    enforce_locked_guardrails(state, ctx, &text)?;
     let mut alert = None;
     if let Some(hit) = scanner.scan_inbound(&text) {
         match scanner.policy() {
@@ -266,7 +378,19 @@ impl SettledCompletion {
         self.record.as_mut().expect("unfinalized completion")
     }
     pub fn fail(&mut self, error: &GatewayError) {
-        self.record_mut().error = Some(error.to_string());
+        let source = match error {
+            GatewayError::ProviderError(_)
+            | GatewayError::ProviderPaymentRequired { .. }
+            | GatewayError::AllProvidersUnavailable(_) => {
+                "upstream provider request failed".to_owned()
+            }
+            _ => error.to_string(),
+        };
+        let redacted = self.state.with_firewall(|fw| {
+            let sanitized = fw.sanitize(&source);
+            fw.redact_outbound(&sanitized).0
+        });
+        self.record_mut().error = Some(redacted);
     }
 }
 impl Drop for SettledCompletion {

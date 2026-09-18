@@ -5,6 +5,7 @@
 // any of them flips it (within and across windows). Generalizes the catalog's
 // "Friendly names" / "Show tags" switches.
 
+import { THEME_APPEARANCE_CHANGE_EVENT } from "@ryu/ui/theme/prefs";
 import { useCallback, useSyncExternalStore } from "react";
 
 const listeners = new Map<string, Set<() => void>>();
@@ -50,6 +51,14 @@ export function setPersistedToggle(key: string, value: boolean): void {
 	for (const cb of listeners.get(key) ?? []) {
 		cb();
 	}
+	if (key === "ryu:animations-enabled") {
+		if (value) {
+			document.documentElement.removeAttribute("data-ryu-animations");
+		} else {
+			document.documentElement.setAttribute("data-ryu-animations", "off");
+		}
+	}
+	window.dispatchEvent(new Event(THEME_APPEARANCE_CHANGE_EVENT));
 }
 
 /** `[value, setValue]` for a persisted boolean, synced across all consumers. */

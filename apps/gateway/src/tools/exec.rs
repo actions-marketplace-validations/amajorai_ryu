@@ -581,7 +581,9 @@ mod tests {
         // Default config: no master key, require_auth=false, no Core wiring.
         // authenticate() yields is_master_key=false + key_config=None, so the
         // caller is neither master nor a trusted forwarder → must be rejected.
-        let state = Arc::new(AppState::new(crate::config::GatewayConfig::default()).unwrap());
+        let mut config = crate::config::GatewayConfig::default();
+        config.audit.enabled = false;
+        let state = Arc::new(AppState::new(config).unwrap());
         let headers = HeaderMap::new();
         let body: ExecToolBody =
             serde_json::from_value(json!({ "kind": "tool", "tool_id": "x", "agent_id": "a" }))
@@ -602,7 +604,9 @@ mod tests {
         use axum::extract::State;
         use std::sync::Arc;
 
-        let state = Arc::new(AppState::new(crate::config::GatewayConfig::default()).unwrap());
+        let mut config = crate::config::GatewayConfig::default();
+        config.audit.enabled = false;
+        let state = Arc::new(AppState::new(config).unwrap());
         let headers = HeaderMap::new();
         let body: ExecScanBody =
             serde_json::from_value(json!({ "backend": "bash", "command": "ls" })).unwrap();

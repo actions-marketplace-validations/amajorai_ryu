@@ -41,6 +41,9 @@ test("suggests a focused thread for a long reply chain", async ({
 	await expect(
 		page.getByRole("button", { name: "Create thread" })
 	).toBeVisible();
+	const infoBar = page.locator('[data-slot="composer-info-bar"]');
+	await expect(infoBar).toHaveAttribute("data-position", "top");
+	await expect(infoBar).toHaveClass(/rounded-t-2xl/);
 
 	await page.screenshot({
 		path:

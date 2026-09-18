@@ -1,3 +1,4 @@
+import { abortableDelay } from "@/src/lib/abortable-delay.ts";
 // apps/desktop/src/lib/api/channelStatus.ts
 //
 // Live connection status for channel bots (Telegram/Slack/…), consumed by the
@@ -69,21 +70,6 @@ function applyStatus(status: ChannelStatus): void {
 	}
 }
 
-/** Pause that resolves early when the connection is torn down. */
-function delay(ms: number, signal: AbortSignal): Promise<void> {
-	return new Promise((resolve) => {
-		const timer = setTimeout(resolve, ms);
-		signal.addEventListener(
-			"abort",
-			() => {
-				clearTimeout(timer);
-				resolve();
-			},
-			{ once: true }
-		);
-	});
-}
-
 /** Fetch the current snapshot so state is correct immediately on (re)connect. */
 async function loadSnapshot(token: string, signal: AbortSignal): Promise<void> {
 	const resp = await fetch(`${BASE}/status`, {
@@ -95,6 +81,9 @@ async function loadSnapshot(token: string, signal: AbortSignal): Promise<void> {
 	}
 	const body = (await resp.json()) as { statuses?: ChannelStatus[] };
 	for (const status of body.statuses ?? []) {
+		if (signal.aborted) {
+			return;
+		}
 		applyStatus(status);
 	}
 }
@@ -133,18 +122,23 @@ async function pump(token: string, signal: AbortSignal): Promise<void> {
 	const reader = resp.body.getReader();
 	const decoder = new TextDecoder();
 	let buffer = "";
-	for (;;) {
-		const { done, value } = await reader.read();
-		if (done) {
-			break;
+	try {
+		while (!signal.aborted) {
+			const { done, value } = await reader.read();
+			if (done) {
+				break;
+			}
+			buffer += decoder.decode(value, { stream: true });
+			let sep = buffer.indexOf(FRAME_SEP);
+			while (sep !== -1 && !signal.aborted) {
+				dispatchFrame(buffer.slice(0, sep));
+				buffer = buffer.slice(sep + FRAME_SEP.length);
+				sep = buffer.indexOf(FRAME_SEP);
+			}
 		}
-		buffer += decoder.decode(value, { stream: true });
-		let sep = buffer.indexOf(FRAME_SEP);
-		while (sep !== -1) {
-			dispatchFrame(buffer.slice(0, sep));
-			buffer = buffer.slice(sep + FRAME_SEP.length);
-			sep = buffer.indexOf(FRAME_SEP);
-		}
+	} finally {
+		await reader.cancel().catch(() => undefined);
+		reader.releaseLock();
 	}
 }
 
@@ -156,6 +150,9 @@ async function runConnection(signal: AbortSignal): Promise<void> {
 		if (token) {
 			try {
 				await loadSnapshot(token, signal);
+				if (signal.aborted) {
+					return;
+				}
 				await pump(token, signal);
 				backoff = INITIAL_BACKOFF_MS; // a clean end resets the backoff
 			} catch {
@@ -167,7 +164,7 @@ async function runConnection(signal: AbortSignal): Promise<void> {
 		}
 		// When signed out we have no token; wait a full interval before retrying
 		// so we pick up a later sign-in without hot-looping.
-		await delay(token ? backoff : MAX_BACKOFF_MS, signal);
+		await abortableDelay(token ? backoff : MAX_BACKOFF_MS, signal);
 		backoff = Math.min(backoff * 2, MAX_BACKOFF_MS);
 	}
 }

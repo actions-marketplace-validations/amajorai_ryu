@@ -4,11 +4,37 @@ import tailwindcss from "@tailwindcss/postcss";
 import react from "@vitejs/plugin-react";
 import { defineConfig } from "vite";
 export default defineConfig({
+	define: { "process.env": {} },
 	plugins: [
 		react(),
 		{
 			name: "mount-proof-bundle",
 			configureServer(server) {
+				let hostStreams = 0;
+				let closedHostStreams = 0;
+				server.middlewares.use("/proof-host-stream-state", (_req, res) => {
+					res.setHeader("Content-Type", "application/json");
+					res.end(
+						JSON.stringify({ started: hostStreams, closed: closedHostStreams })
+					);
+				});
+				server.middlewares.use((req, res, next) => {
+					if (
+						decodeURIComponent((req.url ?? "").split("?")[0]) !==
+						"/api/plugins/@ryu/warmup/host/stream"
+					) {
+						return next();
+					}
+					req.resume();
+					hostStreams++;
+					res.on("close", () => {
+						closedHostStreams++;
+					});
+					res.setHeader("Content-Type", "text/event-stream");
+					res.write(
+						'data: {"type":"text-delta","delta":"fixture reply"}\n\ndata: [DONE]\n\n'
+					);
+				});
 				let started = 0;
 				let closed = 0;
 				server.middlewares.use("/proof-read-state", (_req, res) => {
@@ -29,7 +55,7 @@ export default defineConfig({
 		},
 	],
 	root: import.meta.dirname,
-	cacheDir: "/tmp/ryu-mount-proof-cache",
+	cacheDir: "/tmp/ryu-mount-stream-proof-cache",
 	css: { postcss: { plugins: [tailwindcss()] } },
 	optimizeDeps: { entries: ["mount-performance-proof.html"] },
 	resolve: {

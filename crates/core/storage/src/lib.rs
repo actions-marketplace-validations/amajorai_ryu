@@ -30,6 +30,43 @@ fn now_millis() -> i64 {
         .unwrap_or(0)
 }
 
+/// Bounds for the plugin-owned KV plane. Storage is a durable capability, so a
+/// plugin must not be able to turn one grant into unbounded heap, SQLite, or
+/// response growth.
+pub const MAX_PLUGIN_ID_BYTES: usize = 256;
+pub const MAX_NAMESPACE_BYTES: usize = 256;
+pub const MAX_KEY_BYTES: usize = 512;
+pub const MAX_VALUE_BYTES: usize = 1024 * 1024;
+pub const MAX_PLUGIN_STORAGE_BYTES: u64 = 16 * 1024 * 1024;
+pub const MAX_PLUGIN_STORAGE_KEYS: u64 = 10_000;
+pub const MAX_KEYS_RESPONSE: u64 = 10_000;
+
+fn validate_component(name: &str, value: &str, max_bytes: usize) -> Result<()> {
+    if value.is_empty() || value.len() > max_bytes || value.chars().any(char::is_control) {
+        anyhow::bail!("{name} must be non-empty, control-free, and at most {max_bytes} bytes");
+    }
+    Ok(())
+}
+
+fn validate_plugin_id(plugin_id: &str) -> Result<()> {
+    validate_component("plugin_id", plugin_id, MAX_PLUGIN_ID_BYTES)
+}
+
+fn validate_namespace(namespace: &str) -> Result<()> {
+    validate_component("namespace", namespace, MAX_NAMESPACE_BYTES)
+}
+
+fn validate_key(key: &str) -> Result<()> {
+    validate_component("key", key, MAX_KEY_BYTES)
+}
+
+fn validate_value(value: &str) -> Result<()> {
+    if value.len() > MAX_VALUE_BYTES {
+        anyhow::bail!("value exceeds the {MAX_VALUE_BYTES} byte limit");
+    }
+    Ok(())
+}
+
 /// SQLite-backed per-plugin KV store. Cheap to clone (wraps an `Arc`).
 #[derive(Clone)]
 pub struct PluginStorage {
@@ -78,6 +115,9 @@ impl PluginStorage {
 
     /// Read a value. `Ok(None)` when the key is unset.
     pub async fn get(&self, plugin_id: &str, namespace: &str, key: &str) -> Result<Option<String>> {
+        validate_plugin_id(plugin_id)?;
+        validate_namespace(namespace)?;
+        validate_key(key)?;
         let conn = self.conn.lock().await;
         let v = conn
             .query_row(
@@ -98,7 +138,33 @@ impl PluginStorage {
         key: &str,
         value: &str,
     ) -> Result<()> {
+        validate_plugin_id(plugin_id)?;
+        validate_namespace(namespace)?;
+        validate_key(key)?;
+        validate_value(value)?;
         let conn = self.conn.lock().await;
+        let existing_bytes: Option<i64> = conn
+            .query_row(
+                "SELECT length(CAST(value AS BLOB)) FROM plugin_kv
+                 WHERE plugin_id = ?1 AND namespace = ?2 AND key = ?3",
+                params![plugin_id, namespace, key],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let (count, bytes): (i64, i64) = conn.query_row(
+            "SELECT COUNT(*), COALESCE(SUM(length(CAST(value AS BLOB))), 0)
+             FROM plugin_kv WHERE plugin_id = ?1",
+            params![plugin_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        if existing_bytes.is_none() && count as u64 >= MAX_PLUGIN_STORAGE_KEYS {
+            anyhow::bail!("plugin storage exceeds the {MAX_PLUGIN_STORAGE_KEYS} key limit");
+        }
+        let retained_bytes =
+            (bytes.max(0) as u64).saturating_sub(existing_bytes.unwrap_or(0).max(0) as u64);
+        if retained_bytes.saturating_add(value.len() as u64) > MAX_PLUGIN_STORAGE_BYTES {
+            anyhow::bail!("plugin storage exceeds the {MAX_PLUGIN_STORAGE_BYTES} byte limit");
+        }
         conn.execute(
             "INSERT INTO plugin_kv (plugin_id, namespace, key, value, updated_at)
              VALUES (?1, ?2, ?3, ?4, ?5)
@@ -122,6 +188,12 @@ impl PluginStorage {
         expected: Option<&str>,
         value: Option<&str>,
     ) -> Result<bool> {
+        validate_plugin_id(plugin_id)?;
+        validate_namespace(namespace)?;
+        validate_key(key)?;
+        if let Some(value) = value {
+            validate_value(value)?;
+        }
         let conn = self.conn.lock().await;
         let current = conn
             .query_row(
@@ -136,6 +208,22 @@ impl PluginStorage {
         }
         match value {
             Some(value) => {
+                let (count, bytes): (i64, i64) = conn.query_row(
+                    "SELECT COUNT(*), COALESCE(SUM(length(CAST(value AS BLOB))), 0)
+                     FROM plugin_kv WHERE plugin_id = ?1",
+                    params![plugin_id],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )?;
+                if current.is_none() && count as u64 >= MAX_PLUGIN_STORAGE_KEYS {
+                    anyhow::bail!("plugin storage exceeds the {MAX_PLUGIN_STORAGE_KEYS} key limit");
+                }
+                let old_bytes = current.as_deref().map(str::len).unwrap_or(0) as u64;
+                let retained_bytes = (bytes.max(0) as u64).saturating_sub(old_bytes);
+                if retained_bytes.saturating_add(value.len() as u64) > MAX_PLUGIN_STORAGE_BYTES {
+                    anyhow::bail!(
+                        "plugin storage exceeds the {MAX_PLUGIN_STORAGE_BYTES} byte limit"
+                    );
+                }
                 conn.execute(
                     "INSERT INTO plugin_kv (plugin_id, namespace, key, value, updated_at)
                      VALUES (?1, ?2, ?3, ?4, ?5)
@@ -162,6 +250,7 @@ impl PluginStorage {
         if tenant.is_empty() {
             return Ok(0);
         }
+        validate_component("tenant", tenant, MAX_NAMESPACE_BYTES)?;
         let prefix = format!("tenant:{tenant}:");
         let conn = self.conn.lock().await;
         let transaction = conn.unchecked_transaction()?;
@@ -181,6 +270,9 @@ impl PluginStorage {
 
     /// Delete a value (no-op if absent).
     pub async fn delete(&self, plugin_id: &str, namespace: &str, key: &str) -> Result<()> {
+        validate_plugin_id(plugin_id)?;
+        validate_namespace(namespace)?;
+        validate_key(key)?;
         let conn = self.conn.lock().await;
         conn.execute(
             "DELETE FROM plugin_kv WHERE plugin_id = ?1 AND namespace = ?2 AND key = ?3",
@@ -210,6 +302,8 @@ impl PluginStorage {
     /// # Errors
     /// Returns `Err` if the SQLite transaction fails.
     pub async fn rekey_plugin(&self, from: &str, to: &str) -> Result<usize> {
+        validate_plugin_id(from)?;
+        validate_plugin_id(to)?;
         let conn = self.conn.lock().await;
         conn.execute(
             "INSERT OR IGNORE INTO plugin_kv (plugin_id, namespace, key, value, updated_at)
@@ -229,6 +323,7 @@ impl PluginStorage {
     /// number for the uninstall preview and does not expose another plugin's
     /// namespace or key names.
     pub async fn usage(&self, plugin_id: &str) -> Result<(u64, u64)> {
+        validate_plugin_id(plugin_id)?;
         let conn = self.conn.lock().await;
         let (count, bytes): (i64, i64) = conn.query_row(
             "SELECT COUNT(*), COALESCE(SUM(length(CAST(value AS BLOB))), 0)
@@ -242,6 +337,7 @@ impl PluginStorage {
     /// Delete every record owned by one plugin. Returns the number of rows
     /// removed so callers can make the cleanup observable without reading keys.
     pub async fn delete_plugin(&self, plugin_id: &str) -> Result<usize> {
+        validate_plugin_id(plugin_id)?;
         let conn = self.conn.lock().await;
         Ok(conn.execute(
             "DELETE FROM plugin_kv WHERE plugin_id = ?1",
@@ -250,19 +346,27 @@ impl PluginStorage {
     }
 
     pub async fn keys(&self, plugin_id: &str, namespace: &str) -> Result<Vec<String>> {
+        validate_plugin_id(plugin_id)?;
+        validate_namespace(namespace)?;
         let conn = self.conn.lock().await;
         let mut stmt = conn
             .prepare(
                 "SELECT key FROM plugin_kv WHERE plugin_id = ?1 AND namespace = ?2
-                 ORDER BY updated_at DESC",
+                 ORDER BY updated_at DESC LIMIT ?3",
             )
             .context("preparing plugin_kv keys query")?;
         let rows = stmt
-            .query_map(params![plugin_id, namespace], |row| row.get::<_, String>(0))
+            .query_map(
+                params![plugin_id, namespace, MAX_KEYS_RESPONSE as i64 + 1],
+                |row| row.get::<_, String>(0),
+            )
             .context("querying plugin_kv keys")?;
         let mut out = Vec::new();
         for r in rows {
             out.push(r.context("reading plugin_kv key row")?);
+        }
+        if out.len() as u64 > MAX_KEYS_RESPONSE {
+            anyhow::bail!("plugin storage key listing exceeds the {MAX_KEYS_RESPONSE} item limit");
         }
         Ok(out)
     }
@@ -383,5 +487,30 @@ mod tests {
             s.get("other", "default", "one").await.unwrap().as_deref(),
             Some("outside")
         );
+    }
+
+    #[tokio::test]
+    async fn storage_rejects_oversized_values_and_total_growth() {
+        let s = PluginStorage::in_memory().unwrap();
+        let oversized = "x".repeat(MAX_VALUE_BYTES + 1);
+        assert!(s.set("p", "default", "too-big", &oversized).await.is_err());
+
+        let full_value = "x".repeat(MAX_VALUE_BYTES);
+        for index in 0..(MAX_PLUGIN_STORAGE_BYTES as usize / MAX_VALUE_BYTES) {
+            s.set("p", "default", &format!("k-{index}"), &full_value)
+                .await
+                .unwrap();
+        }
+        assert!(
+            s.set("p", "default", "one-more", "x").await.is_err(),
+            "a plugin must not grow beyond its durable storage quota"
+        );
+    }
+
+    #[tokio::test]
+    async fn storage_rejects_controlled_identifiers() {
+        let s = PluginStorage::in_memory().unwrap();
+        assert!(s.set("p", "default", "bad\nkey", "v").await.is_err());
+        assert!(s.get("p", "default", "bad\nkey").await.is_err());
     }
 }

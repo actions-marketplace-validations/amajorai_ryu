@@ -63,7 +63,7 @@ export function useMeetingStream(): void {
 		const { applyEvent, seedFromMeetings, reset } =
 			useMeetingRecordingStore.getState();
 
-		listMeetings(target)
+		listMeetings(target, controller.signal)
 			.then((meetings) => {
 				if (!cancelled) {
 					seedFromMeetings(meetings);

@@ -56,6 +56,6 @@ test("every public product renders its content through the shared page", () => {
 		expect(html.match(/<h1[\s>]/g)).toHaveLength(1);
 		expect(html).toContain(product.hero.title);
 		expect(html).toContain(`data-testid="product-page-${product.slug}"`);
-		expect(html).toContain(`Try ${product.name}`);
+		expect(html).toContain(product.hero.primaryCta.label);
 	}
 });

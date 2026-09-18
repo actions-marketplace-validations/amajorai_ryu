@@ -10,6 +10,127 @@ export interface StandaloneAppBundle {
 	version: string;
 }
 
+/**
+ * A Desktop-only standalone surface installed from an already-installed app.
+ *
+ * This is deliberately not a second plugin lifecycle record. The app id points
+ * back to the existing manifest and Core-owned data; the record only remembers
+ * that this Desktop installation should offer an app-first window for it.
+ */
+export interface StandaloneAppInstallation {
+	appId: string;
+	installedAt: string;
+	version: string;
+}
+
+export interface StandaloneAppRegistry {
+	apps: StandaloneAppInstallation[];
+	schemaVersion: 1;
+}
+
+const MAX_STANDALONE_APP_INSTALLATIONS = 128;
+
+function isStandaloneAppId(value: unknown): value is string {
+	return (
+		typeof value === "string" &&
+		value.length > 0 &&
+		value.length <= 200 &&
+		/^[a-zA-Z0-9@._/-]+$/.test(value) &&
+		!value.startsWith("/") &&
+		!value.endsWith("/") &&
+		!value.includes("//") &&
+		value.split("/").every((segment) => segment !== "." && segment !== "..")
+	);
+}
+
+function isStandaloneAppInstallation(
+	value: unknown
+): value is StandaloneAppInstallation {
+	if (typeof value !== "object" || value === null || Array.isArray(value)) {
+		return false;
+	}
+	const candidate = value as Record<string, unknown>;
+	return (
+		isStandaloneAppId(candidate.appId) &&
+		typeof candidate.version === "string" &&
+		candidate.version.length > 0 &&
+		candidate.version.length <= 100 &&
+		typeof candidate.installedAt === "string" &&
+		candidate.installedAt.length > 0 &&
+		candidate.installedAt.length <= 80
+	);
+}
+
+function dedupeStandaloneAppInstallations(
+	apps: readonly StandaloneAppInstallation[]
+): StandaloneAppInstallation[] {
+	const byId = new Map<string, StandaloneAppInstallation>();
+	for (const app of apps) {
+		if (isStandaloneAppInstallation(app)) {
+			byId.set(app.appId, app);
+		}
+	}
+	return [...byId.values()].slice(-MAX_STANDALONE_APP_INSTALLATIONS);
+}
+
+/** Parse the local Desktop standalone-surface registry fail-closed. */
+export function parseStandaloneAppRegistry(
+	value: string | null | undefined
+): StandaloneAppInstallation[] {
+	if (!value) {
+		return [];
+	}
+	try {
+		const parsed: unknown = JSON.parse(value);
+		if (
+			typeof parsed !== "object" ||
+			parsed === null ||
+			Array.isArray(parsed) ||
+			(parsed as { schemaVersion?: unknown }).schemaVersion !== 1
+		) {
+			return [];
+		}
+		const apps = (parsed as { apps?: unknown }).apps;
+		return Array.isArray(apps)
+			? dedupeStandaloneAppInstallations(
+					apps.filter(isStandaloneAppInstallation)
+				)
+			: [];
+	} catch {
+		return [];
+	}
+}
+
+/** Serialize the local Desktop standalone-surface registry. */
+export function serializeStandaloneAppRegistry(
+	apps: readonly StandaloneAppInstallation[]
+): string {
+	const registry: StandaloneAppRegistry = {
+		apps: dedupeStandaloneAppInstallations(apps),
+		schemaVersion: 1,
+	};
+	return JSON.stringify(registry);
+}
+
+/** Add or refresh one standalone surface without duplicating its app id. */
+export function upsertStandaloneAppInstallation(
+	apps: readonly StandaloneAppInstallation[],
+	installation: StandaloneAppInstallation
+): StandaloneAppInstallation[] {
+	return dedupeStandaloneAppInstallations([
+		...apps.filter((app) => app.appId !== installation.appId),
+		installation,
+	]);
+}
+
+/** Remove only the standalone surface; the app lifecycle record is untouched. */
+export function removeStandaloneAppInstallation(
+	apps: readonly StandaloneAppInstallation[],
+	appId: string
+): StandaloneAppInstallation[] {
+	return apps.filter((app) => app.appId !== appId);
+}
+
 export interface StandaloneSidecarResource {
 	command: string | null;
 	commandEnv?: string;

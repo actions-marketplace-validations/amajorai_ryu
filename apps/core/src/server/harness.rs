@@ -603,6 +603,7 @@ async fn dispatch_harness_run(
     // explicit values here are intentionally not deserialized from the public
     // harness body.
     request.author_user_id = caller.as_ref().map(|value| value.user_id.clone());
+    request.verified_caller = caller.clone();
     request.user_jwt = user_jwt.clone();
 
     let response = super::chat_stream(

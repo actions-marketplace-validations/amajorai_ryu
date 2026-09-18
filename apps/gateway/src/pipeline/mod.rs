@@ -40,6 +40,7 @@ pub(crate) mod test_support {
         RequestContext {
             request_id: "test-req".to_string(),
             api_key: "sk-test".to_string(),
+            owner_binding: ryu_gw_credentials::fingerprint("sk-test"),
             is_master_key: false,
             org_id: None,
             team_id: None,
@@ -165,6 +166,10 @@ fn firewall_policy_alert(
 pub struct RequestContext {
     pub request_id: String,
     pub api_key: String,
+    /// Stable bearer binding used for asynchronous job ownership. Unlike
+    /// `api_key`, this remains per-credential on dynamic org tokens and is not
+    /// written to audit rows or returned to clients.
+    pub owner_binding: String,
     pub is_master_key: bool,
     pub org_id: Option<String>,
     pub team_id: Option<String>,
@@ -490,9 +495,11 @@ pub async fn authenticate(
                      pool_budgets_micro_usd: std::collections::HashMap<String, i64>,
                      resolved_policy: Option<crate::policy::EffectivePolicy>|
      -> RequestContext {
+        let owner_binding = ryu_gw_credentials::fingerprint(&api_key);
         RequestContext {
             request_id: Uuid::new_v4().to_string(),
             api_key,
+            owner_binding,
             is_master_key,
             org_id,
             team_id,
@@ -716,7 +723,7 @@ pub async fn authenticate(
                         (Some(_), None) | (None, None) => None,
                     };
                     let api_key_label = format!("rgw_org:{}", resolved.org_id);
-                    Ok(build_ctx(
+                    let mut context = build_ctx(
                         false,
                         api_key_label,
                         Some(resolved.org_id.clone()),
@@ -737,7 +744,12 @@ pub async fn authenticate(
                         resolved.unrestricted_budget_micro_usd,
                         resolved.pool_budgets_micro_usd.clone(),
                         Some(resolved.policy.clone()),
-                    ))
+                    );
+                    // `api_key` intentionally stays an org label for audit and
+                    // org-level accounting. Job ownership must still distinguish
+                    // two valid bearers in the same organization.
+                    context.owner_binding = ryu_gw_credentials::fingerprint(&token);
+                    Ok(context)
                 }
                 // An `rgw_`-shaped token that does not resolve (invalid / revoked /
                 // control plane unreachable) is a HARD 401 — never fall open into
@@ -1776,6 +1788,7 @@ async fn apply_inline_output_evaluators(
 /// streaming firewall must buffer the whole response in that case, even when the
 /// node firewall policy is warn/off (otherwise a blocking output evaluator would
 /// never fire on the default streaming chat path).
+#[cfg(test)]
 fn output_inline_wants_transform(scanner: &FirewallScanner, registry: &EvaluatorRegistry) -> bool {
     scanner.config().evaluators.iter().any(|b| {
         if !b.enabled {
@@ -2040,6 +2053,7 @@ pub async fn run(
         BudgetChargeKind::Model,
         OutputCeiling::Clamp,
     )?;
+    auxiliary::authorize_model(&state, &ctx, &decision.model)?;
     // One response, one header: firewall (Ok-path) alert first so it wins a tie
     // against a same-tier budget alert (deterministic).
     let policy_alert = merge_alert(pre_alert, budget_alert);
@@ -2074,6 +2088,17 @@ pub async fn run(
     let prompt_cache_outcome = apply_prompt_cache(&state, &ctx, &decision.model, &mut body);
 
     for provider_kind in &fallback_chain {
+        if let Err(error) = inference_governance::authorize_provider_region(
+            &state,
+            &ctx,
+            provider_kind,
+        ) {
+            last_err = Some(error);
+            if Some(provider_kind) == primary_provider.as_ref() {
+                primary_skipped = true;
+            }
+            continue;
+        }
         // 7. Circuit breaker check
         if state.circuit_breaker.is_open(provider_kind.as_str()) {
             debug!(
@@ -2263,39 +2288,12 @@ pub async fn run(
                 // Tools have already executed too; output rejection must not erase their bill.
                 spawn_tool_call_debit(&state,&ctx,billable_tool_calls);
                 // 9. Outbound firewall
-                let response_text = response_to_text(&response);
-                let outbound_result: Result<bool, GatewayError> = state.with_firewall(|fw| {
-                    if let Some(violation) = fw.scan_outbound(&response_text) {
-                        match fw.policy() {
-                            FirewallPolicy::Block => {
-                                warn!(request_id = %ctx.request_id, "firewall: blocked outbound response");
-                                state.metrics.inc_firewall_blocked();
-                                return Err(GatewayError::FirewallBlocked(
-                                    format!(
-                                        "Outbound response blocked: {} ({:?})",
-                                        violation.pattern_name, violation.kind
-                                    ),
-                                    firewall_policy_alert(fw.config(), &ctx, "block"),
-                                ));
-                            }
-                            FirewallPolicy::Sanitize => {
-                                warn!(request_id = %ctx.request_id, "firewall: sanitized outbound response");
-                                sanitize_response(&mut response, fw);
-                            }
-                            FirewallPolicy::WarnAndContinue => {
-                                warn!(
-                                    request_id = %ctx.request_id,
-                                    pattern = %violation.pattern_name,
-                                    "firewall: outbound violation (warn-and-continue)"
-                                );
-                            }
-                        }
-                        Ok(false)
-                    } else {
-                        Ok(true)
-                    }
-                });
-                let policy_pass = outbound_result.map_err(|error|{settlement.fail(&error);error})?;
+                let policy_pass = apply_outbound_json_dlp(&state, &ctx, &mut response).map_err(
+                    |error| {
+                        settlement.fail(&error);
+                        error
+                    },
+                )?;
 
                 // 9b. Unified-evaluator inline guardrails — OUTPUT target (P3).
                 // Runs the resolved per-agent policy's enabled output evaluators
@@ -2514,7 +2512,16 @@ fn audit_failure(
     if !state.audit.is_enabled() {
         return;
     }
-    let redacted_error = state.with_firewall(|fw| fw.sanitize(&err.to_string()));
+    let source = match err {
+        GatewayError::ProviderError(_)
+        | GatewayError::ProviderPaymentRequired { .. }
+        | GatewayError::AllProvidersUnavailable(_) => "upstream provider request failed".to_owned(),
+        _ => err.to_string(),
+    };
+    let redacted_error = state.with_firewall(|fw| {
+        let sanitized = fw.sanitize(&source);
+        fw.redact_outbound(&sanitized).0
+    });
     state.log_audit(AuditRecord {
         request_id: ctx.request_id.clone(),
         api_key: ctx.api_key.clone(),
@@ -2638,6 +2645,7 @@ pub async fn run_stream(
         BudgetChargeKind::Model,
         OutputCeiling::Clamp,
     )?;
+    auxiliary::authorize_model(&state, &ctx, &decision.model)?;
     // Firewall (Ok-path) alert first so it wins a same-tier tie deterministically.
     let policy_alert = merge_alert(pre_alert, budget_alert);
 
@@ -2691,11 +2699,6 @@ pub async fn run_stream(
         budget.as_ref().map(|b| b.action),
         Some(crate::config::BudgetAction::Restrict)
     );
-	let output_eval_wants_reentrant_slot = {
-		let scanner = state.resolved_scanner(&ctx);
-		let registry = EvaluatorRegistry::from_config(&state.config);
-		output_inline_wants_transform(&scanner, &registry)
-	};
 
     let fallback_chain = clamped_fallback_chain(&state, &ctx, &decision);
     let mut last_err: Option<GatewayError> = None;
@@ -2707,6 +2710,17 @@ pub async fn run_stream(
     let prompt_cache_outcome = apply_prompt_cache(&state, &ctx, &decision.model, &mut body);
 
     for provider_kind in &fallback_chain {
+        if let Err(error) = inference_governance::authorize_provider_region(
+            &state,
+            &ctx,
+            provider_kind,
+        ) {
+            last_err = Some(error);
+            if Some(provider_kind) == primary_provider_stream.as_ref() {
+                primary_skipped_stream = true;
+            }
+            continue;
+        }
         if state.circuit_breaker.is_open(provider_kind.as_str()) {
             remember_preferred_provider_error(
                 &mut last_err,
@@ -2739,8 +2753,11 @@ pub async fn run_stream(
         // and the slot frees before the fallback attempt. As on the non-stream
         // path, the re-entrant tool-loop case (`tools_active`) is left ungated to
         // avoid a parent holding a slot while a delegated child waits for one.
-		let admission_permit = if tools_active || output_eval_wants_reentrant_slot {
-			crate::concurrency::AdmissionPermit::none()
+        // Output guardrails do not bypass this gate: their helper releases the
+        // permit after the upstream stream is fully buffered, immediately before
+        // any re-entrant LLM judge runs.
+        let admission_permit = if tools_active {
+            crate::concurrency::AdmissionPermit::none()
         } else {
             match state.admission.acquire(provider.name(), ctx.priority).await {
                 Ok(permit) => permit,
@@ -2847,13 +2864,20 @@ pub async fn run_stream(
                         .map(|b| b.alert),
                 );
 
-                let observed_body=apply_outbound_firewall_stream(observed_body,Arc::clone(&state),ctx.clone()).await;
+                let (observed_body, admission_permit) = apply_outbound_firewall_stream(
+                    observed_body,
+                    Arc::clone(&state),
+                    ctx.clone(),
+                    admission_permit,
+                )
+                .await;
 
-                // Hold the admission slot AND the credit reservation for the
-                // *whole* stream: move both into the body so they drop only when
-                // the SSE is fully consumed (or the client disconnects). Until
-                // then this generation counts against the engine's slot budget
-                // and against the org's in-flight credit claim.
+                // Hold any remaining admission slot (the pass-through path) and
+                // the credit reservation for the *whole* client stream: move both
+                // into the body so they drop only when the SSE is fully consumed
+                // (or the client disconnects). Buffered guardrail paths already
+                // released the engine slot after the upstream generation ended;
+                // the credit claim still lasts through the client-facing stream.
                 let observed_body = hold_admission_until_stream_end(
                     observed_body,
                     admission_permit,
@@ -2944,34 +2968,13 @@ pub async fn run_multimodal(
 
     let requested_model = body["model"].as_str().unwrap_or("unknown").to_string();
 
-    // Inbound firewall on the prompt / input text field.
-    let prompt_text = multimodal_input_text(&body, &modality);
-    let inbound_result: Result<(), GatewayError> = state.with_firewall(|fw| {
-        if let Some(violation) = fw.scan_inbound(&prompt_text) {
-            match fw.policy() {
-                FirewallPolicy::Block => {
-                    state.metrics.inc_firewall_blocked();
-                    return Err(GatewayError::FirewallBlocked(
-                        format!(
-                            "Inbound content blocked: {} ({:?})",
-                            violation.pattern_name, violation.kind
-                        ),
-                        firewall_policy_alert(fw.config(), &ctx, "block"),
-                    ));
-                }
-                FirewallPolicy::Sanitize | FirewallPolicy::WarnAndContinue => {
-                    warn!(
-                        request_id = %ctx.request_id,
-                        pattern = %violation.pattern_name,
-                        modality = modality.as_str(),
-                        "firewall: inbound violation on multimodal request"
-                    );
-                }
-            }
-        }
-        Ok(())
-    });
-    inbound_result.map_err(|e| {
+    let input_alert = inference_governance::inspect_multimodal_input(
+        &state,
+        &ctx,
+        &mut body,
+        &modality,
+    )
+    .map_err(|e| {
         state.metrics.inc_errors();
         audit_failure(&state, &ctx, &requested_model, &e, start);
         e
@@ -3032,6 +3035,11 @@ pub async fn run_multimodal(
 
     // Budget enforcement (reuse the chat path's enforcer).
     let mut decision = decision;
+    inference_governance::authorize_model(&state, &ctx, &decision.model).map_err(|e| {
+        state.metrics.inc_errors();
+        audit_failure(&state, &ctx, &decision.model, &e, start);
+        e
+    })?;
     let BudgetOutcome {
         decision: budget,
         alert: policy_alert,
@@ -3056,12 +3064,31 @@ pub async fn run_multimodal(
         e
     })?;
 
+    let policy_alert = merge_alert(input_alert, policy_alert);
+
+    inference_governance::authorize_model(&state, &ctx, &decision.model).map_err(|e| {
+        state.metrics.inc_errors();
+        audit_failure(&state, &ctx, &decision.model, &e, start);
+        e
+    })?;
+
     let fallback_chain = clamped_fallback_chain(&state, &ctx, &decision);
     let mut last_err: Option<GatewayError> = None;
     let primary_provider_mm = fallback_chain.first().cloned();
     let mut primary_skipped_mm = false;
 
     for provider_kind in &fallback_chain {
+        if let Err(error) = inference_governance::authorize_provider_region(
+            &state,
+            &ctx,
+            provider_kind,
+        ) {
+            last_err = Some(error);
+            if Some(provider_kind) == primary_provider_mm.as_ref() {
+                primary_skipped_mm = true;
+            }
+            continue;
+        }
         if state.circuit_breaker.is_open(provider_kind.as_str()) {
             remember_preferred_provider_error(
                 &mut last_err,
@@ -3109,9 +3136,14 @@ pub async fn run_multimodal(
         };
 
         match result {
-            Ok(response) => {
+            Ok(mut response) => {
                 state.circuit_breaker.record_success(provider.name());
                 let latency_ms = start.elapsed().as_millis() as u64;
+
+                apply_outbound_json_dlp(&state, &ctx, &mut response).map_err(|e| {
+                    audit_failure(&state, &ctx, &decision.model, &e, start);
+                    e
+                })?;
 
                 let degraded = if primary_skipped_mm {
                     state.metrics.inc_degraded_fallback();
@@ -3412,6 +3444,12 @@ pub async fn run_embedding(
         audit_failure(&state, &ctx, &decision.model, &error, start);
         error
     })?;
+    inference_governance::authorize_provider_region(&state, &ctx, &decision.provider).map_err(
+        |error| {
+            audit_failure(&state, &ctx, &decision.model, &error, start);
+            error
+        },
+    )?;
     body["model"] = json!(decision.model);
     // Restrict is a text-generation budget action; do not add a chat-only field to this wire shape.
     if let Some(max_tokens)=original_max_tokens {body["max_tokens"]=max_tokens;} else if let Some(object)=body.as_object_mut(){object.remove("max_tokens");}
@@ -3423,6 +3461,17 @@ pub async fn run_embedding(
     let mut last_error: Option<GatewayError> = None;
 
     for provider_kind in &fallback_chain {
+        if let Err(error) = inference_governance::authorize_provider_region(
+            &state,
+            &ctx,
+            provider_kind,
+        ) {
+            last_error = Some(error);
+            if Some(provider_kind) == primary_provider.as_ref() {
+                primary_skipped = true;
+            }
+            continue;
+        }
         if state.circuit_breaker.is_open(provider_kind.as_str()) {
             last_error = Some(GatewayError::CircuitOpen(
                 provider_kind.as_str().to_string(),
@@ -3554,29 +3603,13 @@ pub async fn submit_video_job(
     state.metrics.inc_requests();
     let requested_model = body["model"].as_str().unwrap_or("unknown").to_string();
 
-    // Inbound firewall on the prompt.
-    let prompt_text = multimodal_input_text(&body, &Modality::Video);
-    let inbound: Result<(), GatewayError> = state.with_firewall(|fw| {
-        if let Some(violation) = fw.scan_inbound(&prompt_text) {
-            if *fw.policy() == FirewallPolicy::Block {
-                state.metrics.inc_firewall_blocked();
-                return Err(GatewayError::FirewallBlocked(
-                    format!(
-                        "Inbound content blocked: {} ({:?})",
-                        violation.pattern_name, violation.kind
-                    ),
-                    firewall_policy_alert(fw.config(), &ctx, "block"),
-                ));
-            }
-            warn!(
-                request_id = %ctx.request_id,
-                pattern = %violation.pattern_name,
-                "firewall: inbound violation on video request"
-            );
-        }
-        Ok(())
-    });
-    inbound.map_err(|e| {
+    let _input_alert = inference_governance::inspect_multimodal_input(
+        &state,
+        &ctx,
+        &mut body,
+        &Modality::Video,
+    )
+    .map_err(|e| {
         state.metrics.inc_errors();
         audit_failure(&state, &ctx, &requested_model, &e, start);
         e
@@ -3602,6 +3635,11 @@ pub async fn submit_video_job(
         ctx.slot_model.as_deref(),
     );
     let mut decision = decision;
+    inference_governance::authorize_model(&state, &ctx, &decision.model).map_err(|e| {
+        state.metrics.inc_errors();
+        audit_failure(&state, &ctx, &decision.model, &e, start);
+        e
+    })?;
     // Video is job-based, so its reservation must move into the durable in-memory
     // job record and live until the provider reaches a terminal state. Dropping it
     // at the end of submit reopens the exact headroom that concurrent video jobs
@@ -3623,6 +3661,19 @@ pub async fn submit_video_job(
 
         e
     })?;
+
+    inference_governance::authorize_model(&state, &ctx, &decision.model).map_err(|e| {
+        state.metrics.inc_errors();
+        audit_failure(&state, &ctx, &decision.model, &e, start);
+        e
+    })?;
+    inference_governance::authorize_provider_region(&state, &ctx, &decision.provider).map_err(
+        |e| {
+            state.metrics.inc_errors();
+            audit_failure(&state, &ctx, &decision.model, &e, start);
+            e
+        },
+    )?;
 
     let provider_kind = decision.provider.clone();
     if state.circuit_breaker.is_open(provider_kind.as_str()) {
@@ -3667,6 +3718,7 @@ pub async fn submit_video_job(
         agent_id: ctx.agent_id.clone(),
         session_id: ctx.session_id.clone(),
         api_key: ctx.api_key.clone(),
+        owner_binding: ctx.owner_binding.clone(),
         reservation: credit_reservation.map(Arc::new),
     };
     // If the provider completed the job synchronously at submit, bill here — no
@@ -3802,11 +3854,18 @@ pub async fn poll_video_job(
             "no such video job: {job_id}"
         )));
     };
-    // Tenant isolation: one caller must not read another's job by guessing an id.
-    if job.api_key != ctx.api_key {
-        return Err(GatewayError::Unauthorized(
-            "video job belongs to a different key".to_string(),
-        ));
+    // Tenant isolation: the redacted org label is shared by all dynamic
+    // credentials in an organization, so require both the independent tenant
+    // binding and the stable per-bearer owner binding. Return the same not-found
+    // shape as an unknown id so ownership cannot be probed.
+    if !job.belongs_to(
+        ctx.org_id.as_deref(),
+        &ctx.api_key,
+        &ctx.owner_binding,
+    ) {
+        return Err(GatewayError::BadRequest(format!(
+            "no such video job: {job_id}"
+        )));
     }
     state.jobs.touch(&job_id);
     if job.status.is_terminal() {
@@ -5075,6 +5134,9 @@ async fn debit_wallet_for_request(
                         &ref_id,
                         &format!("credits debit response unparseable: {e}"),
                     );
+                    if fail_closed_sticky {
+                        state.wallet.set_org_accounting_unavailable(&org_id, true);
+                    }
                 }
             }
         }
@@ -5776,6 +5838,141 @@ fn estimate_prompt_tokens(body: &Value) -> u64 {
     chars.div_ceil(4)
 }
 
+/// Collect every string value in a provider response. Unlike the legacy
+/// `choices[].message.content` projection, this includes tool/function
+/// arguments, error fields, annotations, nested content parts, and every SSE
+/// choice/frame that has been decoded into JSON.
+fn collect_json_strings(value: &Value, out: &mut String) {
+    match value {
+        Value::String(text) => {
+            if !text.is_empty() {
+                if !out.is_empty() {
+                    out.push('\n');
+                }
+                out.push_str(text);
+            }
+        }
+        Value::Array(values) => {
+            for value in values {
+                collect_json_strings(value, out);
+            }
+        }
+        Value::Object(values) => {
+            for value in values.values() {
+                collect_json_strings(value, out);
+            }
+        }
+        Value::Null | Value::Bool(_) | Value::Number(_) => {}
+    }
+}
+
+fn collect_json_strings_compact(value: &Value, out: &mut String) {
+    match value {
+        Value::String(text) => out.push_str(text),
+        Value::Array(values) => {
+            for value in values {
+                collect_json_strings_compact(value, out);
+            }
+        }
+        Value::Object(values) => {
+            for value in values.values() {
+                collect_json_strings_compact(value, out);
+            }
+        }
+        Value::Null | Value::Bool(_) | Value::Number(_) => {}
+    }
+}
+
+fn json_string_projection(value: &Value) -> String {
+    let mut out = String::new();
+    collect_json_strings(value, &mut out);
+    out
+}
+
+fn redact_json_strings(value: &mut Value, scanner: &dyn crate::firewall::FirewallBackend) {
+    match value {
+        Value::String(text) => {
+            *text = scanner.redact_outbound(text).0;
+        }
+        Value::Array(values) => {
+            for value in values {
+                redact_json_strings(value, scanner);
+            }
+        }
+        Value::Object(values) => {
+            for value in values.values_mut() {
+                redact_json_strings(value, scanner);
+            }
+        }
+        Value::Null | Value::Bool(_) | Value::Number(_) => {}
+    }
+}
+
+fn sanitize_json_strings(value: &mut Value, scanner: &dyn crate::firewall::FirewallBackend) {
+    match value {
+        Value::String(text) => {
+            let sanitized = scanner.sanitize(text);
+            *text = scanner.redact_outbound(&sanitized).0;
+        }
+        Value::Array(values) => {
+            for value in values {
+                sanitize_json_strings(value, scanner);
+            }
+        }
+        Value::Object(values) => {
+            for value in values.values_mut() {
+                sanitize_json_strings(value, scanner);
+            }
+        }
+        Value::Null | Value::Bool(_) | Value::Number(_) => {}
+    }
+}
+
+/// Apply the shared outbound response DLP boundary to every JSON string value.
+/// External-token redaction is unconditional; the configured firewall policy
+/// still controls whether detected PII/secret content blocks, sanitizes, or is
+/// warned through.
+fn apply_outbound_json_dlp(
+    state: &AppState,
+    ctx: &RequestContext,
+    response: &mut Value,
+) -> Result<bool, GatewayError> {
+    let scanner = state.resolved_scanner(ctx);
+    let response_text = json_string_projection(response);
+    let violation = scanner.scan_outbound(&response_text);
+
+    let Some(violation) = violation else {
+        redact_json_strings(response, scanner.as_ref());
+        return Ok(true);
+    };
+
+    match scanner.policy() {
+        FirewallPolicy::Block => {
+            state.metrics.inc_firewall_blocked();
+            Err(GatewayError::FirewallBlocked(
+                format!(
+                    "Outbound response blocked: {} ({:?})",
+                    violation.pattern_name, violation.kind
+                ),
+                firewall_policy_alert(scanner.config(), ctx, "block"),
+            ))
+        }
+        FirewallPolicy::Sanitize => {
+            sanitize_json_strings(response, scanner.as_ref());
+            Ok(false)
+        }
+        FirewallPolicy::WarnAndContinue => {
+            redact_json_strings(response, scanner.as_ref());
+            warn!(
+                request_id = %ctx.request_id,
+                pattern = %violation.pattern_name,
+                "firewall: outbound violation (warn-and-continue)"
+            );
+            Ok(false)
+        }
+    }
+}
+
 fn extract_text_for_scanning(body: &Value) -> String {
     let Some(messages) = body["messages"].as_array() else {
         return String::new();
@@ -5801,35 +5998,16 @@ fn extract_text_for_scanning(body: &Value) -> String {
 ///
 /// Concatenates the text of EVERY choice (not just `choices[0]`) and handles both
 /// the string and array-of-parts (`[{ "type": "text", "text": … }]`) content
-/// shapes, so toxic/PII/biased text placed in a second choice (`n>1`) or in a
-/// content part does not bypass the non-stream + cache-hit judge. (`tool_call`
-/// arguments are still not concatenated — moderating tool-call payloads is a
-/// distinct design question deferred past P3.)
+/// shapes, so toxic/PII/biased text placed in a second choice (`n>1`), a
+/// content part, or structured tool-call arguments does not bypass the
+/// non-stream + cache-hit judge.
 fn response_to_text(response: &Value) -> String {
     let Some(choices) = response["choices"].as_array() else {
         return String::new();
     };
     let mut out = String::new();
-    let mut push = |s: &str| {
-        if !s.is_empty() {
-            if !out.is_empty() {
-                out.push('\n');
-            }
-            out.push_str(s);
-        }
-    };
     for choice in choices {
-        match &choice["message"]["content"] {
-            Value::String(s) => push(s),
-            Value::Array(parts) => {
-                for part in parts {
-                    if let Some(t) = part["text"].as_str() {
-                        push(t);
-                    }
-                }
-            }
-            _ => {}
-        }
+        collect_json_strings(choice, &mut out);
     }
     out
 }
@@ -5845,13 +6023,96 @@ fn sanitize_messages(body: &mut Value, scanner: &dyn crate::firewall::FirewallBa
 }
 
 fn sanitize_response(response: &mut Value, scanner: &dyn crate::firewall::FirewallBackend) {
-    if let Some(choices) = response["choices"].as_array_mut() {
-        for choice in choices.iter_mut() {
-            if let Some(content) = choice["message"]["content"].as_str() {
-                choice["message"]["content"] = Value::String(scanner.sanitize(content));
-            }
+    sanitize_json_strings(response, scanner);
+}
+
+/// Decode and rebuild an SSE response so every JSON frame is inspected and the
+/// client never receives an unscanned raw frame. Unknown event lines and
+/// malformed data frames are rejected instead of being replayed.
+fn rewrite_sse_for_dlp(
+    raw: &str,
+    scanner: &dyn crate::firewall::FirewallBackend,
+    policy: &FirewallPolicy,
+) -> Result<(String, String, Option<(String, String)>), String> {
+    let mut frames = Vec::new();
+    let mut saw_done = false;
+    for line in raw.lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let Some(data) = line.strip_prefix("data:") else {
+            return Err("provider stream contained an unscannable event frame".to_owned());
+        };
+        let data = data.trim();
+        if data.is_empty() {
+            continue;
+        }
+        if data == "[DONE]" {
+            saw_done = true;
+            continue;
+        }
+        frames.push(
+            serde_json::from_str::<Value>(data)
+                .map_err(|error| format!("provider stream frame is not valid JSON: {error}"))?,
+        );
+    }
+
+    let mut payload = Value::Array(frames);
+    let original_text = {
+        let mut text = String::new();
+        collect_json_strings_compact(&payload, &mut text);
+        text
+    };
+    let violation = scanner.scan_outbound(&original_text).map(|match_| {
+        (
+            match_.pattern_name.clone(),
+            format!("{:?}", match_.kind),
+        )
+    });
+    redact_json_strings(&mut payload, scanner);
+    let mut assembled = {
+        let mut text = String::new();
+        collect_json_strings_compact(&payload, &mut text);
+        text
+    };
+    if violation.is_some() && matches!(policy, FirewallPolicy::Sanitize) {
+        sanitize_json_strings(&mut payload, scanner);
+        assembled = json_string_projection(&payload);
+    }
+
+    let mut rewritten = String::new();
+    if let Some(frames) = payload.as_array() {
+        for frame in frames {
+            let encoded = serde_json::to_string(frame)
+                .map_err(|error| format!("provider stream frame could not be encoded: {error}"))?;
+            rewritten.push_str("data: ");
+            rewritten.push_str(&encoded);
+            rewritten.push_str("\n\n");
         }
     }
+    if saw_done || !rewritten.is_empty() {
+        rewritten.push_str("data: [DONE]\n\n");
+    }
+    Ok((rewritten, assembled, violation))
+}
+
+#[cfg(test)]
+fn sse_extract_text(raw: &str) -> String {
+    let mut out = String::new();
+    for line in raw.lines() {
+        let Some(data) = line.strip_prefix("data:") else {
+            continue;
+        };
+        let data = data.trim();
+        if data.is_empty() || data == "[DONE]" {
+            continue;
+        }
+        let Ok(json) = serde_json::from_str::<Value>(data) else {
+            continue;
+        };
+        collect_json_strings_compact(&json, &mut out);
+    }
+    out
 }
 
 // ─── Streaming outbound firewall ────────────────────────────────────────────────
@@ -5864,78 +6125,87 @@ async fn apply_outbound_firewall_stream(
     stream_body: Body,
     state: Arc<AppState>,
     ctx: RequestContext,
-) -> Body {
+    admission_permit: crate::concurrency::AdmissionPermit,
+) -> (Body, crate::concurrency::AdmissionPermit) {
     let request_id = ctx.request_id.clone();
     // Node-level outbound firewall gate (unchanged): does the node config buffer?
     let (outbound_enabled, policy) =
         state.with_firewall(|fw| (fw.outbound_enabled(), fw.policy().clone()));
     let node_needs_buffer = outbound_enabled && !matches!(policy, FirewallPolicy::WarnAndContinue);
 
-    // Resolved per-agent OUTPUT-target inline evaluators (P3). A blocking/redacting
-    // output evaluator must force buffering even when the node policy is warn/off —
-    // otherwise it would never fire on the DEFAULT streaming chat path.
+    // Resolved per-agent OUTPUT-target inline evaluators (P3).
     let resolved = state.resolved_scanner(&ctx);
     let has_output_eval = resolved.config().evaluators.iter().any(|b| b.enabled);
-    let eval_needs_buffer = has_output_eval && {
-        let registry = EvaluatorRegistry::from_config(&state.config);
-        output_inline_wants_transform(&resolved, &registry)
-    };
 
-    // When nothing needs to hold bytes back, pass through. For node warn-and-continue
-    // we still observe the stream to log node detections (unchanged contract).
-    if !node_needs_buffer && !eval_needs_buffer {
-        if outbound_enabled {
-            return scan_and_log_passthrough(stream_body, state, request_id);
-        }
-        return stream_body;
-    }
-
-    // Buffer the whole upstream stream, then decide (node scan first, then evals).
+    // Buffer every stream: structured tool calls, error frames, and outbound-only
+    // secret shapes must not have a raw-byte fast path around DLP.
     const MAX_BUFFERED_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
     let collected = match axum::body::to_bytes(stream_body, MAX_BUFFERED_RESPONSE_BYTES).await {
         Ok(bytes) => bytes,
         Err(e) => {
             warn!(request_id = %request_id, error = %e, "firewall: failed to buffer stream for outbound scan");
             // Surface a clear error rather than silently leaking unscanned text.
-            return Body::from(sse_content_frames(
-                "[Ryu firewall] Unable to scan the response stream; request aborted.",
-            ));
+            return (
+                Body::from(sse_content_frames(
+                    "[Ryu firewall] Unable to scan the response stream; request aborted.",
+                )),
+                crate::concurrency::AdmissionPermit::none(),
+            );
+        }
+    };
+    // The provider generation is complete once the upstream body is buffered.
+    // Release the engine slot before a re-entrant LLM judge is dispatched; the
+    // judge must be admitted independently instead of deadlocking behind its own
+    // parent generation. Deterministic evaluators take the same safe path.
+    drop(admission_permit);
+
+    let raw = String::from_utf8_lossy(&collected).into_owned();
+    let rewritten = state.with_firewall(|fw| rewrite_sse_for_dlp(&raw, fw, &policy));
+    let (rewritten, assembled, violation) = match rewritten {
+        Ok(value) => value,
+        Err(error) => {
+            warn!(request_id = %request_id, %error, "firewall: unscannable response stream");
+            state.metrics.inc_firewall_blocked();
+            return (
+                Body::from(sse_content_frames(
+                    "[Ryu firewall] Response blocked because the provider stream could not be scanned.",
+                )),
+                crate::concurrency::AdmissionPermit::none(),
+            );
         }
     };
 
-    let raw = String::from_utf8_lossy(&collected).into_owned();
-    let assembled = sse_extract_text(&raw);
-
-    // ── Node outbound firewall (existing behavior) ──
-    if node_needs_buffer {
-        let scan_result = state.with_firewall(|fw| {
-            fw.scan_outbound(&assembled)
-                .map(|v| (v, fw.sanitize(&assembled)))
-        });
-        if let Some((violation, sanitized)) = scan_result {
-            match policy {
-                FirewallPolicy::Block => {
-                    warn!(
-                        request_id = %request_id,
-                        pattern = %violation.pattern_name,
-                        "firewall: blocked outbound response (streaming)"
-                    );
-                    state.metrics.inc_firewall_blocked();
-                    return Body::from(sse_content_frames(&format!(
-                        "[Ryu firewall] Response blocked by policy: {} ({:?}).",
-                        violation.pattern_name, violation.kind
-                    )));
-                }
-                FirewallPolicy::Sanitize => {
-                    warn!(
-                        request_id = %request_id,
-                        pattern = %violation.pattern_name,
-                        "firewall: sanitized outbound response (streaming)"
-                    );
-                    return Body::from(sse_content_frames(&sanitized));
-                }
-                FirewallPolicy::WarnAndContinue => {}
+    if let Some((pattern, kind)) = violation {
+        match policy {
+            FirewallPolicy::Block if node_needs_buffer => {
+                warn!(
+                    request_id = %request_id,
+                    pattern = %pattern,
+                    "firewall: blocked outbound response (streaming)"
+                );
+                state.metrics.inc_firewall_blocked();
+                return (
+                    Body::from(sse_content_frames(&format!(
+                        "[Ryu firewall] Response blocked by policy: {pattern} ({kind})."
+                    ))),
+                    crate::concurrency::AdmissionPermit::none(),
+                );
             }
+            FirewallPolicy::Sanitize if node_needs_buffer => {
+                warn!(
+                    request_id = %request_id,
+                    pattern = %pattern,
+                    "firewall: sanitized outbound response (streaming)"
+                );
+            }
+            FirewallPolicy::WarnAndContinue if outbound_enabled => {
+                warn!(
+                    request_id = %request_id,
+                    pattern = %pattern,
+                    "firewall: outbound violation (warn-and-continue, streaming)"
+                );
+            }
+            _ => {}
         }
     }
 
@@ -5953,9 +6223,12 @@ async fn apply_outbound_firewall_stream(
                 state.metrics.inc_firewall_blocked();
                 let model = ctx.agent_id.as_deref().unwrap_or("unknown");
                 audit_inline_evaluator(&state, &ctx, model, "output", "blocked", &reason);
-                return Body::from(sse_content_frames(&format!(
-                    "[Ryu firewall] Response blocked by evaluator: {reason}."
-                )));
+                return (
+                    Body::from(sse_content_frames(&format!(
+                        "[Ryu firewall] Response blocked by evaluator: {reason}."
+                    ))),
+                    crate::concurrency::AdmissionPermit::none(),
+                );
             }
             InlineOutcome::Sanitize => {
                 warn!(
@@ -5963,95 +6236,20 @@ async fn apply_outbound_firewall_stream(
                     %reason,
                     "inline evaluator: sanitized outbound response (streaming)"
                 );
-                return Body::from(sse_content_frames(&resolved.sanitize(&assembled)));
+                return (
+                    Body::from(sse_content_frames(&resolved.sanitize(&assembled))),
+                    crate::concurrency::AdmissionPermit::none(),
+                );
             }
             InlineOutcome::Warn | InlineOutcome::Allow => {}
         }
     }
 
-    // Clean: replay the original buffered bytes untouched.
-    Body::from(collected)
-}
-
-/// Per-stream state threaded through the warn-and-continue passthrough so that
-/// outbound text can be reassembled across SSE chunks and scanned once.
-struct PassthroughScanState {
-    inner: axum::body::BodyDataStream,
-    state: Arc<AppState>,
-    request_id: String,
-    accumulated: String,
-    scanned: bool,
-}
-
-/// Pass the upstream stream straight through to the client while accumulating
-/// the response text, then scan it once when the stream ends and log any
-/// outbound violation. Used for the warn-and-continue policy, where bytes are
-/// never withheld, so there is no need to scan incrementally — a single
-/// end-of-stream scan keeps the default path O(n). Implemented with
-/// `stream::unfold` to avoid pulling in the `async-stream` macro crate.
-fn scan_and_log_passthrough(stream_body: Body, state: Arc<AppState>, request_id: String) -> Body {
-    use futures_util::StreamExt;
-
-    let init = PassthroughScanState {
-        inner: stream_body.into_data_stream(),
-        state,
-        request_id,
-        accumulated: String::new(),
-        scanned: false,
-    };
-
-    let transformed = futures_util::stream::unfold(init, |mut s| async move {
-        match s.inner.next().await {
-            Some(Ok(bytes)) => {
-                s.accumulated.push_str(&String::from_utf8_lossy(&bytes));
-                Some((Ok(bytes), s))
-            }
-            Some(Err(e)) => Some((Err(std::io::Error::other(e.to_string())), s)),
-            None => {
-                // Stream exhausted: scan the assembled response exactly once.
-                if !s.scanned {
-                    s.scanned = true;
-                    let text = sse_extract_text(&s.accumulated);
-                    if let Some(violation) = s.state.with_firewall(|fw| fw.scan_outbound(&text)) {
-                        warn!(
-                            request_id = %s.request_id,
-                            pattern = %violation.pattern_name,
-                            "firewall: outbound violation (warn-and-continue, streaming)"
-                        );
-                    }
-                }
-                None
-            }
-        }
-    });
-
-    Body::from_stream(transformed)
-}
-
-/// Extract the assembled assistant text from an OpenAI-style SSE transcript by
-/// concatenating every `choices[].delta.content` fragment.
-fn sse_extract_text(raw: &str) -> String {
-    let mut out = String::new();
-    for line in raw.lines() {
-        let Some(data) = line.strip_prefix("data:") else {
-            continue;
-        };
-        let data = data.trim();
-        if data.is_empty() || data == "[DONE]" {
-            continue;
-        }
-        let Ok(json) = serde_json::from_str::<Value>(data) else {
-            continue;
-        };
-        if let Some(delta) = json["choices"]
-            .as_array()
-            .and_then(|c| c.first())
-            .and_then(|c| c["delta"]["content"].as_str())
-        {
-            out.push_str(delta);
-        }
-    }
-    out
+    // Clean: replay the canonical, transformed frames rather than provider bytes.
+    (
+        Body::from(rewritten),
+        crate::concurrency::AdmissionPermit::none(),
+    )
 }
 
 /// Render `text` as a minimal OpenAI-compatible SSE transcript: a single
@@ -6074,6 +6272,7 @@ fn sse_content_frames(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::{routing::post, Router};
     use crate::config::FirewallConfig;
     use crate::firewall::FirewallScanner;
 
@@ -6086,6 +6285,7 @@ mod tests {
         RequestContext {
             request_id: "t".into(),
             api_key: "k".into(),
+            owner_binding: ryu_gw_credentials::fingerprint("k"),
             is_master_key: false,
             org_id: None,
             team_id: None,
@@ -6529,6 +6729,48 @@ mod tests {
             preflight_credit_gate(&ctx, None),
             Some(GatewayError::InsufficientCredits)
         ));
+    }
+
+    #[tokio::test]
+    async fn malformed_successful_debit_marks_managed_accounting_unavailable() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind debit fixture");
+        let address = listener.local_addr().expect("debit fixture address");
+        let server = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                Router::new().route(
+                    "/api/credits/debit",
+                    post(|| async { "this is not JSON" }),
+                ),
+            )
+            .await
+            .expect("serve debit fixture");
+        });
+
+        let mut state = reserve_state(10_000, 0);
+        state.config.credits.enabled = true;
+        state.config.credits.base_url = format!("http://{address}");
+        state.config.credits.internal_secret = Some("test-internal-secret".to_string());
+        state.config.credits.fail_closed = true;
+        let state = Arc::new(state);
+
+        debit_wallet_for_request(
+            Arc::clone(&state),
+            "o1".to_string(),
+            "req-malformed-debit".to_string(),
+            "gateway_usage",
+            1,
+            true,
+            None,
+            None,
+            DebitAttribution::default(),
+        )
+        .await;
+
+        assert!(state.wallet.is_org_accounting_unavailable("o1"));
+        server.abort();
     }
 
     #[test]
@@ -7652,6 +7894,7 @@ mod tests {
         let ctx = RequestContext {
             request_id: "acme-route-req".to_string(),
             api_key: "sk-test".to_string(),
+            owner_binding: ryu_gw_credentials::fingerprint("sk-test"),
             is_master_key: false,
             org_id: None,
             team_id: None,
@@ -7835,6 +8078,7 @@ mod tests {
         let ctx = RequestContext {
             request_id: "test-obs-req".to_string(),
             api_key: "sk-test".to_string(),
+            owner_binding: ryu_gw_credentials::fingerprint("sk-test"),
             is_master_key: false,
             org_id: None,
             team_id: None,
@@ -8219,6 +8463,90 @@ mod tests {
             text.contains("piece of shit"),
             "second choice must be extracted"
         );
+    }
+
+    #[test]
+    fn structured_tool_arguments_are_scanned_and_redacted() {
+        let secret = "gho_abcdefghijklmnopqrstuvwxyz0123456789";
+        let mut response = serde_json::json!({
+            "choices": [{
+                "message": {
+                    "content": "safe",
+                    "tool_calls": [{
+                        "function": { "name": "lookup", "arguments": secret }
+                    }]
+                }
+            }]
+        });
+        assert!(response_to_text(&response).contains(secret));
+
+        let scanner = FirewallScanner::new_scoped(FirewallConfig::default());
+        sanitize_response(&mut response, &scanner);
+        assert!(!response.to_string().contains(secret));
+        assert!(response.to_string().contains("[REDACTED:gh_pat]"));
+    }
+
+    #[test]
+    fn streaming_dlp_rebuilds_structured_frames_and_rejects_malformed_data() {
+        let secret = "gho_abcdefghijklmnopqrstuvwxyz0123456789";
+        let frame = serde_json::json!({
+            "choices": [{
+                "delta": {
+                    "tool_calls": [{ "function": { "arguments": secret } }]
+                }
+            }]
+        });
+        let raw = format!("data: {frame}\n\ndata: [DONE]\n\n");
+        let scanner = FirewallScanner::new_scoped(FirewallConfig::default());
+        let (rewritten, assembled, _) = rewrite_sse_for_dlp(
+            &raw,
+            &scanner,
+            &FirewallPolicy::WarnAndContinue,
+        )
+        .expect("valid SSE JSON should be rebuilt");
+        assert!(!rewritten.contains(secret));
+        assert!(!assembled.contains(secret));
+        assert!(rewritten.contains("[REDACTED:gh_pat]"));
+
+        assert!(rewrite_sse_for_dlp(
+            "data: {not-json}\n\n",
+            &scanner,
+            &FirewallPolicy::WarnAndContinue,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn modality_governance_uses_final_model_guardrails_and_regions() {
+        let state = AppState::new_for_test_default();
+        let mut ctx = test_support::plain_request_context();
+        ctx.resolved_policy = Some(crate::policy::EffectivePolicy {
+            approved_models: vec!["allowed-model".into()],
+            locked_guardrails: vec!["secrets".into()],
+            allowed_regions: vec!["global".into()],
+            ..Default::default()
+        });
+
+        assert!(inference_governance::authorize_model(&state, &ctx, "allowed-model").is_ok());
+        assert!(inference_governance::authorize_model(&state, &ctx, "blocked-model").is_err());
+        assert!(inference_governance::enforce_locked_guardrails(
+            &state,
+            &ctx,
+            "send sk-abcdefghijklmnopqrstuvwx"
+        )
+        .is_err());
+        assert!(inference_governance::authorize_provider_region(
+            &state,
+            &ctx,
+            &ProviderId::from("openai")
+        )
+        .is_ok());
+        assert!(inference_governance::authorize_provider_region(
+            &state,
+            &ctx,
+            &ProviderId::from("unregistered-plugin")
+        )
+        .is_err());
     }
 
     // ── WASM policy tier: end-to-end pipeline enforcement (gateway plugin plane) ──
@@ -8813,6 +9141,7 @@ mod fallback_tests {
         RequestContext {
             request_id: "fallback-req".to_string(),
             api_key: "sk-test".to_string(),
+            owner_binding: ryu_gw_credentials::fingerprint("sk-test"),
             is_master_key: false,
             org_id: None,
             team_id: None,
@@ -9804,6 +10133,7 @@ mod fallback_tests {
         })).unwrap()]);
         let token = ryu_gw_credentials::InferenceScope {
             agent_id:"agent-a".into(), user_id:Some("user-a".into()), session_id:Some("session-a".into()),
+            expires_at: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() + 3600,
         }.sign(signer).unwrap();
         let bearer = format!("Bearer {token}");
         let context = super::authenticate(&state, super::AuthInputs::with_key(Some(&bearer))).await.unwrap();

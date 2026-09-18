@@ -34,6 +34,7 @@ import {
 	getReleaseChannel,
 	type ReleaseChannel,
 } from "@/src/lib/release-channel.ts";
+import { formatDateTime } from "@/src/lib/timezone.ts";
 import {
 	formatUpdatesCutoff,
 	getUpdatesCutoffMs,
@@ -579,7 +580,7 @@ export async function scheduleReleaseUpdate(
 		verdict.asset,
 		verdict.latest
 	);
-	const when = new Date(pending.scheduled_for).toLocaleString();
+	const when = formatDateTime(pending.scheduled_for);
 	return `v${pending.version} will install at ${when} (${pending.time_zone}).`;
 }
 

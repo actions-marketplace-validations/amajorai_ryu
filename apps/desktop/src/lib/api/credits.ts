@@ -66,7 +66,11 @@ export type LedgerReason =
 	| "subscription_offset"
 	| "adjustment"
 	| "campaign_grant"
-	| "referral_grant";
+	| "referral_grant"
+	| "gift_credit"
+	| "gift_card"
+	| "gift_expired"
+	| "gift_reversal";
 
 /** Reasons that CREDIT the wallet (positive delta). Mirrors the server's
  * `CREDIT_REASONS`; used so the ledger badges a credit consistently. */
@@ -75,6 +79,8 @@ export const CREDIT_LEDGER_REASONS: readonly LedgerReason[] = [
 	"plan_grant",
 	"campaign_grant",
 	"referral_grant",
+	"gift_credit",
+	"gift_card",
 ];
 
 /** Human label for each ledger reason, for the ledger list. */
@@ -93,6 +99,10 @@ export const LEDGER_REASON_LABELS: Record<LedgerReason, string> = {
 	// card, not on every ledger row.
 	campaign_grant: "Campaign credit",
 	referral_grant: "Referral credit",
+	gift_credit: "Gift credits",
+	gift_card: "Gift card",
+	gift_expired: "Gift credits expired",
+	gift_reversal: "Gift credit reversal",
 };
 
 /** The materialized prepaid balance for the caller's active org. */
@@ -101,6 +111,8 @@ export interface CreditWallet {
 	balanceBreakdownAvailable?: boolean;
 	balanceMicroUsd: number;
 	currency: string;
+	/** Remaining redeemed gift credit; each gift has its own expiry. */
+	giftBalanceMicroUsd?: number | null;
 	id: string;
 	ownerId: string;
 	ownerType: string;
@@ -309,7 +321,8 @@ export async function fetchWallet(): Promise<WalletResponse> {
  * would repeat a row at every boundary as new spend lands mid-read.
  */
 export async function fetchUsage(
-	filters: UsageFilters = {}
+	filters: UsageFilters = {},
+	signal?: AbortSignal
 ): Promise<UsageResponse> {
 	const params = new URLSearchParams();
 	for (const [key, value] of Object.entries(filters)) {
@@ -320,6 +333,7 @@ export async function fetchUsage(
 	const query = params.toString();
 	const resp = await fetch(`${BASE}/usage${query ? `?${query}` : ""}`, {
 		headers: authHeaders(),
+		signal,
 	});
 	if (!resp.ok) {
 		throw await toError(resp);

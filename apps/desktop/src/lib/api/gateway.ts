@@ -2341,36 +2341,40 @@ export function subscribeGatewayTraffic(
 			}
 			const decoder = new TextDecoder();
 			let buffer = "";
-			// eslint-disable-next-line no-constant-condition
-			while (true) {
-				const { done, value } = await reader.read();
-				if (done) {
-					break;
-				}
-				buffer += decoder.decode(value, { stream: true });
-				// Split on event boundaries: `event: traffic\ndata: {…}\n\n`.
-				while (true) {
-					const idx = buffer.indexOf("\n\n");
-					if (idx === -1) {
+			try {
+				while (!controller.signal.aborted) {
+					const { done, value } = await reader.read();
+					if (done) {
 						break;
 					}
-					const frame = buffer.slice(0, idx);
-					buffer = buffer.slice(idx + 2);
-					const dataLine = frame
-						.split("\n")
-						.find((l) => l.startsWith("data:"))
-						?.slice(5)
-						.trim();
-					if (!dataLine || dataLine === "[DONE]") {
-						continue;
-					}
-					try {
-						const parsed = JSON.parse(dataLine) as TrafficEvent;
-						onEvent(parsed);
-					} catch {
-						// Malformed frame — skip; the stream continues.
+					buffer += decoder.decode(value, { stream: true });
+					// Split on event boundaries: `event: traffic\ndata: {…}\n\n`.
+					while (!controller.signal.aborted) {
+						const idx = buffer.indexOf("\n\n");
+						if (idx === -1) {
+							break;
+						}
+						const frame = buffer.slice(0, idx);
+						buffer = buffer.slice(idx + 2);
+						const dataLine = frame
+							.split("\n")
+							.find((l) => l.startsWith("data:"))
+							?.slice(5)
+							.trim();
+						if (!dataLine || dataLine === "[DONE]") {
+							continue;
+						}
+						try {
+							const parsed = JSON.parse(dataLine) as TrafficEvent;
+							onEvent(parsed);
+						} catch {
+							// Malformed frame — skip; the stream continues.
+						}
 					}
 				}
+			} finally {
+				await reader.cancel().catch(() => undefined);
+				reader.releaseLock();
 			}
 		} catch (error) {
 			if (controller.signal.aborted) {
@@ -2464,6 +2468,8 @@ export interface GatewayAuditFilters {
 	agentId?: string;
 	/** Return only entries that have an error. */
 	errorsOnly?: boolean;
+	/** Filter by event discriminator (model_call, exec_call, and so on). */
+	eventType?: string;
 	/** Inclusive ISO timestamp lower bound. */
 	from?: string;
 	/** Maximum number of entries to return (gateway default: 100). */
@@ -2476,6 +2482,8 @@ export interface GatewayAuditFilters {
 	sessionId?: string;
 	/** Exclusive ISO timestamp upper bound. */
 	until?: string;
+	/** Filter by rendered widget instance correlation. */
+	widgetInstanceId?: string;
 }
 
 /** One server-owned 15-minute usage aggregate. */
@@ -2626,6 +2634,9 @@ export async function fetchGatewayAudit(
 	if (filters.provider) {
 		qs.set("provider", filters.provider);
 	}
+	if (filters.eventType) {
+		qs.set("event_type", filters.eventType);
+	}
 	if (filters.model) {
 		qs.set("model", filters.model);
 	}
@@ -2643,6 +2654,9 @@ export async function fetchGatewayAudit(
 	}
 	if (filters.until) {
 		qs.set("until", filters.until);
+	}
+	if (filters.widgetInstanceId) {
+		qs.set("widget_instance_id", filters.widgetInstanceId);
 	}
 	const path = qs.size > 0 ? `/api/gateway/audit?${qs}` : "/api/gateway/audit";
 	const raw = await request<GatewayAuditResponse>(target, path, { signal });
@@ -2762,6 +2776,16 @@ export async function fetchBudgetSpend(
 	};
 }
 
+/** Apply the Gateway's configured local audit retention policy. */
+export async function pruneGatewayAudit(target: ApiTarget): Promise<{
+	deleted_rows?: number;
+	kind?: string;
+	max_rows?: number | null;
+	retention_days?: number | null;
+}> {
+	return await request(target, "/api/gateway/audit/prune", { method: "POST" });
+}
+
 // ── Eval dataset runner (M4 / #180) ──────────────────────────────────────────
 //
 // Scorers: latency / token_efficiency / policy_pass / optional substring_match,
@@ -2772,6 +2796,7 @@ export async function fetchBudgetSpend(
 export interface AssertionOptions {
 	config?: Record<string, unknown>;
 	metric?: string;
+	not?: boolean;
 	provider?: string;
 	rubric_prompt?: string;
 	threshold?: number;
@@ -2792,6 +2817,17 @@ export type Assertion =
 	| { kind: "icontains_any"; options?: AssertionOptions; value: string }
 	| { kind: "icontains_all"; options?: AssertionOptions; value: string }
 	| { kind: "contains_json"; options?: AssertionOptions; value: string }
+	| { kind: "contains_html"; options?: AssertionOptions; value: string }
+	| { kind: "contains_xml"; options?: AssertionOptions; value: string }
+	| { kind: "contains_sql"; options?: AssertionOptions; value: string }
+	| { kind: "levenshtein"; options?: AssertionOptions; value: string }
+	| { kind: "latency"; options?: AssertionOptions; value: string }
+	| { kind: "cost"; options?: AssertionOptions; value: string }
+	| {
+			assertions: Assertion[];
+			kind: "assert_set";
+			options?: AssertionOptions;
+	  }
 	| { kind: "is_html"; options?: AssertionOptions }
 	| { kind: "is_xml"; options?: AssertionOptions }
 	| { kind: "is_sql"; options?: AssertionOptions }
@@ -2805,6 +2841,7 @@ export type Assertion =
 	| { kind: "json_valid"; options?: AssertionOptions }
 	| { kind: "llm_judge"; options?: AssertionOptions; rubric: string }
 	| { kind: "llm_rubric"; options?: AssertionOptions; rubric: string }
+	| { kind: "similar"; options?: AssertionOptions; value: string }
 	| { kind: "factuality"; options?: AssertionOptions; rubric: string }
 	| { kind: "context_faithfulness"; options?: AssertionOptions; rubric: string }
 	| { kind: "answer_relevance"; options?: AssertionOptions; rubric: string };
@@ -2813,6 +2850,8 @@ export type Assertion =
 export interface AssertionResult {
 	/** Human-readable explanation (matched text, regex error, judge verdict, …). */
 	detail: string;
+	/** False when a runtime/judge prerequisite was unavailable. */
+	executed?: boolean;
 	/** The assertion kind as the snake_case wire tag ("contains", "llm_judge", …). */
 	kind: string;
 	/** Whether this assertion passed. */
@@ -2825,6 +2864,10 @@ export interface AssertionResult {
 export interface EvalDatasetCase {
 	/** Assertions to evaluate against this case's response. */
 	assertions?: Assertion[];
+	/** Optional reference/context payload for factuality and faithfulness checks. */
+	context?: unknown;
+	/** Human-readable case description. */
+	description?: string;
 	/**
 	 * Registry evaluator ids to score this case against, in addition to any
 	 * run-level ids. Empty by default => assertion-only behavior.
@@ -2836,10 +2879,29 @@ export interface EvalDatasetCase {
 	 * When absent the scorer is omitted — no penalty for a missing expected.
 	 */
 	expected?: string | null;
+	/** Stable case id used in persisted result matrices. */
+	id?: string;
 	/** Optional ordered chat turns; when present the gateway replays these. */
 	messages?: EvalMessage[];
+	/** Case metadata preserved in results and exports. */
+	metadata?: Record<string, unknown>;
+	/** Promptfoo-compatible per-case prompt/output options. */
+	options?: {
+		cache?: boolean;
+		prefix?: string;
+		suffix?: string;
+		timeout_ms?: number;
+		transform?: string;
+		transform_vars?: string;
+	};
 	/** The single-turn prompt fallback. May contain {{vars}}. */
 	prompt: string;
+	/** Optional per-case provider/model target. */
+	provider?: string;
+	/** Precomputed provider output; skips a live provider call. */
+	provider_output?: unknown;
+	/** Optional per-case provider/model alternatives. */
+	providers?: string[];
 	/** Promptfoo-style threshold for the mean assertion score (0..1). */
 	threshold?: number;
 	/** Per-case {{var}} substitutions (prompt, system prompt, assertions). */
@@ -2860,28 +2922,46 @@ export interface EvalCaseScore {
 	assertions: AssertionResult[];
 	/** NEW: true iff every assertion passed (vacuously true for []). */
 	assertions_pass: boolean;
+	cache_hit?: boolean;
+	/** Optional reference/context payload preserved for result inspection. */
+	context?: unknown;
+	cost_micro_usd?: number | null;
+	description?: string;
+	error?: string | null;
 	/**
 	 * Per-evaluator scores for the registry evaluators requested for this case.
 	 * Present ([] when none requested). Additive to `overall`; never folded in.
 	 */
 	evaluators?: EvaluatorScore[];
+	id?: string;
+	input_tokens?: number;
+	latency_ms?: number;
 	/** 1.0 = instant, 0.0 = at/beyond max_latency_ms. */
 	latency_score: number;
+	metadata?: Record<string, unknown>;
+	model?: string;
+	output_tokens?: number;
 	/** Weighted aggregate for this case. Range [0, 1]. */
 	overall: number;
 	/** Whether the request passed all firewall/policy checks. */
 	policy_pass: boolean;
 	prompt: string;
+	prompt_id?: string;
+	provider?: string;
+	rendered_prompt?: string;
 	/** The response text the provider returned (or an error message). */
 	response_text: string;
 	/** Present only when the case had an expected value. */
 	substring_match: number | null;
 	/** Ratio output/input tokens clamped to [0,1]. */
 	token_efficiency: number;
+	total_tokens?: number;
+	vars?: Record<string, unknown>;
 }
 
 /** Aggregate summary across all eval cases. */
 export interface EvalRunAggregate {
+	assertion_pass_rate?: number;
 	/**
 	 * Per-evaluator aggregate keyed by evaluator id. Empty when no registry
 	 * evaluators were requested. Values are camelCase (`meanScore`/`passRate`/
@@ -2897,6 +2977,9 @@ export interface EvalRunAggregate {
 	/** Fraction of cases where policy_pass was true. Range [0, 1]. */
 	policy_pass_rate: number;
 	total_cases: number;
+	total_cost_micro_usd?: number | null;
+	total_input_tokens?: number;
+	total_output_tokens?: number;
 }
 
 /** One model's full result block in a multi-model run. */
@@ -2912,8 +2995,34 @@ export interface EvalRunResult {
 	aggregate: EvalRunAggregate;
 	/** Always the FIRST evaluated model's cases (back-compat). */
 	cases: EvalCaseScore[];
+	finished_at?: string;
 	/** Present ONLY on the multi-model path; absent on single-model. */
 	models?: ModelEvalResult[];
+	run_id?: string;
+	started_at?: string;
+	tags?: Record<string, string>;
+}
+
+/** One bounded local security probe in a red-team campaign. */
+export interface RedTeamStrategyResult {
+	detail: string;
+	evaluator: string;
+	id: string;
+	name: string;
+	protected: boolean;
+}
+
+/** Response from POST /api/gateway/redteam/run (via Core's proxy). */
+export interface RedTeamRunResult {
+	campaign_id: string;
+	model: string;
+	result?: EvalRunResult;
+	strategies: RedTeamStrategyResult[];
+	summary: {
+		needs_attention: number;
+		protected: number;
+		total: number;
+	};
 }
 
 /** One custom Code evaluator's source, run by Core (not forwarded to the gateway). */
@@ -2930,6 +3039,8 @@ export interface CodeEvaluatorSpec {
 export interface RunEvalsRequest {
 	/** Optional agent id for per-agent budget tracking. */
 	agent_id?: string | null;
+	/** Reuse identical provider inputs within this run. */
+	cache?: boolean;
 	/**
 	 * Custom Code evaluators. Pulled out by the Core proxy and run locally
 	 * (Deno for JS, sandbox for Python); their scores are merged into each
@@ -2952,6 +3063,8 @@ export interface RunEvalsRequest {
 	 * When unset, the server defaults to the first model in `models`.
 	 */
 	judge_model?: string;
+	/** Maximum provider calls in flight. */
+	max_concurrency?: number;
 	/**
 	 * Model to evaluate. Flows through the gateway router — no provider is
 	 * hardcoded; the gateway config determines which provider is used.
@@ -2962,6 +3075,13 @@ export interface RunEvalsRequest {
 	 * and the response gains a per-model `models` breakdown.
 	 */
 	models?: string[];
+	/** Run-level prompt prefix/suffix. */
+	prefix?: string;
+	/** Stable prompt variant id for result matrices. */
+	prompt_id?: string;
+	/** Repeat each dataset case this many times. */
+	repeat?: number;
+	suffix?: string;
 	/** Run-level multi-turn prompt variant; rendered before each test case. */
 	system_messages?: EvalMessage[];
 	/**
@@ -2969,6 +3089,10 @@ export interface RunEvalsRequest {
 	 * case and substitutes any {{vars}} using that case's `vars`.
 	 */
 	system_prompt?: string;
+	/** Run tags preserved in the result envelope. */
+	tags?: Record<string, string>;
+	/** Per-provider call deadline in milliseconds. */
+	timeout_ms?: number;
 }
 
 /**
@@ -2989,6 +3113,55 @@ export async function runGatewayEvals(
 	return await request<EvalRunResult>(target, "/api/gateway/evals/run", {
 		method: "POST",
 		body: req,
+		signal,
+	});
+}
+
+/** Score a completed production output without replaying its provider call. */
+export async function scoreGatewayOutput(
+	target: ApiTarget,
+	input: {
+		agent_id?: string;
+		assertions?: Assertion[];
+		cost_micro_usd?: number;
+		description?: string;
+		evaluators?: string[];
+		expected?: string;
+		id?: string;
+		latency_ms?: number;
+		metadata?: Record<string, unknown>;
+		model?: string;
+		prompt?: string;
+		response: unknown;
+		threshold?: number;
+		vars?: Record<string, unknown>;
+	},
+	signal?: AbortSignal
+): Promise<{ kind: "online_score"; score: EvalCaseScore; scored_at: string }> {
+	return await request(target, "/api/gateway/evals/score", {
+		method: "POST",
+		body: input,
+		signal,
+	});
+}
+
+/**
+ * Run the closed, safe local red-team probe set through the same Gateway path
+ * as production traffic. The server owns the probe prompts and evaluator
+ * mapping so callers cannot silently widen the campaign's security scope.
+ */
+export async function runGatewayRedTeam(
+	target: ApiTarget,
+	input: {
+		agent_id: string;
+		model?: string;
+		strategies?: string[];
+	},
+	signal?: AbortSignal
+): Promise<RedTeamRunResult> {
+	return await request<RedTeamRunResult>(target, "/api/gateway/redteam/run", {
+		method: "POST",
+		body: input,
 		signal,
 	});
 }

@@ -54,21 +54,62 @@ async fn js_evaluator_that_throws_is_not_executed() {
 }
 
 #[tokio::test]
-async fn js_evaluator_returning_non_object_is_malformed() {
+async fn js_evaluator_returning_non_result_is_malformed() {
     if !deno_available() {
-        eprintln!("skipping js_evaluator_returning_non_object: no deno backend available");
+        eprintln!("skipping js_evaluator_returning_non_result: no deno backend available");
         return;
     }
-    // Returns a bare number, not a {score,...} object → unparseable as a score.
+    // Strings are not one of Promptfoo's supported assertion return shapes.
     let out = run_code_evaluator(
         CodeEvalLang::Js,
-        "return 42;",
+        "return 'not a score';",
         &sample_payload(),
         Duration::from_secs(5),
     )
     .await;
     assert!(!out.executed);
     assert!(out.error.is_some());
+}
+
+#[tokio::test]
+async fn js_evaluator_accepts_promptfoo_output_alias_and_boolean_result() {
+    if !deno_available() {
+        eprintln!(
+            "skipping js_evaluator_accepts_promptfoo_output_alias: no deno backend available"
+        );
+        return;
+    }
+    let payload =
+        json!({ "input": "q", "output": "the answer is 4", "expected": "4", "vars": {} });
+    let out = run_code_evaluator(
+        CodeEvalLang::Js,
+        "output.includes(context.expected)",
+        &payload,
+        Duration::from_secs(5),
+    )
+    .await;
+    assert!(out.executed, "should have executed: {:?}", out.error);
+    assert_eq!(out.score, Some(1.0));
+    assert_eq!(out.pass, Some(true));
+}
+
+#[test]
+fn promptfoo_scalar_results_are_normalized() {
+    let boolean = CodeEvalOutcome::from_return(&json!(true));
+    assert_eq!(boolean.score, Some(1.0));
+    assert_eq!(boolean.pass, Some(true));
+
+    let number = CodeEvalOutcome::from_return(&json!(0.25));
+    assert_eq!(number.score, Some(0.25));
+    assert_eq!(number.pass, Some(false));
+
+    let object = CodeEvalOutcome::from_return(&json!({
+        "score": 0.75,
+        "reason": "good enough"
+    }));
+    assert_eq!(object.score, Some(0.75));
+    assert_eq!(object.pass, Some(true));
+    assert_eq!(object.detail, "good enough");
 }
 
 #[tokio::test]
@@ -108,6 +149,32 @@ async fn python_evaluator_printing_score_scores_the_case() {
     assert_eq!(out.score, Some(0.0));
     assert_eq!(out.pass, Some(false));
     assert_eq!(out.detail, "nope");
+}
+
+#[tokio::test]
+async fn python_evaluator_accepts_promptfoo_boolean_and_context() {
+    if !python_on_path() {
+        eprintln!(
+            "skipping python_evaluator_accepts_promptfoo_boolean: python not on PATH"
+        );
+        return;
+    }
+    let payload = json!({
+        "input": "q",
+        "output": "the answer is 4",
+        "expected": "the answer is 4",
+        "vars": {}
+    });
+    let out = run_code_evaluator(
+        CodeEvalLang::Python,
+        "print(json.dumps(output == context['expected']))",
+        &payload,
+        Duration::from_secs(5),
+    )
+    .await;
+    assert!(out.executed, "should have executed: {:?}", out.error);
+    assert_eq!(out.score, Some(1.0));
+    assert_eq!(out.pass, Some(true));
 }
 
 #[tokio::test]
@@ -195,6 +262,8 @@ fn reaggregate_uses_camelcase_keys_and_executed_only() {
     });
     let mut block = json!({ "cases": [case0, case1, case2], "aggregate": {} });
     let specs = vec![CodeEvaluatorSpec {
+        assertion_index: None,
+        case_index: None,
         id: "e".to_owned(),
         lang: "js".to_owned(),
         source: String::new(),
@@ -233,6 +302,8 @@ async fn merge_two_case_dataset_with_js_evaluator() {
         "aggregate": { "evaluators": {} }
     });
     let specs = vec![CodeEvaluatorSpec {
+        assertion_index: None,
+        case_index: None,
         id: "myeval".to_owned(),
         lang: "js".to_owned(),
         source: "return { score: ctx.output === 'good' ? 1.0 : 0.0, pass: ctx.output === 'good' };"
@@ -256,6 +327,51 @@ async fn merge_two_case_dataset_with_js_evaluator() {
     assert_eq!(agg["executedCount"], 2);
     assert_eq!(agg["meanScore"], 0.5);
     assert_eq!(agg["passRate"], 0.5);
+}
+
+#[tokio::test]
+async fn inline_code_assertion_targets_only_its_case_and_assertion_slot() {
+	let mut response = json!({
+		"cases": [
+			{
+				"prompt": "p1",
+				"response_text": "good",
+				"assertions": [{
+					"kind": "javascript",
+					"value": "return { score: ctx.output === 'good' ? 1 : 0 };",
+					"pass": false,
+					"score": 0.0,
+					"executed": false
+				}],
+				"evaluators": []
+			},
+			{
+				"prompt": "p2",
+				"response_text": "other",
+				"assertions": [{
+					"kind": "javascript",
+					"value": "return { score: 1 };",
+					"pass": false,
+					"score": 0.0,
+					"executed": false
+				}],
+				"evaluators": []
+			}
+		],
+		"aggregate": { "evaluators": {} }
+	});
+	let specs = vec![CodeEvaluatorSpec {
+		assertion_index: Some(0),
+		case_index: Some(0),
+		id: "__inline_code_0_0".to_owned(),
+		lang: "js".to_owned(),
+		source: "return { score: ctx.output === 'good' ? 1 : 0 };".to_owned(),
+	}];
+	merge_inline_code_assertions(&mut response, &[], &specs).await;
+	let cases = response["cases"].as_array().expect("cases");
+	assert!(cases[0]["evaluators"].as_array().is_some_and(|items| !items.is_empty()));
+	assert!(cases[1]["evaluators"].as_array().map_or(true, Vec::is_empty));
+	assert_eq!(cases[0]["assertions"][0]["kind"], "javascript");
 }
 
 #[test]

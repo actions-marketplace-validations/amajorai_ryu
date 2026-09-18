@@ -47,9 +47,8 @@
 //!   The firewall's stable-marker `redact_outbound` secret scrubber (GitHub PATs,
 //!   `sk-` keys, AWS AKIAs, `Bearer`/`token=`/`password=` params) also runs per
 //!   text-delta and over any non-streaming (JSON) response body at stream end.
-//!   **Known limitation:** redaction is per-delta, so a secret split across two
-//!   separate text-delta events (`sk-` in one, the rest in the next) is not
-//!   caught — a cross-delta hold-back buffer is a deliberate follow-on.
+//!   Response redaction uses a bounded contiguous pass so a secret split across
+//!   adjacent text-delta events is handled before any bytes are returned.
 
 use std::net::SocketAddr;
 
@@ -78,8 +77,8 @@ use crate::{audit::AuditRecord, firewall::FirewallBackend, state::SharedState};
 // re-exported so `crate::passthrough::WireFormat` paths resolve unchanged.
 pub(crate) use ryu_gw_passthrough::WireFormat;
 use ryu_gw_passthrough::{
-    build_upstream_url, drain_complete_events, is_messages_path, is_responses_path,
-    is_safe_upstream_path, redact_request_body, redact_sse_event, PassthroughFirewall,
+    build_upstream_url, is_messages_path, is_responses_path, is_safe_upstream_path,
+    redact_request_body, redact_sse_stream, PassthroughFirewall,
 };
 
 impl PassthroughFirewall for dyn FirewallBackend + '_ {
@@ -252,8 +251,8 @@ async fn forward(
     let feature = header_string(&headers, "x-ryu-feature");
 
     // ── Request-side DLP: redact the outbound body when the firewall is on ─────
-    // Only the prompt-carrying endpoint is scanned; other sub-paths (token
-    // counting, etc.) are proxied untouched.
+    // Prompt-bearing messages and count_tokens endpoints are scanned; unrelated
+    // provider sub-paths are proxied untouched.
     let scan_inbound = state.with_firewall(|fw| fw.config().enabled && fw.config().scan_inbound);
     if redact_body
         && scan_inbound
@@ -461,20 +460,19 @@ fn emit_audit(
 
 // ── Response-side redaction + audit (#455) ────────────────────────────────────
 
-/// Tee state for the streaming response redaction. Buffers raw bytes until a
-/// complete SSE event (`\n\n`-terminated) is available, redacts the assistant
-/// text in each complete event, and emits the rewritten framing. Accumulates the
-/// (already-redacted) assistant text for a single end-of-stream audit scan.
+const MAX_REDACT_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
+
+/// Tee state for the response redaction. The whole response is held to give the
+/// DLP pass one contiguous assistant-text stream; a bounded cap prevents this
+/// security fix from becoming an unbounded buffering DoS.
 struct ResponseRedactState {
     inner: axum::body::BodyDataStream,
     state: SharedState,
     format: WireFormat,
-    /// Raw bytes not yet split into a complete `\n\n`-terminated event. Kept as
-    /// bytes (not a `String`) so a multibyte UTF-8 char split across a network
-    /// chunk is never corrupted — events split on the ASCII `\n\n` boundary.
-    pending: Vec<u8>,
-    /// Concatenated, already-redacted assistant text, scanned once at stream end.
-    accumulated: String,
+    /// Raw response bytes held until the single contiguous DLP pass. Holding a
+    /// bounded response is deliberate: per-delta redaction can miss a secret
+    /// split across two SSE events, while an unbounded hold would be a DoS.
+    raw: Vec<u8>,
     /// Set once the trailing remainder + audit have been flushed at stream end.
     flushed: bool,
     /// Forwarded end-user id (`x-ryu-user-id`) for the end-of-stream audit row.
@@ -485,12 +483,9 @@ struct ResponseRedactState {
     feature: Option<String>,
 }
 
-/// Stream the upstream SSE response to the client, redacting matched PII/secrets
-/// in each assistant-text delta *before* the bytes leave the gateway. Complete
-/// events are reassembled across network-chunk boundaries; non-text events pass
-/// verbatim; unparseable events fail open (pass verbatim). The accumulated
-/// redacted text is scanned once at stream end to audit any residual outbound
-/// violation. Mirrors the request-side `redact_content` per-text-node `sanitize`.
+/// Stream the upstream response to the client after one contiguous, bounded DLP
+/// pass. This catches credentials split across SSE text-delta events before any
+/// response bytes leave the Gateway.
 fn redact_response_passthrough(
     body: Body,
     format: WireFormat,
@@ -505,8 +500,7 @@ fn redact_response_passthrough(
         inner: body.into_data_stream(),
         state,
         format,
-        pending: Vec::new(),
-        accumulated: String::new(),
+        raw: Vec::new(),
         flushed: false,
         user_id,
         agent_id,
@@ -515,19 +509,22 @@ fn redact_response_passthrough(
 
     let transformed = futures_util::stream::unfold(init, |mut s| async move {
         loop {
+            if s.flushed {
+                return None;
+            }
             match s.inner.next().await {
                 Some(Ok(bytes)) => {
-                    s.pending.extend_from_slice(&bytes);
-                    let (out, text) = s
-                        .state
-                        .with_firewall(|fw| drain_complete_events(s.format, fw, &mut s.pending));
-                    s.accumulated.push_str(&text);
-                    if out.is_empty() {
-                        // No complete event yet — keep reading without emitting an
-                        // empty chunk (which would just churn the stream).
-                        continue;
+                    if s.raw.len().saturating_add(bytes.len()) > MAX_REDACT_RESPONSE_BYTES {
+                        s.flushed = true;
+                        return Some((
+                            Err(std::io::Error::other(
+                                "passthrough response exceeded the DLP buffer cap",
+                            )),
+                            s,
+                        ));
                     }
-                    return Some((Ok(Bytes::from(out)), s));
+                    s.raw.extend_from_slice(&bytes);
+                    continue;
                 }
                 Some(Err(e)) => {
                     return Some((Err(std::io::Error::other(e.to_string())), s));
@@ -537,44 +534,28 @@ fn redact_response_passthrough(
                         return None;
                     }
                     s.flushed = true;
-                    // Flush any trailing partial event (no final `\n\n`) — redact it
-                    // best-effort, then run the single end-of-stream audit scan.
-                    let tail = std::mem::take(&mut s.pending);
-                    let tail_out = if tail.is_empty() {
-                        Vec::new()
+                    let raw = String::from_utf8_lossy(&s.raw).to_string();
+                    let (redacted, audit_text) = if raw.contains("data:") {
+                        s.state
+                            .with_firewall(|fw| redact_sse_stream(s.format, fw, &raw))
                     } else {
-                        let raw = String::from_utf8_lossy(&tail).to_string();
-                        // SSE events are processed incrementally above; a non-empty
-                        // tail with no `data:` line is a non-streaming (JSON) body —
-                        // redact the FULL body once (OUTBOUND-DLP contract). Heuristic
-                        // note: a JSON body that itself contains the literal `data:`
-                        // (e.g. a data: URI in output) routes to the SSE path and is
-                        // passed through un-redacted — acceptable best-effort.
-                        if raw.contains("data:") {
-                            let (redacted, text) = s
-                                .state
-                                .with_firewall(|fw| redact_sse_event(s.format, fw, &raw));
-                            s.accumulated.push_str(&text);
-                            redacted.into_bytes()
-                        } else {
-                            let (redacted, _hits) =
-                                s.state.with_firewall(|fw| fw.redact_outbound(&raw));
-                            s.accumulated.push_str(&redacted);
-                            redacted.into_bytes()
-                        }
+                        s.state.with_firewall(|fw| {
+                            let (redacted, _) = fw.redact_outbound(&raw);
+                            (redacted.clone(), redacted)
+                        })
                     };
                     audit_outbound(
                         &s.state,
                         s.format,
-                        &s.accumulated,
+                        &audit_text,
                         s.user_id.clone(),
                         s.agent_id.clone(),
                         s.feature.clone(),
                     );
-                    if tail_out.is_empty() {
+                    if redacted.is_empty() {
                         return None;
                     }
-                    return Some((Ok(Bytes::from(tail_out)), s));
+                    return Some((Ok(Bytes::from(redacted.into_bytes())), s));
                 }
             }
         }
@@ -624,6 +605,7 @@ mod tests {
     use super::*;
     use crate::config::{FirewallConfig, FirewallPolicy};
     use crate::firewall::FirewallScanner;
+    use ryu_gw_passthrough::{drain_complete_events, redact_sse_event};
     // Request-body redactors are consumed only by these tests (the non-test path
     // calls `redact_request_body`); import them test-locally to avoid an unused
     // import in the non-test build.

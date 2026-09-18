@@ -35,7 +35,7 @@
  *                     per five billed seats.
  *  - Business         $300/month for five seats, then $50 per seat; pooled
  *                     credits grow by $100 per completed five-seat bundle.
- *  - Credits top-up   deposit fee 17% base (16.5% Plus/Pro, 16% Max/org) + $2.75
+ *  - Credits top-up   deposit fee 27% base (26.5% Plus/Pro, 26% Max/org) + $5
  *                     floor; usage debits AT COST (markup 0).
  *
  * The credit pool / markup is captured at DEPOSIT, not per-usage. The wallet is
@@ -222,61 +222,86 @@ export interface Plan {
  * (no per-token markup) and tool calls use the configured provider rate; the
  * platform's inference margin is captured once here, at deposit. Lives ONLY here.
  *
- * The fee is `max(plan % of the top-up, $2.75 floor)` — a MINIMUM, not an
- * add-on. The safe schedule is 17% for the unqualified/base rate, 16.5% for
- * Pro, and 16% for Max and organization plans. It covers the current
- * OpenRouter funding fee and the highest listed Polar card-processing path,
- * including the international-card surcharge, without adding a usage markup.
+ * The fee is `max(plan % of the top-up, $5 floor)` — a MINIMUM, not an
+ * add-on. The safe schedule is 27% for the unqualified/base rate, 26.5% for
+ * Pro, and 26% for Max and organization plans. It covers the current
+ * OpenRouter funding fee, the Singapore GST reserve that starts 2026-09-18,
+ * and the highest listed Polar card-processing path, including the
+ * international-card surcharge, without adding a usage markup.
  *
  * The floor is NOT a free parameter — see {@link DEPOSIT_FEE_FIXED_MICRO_USD} for
- * why $2.75 specifically, and why lowering a managed-plan rate below 16% reopens
+ * why $5 specifically, and why lowering a managed-plan rate below 26% reopens
  * a band of deposits that lose money.
  */
-export const DEPOSIT_FEE_BPS = 1700; // 17.00% base rate in basis points
+export const DEPOSIT_FEE_BPS = 2700; // 27.00% base rate in basis points
 
 /**
- * The minimum fee on any top-up. **$2.75, and the number is load-bearing.**
+ * The minimum fee on any top-up. **$5, and the number is load-bearing.**
  *
  * The floor and percentage have to overlap under the current conservative
- * processor case: OpenRouter 5.5% with a $0.80 minimum and Polar 6.5% + $0.50
- * on a transaction. At the 16% managed-plan rate the percentage
- * curve starts clearing its own costs at about $16.89; the $2.75 floor remains
- * safe through the rounded-cent crossover. The economics test walks every
+ * processor case: OpenRouter 5.5% with a $0.80 minimum, Singapore GST at 9%
+ * on the OpenRouter purchase subtotal, and Polar 6.5% + $0.50 on a
+ * transaction. At the 26% managed-plan rate the percentage curve starts
+ * clearing its own costs at about $17.76; the $5 floor remains safe through
+ * the rounded-cent crossover. The economics test walks every
  * whole-cent value through $600 so a sampled list cannot hide a loss band.
  *
- * A $5 face value therefore costs $7.75 and a $10 face value costs $12.75 at
+ * A $5 face value therefore costs $10 and a $10 face value costs $15 at
  * the base floor. The checkout returns the exact face, fee, and total before
  * the buyer leaves Ryu.
  */
-export const DEPOSIT_FEE_FIXED_MICRO_USD = usdToMicro(2.75);
+export const DEPOSIT_FEE_FIXED_MICRO_USD = usdToMicro(5);
 
 /** Current conservative external cost inputs used by the top-up economics guard. */
 export const TOPUP_OPENROUTER_FEE_BPS = 550;
 export const TOPUP_OPENROUTER_MINIMUM_USD = 0.8;
+/** Singapore GST applied to OpenRouter credit purchases from 2026-09-18. */
+export const TOPUP_OPENROUTER_GST_BPS = 900;
 export const TOPUP_POLAR_PROCESSING_BPS = 650;
 export const TOPUP_POLAR_PROCESSING_FIXED_USD = 0.5;
 
 /**
- * WHY 17% / 16% — the arithmetic that sets the floor under every rate below.
+ * Cost to Ryu of stocking `faceUsd` of OpenRouter credits when the upstream
+ * Singapore GST is not recoverable. GST is modeled on the OpenRouter purchase
+ * subtotal (the face value plus OpenRouter's funding fee), which is the
+ * conservative interpretation of the provider notice.
+ */
+export const openRouterCreditPurchaseCostUsd = (faceUsd: number): number => {
+	if (faceUsd <= 0) {
+		return 0;
+	}
+	const fundingFee = Math.max(
+		faceUsd * (TOPUP_OPENROUTER_FEE_BPS / 10_000),
+		TOPUP_OPENROUTER_MINIMUM_USD
+	);
+	const taxableSubtotal = faceUsd + fundingFee;
+	return taxableSubtotal * (1 + TOPUP_OPENROUTER_GST_BPS / 10_000);
+};
+
+/**
+ * WHY 27% / 26% — the arithmetic that sets the floor under every rate below.
  *
  * Two costs sit under every top-up, and the fee has to clear BOTH:
  *
  *  - **OpenRouter charges 5.5%**, with a current $0.80 minimum, to buy the
  *    credits we then meter out at cost (`markup_bps` is pinned to 0 on purpose).
+ *  - **Singapore GST is 9%** on that OpenRouter purchase subtotal from
+ *    2026-09-18. This guard assumes the tax is not recoverable until the
+ *    upstream account's GST treatment is verified.
  *  - The conservative Polar case is **6.5% + $0.50**: the current Starter
  *    transaction rate plus the listed international-card surcharge.
  *
  * The buyer pays `face + fee` and the wallet is credited `face`
  * (`computeTopupQuote`), so per top-up:
  *
- *     net = (1 − 0.065) × fee − (0.055 + 0.065) × face − 0.50
+ *     net = (1 − 0.065) × fee − [0.055 + 0.09 × (1 + 0.055) + 0.065] × face − 0.50
  *
- * The 16% managed-plan rate and $2.75 floor are the smallest rounded schedule
+ * The 26% managed-plan rate and $5 floor are the smallest rounded schedule
  * in this catalog that stays non-negative through the floor/percentage join in
  * that conservative case. The fee is the only Ryu spread on inference; usage
  * remains at cost.
  *
- * The 16% managed-plan rate clears it with room for the international-card
+ * The 26% managed-plan rate clears it with room for the international-card
  * surcharge (+1.5%) and leaves the "models are metered AT COST, no per-token
  * markup" promise intact — the fee is what covers the two costs above, and it
  * is the only place Ryu takes a spread on inference.
@@ -299,18 +324,21 @@ export const topupBreakEvenUsd = (bps: number): number => {
 	const rate = bps / 10_000;
 	const polarRate = TOPUP_POLAR_PROCESSING_BPS / 10_000;
 	const openRouterRate = TOPUP_OPENROUTER_FEE_BPS / 10_000;
+	const gstRate = TOPUP_OPENROUTER_GST_BPS / 10_000;
 	const minimumRegimeBoundary = TOPUP_OPENROUTER_MINIMUM_USD / openRouterRate;
-	const minimumRegimeRate = rate * (1 - polarRate) - polarRate;
+	const minimumRegimeRate = rate * (1 - polarRate) - (gstRate + polarRate);
 	const minimumRegimeBreakEven =
 		minimumRegimeRate > 0
-			? (TOPUP_OPENROUTER_MINIMUM_USD + TOPUP_POLAR_PROCESSING_FIXED_USD) /
+			? (TOPUP_OPENROUTER_MINIMUM_USD * (1 + gstRate) +
+					TOPUP_POLAR_PROCESSING_FIXED_USD) /
 				minimumRegimeRate
 			: Number.POSITIVE_INFINITY;
 	if (minimumRegimeBreakEven <= minimumRegimeBoundary) {
 		return minimumRegimeBreakEven;
 	}
 	const percentageRegimeRate =
-		rate * (1 - polarRate) - (openRouterRate + polarRate);
+		rate * (1 - polarRate) -
+		(openRouterRate + gstRate * (1 + openRouterRate) + polarRate);
 	return percentageRegimeRate > 0
 		? TOPUP_POLAR_PROCESSING_FIXED_USD / percentageRegimeRate
 		: Number.POSITIVE_INFINITY;
@@ -327,18 +355,18 @@ export const topupBreakEvenUsd = (bps: number): number => {
  * practice; it exists so the map is total over `PlanId` and a future policy
  * change has an obvious place to land, not because Lifetime has a rate.
  *
- * Pro and Plus pay 16.5%. Max, Teams, and Business pay 16%. All are below the 17% base
+ * Pro and Plus pay 26.5%. Max, Teams, and Business pay 26%. All are below the 27% base
  * rate while remaining above the conservative break-even.
  */
 export const DEPOSIT_FEE_BPS_BY_PLAN: Record<PlanId, number> = {
 	"desktop-license": DEPOSIT_FEE_BPS, // total map; route does not allow this plan to top up
 	"marketplace-membership": DEPOSIT_FEE_BPS,
-	plus: 1650,
-	pro: 1650,
-	max: 1600,
-	teams: 1600,
-	"teams-lite": 1600,
-	business: 1600,
+	plus: 2650,
+	pro: 2650,
+	max: 2600,
+	teams: 2600,
+	"teams-lite": 2600,
+	business: 2600,
 };
 
 /** The deposit-fee rate (bps) for a buyer on `plan`, falling back to the base rate. */
@@ -376,6 +404,17 @@ export const CREDITS_TOPUP_BINDING: PolarBinding = {
 };
 
 /**
+ * The one-time custom-price product used to fund Ryu gift cards, credit gifts,
+ * and non-renewing subscription gifts. The selected face/value is frozen in
+ * Ryu's gift record and server-set checkout metadata; the webhook verifies the
+ * paid order before activating it.
+ */
+export const GIFTS_BINDING: PolarBinding = {
+	productIdEnv: "POLAR_PRODUCT_GIFTS",
+	productIdDefault: "polar_product_gifts",
+};
+
+/**
  * The ONE rule for a plan's included credit pool: a fixed FRACTION of its
  * recurring price, documented once, here. The default is 30% — a $40/mo plan
  * grants $12/mo of credits. Teams' current version instead grants one $50
@@ -401,7 +440,8 @@ export const INCLUDED_CREDIT_FRACTION_DEFAULT = 0.3;
  * the overrides instead of competing with them, and `plans.test.ts` asserts it.
  *
  * 40% is a solvency cap, not the launch-margin target. A granted credit costs
- * `pool × 1.055` (OpenRouter's 5.5%), the free node has a plan-specific reserve,
+ * `openRouterCreditPurchaseCostUsd(pool)` (OpenRouter's 5.5% plus the current
+ * Singapore GST reserve), the free node has a plan-specific reserve,
  * and Polar has a percentage plus fixed subscription fee. ANNUAL is the binding
  * case because a yearly plan bills 10 months while serving 12 pool grants.
  * The economics guard separately requires each current yearly offer to clear a

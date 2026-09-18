@@ -62,7 +62,7 @@ const PRODUCT_SHEET = [
 				? [
 						{
 							label: "Ryu Apps",
-							href: "/marketplace/apps",
+							href: "/products/apps",
 							external: false,
 						},
 					]
@@ -146,7 +146,7 @@ function isTabActive(key: TabKey, pathname: string): boolean {
 				pathname === "/console" ||
 				pathname === "/build" ||
 				pathname === "/platform" ||
-				pathname.startsWith("/marketplace/apps")
+				pathname.startsWith("/products/apps")
 			);
 		case "solutions":
 			return pathname.startsWith("/for");

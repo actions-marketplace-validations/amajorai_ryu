@@ -12,6 +12,7 @@
 // The same item list feeds all three, so the tile art is the control and the layout
 // is the variable.
 
+import { useMemo, useState } from "react";
 import { createRoot } from "react-dom/client";
 import {
 	AppLaunchpadGrid,
@@ -24,10 +25,12 @@ import "../../src/index.css";
  *  a deliberately long label that has to truncate instead of widening its cell. */
 const ITEMS: LaunchpadItem[] = [
 	{
+		appId: "@ryu/browser",
 		id: "app__browser",
 		label: "Browser",
 		iconId: "lucide:globe",
 		seedId: "@ryu/browser",
+		version: "1.0.0",
 	},
 	{
 		id: "app__crm",
@@ -131,7 +134,21 @@ function recordOpen(item: LaunchpadItem, newTab: boolean) {
 
 /** One mount at a fixed width, labelled — the widths stand in for a narrow split
  *  pane, the start page's own column, and a wide window. */
-function Pane({ label, width }: { label: string; width: number }) {
+function Pane({
+	items,
+	label,
+	onInstallStandalone,
+	onOpenStandalone,
+	onRemoveStandalone,
+	width,
+}: {
+	items: LaunchpadItem[];
+	label: string;
+	onInstallStandalone: (item: LaunchpadItem) => void;
+	onOpenStandalone: (item: LaunchpadItem) => void;
+	onRemoveStandalone: (item: LaunchpadItem) => void;
+	width: number;
+}) {
 	return (
 		<section style={{ marginBottom: 40 }}>
 			<h2
@@ -145,18 +162,87 @@ function Pane({ label, width }: { label: string; width: number }) {
 				{label} — {width}px
 			</h2>
 			<div data-testid={`launchpad-${width}`} style={{ width }}>
-				<AppLaunchpadGrid items={ITEMS} onOpen={recordOpen} />
+				<AppLaunchpadGrid
+					items={items}
+					onInstallStandalone={onInstallStandalone}
+					onOpen={recordOpen}
+					onOpenStandalone={onOpenStandalone}
+					onRemoveStandalone={onRemoveStandalone}
+				/>
 			</div>
 		</section>
 	);
 }
 
 function Story() {
+	const [standaloneAppIds, setStandaloneAppIds] = useState<Set<string>>(
+		new Set()
+	);
+	const items = useMemo(
+		() =>
+			ITEMS.map((item) => ({
+				...item,
+				standaloneInstalled: item.appId
+					? standaloneAppIds.has(item.appId)
+					: false,
+			})),
+		[standaloneAppIds]
+	);
+	const setStatus = (message: string) => {
+		const out = document.getElementById("standalone-status");
+		if (out) {
+			out.textContent = message;
+		}
+	};
+	const onInstallStandalone = (item: LaunchpadItem) => {
+		if (!item.appId) {
+			return;
+		}
+		setStandaloneAppIds((current) =>
+			new Set(current).add(item.appId as string)
+		);
+		setStatus(`Installed standalone: ${item.label}`);
+	};
+	const onOpenStandalone = (item: LaunchpadItem) => {
+		setStatus(`Opened standalone: ${item.label}`);
+	};
+	const onRemoveStandalone = (item: LaunchpadItem) => {
+		if (!item.appId) {
+			return;
+		}
+		setStandaloneAppIds((current) => {
+			const next = new Set(current);
+			next.delete(item.appId as string);
+			return next;
+		});
+		setStatus(`Removed standalone: ${item.label}; app data stays in Ryu`);
+	};
 	return (
 		<div style={{ padding: 40 }}>
-			<Pane label="Narrow split pane" width={320} />
-			<Pane label="Start page column" width={720} />
-			<Pane label="Wide window" width={1040} />
+			<Pane
+				items={items}
+				label="Narrow split pane"
+				onInstallStandalone={onInstallStandalone}
+				onOpenStandalone={onOpenStandalone}
+				onRemoveStandalone={onRemoveStandalone}
+				width={320}
+			/>
+			<Pane
+				items={items}
+				label="Start page column"
+				onInstallStandalone={onInstallStandalone}
+				onOpenStandalone={onOpenStandalone}
+				onRemoveStandalone={onRemoveStandalone}
+				width={720}
+			/>
+			<Pane
+				items={items}
+				label="Wide window"
+				onInstallStandalone={onInstallStandalone}
+				onOpenStandalone={onOpenStandalone}
+				onRemoveStandalone={onRemoveStandalone}
+				width={1040}
+			/>
 			{/* The empty list must render NOTHING — no stray strip under the
 			    composer for a user whose apps are all off. */}
 			<section>
@@ -175,6 +261,7 @@ function Story() {
 				</div>
 			</section>
 			<pre data-testid="opened" id="opened" />
+			<output data-testid="standalone-status" id="standalone-status" />
 		</div>
 	);
 }

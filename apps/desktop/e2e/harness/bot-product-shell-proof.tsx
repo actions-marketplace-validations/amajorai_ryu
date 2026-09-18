@@ -1,3 +1,4 @@
+import { AgentChat } from "@ryu/blocks/desktop/agent-elements/agent-chat";
 import {
 	Sidebar,
 	SidebarContent,
@@ -5,13 +6,14 @@ import {
 	SidebarProvider,
 } from "@ryu/ui/components/sidebar.tsx";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import type { UIMessage } from "ai";
 import { useState } from "react";
 import { createRoot } from "react-dom/client";
 import {
 	EmptyStateHeader,
 	type EmptyStateLogo,
 } from "../../components/agent-elements/empty-state-header.tsx";
-import { InputBar } from "../../components/agent-elements/input-bar.tsx";
+import { BotChatHeader } from "../../src/components/chat/BotChatHeader.tsx";
 import { ChatsSection } from "../../src/components/layout/AppSidebar.tsx";
 import { SidebarBrandBadge } from "../../src/components/layout/SidebarBrandBadge.tsx";
 import type { ChatRowHandlers } from "../../src/components/layout/sidebar-conversation-rows.tsx";
@@ -55,6 +57,16 @@ const CONVERSATIONS = [
 	conversation("chat-notes", "Summarize my notes", 10),
 ];
 
+const BOT_AGENT = {
+	avatarGlyph: null,
+	avatarUrl: null,
+	builtIn: true,
+	engine: "ryu",
+	id: "ryu",
+	name: "Ryu",
+	title: "Ryu Bot",
+} as const;
+
 const noOp = () => undefined;
 const handlers = {
 	activeConversationId: null,
@@ -68,6 +80,7 @@ const handlers = {
 	onJumpToMessage: noOp,
 	onMarkRead: noOp,
 	onMarkUnread: noOp,
+	onOpenQuickReply: noOp,
 	onOpenInNewTab: noOp,
 	onOpenInNewWindow: noOp,
 	onOpenNewSideChat: noOp,
@@ -109,7 +122,7 @@ const queryClient = new QueryClient({
 });
 
 function ChatPreview() {
-	const [draft, setDraft] = useState("");
+	const [messages, setMessages] = useState<UIMessage[]>([]);
 	const [sent, setSent] = useState("");
 	const logo: EmptyStateLogo = { engine: "ryu", kind: "single" };
 
@@ -118,47 +131,62 @@ function ChatPreview() {
 			className="flex min-w-0 flex-1 flex-col bg-background"
 			data-testid="bot-chat-surface"
 		>
-			<header className="flex items-center justify-between border-border/60 border-b px-8 py-5">
-				<div>
-					<p className="font-medium text-muted-foreground text-xs uppercase tracking-[0.16em]">
-						Managed chat
-					</p>
-					<h1 className="mt-1 font-semibold text-2xl tracking-tight">
-						Ryu Bot
-					</h1>
-				</div>
-				<div
-					className="rounded-full border border-primary/20 bg-primary/5 px-3 py-1.5 text-primary text-xs"
-					data-testid="bot-managed-default"
-				>
-					Ryu-managed models
-				</div>
-			</header>
-			<div className="flex min-h-0 flex-1 flex-col items-center justify-center px-8">
-				<EmptyStateHeader
-					interactiveLogo={false}
-					logo={logo}
-					sections={[]}
-					showProjectPicker={false}
-					title="What can I help with?"
-				/>
-				<div className="mt-8 w-full max-w-2xl">
-					<InputBar
-						onChange={setDraft}
-						onSend={(message) => setSent(message.content)}
-						onStop={noOp}
-						placeholder="Ask Ryu anything"
-						status="ready"
-						value={draft}
-					/>
+			<AgentChat
+				assistantName="Ryu"
+				composerFooter={
 					<output
-						className="mt-3 block min-h-5 text-center text-muted-foreground text-xs"
+						className="block min-h-5 text-center text-muted-foreground text-xs"
 						data-testid="bot-sent-message"
 					>
 						{sent}
 					</output>
-				</div>
-			</div>
+				}
+				conversationHeader={
+					<>
+						<BotChatHeader agent={BOT_AGENT} clearTitleBar={false} />
+						<div className="flex items-center justify-between border-border/60 border-b px-8 py-3">
+							<div>
+								<p className="font-medium text-muted-foreground text-xs uppercase tracking-[0.16em]">
+									Managed chat
+								</p>
+								<h1 className="mt-1 font-semibold text-xl tracking-tight">
+									Ryu Bot
+								</h1>
+							</div>
+							<div
+								className="rounded-full border border-primary/20 bg-primary/5 px-3 py-1.5 text-primary text-xs"
+								data-testid="bot-managed-default"
+							>
+								Ryu-managed models
+							</div>
+						</div>
+					</>
+				}
+				emptyStateHeader={
+					<EmptyStateHeader
+						interactiveLogo={false}
+						logo={logo}
+						sections={[]}
+						showProjectPicker={false}
+						title="What can I help with?"
+					/>
+				}
+				emptyStatePosition="center"
+				messages={messages}
+				onSend={(message) => {
+					setSent(message.content);
+					setMessages((previous) => [
+						...previous,
+						{
+							id: `bot-proof-${previous.length}`,
+							parts: [{ text: message.content, type: "text" }],
+							role: "user",
+						} as UIMessage,
+					]);
+				}}
+				onStop={noOp}
+				status="ready"
+			/>
 		</section>
 	);
 }

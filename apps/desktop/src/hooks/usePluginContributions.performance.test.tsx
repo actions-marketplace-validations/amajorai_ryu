@@ -26,6 +26,12 @@ mock.module("@/src/lib/api/plugins.ts", () => ({
 		new Promise((resolve) =>
 			requests.push({ jwt: target.userJwt, signal, resolve })
 		),
+	fetchApps: () => Promise.resolve([]),
+	disableApp: () => Promise.reject(new Error("unused")),
+	enableApp: () => Promise.reject(new Error("unused")),
+	installApp: () => Promise.reject(new Error("unused")),
+	uninstallApp: () => Promise.reject(new Error("unused")),
+	describeDependencyError: () => "unused",
 }));
 mock.module("@/src/components/views/DeclarativeView.tsx", () => ({
 	HelloDeclarativeViewHarness: () => null,
@@ -44,13 +50,13 @@ mock.module("@/src/pages/PluginCompanionPage.tsx", () => ({
 	default: () => null,
 }));
 mock.module("@/src/pages/PluginViewPage.tsx", () => ({ default: () => null }));
-const { usePluginContributionsQuery } = await import(
+const { usePluginContributions, usePluginContributionsQuery } = await import(
 	"./usePluginContributions.ts"
 );
 const client = new QueryClient({
 	defaultOptions: { queries: { retry: false } },
 });
-const root = createRoot(document.createElement("div"));
+let root = createRoot(document.createElement("div"));
 let latest: ReturnType<typeof usePluginContributionsQuery>;
 function Reader() {
 	latest = usePluginContributionsQuery();
@@ -67,6 +73,8 @@ function Harness() {
 afterEach(async () => {
 	await act(async () => root.unmount());
 	client.clear();
+	requests.length = 0;
+	root = createRoot(document.createElement("div"));
 });
 test("mounts share a read while changed credentials cancel and isolate pending contributions", async () => {
 	await act(async () => root.render(<Harness />));
@@ -85,4 +93,44 @@ test("mounts share a read while changed credentials cancel and isolate pending c
 	expect(latest!.data?.companions.map((item) => item.id)).toEqual(["current"]);
 	await act(async () => root.render(<Harness />));
 	expect(requests).toHaveLength(2);
+});
+
+test("data-only readers ignore background query status changes", async () => {
+	let renders = 0;
+	function DataReader() {
+		usePluginContributions();
+		renders += 1;
+		return null;
+	}
+
+	await act(async () =>
+		root.render(
+			<QueryClientProvider client={client}>
+				<DataReader />
+				<DataReader />
+			</QueryClientProvider>
+		)
+	);
+	expect(requests).toHaveLength(1);
+	const beforeData = renders;
+	const payload = { companions: [{ id: "stable" }] };
+	await act(async () => {
+		requests[0].resolve(payload);
+		await new Promise((resolve) => setTimeout(resolve, 0));
+	});
+	expect(renders).toBeGreaterThan(beforeData);
+	const afterData = renders;
+
+	await act(async () => {
+		void client.invalidateQueries({ queryKey: ["plugin-contributions"] });
+	});
+	expect(requests).toHaveLength(2);
+	// The observer is interested in `data` only, so the refetching status does
+	// not rebuild a data-only contribution consumer.
+	expect(renders).toBe(afterData);
+	await act(async () => {
+		requests[1].resolve(payload);
+		await new Promise((resolve) => setTimeout(resolve, 0));
+	});
+	expect(renders).toBe(afterData);
 });

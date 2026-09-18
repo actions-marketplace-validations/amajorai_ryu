@@ -21,30 +21,27 @@ import { useAgents } from "@/src/hooks/useAgents.ts";
 import { useApps } from "@/src/hooks/useApps.ts";
 import { clearMediaSource, publishMediaSource } from "@/src/lib/media-pip.ts";
 import { getRealtimeJwt } from "@/src/lib/realtime/jwt.ts";
+import { requestWebSocketTicket } from "@ryuhq/core-client/client";
 
 const DESKTOP_PLUGIN_ID = "@ryu/desktop";
 
-/** Build the noVNC WebSocket URL for the active node, mirroring `voiceWsUrl`. */
+/** Build the exact Core ext-proxy path bound into a noVNC WebSocket ticket. */
+export function desktopWsPath(agentId = "ryu"): string {
+	const safeAgentId = agentId.trim();
+	return safeAgentId
+		? `/api/ext/ws/@ryu/desktop/bots/${encodeURIComponent(safeAgentId)}/ws`
+		: "/api/ext/ws/@ryu/desktop/ws";
+}
+
+/** Build the noVNC WebSocket URL with an opaque one-use ticket. */
 export function desktopWsUrl(
 	url: string,
-	token: string | null,
-	jwt: string | null = null,
+	ticket: string,
 	agentId = "ryu"
 ): string {
-	const safeAgentId = agentId.trim();
-	const wsUrl = new URL(
-		safeAgentId
-			? `/api/ext/ws/@ryu/desktop/bots/${encodeURIComponent(safeAgentId)}/ws`
-			: "/api/ext/ws/@ryu/desktop/ws",
-		url
-	);
+	const wsUrl = new URL(desktopWsPath(agentId), url);
 	wsUrl.protocol = wsUrl.protocol === "https:" ? "wss:" : "ws:";
-	if (token) {
-		wsUrl.searchParams.set("token", token);
-	}
-	if (jwt) {
-		wsUrl.searchParams.set("jwt", jwt);
-	}
+	wsUrl.searchParams.set("ticket", ticket);
 	return wsUrl.toString();
 }
 
@@ -83,12 +80,20 @@ export function DesktopStreamPanel({ active = true }: { active?: boolean }) {
 		setStatus("connecting");
 		try {
 			const jwt = await getRealtimeJwt();
+			const ticket = await requestWebSocketTicket(
+				{
+					url: node.url,
+					token: node.token ?? null,
+					userJwt: jwt,
+				},
+				{ path: desktopWsPath(selectedAgentId), route: "ext" }
+			);
 			if (!canvasRef.current || rfbRef.current) {
 				return;
 			}
 			const rfb = new RFB(
 				canvasRef.current,
-				desktopWsUrl(node.url, node.token ?? null, jwt, selectedAgentId),
+				desktopWsUrl(node.url, ticket, selectedAgentId),
 				{
 					credentials: {},
 				}

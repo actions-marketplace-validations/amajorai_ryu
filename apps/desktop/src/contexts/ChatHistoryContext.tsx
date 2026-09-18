@@ -168,6 +168,8 @@ interface CoreConversationSummary {
 
 // Server-side shape returned by Core's `GET /api/conversations/:id`.
 interface CoreMessage {
+	author_name?: string | null;
+	author_user_id?: string | null;
 	content: string;
 	created_at: number;
 	id: string;
@@ -183,6 +185,7 @@ interface CoreMessage {
 	 * client falls back to a text part from `content`).
 	 */
 	parts?: unknown[];
+	persisted?: boolean;
 	role: string;
 	sibling_count?: number;
 	sibling_ids?: string[];
@@ -223,7 +226,21 @@ async function mapCoreMessages(
 ): Promise<Message[]> {
 	return await Promise.all(
 		(messages ?? []).map(async (m) => ({
+			author:
+				typeof m.author_user_id === "string" && m.author_user_id.trim()
+					? {
+							id: m.author_user_id,
+							name:
+								typeof m.author_name === "string" && m.author_name.trim()
+									? m.author_name
+									: undefined,
+						}
+					: undefined,
 			id: m.id,
+			// Every row returned by this history endpoint is already durable. Core's
+			// wire shape predates the client-only marker, so do not wait for an
+			// optional field that older nodes never send.
+			persisted: true,
 			role: m.role === "assistant" ? "assistant" : "user",
 			content: m.content,
 			originServer:

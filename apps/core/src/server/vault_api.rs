@@ -328,7 +328,9 @@ async fn can_manage_shared(
         return false;
     };
     let Some(caller) = caller else {
-        return true;
+        // Shared team/org/node writes are governance operations. A node bearer
+        // proves machine admission, not which human may mutate shared secrets.
+        return false;
     };
     if !caller_can_use_node(Some(node), Some(caller)) {
         return false;

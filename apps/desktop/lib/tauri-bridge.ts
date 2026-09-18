@@ -3,7 +3,7 @@
 // its bridge yet — so they all go through the shared ready-gate.
 
 import type { StandaloneAppBundle } from "@ryu/app-host/standalone";
-import { invokeWhenReady } from "@/src/lib/tauri-ready.ts";
+import { invokeWhenReady, isTauriReady } from "@/src/lib/tauri-ready.ts";
 
 export const startRyuCore = () => invokeWhenReady<string>("start_ryu_core");
 export const stopRyuCore = () => invokeWhenReady<void>("stop_ryu_core");
@@ -97,3 +97,36 @@ export const openTabWindow = (opts: {
 		node: opts.node ?? null,
 		title: opts.title ?? null,
 	});
+
+/** Open or focus the app-first window for an installed app. */
+export async function openStandaloneAppWindow(opts: {
+	appId: string;
+	title: string;
+}): Promise<void> {
+	if (!isTauriReady() && typeof window !== "undefined") {
+		const url = new URL(window.location.href);
+		url.pathname = "/";
+		url.search = new URLSearchParams({
+			appId: opts.appId,
+			window: "standalone-app",
+		}).toString();
+		const opened = window.open(url.toString(), "_blank", "noopener,noreferrer");
+		if (!opened) {
+			throw new Error("The standalone app window was blocked by the browser.");
+		}
+		return;
+	}
+	await invokeWhenReady<void>("open_standalone_app_window", {
+		appId: opts.appId,
+		title: opts.title,
+	});
+}
+
+/** Close the current app-first window without changing app lifecycle. */
+export async function closeCurrentWindow(): Promise<void> {
+	if (!isTauriReady() && typeof window !== "undefined") {
+		window.close();
+		return;
+	}
+	await invokeWhenReady<void>("close_current_window");
+}

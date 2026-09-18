@@ -54,17 +54,17 @@ import {
 //     (Windows 11 acrylic / macOS vibrancy) shows through as real frosted glass.
 const SHAPE_BASE =
 	"island-siri-border relative shrink-0 overflow-hidden shadow-2xl";
-// The "Golden Gate" Siri look: a near-black vertical gradient that fades toward
-// transparent, with light text, over the in-island blur. (Translucent CSS blur
-// can't reach the desktop, so this is a tinted dark glass — see file header.)
+// The "Golden Gate" Siri look: a semantic vertical gradient that fades toward
+// transparent, with the active theme's foreground text, over the in-island blur.
+// (Translucent CSS blur can't reach the desktop, so this is tinted theme glass.)
 const TRANSLUCENT_SKIN =
 	"bg-gradient-to-b from-background/85 via-background/65 to-card/35 text-foreground backdrop-blur-2xl";
 // Acrylic = REAL desktop blur from the native OS material (Win11 acrylic / macOS
-// vibrancy). A *translucent* dark gradient tints that blur into the Siri look
-// without negating it — keep these alphas well under 1 so the frosted desktop
-// still reads through (a heavy/opaque fill would kill the material).
+// vibrancy). A semantic, translucent gradient tints that blur without negating
+// the active light/dark palette — keep these alphas well under 1 so the frosted
+// desktop still reads through (a heavy/opaque fill would kill the material).
 const ACRYLIC_SKIN =
-	"bg-gradient-to-b from-black/55 via-black/40 to-black/20 text-foreground";
+	"bg-gradient-to-b from-background/55 via-background/40 to-card/20 text-foreground";
 
 /**
  * The visible footprint (bounding box) of the island group for a given state.

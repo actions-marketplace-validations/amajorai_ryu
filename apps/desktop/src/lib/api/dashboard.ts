@@ -285,30 +285,38 @@ export async function streamDashboardEvents(
 	let buffer = "";
 	// SSE frames are separated by a blank line; each `data:` line carries the
 	// JSON of one `DashboardEvent`.
-	for (;;) {
-		const { done, value } = await reader.read();
-		if (done) {
-			break;
-		}
-		buffer += decoder.decode(value, { stream: true });
-		const frames = buffer.split("\n\n");
-		buffer = frames.pop() ?? "";
-		for (const frame of frames) {
-			for (const line of frame.split("\n")) {
-				const trimmed = line.trim();
-				if (!trimmed.startsWith("data:")) {
-					continue;
-				}
-				const payload = trimmed.slice("data:".length).trim();
-				if (!payload) {
-					continue;
-				}
-				try {
-					onEvent(JSON.parse(payload) as DashboardEvent);
-				} catch {
-					// Non-JSON keep-alive or partial frame — ignore; the feed self-heals.
+	try {
+		while (!signal?.aborted) {
+			const { done, value } = await reader.read();
+			if (done) {
+				break;
+			}
+			buffer += decoder.decode(value, { stream: true });
+			const frames = buffer.split("\n\n");
+			buffer = frames.pop() ?? "";
+			for (const frame of frames) {
+				for (const line of frame.split("\n")) {
+					if (signal?.aborted) {
+						return;
+					}
+					const trimmed = line.trim();
+					if (!trimmed.startsWith("data:")) {
+						continue;
+					}
+					const payload = trimmed.slice("data:".length).trim();
+					if (!payload) {
+						continue;
+					}
+					try {
+						onEvent(JSON.parse(payload) as DashboardEvent);
+					} catch {
+						// Non-JSON keep-alive or partial frame — ignore; the feed self-heals.
+					}
 				}
 			}
 		}
+	} finally {
+		await reader.cancel().catch(() => undefined);
+		reader.releaseLock();
 	}
 }

@@ -1,3 +1,4 @@
+import { abortableDelay } from "@/src/lib/abortable-delay.ts";
 // apps/desktop/src/hooks/useBillingStatusStream.ts
 //
 // Live hosted-agent subscription status for the caller's active org, streamed
@@ -22,21 +23,6 @@ import {
 const INITIAL_BACKOFF_MS = 500;
 const MAX_BACKOFF_MS = 10_000;
 
-/** Pause that resolves early when the stream is torn down. */
-function delay(ms: number, signal: AbortSignal): Promise<void> {
-	return new Promise((resolve) => {
-		const timer = setTimeout(resolve, ms);
-		signal.addEventListener(
-			"abort",
-			() => {
-				clearTimeout(timer);
-				resolve();
-			},
-			{ once: true }
-		);
-	});
-}
-
 /** Run (and keep reconnecting) the billing-status stream until `signal` aborts. */
 async function runBillingStatusStream(
 	signal: AbortSignal,
@@ -47,6 +33,9 @@ async function runBillingStatusStream(
 		if (hasTeamsBillingAuth()) {
 			try {
 				for await (const message of openBillingStatusStream(signal)) {
+					if (signal.aborted) {
+						break;
+					}
 					onStatus(message.data);
 					backoff = INITIAL_BACKOFF_MS; // a live frame resets the backoff
 				}
@@ -59,7 +48,10 @@ async function runBillingStatusStream(
 		}
 		// When signed out we have no token; wait a full interval before retrying so
 		// a later sign-in is picked up without hot-looping.
-		await delay(hasTeamsBillingAuth() ? backoff : MAX_BACKOFF_MS, signal);
+		await abortableDelay(
+			hasTeamsBillingAuth() ? backoff : MAX_BACKOFF_MS,
+			signal
+		);
 		backoff = Math.min(backoff * 2, MAX_BACKOFF_MS);
 	}
 }

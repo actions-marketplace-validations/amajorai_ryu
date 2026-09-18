@@ -276,6 +276,7 @@
         "to": "transparent",
         "direction": "down"
       },
+      "icon_padding": "md",
       "tagline": "Crawl and extract web pages for agents",
       "category": "Search",
       "repository": "https://github.com/amajorai/ryu-marketplace/tree/main/plugins/plugins/spider",
@@ -362,7 +363,7 @@
           "support": "full"
         }
       ],
-      "icon": "code-browser",
+      "icon": "computer-terminal-02",
       "icon_dither": {
         "from": 188,
         "to": "transparent",
@@ -444,6 +445,7 @@
         "to": "transparent",
         "direction": "down"
       },
+      "icon_padding": "md",
       "tagline": "Neural web search for agents",
       "category": "Search",
       "repository": "https://github.com/amajorai/ryu-marketplace/tree/main/plugins/plugins/exa",
@@ -970,6 +972,7 @@
         "to": "transparent",
         "direction": "down"
       },
+      "icon_padding": "md",
       "tagline": "Recall and record in an existing Mem0 project inside Ryu",
       "category": "Knowledge & Memory",
       "repository": "https://github.com/amajorai/ryu-marketplace/tree/main/plugins/plugins/mem0",
@@ -1305,6 +1308,7 @@
         "to": "transparent",
         "direction": "down"
       },
+      "icon_padding": "md",
       "tagline": "A standing synthesis of the user, not a list of facts",
       "category": "Knowledge & Memory",
       "repository": "https://github.com/amajorai/ryu-marketplace/tree/main/plugins/plugins/honcho",
@@ -1394,6 +1398,7 @@
         "to": "transparent",
         "direction": "down"
       },
+      "icon_padding": "md",
       "tagline": "Swap computer control onto a Bytebot desktop",
       "category": "Automation",
       "repository": "https://github.com/amajorai/ryu-marketplace/tree/main/plugins/plugins/bytebot",
@@ -1422,6 +1427,80 @@
           ]
         }
       ],
+      "developer": "Ryu",
+      "stability": "experimental"
+    },
+    {
+      "id": "@ryu/writing-style",
+      "name": "Writing Style",
+      "version": "0.1.0",
+      "description": "Extract a content-agnostic writing-style guide from a small, user-approved sample of the connected apps already available to the calling agent. It produces a reviewable Markdown Agent Skill that can be activated alongside an Output Style; it never guesses unavailable connections or copies private sample text into the guide.",
+      "source": "builtin",
+      "kinds": [
+        "skill"
+      ],
+      "permission_grants": [],
+      "built_in": true,
+      "tags": [
+        "writing",
+        "style",
+        "stylometry",
+        "connections",
+        "personalization"
+      ],
+      "type": "plugin",
+      "surface_support": [
+        {
+          "surface": "core",
+          "support": "full"
+        },
+        {
+          "surface": "desktop",
+          "support": "full"
+        },
+        {
+          "surface": "island",
+          "support": "limited"
+        },
+        {
+          "surface": "mobile",
+          "support": "limited",
+          "inheritedFrom": "desktop"
+        },
+        {
+          "surface": "extension",
+          "support": "limited",
+          "inheritedFrom": "desktop"
+        },
+        {
+          "surface": "web",
+          "support": "full",
+          "inheritedFrom": "desktop"
+        },
+        {
+          "surface": "cli",
+          "support": "full"
+        }
+      ],
+      "icon": "text-align-left",
+      "icon_dither": {
+        "from": 170,
+        "to": "transparent",
+        "direction": "down"
+      },
+      "tagline": "Turn your connected writing into a reusable voice guide",
+      "category": "Productivity",
+      "repository": "https://github.com/amajorai/ryu-marketplace/tree/main/plugins/plugins/writing-style",
+      "homepage": "https://github.com/amajorai/ryu-marketplace/tree/main/plugins/plugins/writing-style",
+      "keywords": [
+        "writing",
+        "style",
+        "stylometry",
+        "connections",
+        "personalization"
+      ],
+      "privacy_policy_url": "https://ryuhq.com/privacy",
+      "terms_of_service_url": "https://ryuhq.com/terms",
       "developer": "Ryu",
       "stability": "experimental"
     }

@@ -19,6 +19,8 @@ describe("appearance settings registry", () => {
 			"appearance.animations-enabled",
 			"appearance.stream-animation",
 			"appearance.inverted-backgrounds",
+			"appearance.sidebar-transparency",
+			"appearance.window-transparency",
 			"appearance.popup-overlay-blur",
 			"appearance.sidebar-mode",
 			"appearance.sidebar-variant",
@@ -63,6 +65,15 @@ describe("appearance settings registry", () => {
 	it("ships Bot terminology on with its stable storage key", () => {
 		expect(APPEARANCE_DEFAULTS.botTerminology).toBe(true);
 		expect(APPEARANCE_KEYS.botTerminology).toBe("ryu:bot-terminology");
+	});
+
+	it("keeps native surface transparency opt-in and independent", () => {
+		expect(APPEARANCE_DEFAULTS.sidebarTransparency).toBe(false);
+		expect(APPEARANCE_DEFAULTS.windowTransparency).toBe(false);
+		expect(APPEARANCE_KEYS.sidebarTransparency).toBe(
+			"ryu:sidebar-transparency"
+		);
+		expect(APPEARANCE_KEYS.windowTransparency).toBe("ryu:window-transparency");
 	});
 
 	it("registers core theme / layout prefs", () => {

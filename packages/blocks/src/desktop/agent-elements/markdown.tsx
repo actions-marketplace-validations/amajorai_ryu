@@ -7,6 +7,7 @@ import {
 	type CustomRendererProps,
 	extractTableDataFromElement,
 	Streamdown,
+	type StreamdownProps,
 	tableDataToCSV,
 	tableDataToMarkdown,
 	tableDataToTSV,
@@ -126,9 +127,13 @@ export interface FileReference {
 	path: string;
 }
 
-const code = createCodePlugin({
+// `@streamdown/code` currently resolves its own Shiki 3 types while Streamdown
+// resolves the workspace Shiki 4 types. The runtime plugin contract is the same
+// (both expose the documented code-highlighter methods), so keep the boundary
+// explicit until the upstream packages publish a shared Shiki type surface.
+const code: NonNullable<StreamdownProps["plugins"]>["code"] = createCodePlugin({
 	themes: ["github-light", "github-dark"],
-});
+}) as unknown as NonNullable<StreamdownProps["plugins"]>["code"];
 
 function normalizePathToken(value: string): string {
 	return value.replaceAll("\\", "/").replace(LEADING_DOT_SLASH_RE, "");

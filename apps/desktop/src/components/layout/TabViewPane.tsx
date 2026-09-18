@@ -41,7 +41,7 @@ export function TabViewPane({
 					data-tab-view-pane={tab.id}
 					onMouseDownCapture={focused ? undefined : onFocus}
 					role="group"
-					style={style}
+					style={{ ...style, "--ryu-titlebar-inset": "0px" } as CSSProperties}
 				>
 					{children}
 					{tab.unloaded ? (

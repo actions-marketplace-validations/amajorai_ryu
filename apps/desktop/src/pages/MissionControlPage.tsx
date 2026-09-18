@@ -60,6 +60,7 @@ import {
 	syncMissionIndex,
 } from "@/src/lib/api/mission-control.ts";
 import { compactAge } from "@/src/lib/time.ts";
+import { formatDate } from "@/src/lib/timezone.ts";
 import { useWorkspaceStore } from "@/src/store/useWorkspaceStore.ts";
 
 /** The window the page opens on, and what a cleared select falls back to. */
@@ -88,7 +89,7 @@ function weekdayLabel(day: string): string {
 	if (Number.isNaN(date.getTime())) {
 		return day;
 	}
-	return date.toLocaleDateString(undefined, { weekday: "short" });
+	return formatDate(day, { weekday: "short" });
 }
 
 function Stat({

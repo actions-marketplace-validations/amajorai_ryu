@@ -616,6 +616,11 @@ const BUILTIN_MANIFESTS: &[&str] = &[
     // `stateful` matches on the conversation), so it costs a sandbox spawn per
     // turn.
     include_str!("../../../../generated/ryu-runtime/plugins-store/plugins/agent-comms/manifest.json"),
+    // Writing Style is a skill-only, install-on-demand plugin. Keep its manifest
+    // in the hermetic catalog so Core validates the runnable and the package's
+    // skill lifecycle contract, but do not add it to the production runtime set:
+    // bundled skill bodies are materialized from an installed package tree.
+    include_str!("../../../../generated/ryu-runtime/plugins-store/plugins/writing-style/manifest.json"),
     // `rules` discovers Cursor- and Claude-style project rules and exposes the
     // agent-edit panel contract. Its context hook injects normalized project
     // rules plus per-agent base rules into the outbound context, deduplicating
@@ -851,6 +856,10 @@ const BUILTIN_MANIFESTS: &[&str] = &[
     // editing. It has no sidecar: persistence, upload, model, and media work use
     // the generic host bridges, and the bundled UI is seeded on explicit install.
     include_str!("../../../../generated/ryu-runtime/apps-store/slides/manifest.json"),
+    // Studio — the local-first short-form content queue. Its Companion
+    // uses only app-scoped storage and the governed side-model bridge; its UI is
+    // supplied by the satellite/package install rather than embedded in Core.
+    include_str!("../../../../generated/ryu-runtime/apps-store/reelfarm/manifest.json"),
     // The Fine-tuning app — a full-page Companion (`ui_format:"html"`, Path B) that
     // drives Core's fine-tune orchestration + durable job store via the
     // `finetune:runs` bridge and OWNS its Unsloth training sidecar (a
@@ -1187,6 +1196,11 @@ const BUILTIN_MANIFESTS: &[&str] = &[
     // project, exploration, check, report, list, and schedule surfaces; Core owns
     // no external provider client, route, port, or remote execution behavior.
     include_str!("../../../../generated/ryu-runtime/apps-store/checks/manifest.json"),
+    // Security — a local-first application security workbench. Its companion and
+    // bounded static-analysis sidecar own scan, finding, repository, triage, and
+    // read-only patch-proposal state; Core carries it only through the generic app
+    // lifecycle and authenticated ext-proxy seams.
+    include_str!("../../../../generated/ryu-runtime/apps-store/security/manifest.json"),
     // Blueprint — visual plan review. An agent publishes its plan over the app's own
     // MCP server (`blueprint.plan_publish`), a human reads it as rendered markdown
     // blocks plus a dependency graph derived from `steps[].depends_on`, annotates it,
@@ -1326,6 +1340,11 @@ const CORE_RUNTIME_BUILTIN_MANIFESTS: &[&str] = &[
     include_str!("../../../../generated/ryu-runtime/plugins-store/plugins/pi-subagent/manifest.json"),
     include_str!("../../../../generated/ryu-runtime/plugins-store/plugins/pi-monitor/manifest.json"),
     include_str!("../../../../generated/ryu-runtime/plugins-store/plugins/spider/manifest.json"),
+    // These two MCP providers are Core-tier built-in Store targets. Keep their
+    // signed manifests in the production runtime set so install-by-id can
+    // resolve them before a remote catalog package is fetched.
+    include_str!("../../../../generated/ryu-runtime/plugins-store/plugins/scrapling/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/plugins-store/plugins/zvec-grep/manifest.json"),
     include_str!("../../../../generated/ryu-runtime/plugins-store/plugins/exa/manifest.json"),
     include_str!("../../../../generated/ryu-runtime/plugins-store/plugins/docs/manifest.json"),
     include_str!("../../../../generated/ryu-runtime/plugins-store/external_plugins/composio-connect/manifest.json"),
@@ -1360,6 +1379,7 @@ const CORE_RUNTIME_BUILTIN_MANIFESTS: &[&str] = &[
     include_str!("../../../../generated/ryu-runtime/apps-store/calendar/manifest.json"),
     include_str!("../../../../generated/ryu-runtime/apps-store/canvas/manifest.json"),
     include_str!("../../../../generated/ryu-runtime/apps-store/checks/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/apps-store/security/manifest.json"),
     include_str!("../../../../generated/ryu-runtime/apps-store/clips/manifest.json"),
     include_str!("../../../../generated/ryu-runtime/apps-store/content/manifest.json"),
     include_str!("../../../../generated/ryu-runtime/apps-store/convert/manifest.json"),
@@ -1378,6 +1398,11 @@ const CORE_RUNTIME_BUILTIN_MANIFESTS: &[&str] = &[
     include_str!("../../../../generated/ryu-runtime/apps-store/help-center/manifest.json"),
     include_str!("../../../../generated/ryu-runtime/apps-store/learning/manifest.json"),
     include_str!("../../../../generated/ryu-runtime/apps-store/mail/manifest.json"),
+    // Meetings is a Core-tier, opt-in sidecar app. It is also a dependency-aware
+    // Store install target, so its manifest must be in the production runtime
+    // registry (not only BOOTSTRAP_MANIFESTS) before a user can install it and
+    // before the public-mount router can register /api/meetings.
+    include_str!("../../../../generated/ryu-runtime/apps-store/meetings/manifest.json"),
     include_str!("../../../../generated/ryu-runtime/apps-store/markitdown/manifest.json"),
     include_str!("../../../../generated/ryu-runtime/apps-store/mineru/manifest.json"),
     include_str!("../../../../generated/ryu-runtime/apps-store/mission-control/manifest.json"),
@@ -1411,6 +1436,15 @@ const CORE_RUNTIME_BUILTIN_MANIFESTS: &[&str] = &[
     include_str!("../../../../generated/ryu-runtime/apps-store/voice/manifest.json"),
     include_str!("../../../../generated/ryu-runtime/apps-store/warmup/manifest.json"),
     include_str!("../../../../generated/ryu-runtime/apps-store/webhooks/manifest.json"),
+    // Activity is an opt-in companion (not part of the fresh-node seed), but its
+    // signed manifest must still be in the production runtime catalog so the
+    // Store's built-in install endpoint can resolve it without a remote fetch.
+    include_str!("../../../../generated/ryu-runtime/apps-store/activity/manifest.json"),
+    // Autopilot and Skill Editor are the same opt-in Companion shape: Core owns
+    // their signed manifests and compiled UI carriages, while the fresh-node seed
+    // intentionally leaves both disabled until a user installs them.
+    include_str!("../../../../generated/ryu-runtime/apps-store/autopilot/manifest.json"),
+    include_str!("../../../../generated/ryu-runtime/apps-store/skill-editor/manifest.json"),
     include_str!("../../../../generated/ryu-runtime/apps-store/whiteboard/manifest.json"),
     include_str!("../../../../generated/ryu-runtime/apps-store/workflows/manifest.json"),
     include_str!("fixtures/engines.manifest.json"),
@@ -1587,16 +1621,20 @@ pub const BLUEPRINT_UI_HTML: &str = include_str!("fixtures/blueprint.ui.html");
 /// `scripts/sync-app-fixtures.sh pull-requests`.
 pub const PULL_REQUESTS_UI_HTML: &str = include_str!("fixtures/pull-requests.ui.html");
 
+/// The Security app's prebuilt, self-contained Companion. Refresh with
+/// `scripts/sync-app-fixtures.sh security` after changing the workbench UI.
+pub const SECURITY_UI_HTML: &str = include_str!("fixtures/security.ui.html");
+
 /// The Workflows app's plugin id (its sandboxed companion drives Core's DAG
 /// workflow engine + ghost record→replay). Re-exported from `plugins::builtins`
 /// so the seed table and desktop route flow share one definition.
 pub const WORKFLOWS_PLUGIN_ID: &str = crate::plugins::builtins::WORKFLOWS_PLUGIN_ID;
 
 /// The Workflows app's prebuilt, self-contained UI bundle (a
-/// `vite-plugin-singlefile` build of `packages/workflows-app`, React Flow + all
+/// `vite-plugin-singlefile` build of `apps-store/workflows/ui`, React Flow + all
 /// JS/CSS inlined). Seeded as the plugin's `ui_code` on a fresh install so the
 /// pre-installed companion has a UI without going through `ryu pack`. Rebuild with
-/// `bun run --cwd packages/workflows-app build` and copy `dist/index.html` to
+/// `bun run --cwd apps-store/workflows/ui build` and copy `dist/index.html` to
 /// `fixtures/workflows.ui.html` to refresh it.
 pub const WORKFLOWS_UI_HTML: &str = include_str!("fixtures/workflows.ui.html");
 
@@ -2207,14 +2245,34 @@ impl PluginManifestLoader {
     }
 
     /// Combine the manifests available before the HTTP listener starts.
-    /// Installed/runtime manifests win over bootstrap declarations so a
-    /// materialized package's current manifest is used for its public mount.
+    /// Installed/runtime manifests win over compiled and bootstrap declarations
+    /// so a materialized package's current manifest is used for its public mount.
+    /// Compiled first-party manifests that are opt-in still contribute their
+    /// declared public mounts: the router is immutable after bind, while the
+    /// enabled gate in the generic proxy keeps an uninstalled app's prefix inert.
     pub(crate) fn for_router(
         installed: &[PluginManifest],
         bootstrap: &[PluginManifest],
     ) -> Vec<PluginManifest> {
         let mut manifests = installed.to_vec();
         let mut seen_ids: HashSet<String> = installed.iter().map(|m| m.id.clone()).collect();
+        // Public mounts are stable routes owned by compiled first-party manifests.
+        // Include only manifests that declare one; ordinary opt-in built-ins remain
+        // absent from the router snapshot, but an app such as Rooms must have its
+        // guest prefix registered before a later runtime install can enable it.
+        manifests.extend(
+            Self::load_builtins()
+                .into_iter()
+                .filter(|manifest| {
+                    manifest.sidecars.iter().any(|sidecar| {
+                        sidecar
+                            .http
+                            .as_ref()
+                            .is_some_and(|http| http.public_mount.is_some())
+                    })
+                })
+                .filter(|manifest| seen_ids.insert(manifest.id.clone())),
+        );
         manifests.extend(
             bootstrap
                 .iter()
@@ -2511,6 +2569,15 @@ impl PluginManifestLoader {
         validate_permission_levels(&manifest.permission_levels)
             .map_err(|e| format!("app '{}': {e} (source: {source})", manifest.id))?;
 
+        // Browser cookies are stripped from proxy hops by default. A sidecar may
+        // opt into only its own namespaced HttpOnly session cookies; validate this
+        // at load so an unsafe declaration never reaches the forwarding path.
+        ryu_kernel_contracts::manifest::validate_forwarded_cookie_names(
+            &manifest.id,
+            &manifest.sidecars,
+        )
+        .map_err(|e| format!("app '{}': {e} (source: {source})", manifest.id))?;
+
         // And the routes that CONSUME that vocabulary. Load-time rather than
         // call-time because a route naming an undeclared level is unsatisfiable: the
         // ext-proxy would refuse it on every request with the cause visible only in
@@ -2803,6 +2870,123 @@ mod tests {
                 ids.contains(id),
                 "production Core must embed runtime manifest '{id}'"
             );
+        }
+    }
+
+    #[test]
+    fn production_runtime_includes_the_opt_in_meetings_install_target() {
+        let ids: HashSet<String> = CORE_RUNTIME_BUILTIN_MANIFESTS
+            .iter()
+            .map(|raw| {
+                serde_json::from_str::<PluginManifest>(raw)
+                    .expect("production runtime manifest must parse")
+                    .id
+            })
+            .collect();
+
+        assert!(
+            ids.contains("@ryu/meetings"),
+            "Meetings is a Core-tier install target and must be available to the Store"
+        );
+    }
+
+    #[test]
+    fn production_runtime_includes_the_opt_in_activity_install_target() {
+        let ids: HashSet<String> = CORE_RUNTIME_BUILTIN_MANIFESTS
+            .iter()
+            .map(|raw| {
+                serde_json::from_str::<PluginManifest>(raw)
+                    .expect("production runtime manifest must parse")
+                    .id
+            })
+            .collect();
+
+        assert!(
+            ids.contains("@ryu/activity"),
+            "Activity is a Core-tier install target and must be available to the Store"
+        );
+    }
+
+    #[test]
+    fn production_runtime_includes_opt_in_companion_install_targets() {
+        let ids: HashSet<String> = CORE_RUNTIME_BUILTIN_MANIFESTS
+            .iter()
+            .map(|raw| {
+                serde_json::from_str::<PluginManifest>(raw)
+                    .expect("production runtime manifest must parse")
+                    .id
+            })
+            .collect();
+
+        for id in ["@ryu/autopilot", "@ryu/skill-editor"] {
+            assert!(
+                ids.contains(id),
+                "{id} is a Core-tier install target and must be available to the Store"
+            );
+        }
+    }
+
+    #[test]
+    fn production_runtime_includes_every_core_companion_carriage() {
+        let ids: HashSet<String> = CORE_RUNTIME_BUILTIN_MANIFESTS
+            .iter()
+            .map(|raw| {
+                serde_json::from_str::<PluginManifest>(raw)
+                    .expect("production runtime manifest must parse")
+                    .id
+            })
+            .collect();
+
+        for spec in crate::plugins::seed::companion_ui_specs() {
+            if crate::plugins::builtins::CORE_PLUGINS.contains(&spec.id) {
+                assert!(
+                    ids.contains(spec.id),
+                    "Core companion '{}' has a compiled UI carriage but no production runtime manifest",
+                    spec.id
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn production_runtime_includes_builtin_mcp_install_targets() {
+        let ids: HashSet<String> = CORE_RUNTIME_BUILTIN_MANIFESTS
+            .iter()
+            .map(|raw| {
+                serde_json::from_str::<PluginManifest>(raw)
+                    .expect("production runtime manifest must parse")
+                    .id
+            })
+            .collect();
+
+        for id in ["@ryu/scrapling", "@ryu/zvec-grep"] {
+            assert!(
+                ids.contains(id),
+                "{id} is a built-in MCP install target and must be available to the Store"
+            );
+        }
+    }
+
+    #[test]
+    fn production_code_table_covers_runtime_manifest_code_files() {
+        let source = include_str!("builtin_code.rs");
+        let production = source
+            .split_once("#[cfg(not(test))]")
+            .map(|(_, rest)| rest)
+            .expect("builtin_code.rs must declare a production code table");
+
+        for raw in CORE_RUNTIME_BUILTIN_MANIFESTS {
+            let manifest = serde_json::from_str::<PluginManifest>(raw)
+                .expect("production runtime manifest must parse");
+            for rel in manifest.code_file_refs() {
+                assert!(
+                    production.contains(&format!("\"{}\"", manifest.id))
+                        && production.contains(&format!("\"{}\"", rel)),
+                    "production builtin-code table is missing ({}, {})",
+                    manifest.id,
+                    rel
+                );
+            }
         }
     }
 

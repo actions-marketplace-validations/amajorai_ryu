@@ -77,21 +77,22 @@ function translucentOptions(): BrowserWindowConstructorOptions {
 }
 
 /**
- * Window options for the acrylic appearance: a window-tracked, non-transparent
+ * Window options for the acrylic appearance: a window-tracked transparent
  * window carrying a native OS material. `backgroundMaterial: "acrylic"` drives
  * the Windows 11 blur; `vibrancy: "under-window"` drives macOS vibrancy (each is
- * ignored on the other platform). `backgroundColor` is fully transparent so the
- * material shows through the web layer.
+ * ignored on the other platform). The transparent web layer lets the native
+ * material show through the Island's lightly-tinted shape.
  */
 function acrylicOptions(): BrowserWindowConstructorOptions {
 	return {
 		width: ACRYLIC_START_WIDTH,
 		height: ACRYLIC_START_HEIGHT,
 		frame: false,
-		transparent: false,
+		transparent: true,
 		backgroundColor: "#00000000",
 		backgroundMaterial: "acrylic",
 		vibrancy: "under-window",
+		visualEffectState: "active",
 		resizable: false,
 		skipTaskbar: true,
 		hasShadow: true,
@@ -109,7 +110,7 @@ function micaOptions(): BrowserWindowConstructorOptions {
 		width: ACRYLIC_START_WIDTH,
 		height: ACRYLIC_START_HEIGHT,
 		frame: false,
-		transparent: false,
+		transparent: true,
 		backgroundColor: "#00000000",
 		resizable: false,
 		skipTaskbar: true,

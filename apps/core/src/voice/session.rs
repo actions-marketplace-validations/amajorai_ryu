@@ -53,6 +53,7 @@ pub const TTS_SAMPLE_RATE: u32 = 24_000;
 /// Pre-roll kept before a confirmed onset so the VAD debounce (~120 ms) doesn't
 /// clip the first word. ~300 ms of 16 kHz mono.
 const PREROLL_SAMPLES: usize = (VAD_RATE as usize * 300) / 1000;
+const MAX_CAPTURE_SAMPLES: usize = VAD_RATE as usize * 60;
 
 /// The store bundle a turn needs to run through the real streaming chat path.
 /// Cloned out of `ServerState` at connect (the same handles the chat handler
@@ -133,6 +134,14 @@ impl VoiceSession {
             self.preroll.push_back(s);
         }
         if self.capturing {
+            if self.capture.len().saturating_add(pcm16.len()) > MAX_CAPTURE_SAMPLES {
+                // A client that never produces SpeechEnd must not grow one
+                // connection's PCM buffer without bound.
+                self.capture.clear();
+                self.capturing = false;
+                self.vad.reset();
+                return vec![VoiceEvent::SpeechEnd];
+            }
             self.capture.extend_from_slice(&pcm16);
         }
 

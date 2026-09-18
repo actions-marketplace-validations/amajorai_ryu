@@ -185,6 +185,13 @@ fn configure_schema() -> Value {
 /// Dispatch a tool call from the MCP registry to the right handler. Uses the
 /// process-global dashboard engine; no handle to wire.
 pub async fn dispatch(tool: &str, arguments: Value) -> Result<Value> {
+    if crate::sidecar::control_plane::is_managed_node()
+        || crate::sidecar::control_plane::registered_org().is_some()
+    {
+        anyhow::bail!(
+            "dashboard builder is disabled on managed nodes until dashboard and device ownership is bound to the verified caller"
+        );
+    }
     match tool {
         "get_dashboard" => get_dashboard(arguments).await,
         "create_dashboard" => create_dashboard(arguments).await,

@@ -109,11 +109,14 @@ export function mcpListQuery(
 
 export function useMcpCatalog(initialQuery = ""): UseMcpCatalogResult {
 	const activeNode = useActiveNode();
-	const target: ApiTarget = {
-		url: activeNode.url,
-		token: activeNode.token ?? null,
-		userJwt: activeNode.userJwt ?? null,
-	};
+	const target = useMemo<ApiTarget>(
+		() => ({
+			url: activeNode.url,
+			token: activeNode.token ?? null,
+			userJwt: activeNode.userJwt ?? null,
+		}),
+		[activeNode.url, activeNode.token, activeNode.userJwt]
+	);
 	const { url, token, userJwt } = target;
 	const qc = useQueryClient();
 
@@ -123,7 +126,9 @@ export function useMcpCatalog(initialQuery = ""): UseMcpCatalogResult {
 
 	// Catalog sources: list + active selection live in Core. Selecting a source
 	// switches Core's active endpoint, so every list/detail must refetch.
-	const sourcesQuery = useQuery(mcpSourcesQuery(target));
+	const sourcesQuery = useQuery(
+		useMemo(() => mcpSourcesQuery(target), [target])
+	);
 	const activeSource = sourcesQuery.data?.active ?? "";
 
 	const selectSourceMutation = useMutation({
@@ -147,16 +152,26 @@ export function useMcpCatalog(initialQuery = ""): UseMcpCatalogResult {
 
 	// Registered MCP servers — the authoritative installed-state signal. A card
 	// is installed iff its id is among these names. Re-fetched after install.
-	const serversQuery = useQuery(mcpServersQuery(target));
+	const serversQuery = useQuery(
+		useMemo(() => mcpServersQuery(target), [target])
+	);
 	const installedNames = useMemo(
 		() => new Set((serversQuery.data ?? []).map((s) => s.name)),
 		[serversQuery.data]
 	);
 
-	const listQuery = useInfiniteQuery({
-		...mcpListQuery(target, { query: debouncedQuery, source: activeSource }),
-		placeholderData: keepPreviousData,
-	});
+	const listQuery = useInfiniteQuery(
+		useMemo(
+			() => ({
+				...mcpListQuery(target, {
+					query: debouncedQuery,
+					source: activeSource,
+				}),
+				placeholderData: keepPreviousData,
+			}),
+			[target, debouncedQuery, activeSource]
+		)
+	);
 
 	// Flatten every loaded page, then fold in derived installed-state.
 	const servers = useMemo(() => {
@@ -164,12 +179,16 @@ export function useMcpCatalog(initialQuery = ""): UseMcpCatalogResult {
 		return flat.map((s) => ({ ...s, installed: installedNames.has(s.id) }));
 	}, [listQuery.data, installedNames]);
 
-	const detailQuery = useQuery({
-		queryKey: ["mcp", "detail", url, selectedId],
-		queryFn: () =>
-			fetchMcpCatalogDetail({ url, token, userJwt }, selectedId as string),
-		enabled: selectedId !== null,
-	});
+	const detailQuery = useQuery(
+		useMemo(
+			() => ({
+				queryKey: ["mcp", "detail", url, selectedId],
+				queryFn: () => fetchMcpCatalogDetail(target, selectedId as string),
+				enabled: selectedId !== null,
+			}),
+			[target, url, selectedId]
+		)
+	);
 
 	// Fold derived installed-state into the detail card too (Core sends false).
 	const detail = useMemo((): McpCatalogDetail | null => {

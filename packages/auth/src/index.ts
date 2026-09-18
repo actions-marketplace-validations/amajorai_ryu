@@ -113,11 +113,7 @@ import {
 	resolvePersonalOrgId,
 } from "./lib/organizations.ts";
 import { passwordSchema } from "./lib/password-policy.ts";
-import {
-	ensurePolarCustomer,
-	polarClient,
-	syncPolarCustomer,
-} from "./lib/payments.ts";
+import { polarClient, syncPolarCustomer } from "./lib/payments.ts";
 import {
 	ORGANIZATION_PLAN_IDS,
 	PLANS,
@@ -813,7 +809,9 @@ interface RateLimitedError {
 	retryAfter?: number;
 }
 
-const TURNSTILE_SECRET_KEY = process.env.TURNSTILE_SECRET_KEY ?? "";
+const TURNSTILE_SECRET_KEY = process.env.TURNSTILE_SECRET_KEY?.trim() || null;
+const TURNSTILE_CAPTCHA_ENABLED =
+	TURNSTILE_SECRET_KEY !== null || process.env.NODE_ENV === "production";
 
 interface LoginSession {
 	createdAt?: Date;
@@ -2032,11 +2030,6 @@ export const auth = betterAuth({
 					if (user.isAnonymous) {
 						return;
 					}
-					await ensurePolarCustomer({
-						id: user.id,
-						email: user.email,
-						name: user.name,
-					});
 					// Credit the referrer (if any) so referrals move them up the queue.
 					// Best-effort: a bad/unknown code just means no credit.
 					if (user.referredBy) {
@@ -2161,19 +2154,28 @@ export const auth = betterAuth({
 		// copy; this plugin is deliberately limited to auth errors and keeps the
 		// original message in the response for support and diagnostics.
 		createRyuAuthI18nPlugin(),
-		captcha({
-			// Keep the password-recovery request protected after moving from the
-			// core reset-link endpoint to Email OTP. Better Auth's default list does
-			// not include the Email OTP endpoint.
-			endpoints: [
-				"/sign-up/email",
-				"/sign-in/email",
-				"/request-password-reset",
-				"/email-otp/request-password-reset",
-			],
-			provider: "cloudflare-turnstile",
-			secretKey: TURNSTILE_SECRET_KEY,
-		}),
+		// Turnstile is optional for local/self-hosted development. Better Auth treats
+		// an empty secret as an internal error, which would make every local signup
+		// with a widget response fail as HTTP 500. Keep the plugin in production so a
+		// missing production secret remains fail-closed rather than silently disabling
+		// bot protection.
+		...(TURNSTILE_CAPTCHA_ENABLED
+			? [
+					captcha({
+						// Keep the password-recovery request protected after moving from the
+						// core reset-link endpoint to Email OTP. Better Auth's default list does
+						// not include the Email OTP endpoint.
+						endpoints: [
+							"/sign-up/email",
+							"/sign-in/email",
+							"/request-password-reset",
+							"/email-otp/request-password-reset",
+						],
+						provider: "cloudflare-turnstile",
+						secretKey: TURNSTILE_SECRET_KEY ?? "",
+					}),
+				]
+			: []),
 		// Keep the plugin registered so legacy anonymous sessions can be removed by
 		// the clients. New anonymous sign-ins are rejected by the auth hook below
 		// while the hosted browser waitlist is active.
@@ -2340,8 +2342,9 @@ export const auth = betterAuth({
 			// endpoint should be registered. Keep the runtime list empty; the cast is
 			// only to satisfy that type-level tuple requirement.
 			use: [] as unknown as [never],
-			// Customer provisioning is handled by databaseHooks.user.create.after via
-			// ensurePolarCustomer so a Polar/API error never makes sign-up fail.
+			// Customer provisioning is deferred to the billing checkout routes. This
+			// prevents a personal customer created at sign-up from colliding with the
+			// dedicated team customer an organization may need later.
 			createCustomerOnSignUp: false,
 		}),
 		deviceAuthorization({

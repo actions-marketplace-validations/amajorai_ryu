@@ -49,6 +49,15 @@ test("Help Center companion completes the support workflow in Chromium", async (
 	await page.goto("/companion-host-story.html");
 	await page.waitForLoadState("networkidle");
 	await page.waitForSelector("body[data-harness-ready='1']");
+	await page.locator("main").evaluate((element) => {
+		const main = element as HTMLElement;
+		main.style.maxWidth = "1320px";
+	});
+	await page.locator("#host-root").evaluate((element) => {
+		const hostRoot = element as HTMLElement;
+		hostRoot.style.height = "720px";
+		hostRoot.style.width = "1280px";
+	});
 	await page.evaluate(async () => {
 		await import("/help-center-host-story.tsx");
 	});

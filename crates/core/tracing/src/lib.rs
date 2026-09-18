@@ -9,8 +9,9 @@
 //!   - `started_at`  — Unix milliseconds (write time)
 //!   - `ended_at`    — Unix milliseconds (finish time; `None` while running)
 //!   - `error`       — non-`None` when the span ended with an error
-//!   - `session_id`  — nullable link to the gateway audit row (populated when
-//!                     #176 threads the id; left `None` until then)
+//!   - `session_id`  — nullable link to the Gateway audit session when the
+//!                     caller has one; model-call spans receive the Core
+//!                     conversation id and tool spans may remain `None`
 //!
 //! Placement rationale (Core vs Gateway, see CLAUDE.md §1): span ordering and
 //! tool-call sequencing are *what ran* (orchestration) — Core.  Token counts,
@@ -45,8 +46,8 @@ pub struct Span {
     pub ended_at: Option<i64>,
     /// Error message if the span ended with a failure.
     pub error: Option<String>,
-    /// Nullable link to the gateway audit row via `x-ryu-session` (populated
-    /// by #176; `None` until that thread lands).
+    /// Nullable link to the Gateway audit session. Model-call spans carry the
+    /// Core conversation id; tool spans may omit the link.
     pub session_id: Option<String>,
     /// Autoincrement ordering key (monotonically increasing within the DB).
     pub seq: i64,
@@ -55,7 +56,32 @@ pub struct Span {
 /// SQLite-backed trace store.  Cheap to clone — wraps an `Arc<Mutex<Connection>>`.
 #[derive(Clone)]
 pub struct TraceStore {
-    conn: Arc<Mutex<Connection>>,
+	conn: Arc<Mutex<Connection>>,
+	path: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize)]
+pub struct TracePruneSummary {
+	pub deleted_rows: u64,
+	pub retention_days: Option<u64>,
+	pub max_rows: Option<u64>,
+}
+
+const DEFAULT_TRACE_RETENTION_DAYS: u64 = 90;
+const DEFAULT_TRACE_MAX_ROWS: u64 = 1_000_000;
+
+fn trace_retention_policy() -> (Option<u64>, Option<u64>) {
+	let parse = |name: &str, fallback: u64| {
+		std::env::var(name)
+			.ok()
+			.and_then(|value| value.trim().parse::<u64>().ok())
+			.map(|value| if value == 0 { None } else { Some(value) })
+			.unwrap_or(Some(fallback))
+	};
+	(
+		parse("RYU_TRACE_RETENTION_DAYS", DEFAULT_TRACE_RETENTION_DAYS),
+		parse("RYU_TRACE_MAX_ROWS", DEFAULT_TRACE_MAX_ROWS),
+	)
 }
 
 fn now_millis() -> i64 {
@@ -96,8 +122,14 @@ impl TraceStore {
         let conn = Connection::open(&path)
             .with_context(|| format!("opening trace db {}", path.display()))?;
         Self::init_schema(&conn)?;
+		let (retention_days, max_rows) = trace_retention_policy();
+		let summary = prune_connection(&conn, retention_days, max_rows)?;
+		if summary.deleted_rows > 0 {
+			tracing::info!(deleted_rows = summary.deleted_rows, "trace retention pass removed old spans");
+		}
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
+			path: Some(path),
         })
     }
 
@@ -107,6 +139,7 @@ impl TraceStore {
         Self::init_schema(&conn)?;
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
+			path: None,
         })
     }
 
@@ -215,6 +248,61 @@ impl TraceStore {
         rows.collect::<std::result::Result<Vec<_>, _>>()
             .context("reading spans")
     }
+
+    /// Delete every span for a temporary or deleted run. Trace rows have no
+    /// independent ownership; retaining them after their conversation disappears
+    /// would leave no durable ACL principal to authorize a later read.
+    pub async fn delete_spans(&self, conversation_id: &str) -> Result<u64> {
+        let conn = self.conn.lock().await;
+        Ok(conn.execute(
+            "DELETE FROM spans WHERE conversation_id = ?1",
+            params![conversation_id],
+        )? as u64)
+    }
+
+	/// Apply the configured trace retention policy immediately. In-memory stores
+	/// are intentionally no-ops; persistent stores use the same bounded policy
+	/// that runs at startup.
+	pub async fn prune(&self) -> Result<TracePruneSummary> {
+		let Some(_path) = &self.path else {
+			return Ok(TracePruneSummary::default());
+		};
+		let (retention_days, max_rows) = trace_retention_policy();
+		let conn = self.conn.lock().await;
+		prune_connection(&conn, retention_days, max_rows)
+	}
+}
+
+fn prune_connection(
+	conn: &Connection,
+	retention_days: Option<u64>,
+	max_rows: Option<u64>,
+) -> Result<TracePruneSummary> {
+	let mut deleted_rows = 0_u64;
+	if let Some(days) = retention_days {
+		let cutoff = chrono::Utc::now()
+			.checked_sub_signed(chrono::Duration::days(days.min(i64::MAX as u64) as i64))
+			.map(|value| value.timestamp_millis())
+			.unwrap_or(i64::MIN);
+		deleted_rows = deleted_rows.saturating_add(
+			conn.execute("DELETE FROM spans WHERE started_at < ?1", params![cutoff])? as u64,
+		);
+	}
+	if let Some(max_rows) = max_rows {
+		let max_rows = max_rows.min(i64::MAX as u64) as i64;
+		deleted_rows = deleted_rows.saturating_add(
+			conn.execute(
+				"DELETE FROM spans
+				 WHERE seq NOT IN (SELECT seq FROM spans ORDER BY seq DESC LIMIT ?1)",
+				params![max_rows],
+			)? as u64,
+		);
+	}
+	Ok(TracePruneSummary {
+		deleted_rows,
+		retention_days,
+		max_rows,
+	})
 }
 
 #[cfg(test)]
@@ -250,6 +338,22 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn delete_spans_removes_temporary_run_evidence() {
+        let store = TraceStore::open_in_memory().unwrap();
+        let span_id = store
+            .open_span("temporary-eval", "model-call", "m1", None, None)
+            .await
+            .unwrap();
+        store.close_span(&span_id, None).await.unwrap();
+        assert_eq!(store.delete_spans("temporary-eval").await.unwrap(), 1);
+        assert!(store
+            .get_spans("temporary-eval")
+            .await
+            .unwrap()
+            .is_empty());
+    }
+
+    #[tokio::test]
     async fn error_span_records_message() {
         let store = TraceStore::open_in_memory().unwrap();
         let span_id = store
@@ -262,6 +366,28 @@ mod tests {
             .unwrap();
         let spans = store.get_spans("conv-2").await.unwrap();
         assert_eq!(spans[0].error.as_deref(), Some("permission denied"));
+    }
+
+    #[tokio::test]
+    async fn model_call_span_keeps_session_link_without_payload() {
+        let store = TraceStore::open_in_memory().unwrap();
+        let span_id = store
+            .open_span(
+                "conv-model",
+                "model-call",
+                "gpt-4o-mini",
+                None,
+                Some("conv-model"),
+            )
+            .await
+            .unwrap();
+        store.close_span(&span_id, None).await.unwrap();
+
+        let spans = store.get_spans("conv-model").await.unwrap();
+        assert_eq!(spans[0].kind, "model-call");
+        assert_eq!(spans[0].name, "gpt-4o-mini");
+        assert_eq!(spans[0].session_id.as_deref(), Some("conv-model"));
+        assert!(spans[0].args_hash.is_none());
     }
 
     #[tokio::test]

@@ -10,7 +10,7 @@
 // what extraction managed in `index`. A 200 therefore means "stored", not
 // "searchable" — a scanned PDF on a node with no OCR reader comes back `skipped`,
 // and a user told "Uploaded ✓" would go on to search for text that was never
-// indexed. Every finished row prints {@link indexNote} for that reason.
+// indexed. Every finished row prints the extraction outcome for that reason.
 //
 // Uploads run one at a time. The wire form is base64 JSON at up to 32 MiB a file,
 // so N concurrent uploads means N inflated copies resident at once; serialising
@@ -28,10 +28,7 @@ import {
 	DialogHeader,
 	DialogTitle,
 } from "@ryu/ui/components/dialog.tsx";
-import {
-	FileUpload,
-	type FileUploadItem,
-} from "@ryu/ui/components/file-upload.tsx";
+import { FileUpload } from "@ryu/ui/components/file-upload.tsx";
 import { Label } from "@ryu/ui/components/label.tsx";
 import {
 	Select,
@@ -41,50 +38,14 @@ import {
 	SelectValue,
 } from "@ryu/ui/components/select.tsx";
 import { toast } from "@ryu/ui/components/sileo.tsx";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useSpacesContext } from "@/src/contexts/SpacesContext.tsx";
 import { useTabsContext } from "@/src/contexts/TabsContext.tsx";
-import {
-	formatBytes,
-	SPACE_UPLOAD_MAX_BYTES,
-	type SpaceFileIndex,
-} from "@/src/lib/api/spaces.ts";
+import { useSpaceFileUpload } from "@/src/hooks/useSpaceFileUpload.ts";
 
 /** The system space every other upload path in the app already writes to, and so
  *  the least surprising default when the dialog is opened without a target. */
 const DEFAULT_SPACE_NAME = "Uploads";
-
-/**
- * The one-line truth about a stored file's contents, per Core's extraction state.
- *
- * The five states are three different things for the user to do (nothing / install
- * a reader / try again), which is exactly why this does not collapse them into a
- * single "Uploaded". `null` — a state this build does not recognise — says only
- * that the bytes are stored, because a claim about searchability has no safe
- * default.
- */
-function indexNote(index: SpaceFileIndex): string {
-	switch (index.state) {
-		case "indexed":
-			return "Stored and searchable";
-		case "pending":
-			return "Stored — reading its text now";
-		case "skipped":
-			return "Stored — nothing on this node can read this format, so its contents aren't searchable";
-		case "failed":
-			return index.message
-				? `Stored, but its text couldn't be read: ${index.message}`
-				: "Stored, but its text couldn't be read";
-		case "unattempted":
-			return "Stored — its contents haven't been indexed";
-		default:
-			return "Stored";
-	}
-}
-
-interface QueuedUpload extends FileUploadItem {
-	file: File;
-}
 
 export function AddToSpaceDialog({
 	onClose,
@@ -98,15 +59,9 @@ export function AddToSpaceDialog({
 	spaceId: string | null;
 }) {
 	const { openTab } = useTabsContext();
-	const { spaces, uploadFile, createPage, createDatabase, reload } =
-		useSpacesContext();
+	const { spaces, createPage, createDatabase } = useSpacesContext();
 	const [pickedId, setPickedId] = useState<string | null>(null);
-	const [queue, setQueue] = useState<QueuedUpload[]>([]);
 	const [creating, setCreating] = useState(false);
-	// Uploads are serialised by chaining onto this promise, so a second drop while
-	// the first batch is still running queues behind it rather than racing it.
-	const chainRef = useRef<Promise<void>>(Promise.resolve());
-	const seqRef = useRef(0);
 
 	const fallbackId = useMemo(() => {
 		const uploads = spaces.find(
@@ -117,113 +72,17 @@ export function AddToSpaceDialog({
 
 	const targetId = spaceId ?? pickedId ?? fallbackId;
 	const target = spaces.find((s) => s.id === targetId) ?? null;
+	const { onFilesAdded, onRemove, onRetry, queue, reset, uploading } =
+		useSpaceFileUpload(targetId);
 
 	// A fresh open starts from an empty queue: leaving the previous batch's rows up
 	// would show results for a Space the user may no longer be looking at.
 	useEffect(() => {
 		if (open) {
-			setQueue([]);
+			reset();
 			setPickedId(null);
 		}
-	}, [open]);
-
-	const patch = useCallback((id: string, next: Partial<QueuedUpload>) => {
-		setQueue((prev) =>
-			prev.map((item) => (item.id === id ? { ...item, ...next } : item))
-		);
-	}, []);
-
-	const runOne = useCallback(
-		async (entry: QueuedUpload, toSpaceId: string) => {
-			// `progress: null` until the first real `onprogress`: the file is being
-			// read into base64 locally and there is nothing truthful to show yet.
-			patch(entry.id, {
-				status: "uploading",
-				progress: null,
-				error: undefined,
-			});
-			try {
-				const stored = await uploadFile(toSpaceId, entry.file, {
-					onProgress: (fraction) => patch(entry.id, { progress: fraction }),
-				});
-				patch(entry.id, {
-					status: "success",
-					progress: 1,
-					note: indexNote(stored.index),
-				});
-			} catch (e) {
-				patch(entry.id, {
-					status: "error",
-					progress: null,
-					error: e instanceof Error ? e.message : "Upload failed",
-				});
-			}
-		},
-		[patch, uploadFile]
-	);
-
-	const enqueue = useCallback(
-		(entries: QueuedUpload[], toSpaceId: string) => {
-			chainRef.current = chainRef.current.then(async () => {
-				for (const entry of entries) {
-					await runOne(entry, toSpaceId);
-				}
-				// One refetch per batch, not per file — the list only needs to be right
-				// once the queue settles, and reloading mid-batch re-renders the sidebar
-				// under the user's pointer.
-				await reload().catch(() => undefined);
-			});
-		},
-		[runOne, reload]
-	);
-
-	const onFilesAdded = (files: File[]) => {
-		if (!targetId) {
-			toast.error("Create a space first", {
-				description: "There's nowhere to put these files yet.",
-			});
-			return;
-		}
-		const entries: QueuedUpload[] = files.map((file) => {
-			seqRef.current += 1;
-			return {
-				file,
-				id: `${seqRef.current}:${file.name}`,
-				name: file.name,
-				size: file.size,
-				status: "pending",
-				progress: null,
-			};
-		});
-		// Refuse the oversize ones up front, as rows rather than as a toast, so the
-		// user sees which file was refused next to the ones that were not.
-		const tooBig = entries.filter((e) => e.file.size > SPACE_UPLOAD_MAX_BYTES);
-		const ok = entries.filter((e) => e.file.size <= SPACE_UPLOAD_MAX_BYTES);
-		setQueue((prev) => [
-			...prev,
-			...ok,
-			...tooBig.map((e) => ({
-				...e,
-				status: "error" as const,
-				error: `Too large — the limit is ${formatBytes(SPACE_UPLOAD_MAX_BYTES)}.`,
-			})),
-		]);
-		if (ok.length > 0) {
-			enqueue(ok, targetId);
-		}
-	};
-
-	const onRetry = (item: FileUploadItem) => {
-		const entry = queue.find((q) => q.id === item.id);
-		if (!(entry && targetId)) {
-			return;
-		}
-		enqueue([entry], targetId);
-	};
-
-	const onRemove = (item: FileUploadItem) => {
-		setQueue((prev) => prev.filter((q) => q.id !== item.id));
-	};
+	}, [open, reset]);
 
 	const createAndOpen = async (kind: "database" | "page") => {
 		if (!targetId) {
@@ -249,8 +108,6 @@ export function AddToSpaceDialog({
 			setCreating(false);
 		}
 	};
-
-	const uploading = queue.some((q) => q.status === "uploading");
 
 	return (
 		<Dialog
@@ -297,6 +154,7 @@ export function AddToSpaceDialog({
 						</div>
 					)}
 					<FileUpload
+						description="Files are read and indexed by this node"
 						disabled={!targetId}
 						items={queue}
 						onFilesAdded={onFilesAdded}

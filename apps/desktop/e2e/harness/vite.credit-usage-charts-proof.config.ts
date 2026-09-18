@@ -8,12 +8,17 @@ const desktopRoot = path.resolve(harnessDir, "../..");
 
 export default defineConfig({
 	plugins: [react()],
+	base: "./",
 	css: {
 		postcss: {
 			plugins: [tailwindcss()],
 		},
 	},
+	define: {
+		"process.env": {},
+	},
 	root: harnessDir,
+	publicDir: path.resolve(desktopRoot, "public"),
 	resolve: {
 		alias: {
 			"@": desktopRoot,

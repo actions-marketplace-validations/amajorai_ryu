@@ -266,8 +266,6 @@ function Story() {
 							retrievalMode: "vector",
 						},
 						documents: [],
-						ingestTitle: "",
-						ingestContent: "",
 						searchQuery: "",
 						importPanel: (
 							<SpaceImportsPanel

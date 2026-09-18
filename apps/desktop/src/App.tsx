@@ -57,7 +57,11 @@ import { useConsoleAccess } from "./hooks/useConsoleAccess.ts";
 import { useCreditsWallet } from "./hooks/useCreditsWallet.ts";
 import { initInvertedBackgrounds } from "./hooks/useInvertedBackgrounds.ts";
 import { initPointerCursor } from "./hooks/usePointerCursor.ts";
-import { initTheme, useThemePreset } from "./hooks/useThemePreset.ts";
+import {
+	initAnimationsPreference,
+	initTheme,
+	useThemePreset,
+} from "./hooks/useThemePreset.ts";
 import { useBuildProfile } from "./lib/build-profile.ts";
 import {
 	isDesktopOnboardingComplete,
@@ -81,12 +85,14 @@ import {
 	useProductModeStore,
 } from "./lib/product-mode.ts";
 import { useReleaseChannel } from "./lib/release-channel.ts";
+import { readHostedStandaloneAppId } from "./lib/standalone-window.ts";
 import {
 	readStartupSelectionPreferences,
 	startupSelectionSteps,
 } from "./lib/startup-selection.ts";
 import { resolveDesktopWindowTitle } from "./lib/window-title.ts";
 import CompanionPage from "./pages/CompanionPage.tsx";
+import HostedStandaloneAppEntry from "./pages/HostedStandaloneAppEntry.tsx";
 import LoginPage from "./pages/LoginPage.tsx";
 import OnboardingPage from "./pages/OnboardingPage.tsx";
 import StandaloneAppEntry from "./pages/StandaloneAppEntry.tsx";
@@ -107,6 +113,9 @@ function getTauriWindowLabel(): string {
 }
 
 const WINDOW_LABEL = getTauriWindowLabel();
+const HOSTED_STANDALONE_APP_ID = readHostedStandaloneAppId(
+	typeof window === "undefined" ? "" : window.location.search
+);
 
 /** Terminates a `listenWhenReady(...).then(...)` chain. Outside Tauri the gate
  *  already resolves to a no-op unlisten, so reaching here means a real subscribe
@@ -259,6 +268,9 @@ function ProductModeAccessSync({ children }: { children: ReactNode }) {
 
 /** Syncs the native window/taskbar label with the active product and release channel. */
 function WindowTitleManager() {
+	if (HOSTED_STANDALONE_APP_ID) {
+		return null;
+	}
 	const { dev } = useBuildProfile();
 	const [channel] = useReleaseChannel();
 	const productMode = useProductMode();
@@ -302,6 +314,7 @@ function MainApp({ hostSurface }: { hostSurface: AppSurface }) {
 	const productMode = useProductMode();
 	const botProduct = productMode === "bot";
 	const standaloneApp = isRyuStandaloneApp();
+	const hostedStandaloneApp = Boolean(HOSTED_STANDALONE_APP_ID);
 	useAcpKeepAwake();
 	const setCoreStatus = useAppStore((state) => state.setCoreStatus);
 	const initNodes = useNodeStore((s) => s.init);
@@ -913,6 +926,7 @@ function MainApp({ hostSurface }: { hostSurface: AppSurface }) {
 		// module scope, because its default is off while the CSS base state is on,
 		// so applying it one effect late would flash a blurred backdrop.
 		initTheme();
+		initAnimationsPreference();
 		initPointerCursor();
 		initChromeShadows();
 		initInvertedBackgrounds();
@@ -975,9 +989,11 @@ function MainApp({ hostSurface }: { hostSurface: AppSurface }) {
 		!standaloneApp && showApp && waitlistGate === "loading";
 	const waitlisted = !standaloneApp && showApp && waitlistGate === "pending";
 	const startupSelectionLoading =
-		!standaloneApp && authed && startupSelectionStatus === "loading";
+		!(standaloneApp || hostedStandaloneApp) &&
+		authed &&
+		startupSelectionStatus === "loading";
 	const startupChooserVisible =
-		!(botProduct || standaloneApp) &&
+		!(botProduct || standaloneApp || hostedStandaloneApp) &&
 		authed &&
 		startupSelectionStatus === "show";
 	const desktopOnboardingComplete = isDesktopOnboardingComplete();
@@ -1044,6 +1060,10 @@ function MainApp({ hostSurface }: { hostSurface: AppSurface }) {
 									<ProductModeAccessSync>
 										{standaloneApp ? (
 											<StandaloneAppEntry appId={STANDALONE_APP_ID} />
+										) : hostedStandaloneApp ? (
+											<HostedStandaloneAppEntry
+												appId={HOSTED_STANDALONE_APP_ID}
+											/>
 										) : botProduct ? (
 											<BotManagedEntry />
 										) : nodeOnboardingStateStatus === "loading" &&

@@ -1,5 +1,4 @@
 import {
-	LOGIN_APPROVAL_CLIENTS,
 	LOGIN_APPROVAL_POLL_INTERVAL_SECONDS,
 	type LoginApprovalEvent,
 	type LoginApprovalRequest,
@@ -8,6 +7,7 @@ import {
 
 export type {
 	LoginApprovalEvent,
+	LoginApprovalQrPayload,
 	LoginApprovalRequest,
 	LoginApprovalStart,
 	LoginApprovalSurface,
@@ -278,12 +278,14 @@ export async function pollLoginApprovalSession(
 /** Read all pending approval prompts for the authenticated account. */
 export async function listLoginApprovals(
 	base: string,
-	auth: LoginApprovalAuth = {}
+	auth: LoginApprovalAuth = {},
+	signal?: AbortSignal
 ): Promise<LoginApprovalRequest[]> {
 	const response = await fetch(apiUrl(base, "/pending"), {
 		credentials: "include",
 		headers: authHeaders(auth.token),
 		method: "GET",
+		signal,
 	});
 	if (!response.ok) {
 		throw new Error(await errorMessage(response));
@@ -389,23 +391,32 @@ export async function streamLoginApprovals(
 	const reader = response.body.getReader();
 	const decoder = new TextDecoder();
 	let buffer = "";
-	while (true) {
-		const { done, value } = await reader.read();
-		if (done) {
-			return;
-		}
-		buffer += decoder.decode(value, { stream: true });
-		let separator = buffer.indexOf(FRAME_SEPARATOR);
-		while (separator >= 0) {
-			const frame = buffer.slice(0, separator);
-			buffer = buffer.slice(separator + FRAME_SEPARATOR.length);
-			const event = parseEvent(frame);
-			if (event) {
-				onEvent(event);
+	try {
+		while (!signal?.aborted) {
+			const { done, value } = await reader.read();
+			if (done) {
+				return;
 			}
-			separator = buffer.indexOf(FRAME_SEPARATOR);
+			buffer += decoder.decode(value, { stream: true });
+			let separator = buffer.indexOf(FRAME_SEPARATOR);
+			while (separator >= 0 && !signal?.aborted) {
+				const frame = buffer.slice(0, separator);
+				buffer = buffer.slice(separator + FRAME_SEPARATOR.length);
+				const event = parseEvent(frame);
+				if (event) {
+					onEvent(event);
+				}
+				separator = buffer.indexOf(FRAME_SEPARATOR);
+			}
 		}
+	} finally {
+		await reader.cancel().catch(() => undefined);
+		reader.releaseLock();
 	}
 }
 
-export { LOGIN_APPROVAL_CLIENTS };
+export {
+	LOGIN_APPROVAL_CLIENTS,
+	normalizeLoginApprovalUserCode,
+	parseLoginApprovalQr,
+} from "./login-approval-contract.ts";

@@ -1,5 +1,11 @@
 {
-  "tags": ["agents", "messaging", "delegation", "inbox", "multi-agent"],
+  "tags": [
+    "agents",
+    "messaging",
+    "delegation",
+    "inbox",
+    "multi-agent"
+  ],
   "author": {
     "name": "Ryu",
     "url": "https://ryuhq.com"
@@ -10,11 +16,17 @@
   "termsOfServiceUrl": "https://ryuhq.com/terms",
   "id": "@ryu/agent-comms",
   "name": "Switchboard",
-  "version": "0.1.14",
+  "version": "0.1.15",
   "stability": "experimental",
   "description": "Lets the agents on this node talk to each other. Any agent can look up who else is here, leave one of them a message, and inspect the pair's bounded message history. A message is delivered at the start of the recipient's next turn, so delegation stays asynchronous and scoped to the calling agent. Works with every agent Ryu can run — the flagship agent, Claude Code, Codex, and any custom agent you have added — because it ships as ordinary tools rather than one agent's private feature.",
   "tagline": "Your agents can message each other",
-  "keywords": ["agents", "messaging", "delegation", "inbox", "multi-agent"],
+  "keywords": [
+    "agents",
+    "messaging",
+    "delegation",
+    "inbox",
+    "multi-agent"
+  ],
   "category": "Automation",
   "icon": "message-multiple-01",
   "iconDither": {
@@ -54,9 +66,12 @@
   "permission_grants": [
     "tool:execute",
     "storage:kv",
+    "conversation:reactions",
     "tool:http-egress:127.0.0.1"
   ],
-  "activation_events": ["*"],
+  "activation_events": [
+    "*"
+  ],
   "runnables": [
     {
       "id": "tool-agents-directory",
@@ -90,7 +105,10 @@
         "description": "Leave a message in another agent's inbox and carry on — nothing waits. The recipient reads it at the start of its next turn. Use this to hand something over (\"the deploy is done, your turn\"), or to reply to a message you received. The sender is taken from the calling agent, not from anything you write. Returns `{ok, id, from, to, hops, delivery}`, or `{ok:false, refused:\"hop_limit\"}` when the relay chain is already at its limit.",
         "input_schema": {
           "type": "object",
-          "required": ["to", "text"],
+          "required": [
+            "to",
+            "text"
+          ],
           "properties": {
             "to": {
               "type": "string",
@@ -138,6 +156,39 @@
         },
         "code": "// Tool body for `agents.thread`, run in Core's Deno sandbox.\n//\n// This file is a FRAGMENT, not an ES module: Core splices it into an async IIFE\n// (`build_inline_tool_program` in crates/core/tool-exec/src/lib.rs) with `input`,\n// `caller` and `host` bound, and the body `return`s the tool result. The\n// manifest's `runnables[].config.code` is sealed from this file — edit here, then\n// reseal (plugin.test.mjs fails on drift).\n//\n// Reading is scoped to the CALLING agent's own threads, and that is the whole\n// security posture of this tool: `caller.agent_id` is host-derived, so a `with`\n// the model writes can only ever name the OTHER end of one of its own\n// conversations. There is deliberately no \"read agent X's mailbox\" argument.\n\nconst MAX_MESSAGES = 12;\nconst AGENT_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;\n\nasync function readJson(key, fallback) {\n\tconst raw = await host.storage.get(key);\n\tif (raw === null || raw === undefined || raw === \"\") {\n\t\treturn fallback;\n\t}\n\ttry {\n\t\tconst parsed = JSON.parse(String(raw));\n\t\treturn parsed === null ? fallback : parsed;\n\t} catch (_e) {\n\t\treturn fallback;\n\t}\n}\n\nfunction threadKey(a, b) {\n\tconst pair = [a, b].sort().map((value) => encodeURIComponent(value));\n\treturn `thread:${pair[0]}|${pair[1]}`;\n}\n\nconst me = String(caller.agent_id ?? \"\").trim();\nif (!AGENT_ID.test(me)) {\n\tthrow new Error(\"agents.thread: the calling agent could not be identified\");\n}\n\nconst peer = String(input.with ?? \"\").trim();\nif (peer !== \"\" && !AGENT_ID.test(peer)) {\n\tthrow new Error(\"agents.thread: 'with' must be a bounded agent id\");\n}\n\n// No peer named → which agents has this one talked to at all. Derived from the\n// key set, so it lists real history rather than the node's whole roster (that is\n// what agents.directory is for).\nif (peer === \"\") {\n\tconst keys = await host.storage.keys();\n\tconst peers = [];\n\tfor (const key of Array.isArray(keys) ? keys : []) {\n\t\tconst k = String(key);\n\t\tif (!k.startsWith(\"thread:\")) {\n\t\t\tcontinue;\n\t\t}\n\t\tconst pair = k.slice(\"thread:\".length).split(\"|\");\n\t\tif (pair.length !== 2) {\n\t\t\tcontinue;\n\t\t}\n\t\tconst decoded = pair.map((value) => decodeURIComponent(value));\n\t\tif (decoded[0] === me && !peers.includes(decoded[1])) {\n\t\t\tpeers.push(decoded[1]);\n\t\t} else if (decoded[1] === me && !peers.includes(decoded[0])) {\n\t\t\tpeers.push(decoded[0]);\n\t\t}\n\t}\n\treturn {\n\t\tok: true,\n\t\tagent: me,\n\t\tpeers: peers,\n\t\thint:\n\t\t\tpeers.length === 0\n\t\t\t\t? \"No agent-to-agent history yet. agents.directory lists who is on this node.\"\n\t\t\t\t: \"Call agents.thread again with `with: \\\"<agent id>\\\"` to read one of these.\",\n\t};\n}\n\nconst messages = await readJson(threadKey(me, peer), []);\nconst rows = (Array.isArray(messages) ? messages : []).slice(-MAX_MESSAGES);\n\nreturn {\n\tok: true,\n\tagent: me,\n\twith: peer,\n\tmessages: rows.map((m) => ({\n\t\tseq: m.seq ?? null,\n\t\tfrom: m.from ?? null,\n\t\tto: m.to ?? null,\n\t\ttext: String(m.text ?? \"\"),\n\t})),\n\tcount: rows.length,\n};\n"
       }
+    },
+    {
+      "id": "tool-agents-react",
+      "name": "React to a Message",
+      "kind": "tool",
+      "config": {
+        "slug": "agents.react",
+        "backend": "inline_deno",
+        "description": "Set an emoji reaction on an exact persisted message in the calling agent's current conversation. Use the message_id from the conversation or from search_conversations.search; the target may be a user message or a message authored by any other agent in the same conversation. Repeating the same reaction is idempotent. The actor and conversation are resolved by Core from the calling agent and cannot be supplied by the model.",
+        "input_schema": {
+          "type": "object",
+          "required": [
+            "message_id",
+            "emoji"
+          ],
+          "properties": {
+            "message_id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200,
+              "description": "The exact persisted Core message id to react to. Streaming/client-generated ids and ids from another conversation are rejected; messages authored by other agents are allowed."
+            },
+            "emoji": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 64,
+              "description": "The emoji or bounded emoji sequence to add, such as ✅ or 👀."
+            }
+          },
+          "additionalProperties": false
+        },
+        "code": "// Tool body for `agents.react`, run in Core's Deno sandbox.\n//\n// This file is a FRAGMENT, not an ES module: Core splices it into an async IIFE\n// (`build_inline_tool_program` in crates/core/tool-exec/src/lib.rs) with `input`\n// (the call arguments), `caller` (the DISPATCHING agent, host-derived) and `host`\n// (the capability bridge) already bound, and the body `return`s the tool result.\n// A top-level `return` is therefore correct here and `export` is not. The\n// manifest's `runnables[].config.code` is sealed from this file — edit here, then\n// reseal (see plugin.test.mjs, which fails on drift).\n//\n// Reactions are scoped to the agent's current host conversation. The Core bridge\n// supplies that conversation and the agent actor from the dispatch context, so a\n// model cannot redirect the reaction to another chat or react as another agent.\n\nconst MAX_MESSAGE_ID_BYTES = 200;\nconst MAX_EMOJI_BYTES = 64;\nconst AGENT_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;\nconst byteLength = (value) => new TextEncoder().encode(value).length;\n\nconst messageId = String(input.message_id ?? \"\").trim();\nif (messageId === \"\") {\n\tthrow new Error(\"agents.react: 'message_id' is required\");\n}\nif (byteLength(messageId) > MAX_MESSAGE_ID_BYTES) {\n\tthrow new Error(\n\t\t`agents.react: 'message_id' must be at most ${MAX_MESSAGE_ID_BYTES} bytes`\n\t);\n}\n\nconst emoji = String(input.emoji ?? \"\").trim();\nif (emoji === \"\") {\n\tthrow new Error(\"agents.react: 'emoji' is required\");\n}\nif (byteLength(emoji) > MAX_EMOJI_BYTES) {\n\tthrow new Error(\n\t\t`agents.react: 'emoji' must be at most ${MAX_EMOJI_BYTES} bytes`\n\t);\n}\n\nconst agentId = String(caller.agent_id ?? \"\").trim();\nif (!AGENT_ID.test(agentId)) {\n\tthrow new Error(\"agents.react: the calling agent could not be identified\");\n}\nif (!String(caller.conversation_id ?? \"\").trim()) {\n\tthrow new Error(\n\t\t\"agents.react: a current conversation is required to set a reaction\"\n\t);\n}\n\n// Core derives the conversation and actor from the dispatch context. Only the\n// exact persisted message id and the normalized emoji cross the sandbox boundary.\nreturn await host.reactions.add({ message_id: messageId, emoji });\n"
+      }
     }
   ],
   "contributes": {
@@ -151,7 +202,9 @@
         "id": "agent-comms.directory",
         "on": "tool_result",
         "match": {
-          "tools": ["agents.directory"]
+          "tools": [
+            "agents.directory"
+          ]
         },
         "code_file": "hooks/directory.js"
       }

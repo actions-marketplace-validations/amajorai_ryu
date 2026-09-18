@@ -494,7 +494,7 @@ function CanvasInner() {
 	return (
 		<div
 			aria-label="Infinite tab canvas"
-			className="h-full min-h-0 min-w-0 pt-12"
+			className="h-full min-h-0 min-w-0 pt-[var(--ryu-titlebar-inset,3rem)]"
 			data-tab-layout={tabLayout}
 			data-testid="infinite-tabs-canvas"
 		>

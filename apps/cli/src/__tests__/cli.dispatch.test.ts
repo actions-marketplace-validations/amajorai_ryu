@@ -219,6 +219,30 @@ const pluginDoctorReport = {
 	score: 100,
 };
 
+const pluginEvalReport = {
+	artifactKind: "app",
+	baseline: { reason: "not run", status: "not_run" },
+	cases: [
+		{
+			failed: 0,
+			name: "search uses the app",
+			passed: 1,
+			score: 1,
+			status: "passed",
+		},
+	],
+	evidenceLevel: "plugin-agent",
+	pluginId: "com.example.mail",
+	score: 1,
+	status: "passed",
+	suite: {
+		caseCount: 1,
+		graderCount: 1,
+		status: "ready",
+		unsupportedGraders: [],
+	},
+};
+
 test("doctor: read-only audit uses the GET endpoint", async () => {
 	const cap = makeIo();
 	let capturedPath = "";
@@ -237,6 +261,121 @@ test("doctor: read-only audit uses the GET endpoint", async () => {
 	expect(capturedPath).toBe("/api/gateway/doctor");
 	expect(capturedMethod).toBe("GET");
 	expect(cap.out()).toContain("Gateway Doctor");
+});
+
+test("observability audit: filters the shared Gateway audit endpoint", async () => {
+	const cap = makeIo();
+	let capturedPath = "";
+	let capturedMethod = "";
+	const code = await runCli(["observability", "audit", "--agent", "agent-1"], {
+		io: cap.io,
+		api: stubApi({
+			call: (_target, path, options) => {
+				capturedPath = path;
+				capturedMethod = options?.method ?? "";
+				return Promise.resolve({ reachable: true, entries: [] });
+			},
+		}),
+	});
+	expect(code).toBe(0);
+	expect(capturedPath).toBe("/api/gateway/audit?limit=100&agent_id=agent-1");
+	expect(capturedMethod).toBe("GET");
+	const parsed = JSON.parse(cap.out()) as { reachable: boolean };
+	expect(parsed.reachable).toBe(true);
+});
+
+test("observability audit-prune: invokes the owner maintenance endpoint", async () => {
+	const cap = makeIo();
+	let capturedPath = "";
+	let capturedMethod = "";
+	const code = await runCli(["observability", "audit-prune", "--json"], {
+		io: cap.io,
+		api: stubApi({
+			call: (_target, path, options) => {
+				capturedPath = path;
+				capturedMethod = options?.method ?? "";
+				return Promise.resolve({ deleted_rows: 3 });
+			},
+		}),
+	});
+	expect(code).toBe(0);
+	expect(capturedPath).toBe("/api/gateway/audit/prune");
+	expect(capturedMethod).toBe("POST");
+	expect(JSON.parse(cap.out())).toEqual({ deleted_rows: 3 });
+});
+
+test("observability score: sends a completed response to online scoring", async () => {
+	const cap = makeIo();
+	let capturedPath = "";
+	let capturedBody: unknown;
+	const code = await runCli(
+		[
+			"observability",
+			"score",
+			"agent-1",
+			'{"choices":[{"message":{"content":"done"}}]}',
+			"gpt-4o-mini",
+			"--json",
+		],
+		{
+			io: cap.io,
+			api: stubApi({
+				call: (_target, path, options) => {
+					capturedPath = path;
+					capturedBody = options?.body;
+					return Promise.resolve({ kind: "online_score" });
+				},
+			}),
+		}
+	);
+	expect(code).toBe(0);
+	expect(capturedPath).toBe("/api/gateway/evals/score");
+	expect(capturedBody).toEqual({
+		agent_id: "agent-1",
+		model: "gpt-4o-mini",
+		prompt: "ryu observability score",
+		response: { choices: [{ message: { content: "done" } }] },
+	});
+});
+
+test("trace: URL-encodes the run id and uses the Core trace route", async () => {
+	const cap = makeIo();
+	let capturedPath = "";
+	const code = await runCli(["trace", "run/with spaces", "--json"], {
+		io: cap.io,
+		api: stubApi({
+			call: (_target, path) => {
+				capturedPath = path;
+				return Promise.resolve({ spans: [] });
+			},
+		}),
+	});
+	expect(code).toBe(0);
+	expect(capturedPath).toBe("/api/runs/run%2Fwith%20spaces/trace");
+});
+
+test("redteam: sends an agent-scoped security campaign", async () => {
+	const cap = makeIo();
+	let capturedPath = "";
+	let capturedBody: unknown;
+	const code = await runCli(["redteam", "agent-1", "gpt-4o-mini", "--json"], {
+		io: cap.io,
+		api: stubApi({
+			call: (_target, path, options) => {
+				capturedPath = path;
+				capturedBody = options?.body;
+				return Promise.resolve({
+					summary: { needs_attention: 0, protected: 5, total: 5 },
+				});
+			},
+		}),
+	});
+	expect(code).toBe(0);
+	expect(capturedPath).toBe("/api/gateway/redteam/run");
+	expect(capturedBody).toEqual({
+		agent_id: "agent-1",
+		model: "gpt-4o-mini",
+	});
 });
 
 test("doctor --dry-run previews without applying", async () => {
@@ -287,6 +426,28 @@ test("plugin doctor: audits an installed app and supports the app alias", async 
 	expect(capturedPath).toBe("/api/plugins/doctor?id=com.example.mail");
 	expect(cap.out()).toContain("com.example.mail");
 	expect(cap.out()).toContain("no findings");
+});
+
+test("plugin eval: runs an installed app suite and returns its score", async () => {
+	const cap = makeIo();
+	let capturedPath = "";
+	let capturedBody: unknown;
+	const code = await runCli(["plugin", "eval", "com.example.mail"], {
+		io: cap.io,
+		api: stubApi({
+			call: (_target, path, options) => {
+				capturedPath = path;
+				capturedBody = options?.body;
+				expect(options?.method).toBe("POST");
+				return Promise.resolve(pluginEvalReport);
+			},
+		}),
+	});
+	expect(code).toBe(0);
+	expect(capturedPath).toBe("/api/plugins/evals/run");
+	expect(capturedBody).toEqual({ id: "com.example.mail" });
+	expect(cap.out()).toContain("Plugin Evals");
+	expect(cap.out()).toContain("100/100");
 });
 
 // ── list ──────────────────────────────────────────────────────────────────────

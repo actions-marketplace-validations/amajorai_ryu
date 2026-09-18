@@ -1543,7 +1543,7 @@ function LibraryCollections({
 		: [];
 
 	return (
-		<div className="flex h-full flex-col overflow-hidden pt-12">
+		<div className="flex h-full flex-col overflow-hidden">
 			{/* Page chrome, inline and in the order it works: the library-wide search
 			    (with the collection's own controls beside it), then the tabs. No
 			    floating bar — the tab list is open-ended (every app may register a

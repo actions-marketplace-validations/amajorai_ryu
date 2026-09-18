@@ -102,6 +102,15 @@ pub fn is_insecure_auth_token_placeholder(token: &str) -> bool {
         .any(|placeholder| trimmed.eq_ignore_ascii_case(placeholder))
 }
 
+/// Whether a node bearer is too short or malformed to use on a network-facing
+/// listener. Operator-provided tokens are accepted as opaque values, but they
+/// still need a minimum 256-bit printable envelope so a guessable value cannot
+/// turn remote Core into an authenticated service.
+pub fn is_weak_auth_token(token: &str) -> bool {
+    let trimmed = token.trim();
+    trimmed.len() < 32 || !trimmed.bytes().all(|byte| byte.is_ascii_graphic())
+}
+
 // ── Mesh plane handle + enabled gate ──────────────────────────────────────────
 
 /// Handle held by Core's `ServerState` for the mesh plane. Cheap to clone. Today
@@ -531,7 +540,10 @@ fn peer_url(peer: &MeshPeer, port: u16) -> String {
 /// `require_auth` compares equal against.
 pub fn resolve_mesh_bearer(node_token: Option<&str>) -> Option<String> {
     let token = node_token?.trim();
-    if token.is_empty() || is_insecure_auth_token_placeholder(token) {
+    if token.is_empty()
+        || is_insecure_auth_token_placeholder(token)
+        || is_weak_auth_token(token)
+    {
         return None;
     }
     Some(token.to_owned())
@@ -847,8 +859,8 @@ mod tests {
         // A real (non-placeholder) token is handed back verbatim — this is the
         // exact bearer a peer provisioned with the same RYU_TOKEN accepts.
         assert_eq!(
-            resolve_mesh_bearer(Some("ryu_shared_secret")).as_deref(),
-            Some("ryu_shared_secret")
+            resolve_mesh_bearer(Some("ryu_shared_secret_0123456789abcdef")).as_deref(),
+            Some("ryu_shared_secret_0123456789abcdef")
         );
     }
 
@@ -874,14 +886,15 @@ mod tests {
         assert!(is_insecure_auth_token_placeholder("CHANGE_ME"));
         assert!(is_insecure_auth_token_placeholder("  changeme  "));
         assert!(is_insecure_auth_token_placeholder("PASSWORD"));
-        assert!(!is_insecure_auth_token_placeholder("ryu_strong_random"));
+        assert!(!is_insecure_auth_token_placeholder("ryu_strong_random_0123456789abcdef"));
+        assert!(is_weak_auth_token("ryu_strong_random"));
         assert!(!is_insecure_auth_token_placeholder(""));
     }
 
     #[test]
     fn peers_response_carries_shared_bearer_and_urls() {
         let status = parse_status_json(true, &running_status_json());
-        let resp = build_peers_response(&status, Some("ryu_shared_secret"));
+        let resp = build_peers_response(&status, Some("ryu_shared_secret_0123456789abcdef"));
         assert!(resp.enabled);
         assert_eq!(resp.bearer_source, BEARER_SOURCE_SHARED);
         assert!(resp.note.is_none());
@@ -891,7 +904,10 @@ mod tests {
         assert_eq!(peer.url, "http://ryu-pi.tailnet-x.ts.net:7980");
         assert_eq!(peer.port, 7980);
         assert!(peer.bearer_available);
-        assert_eq!(peer.bearer.as_deref(), Some("ryu_shared_secret"));
+        assert_eq!(
+            peer.bearer.as_deref(),
+            Some("ryu_shared_secret_0123456789abcdef")
+        );
     }
 
     #[test]
@@ -910,7 +926,10 @@ mod tests {
 
     #[test]
     fn disabled_mesh_yields_empty_peers() {
-        let resp = build_peers_response(&MeshStatus::default(), Some("ryu_shared_secret"));
+        let resp = build_peers_response(
+            &MeshStatus::default(),
+            Some("ryu_shared_secret_0123456789abcdef"),
+        );
         assert!(!resp.enabled);
         assert!(resp.peers.is_empty());
         // A token exists, so the source still reflects a candidate bearer even with

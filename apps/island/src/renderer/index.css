@@ -17,7 +17,15 @@
 @source "../../../../packages/blocks/src/command";
 
 @theme inline {
-	--font-sans: "Inter Variable", sans-serif;
+	/* Keep a concrete first-paint fallback. `useIslandTheme` replaces the
+	   runtime font tokens when Core has a saved theme, but an unavailable Core
+	   must never turn the font family into a self-referential custom property. */
+	--font-sans: "Inter Variable", "Inter", sans-serif;
+	--font-heading: "Geist Variable", "Geist", sans-serif;
+	--font-mono: "Geist Mono Variable", "Geist Mono", ui-monospace, monospace;
+	--font-code:
+		ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono",
+		"Courier New", monospace;
 }
 
 @layer base {
@@ -52,10 +60,9 @@
 }
 
 ::-webkit-scrollbar-thumb {
-	/* The island sits on a near-black Siri gradient, where --border (white/10%)
-	   would be invisible — use a light translucent pill so it reads like the
-	   desktop's visible rounded thumb. */
-	background-color: rgba(255, 255, 255, 0.22);
+	/* Keep the thumb legible in both light and dark modes by deriving it from the
+	   active foreground instead of a fixed light color. */
+	background-color: color-mix(in srgb, var(--foreground) 22%, transparent);
 	background-clip: padding-box;
 	border: 2px solid transparent;
 	border-radius: 9999px;
@@ -63,7 +70,7 @@
 }
 
 ::-webkit-scrollbar-thumb:hover {
-	background-color: rgba(255, 255, 255, 0.4);
+	background-color: color-mix(in srgb, var(--foreground) 40%, transparent);
 	background-clip: padding-box;
 }
 
@@ -87,9 +94,9 @@
 	content: "";
 	background: radial-gradient(
 		130% 150% at 50% 118%,
-		rgba(255, 255, 255, 0.9) 0%,
-		rgba(255, 255, 255, 0.45) 28%,
-		rgba(255, 255, 255, 0.12) 48%,
+		color-mix(in srgb, var(--ring) 90%, transparent) 0%,
+		color-mix(in srgb, var(--ring) 45%, transparent) 28%,
+		color-mix(in srgb, var(--ring) 12%, transparent) 48%,
 		transparent 64%
 	);
 	border-radius: inherit;

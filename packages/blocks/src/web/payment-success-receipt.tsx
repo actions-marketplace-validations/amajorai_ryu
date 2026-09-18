@@ -12,6 +12,7 @@ export type PaymentSuccessKind =
 	| "subscription"
 	| "upgrade"
 	| "purchase"
+	| "gift"
 	| "cloud";
 
 interface PaymentSuccessCopy {
@@ -63,6 +64,16 @@ const PAYMENT_SUCCESS_COPY: Record<PaymentSuccessKind, PaymentSuccessCopy> = {
 		nextLabel: "License",
 		nextValue: "Being issued",
 		title: "Purchase complete",
+	},
+	gift: {
+		detailLabel: "Gift",
+		detailValue: "Ready to share",
+		description:
+			"Your payment went through. The private gift link will appear once the payment is verified.",
+		eyebrow: "Ryu / gift receipt",
+		nextLabel: "Delivery",
+		nextValue: "Share privately",
+		title: "Gift purchase complete",
 	},
 	subscription: {
 		detailLabel: "Subscription",

@@ -90,6 +90,23 @@ afterEach(async () => {
 test("two consumers share three reads and agent filtering requests tools only", async () => {
 	await act(async () => root.render(<Harness />));
 	expect(reads).toHaveLength(3);
+	const queryFns = client
+		.getQueryCache()
+		.getAll()
+		.filter((query) =>
+			["mcp-servers", "mcp-tools"].includes(String(query.queryKey[0]))
+		)
+		.map((query) => query.options.queryFn);
+	await act(async () => root.render(<Harness />));
+	expect(
+		client
+			.getQueryCache()
+			.getAll()
+			.filter((query) =>
+				["mcp-servers", "mcp-tools"].includes(String(query.queryKey[0]))
+			)
+			.map((query) => query.options.queryFn)
+	).toEqual(queryFns);
 	await settle(reads);
 	await act(async () => first.setAgentFilter("agent-a"));
 	expect(reads).toHaveLength(4);

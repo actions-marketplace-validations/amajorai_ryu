@@ -77,16 +77,22 @@ async fn resolved_model() -> (std::path::PathBuf, ModelKind) {
         return (std::path::PathBuf::from(p), ModelKind::EnvOverride);
     }
     if let Some(stem) = active_diffusion_model_stem().await {
-        let path = crate::model_catalog::installed::model_file_path(&stem);
-        if path.exists() {
-            let kind = if stem == downloader::VIDEO_DEFAULT_STEM {
-                ModelKind::KnownVideo
-            } else if stem == downloader::IMAGE_DEFAULT_STEM {
-                ModelKind::KnownImage
-            } else {
-                ModelKind::Other
-            };
-            return (path, kind);
+        if stem == downloader::LEGACY_IMAGE_DEFAULT_STEM {
+            tracing::warn!(
+                "ignoring legacy incompatible SDXL preference {stem}; using the compatible default"
+            );
+        } else {
+            let path = crate::model_catalog::installed::model_file_path(&stem);
+            if path.exists() {
+                let kind = if stem == downloader::VIDEO_DEFAULT_STEM {
+                    ModelKind::KnownVideo
+                } else if stem == downloader::IMAGE_DEFAULT_STEM {
+                    ModelKind::KnownImage
+                } else {
+                    ModelKind::Other
+                };
+                return (path, kind);
+            }
         }
     }
     (downloader::default_model_path(), ModelKind::DefaultImage)

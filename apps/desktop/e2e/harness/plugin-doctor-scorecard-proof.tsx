@@ -8,6 +8,8 @@ import type {
 	CatalogEntry,
 	PluginCatalogDetail,
 } from "../../../../packages/marketplace/src/catalog/types.ts";
+import { Badge } from "../../../../packages/ui/src/components/badge";
+import { Button } from "../../../../packages/ui/src/components/button";
 import "../../src/index.css";
 
 const entry: CatalogEntry = {
@@ -94,6 +96,39 @@ function Story() {
 				<section className="mt-6 rounded-xl border bg-card p-6">
 					<ScorecardPanel
 						developerCommand="ryu plugin doctor com.example.mail"
+						developerEvals={
+							<section
+								className="flex flex-col gap-3 rounded-lg border border-primary/25 bg-primary/5 p-4"
+								data-testid="plugin-evals-card"
+							>
+								<div className="flex flex-wrap items-start justify-between gap-3">
+									<div>
+										<h3 className="font-medium text-sm">Behavioral evals</h3>
+										<p className="mt-1 text-muted-foreground text-xs leading-relaxed">
+											The installed app's prompt cases are separate from the
+											static scorecard and the read-only doctor.
+										</p>
+									</div>
+									<Button size="sm">Run evals</Button>
+								</div>
+								<div className="flex items-center gap-2 text-xs">
+									<Badge data-testid="plugin-evals-status" variant="outline">
+										Ready · 2 cases · 3 graders
+									</Badge>
+									<span className="text-muted-foreground">
+										Latest run 100/100 · plugin-agent evidence
+									</span>
+								</div>
+								<ul className="space-y-1 text-xs">
+									<li className="rounded-md bg-background px-3 py-2">
+										search uses the app · 100/100
+									</li>
+									<li className="rounded-md bg-background px-3 py-2">
+										refuses an unsafe request · 100/100
+									</li>
+								</ul>
+							</section>
+						}
 						scorecard={scorecard}
 					/>
 				</section>

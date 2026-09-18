@@ -410,10 +410,16 @@ pub async fn upload_file(
         )
             .into_response(),
         Err(e) => {
+            let message = e.to_string();
+            let status = if message.contains("file quota exceeded") {
+                StatusCode::PAYLOAD_TOO_LARGE
+            } else {
+                StatusCode::INTERNAL_SERVER_ERROR
+            };
             tracing::error!("upload_file: create_file: {e:#}");
             (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({ "error": e.to_string() })),
+                status,
+                Json(json!({ "error": message })),
             )
                 .into_response()
         }

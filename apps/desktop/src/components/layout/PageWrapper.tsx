@@ -1,7 +1,7 @@
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { cn } from "@/lib/utils.ts";
-import { isTauriReady } from "@/src/lib/tauri-ready.ts";
+import { invokeWhenReady, isTauriReady } from "@/src/lib/tauri-ready.ts";
 
 interface PageWrapperProps {
 	children: React.ReactNode;
@@ -13,6 +13,46 @@ export function PageWrapper({ children }: PageWrapperProps) {
 	// fullscreen back to a windowed size reports isMaximized() === false but
 	// only fires resize events, so a maximized-only check could stay stuck.
 	const [edgeToEdge, setEdgeToEdge] = useState(false);
+	const rootRef = useRef<HTMLDivElement>(null);
+
+	useEffect(() => {
+		if (!(isTauriReady() && navigator.userAgent.includes("Mac"))) {
+			return;
+		}
+		const root = rootRef.current;
+		if (!root) {
+			return;
+		}
+		let previous = -1;
+		const syncCorners = () => {
+			const radius =
+				Number.parseFloat(getComputedStyle(root).borderTopLeftRadius) || 0;
+			const zoom =
+				Number.parseFloat(getComputedStyle(document.documentElement).zoom) || 1;
+			const effectiveRadius = Math.min(256, Math.max(0, radius * zoom));
+			if (effectiveRadius === previous) {
+				return;
+			}
+			previous = effectiveRadius;
+			invokeWhenReady("set_window_corner_radius", {
+				radius: effectiveRadius,
+			}).catch(() => {
+				previous = -1;
+			});
+		};
+		syncCorners();
+		const observer = new MutationObserver(syncCorners);
+		observer.observe(document.documentElement, {
+			attributes: true,
+			attributeFilter: ["style", "class"],
+		});
+		const resizeObserver = new ResizeObserver(syncCorners);
+		resizeObserver.observe(root);
+		return () => {
+			observer.disconnect();
+			resizeObserver.disconnect();
+		};
+	}, [edgeToEdge]);
 
 	useEffect(() => {
 		// getCurrentWebviewWindow() throws synchronously outside Tauri (browser-mode
@@ -85,6 +125,8 @@ export function PageWrapper({ children }: PageWrapperProps) {
 					? "rounded-none"
 					: "rounded-[var(--ryu-window-radius-base,2rem)] border border-border/30"
 			)}
+			data-ryu-window-root="true"
+			ref={rootRef}
 		>
 			{children}
 		</div>

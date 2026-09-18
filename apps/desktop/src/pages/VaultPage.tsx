@@ -42,6 +42,7 @@ import {
 	setVaultSecret,
 	type VaultScope,
 } from "@/src/lib/api/vault.ts";
+import { formatDateTime } from "@/src/lib/timezone.ts";
 
 const NAME_PATTERN = /^[A-Za-z_][A-Za-z0-9_]{0,127}$/;
 
@@ -81,7 +82,7 @@ function scopeLabel(scope: VaultScope): string {
 
 function formatUpdatedAt(value: string): string {
 	const date = new Date(value);
-	return Number.isNaN(date.getTime()) ? "recently" : date.toLocaleString();
+	return Number.isNaN(date.getTime()) ? "recently" : formatDateTime(value);
 }
 
 function scopeIdLabel(scope: VaultScope, scopeId: string): string {

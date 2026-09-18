@@ -191,6 +191,13 @@ pub fn should_require_approval_local(
     mode: ApprovalMode,
     mode_pref: Option<&str>,
 ) -> Option<Vec<String>> {
+    // Research executes agent-edited native code outside Core's Deno/WASI
+    // sandbox. It is therefore a privileged unsandboxed capability: every
+    // attempt needs an operator decision, including when the global approval
+    // preference is explicitly `off`.
+    if tool_id == "research.run" {
+        return Some(vec!["privileged-native-execution".to_owned()]);
+    }
     // Layer A: this agent explicitly gates this tool.
     if agent_approval_tools.iter().any(|t| t == tool_id) {
         let mut tags = classify_risk(tool_id);
@@ -499,6 +506,19 @@ mod tests {
             Some("smart")
         )
         .is_some());
+    }
+
+    #[test]
+    fn research_runs_require_operator_approval_even_when_global_mode_is_off() {
+        for (mode, preference) in [
+            (ApprovalMode::Off, Some("off")),
+            (ApprovalMode::Smart, Some("smart")),
+            (ApprovalMode::Manual, Some("manual")),
+        ] {
+            let tags = should_require_approval_local(&[], "research.run", mode, preference)
+                .expect("native research execution must always require approval");
+            assert!(tags.iter().any(|tag| tag == "privileged-native-execution"));
+        }
     }
 
     #[test]

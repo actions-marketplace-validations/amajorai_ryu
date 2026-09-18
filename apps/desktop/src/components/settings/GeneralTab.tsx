@@ -92,12 +92,12 @@ import {
 import { toTarget } from "@/src/lib/api/client.ts";
 import {
 	DEFAULT_GATEWAY_ACP,
-	fetchGatewayConfig,
 	type GatewayAcpSettings,
 	updateGatewayConfig,
 } from "@/src/lib/api/gateway.ts";
 import type { DefaultFileOpener } from "@/src/lib/default-file-opener.ts";
 import { resetDesktopOnboarding } from "@/src/lib/desktop-onboarding-state.ts";
+import { gatewayAcpQueryOptions } from "@/src/lib/gateway-acp-query.ts";
 import {
 	isStartupRealm,
 	STARTUP_REALM_OPTIONS,
@@ -220,11 +220,11 @@ function KeepAwakeSetting() {
 		[node.token, node.url, node.userJwt]
 	);
 	const queryClient = useQueryClient();
+	const options = gatewayAcpQueryOptions(target);
 	const configQuery = useQuery({
-		queryKey: ["gateway-acp-runtime", target.url],
-		queryFn: () => fetchGatewayConfig(target),
+		...options,
 		enabled: canManageDesktopLifecycle,
-		refetchOnWindowFocus: false,
+		subscribed: canManageDesktopLifecycle,
 	});
 	const config = configQuery.data?.acp ?? DEFAULT_GATEWAY_ACP;
 	const save = useMutation({
@@ -238,7 +238,7 @@ function KeepAwakeSetting() {
 		},
 		onSuccess: async () => {
 			await queryClient.invalidateQueries({
-				queryKey: ["gateway-acp-runtime", target.url],
+				queryKey: options.queryKey,
 			});
 		},
 		onError: (error: Error) => {

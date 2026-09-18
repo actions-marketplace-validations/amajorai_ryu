@@ -6,6 +6,7 @@
 // desktop popup reads the same document-level state.
 
 import { useSyncExternalStore } from "react";
+import { THEME_APPEARANCE_CHANGE_EVENT } from "../theme/prefs.ts";
 
 export const POPUP_OVERLAY_BLUR_STORAGE_KEY = "ryu_popup_overlay_blur";
 export const DEFAULT_POPUP_OVERLAY_BLUR = false;
@@ -64,6 +65,9 @@ export function setPopupOverlayBlur(enabled: boolean): void {
 	applyPopupOverlayBlur(enabled);
 	for (const listener of listeners) {
 		listener();
+	}
+	if (typeof window !== "undefined") {
+		window.dispatchEvent(new Event(THEME_APPEARANCE_CHANGE_EVENT));
 	}
 }
 

@@ -1,3 +1,4 @@
+import { formatTime } from "@ryu/ui/lib/timezone.ts";
 import {
 	createContext,
 	type ReactNode,
@@ -152,7 +153,7 @@ export function formatToolClock(epochMs: number, withSeconds = false): string {
 	if (!Number.isFinite(epochMs)) {
 		return "";
 	}
-	return new Date(epochMs).toLocaleTimeString(undefined, {
+	return formatTime(epochMs, {
 		hour: "2-digit",
 		minute: "2-digit",
 		...(withSeconds ? { second: "2-digit" } : {}),

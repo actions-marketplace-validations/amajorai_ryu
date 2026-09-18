@@ -44,17 +44,27 @@ export function ProgressiveBlur({
 				background: isTop
 					? `linear-gradient(to top, transparent, ${bgColor})`
 					: `linear-gradient(to bottom, transparent, ${bgColor})`,
-				// The mask only reads the alpha channel, so use an opaque color
-				// (`black`) rather than the theme token — this keeps the fade shape
-				// identical regardless of the theme's background lightness.
-				maskImage: isTop
-					? "linear-gradient(to bottom, black 50%, transparent)"
-					: "linear-gradient(to top, black 50%, transparent)",
-				WebkitBackdropFilter: `blur(${blurAmount})`,
-				backdropFilter: `blur(${blurAmount})`,
 				WebkitUserSelect: "none",
 				userSelect: "none",
 			}}
-		/>
+		>
+			{[0.125, 0.25, 0.5, 1].map((strength, index) => {
+				const mask = `linear-gradient(${isTop ? "to bottom" : "to top"}, black ${85 - index * 15}%, transparent ${100 - index * 10}%)`;
+				return (
+					<div
+						aria-hidden
+						key={strength}
+						style={{
+							position: "absolute",
+							inset: 0,
+							maskImage: mask,
+							WebkitMaskImage: mask,
+							backdropFilter: `blur(calc(${blurAmount} * ${strength}))`,
+							WebkitBackdropFilter: `blur(calc(${blurAmount} * ${strength}))`,
+						}}
+					/>
+				);
+			})}
+		</div>
 	);
 }

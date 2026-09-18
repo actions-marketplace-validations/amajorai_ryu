@@ -9,6 +9,12 @@ export interface Agent {
 }
 
 export interface Message {
+	/** Verified human author for shared team conversations. Absent on local
+	 * messages and agent replies. */
+	author?: {
+		id: string;
+		name?: string;
+	};
 	content: string;
 	id: string;
 	/**
@@ -31,6 +37,8 @@ export interface Message {
 	 * built from `content`).
 	 */
 	parts?: UIMessage["parts"];
+	/** True when this row came from Core rather than an optimistic client copy. */
+	persisted?: boolean;
 	role: "user" | "assistant";
 	siblingCount?: number;
 	/** Ids of every version at this branch point in pager order (v1..vN); lets the

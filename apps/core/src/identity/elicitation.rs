@@ -73,6 +73,19 @@ pub fn to_envelope(elicit: &Elicitation) -> Value {
 /// across all profiles. The store exposes no find-by-domain, so this filters
 /// [`IdentityStore::list`] (surgical: no store change).
 pub async fn needs_connection(domain: &str) -> Option<Elicitation> {
+    if let Some(remote) = crate::identity::passport::needs_auth(domain).await {
+        let message = match remote {
+            Ok(false) => return None,
+            Ok(true) => format!("This action needs a connection to `{domain}`. Complete the connection in Passport, then retry."),
+            Err(_) => "Passport connection status is unavailable. Restore the identity service before retrying this action.".to_owned(),
+        };
+        return Some(Elicitation {
+            kind: "url".to_owned(),
+            message,
+            url: None,
+            requested_schema: None,
+        });
+    }
     let store = crate::identity::global()?;
     let registry = CredentialSourceRegistry::from_env();
     needs_connection_with(store, &registry, domain).await

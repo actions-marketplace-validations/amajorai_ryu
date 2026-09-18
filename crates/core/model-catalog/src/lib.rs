@@ -470,9 +470,21 @@ pub struct ModelDetail {
 
 fn hf_get(client: &reqwest::Client, url: &str) -> reqwest::RequestBuilder {
     let req = client.get(url).header("User-Agent", USER_AGENT);
-    // Optional token (preferences-first, env fallback) raises rate limits and
-    // unlocks gated repos for search, detail, and README/tree fetches.
-    host().authorize_hf(req)
+    // The stored token is specifically a Hugging Face credential. Never attach
+    // it to an HF-compatible mirror or a custom catalog endpoint, even though
+    // those endpoints share the same response shape.
+    if url
+        .parse::<reqwest::Url>()
+        .ok()
+        .and_then(|parsed| parsed.host_str().map(str::to_owned))
+        .is_some_and(|host| matches!(host.as_str(), "huggingface.co" | "www.huggingface.co"))
+    {
+        // Optional token (preferences-first, env fallback) raises rate limits
+        // and unlocks gated repos on the first-party Hub only.
+        host().authorize_hf(req)
+    } else {
+        req
+    }
 }
 
 fn gated_to_bool(v: &serde_json::Value) -> bool {
@@ -2499,7 +2511,7 @@ mod tests {
         assert!(uninstall_file("acme/uninst", "../evil.gguf").is_err());
     }
 
-    // ── HTTP-backed search / detail / install via a std-only mock server ─────
+    // ── HTTP-backed search/detail plus guarded-install denial ---------------
 
     /// A reqwest client that ignores any ambient proxy (localhost must be direct).
     fn test_client() -> reqwest::Client {
@@ -2793,7 +2805,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn install_from_descriptor_downloads_and_records() {
+    async fn install_from_descriptor_rejects_loopback_fixture() {
         ensure_test_host();
         ensure_downloads_host();
         let addr = spawn_http(|path| {
@@ -2814,25 +2826,24 @@ mod tests {
         assert!(matrix_error
             .to_string()
             .contains("not runnable model weights"));
-        let res =
-            install_from_descriptor("acme/desc-repo", &url, None, &format!("{stem}.gguf"), &dc)
-                .await
-                .unwrap();
-
-        assert_eq!(res.repo_id, "acme/desc-repo");
-        assert_eq!(res.filename, format!("{stem}.gguf"));
-        assert!(ryu_dir()
-            .join("models")
-            .join(format!("{stem}.gguf"))
-            .exists());
-        assert!(installed::load_present().iter().any(|m| m.stem == stem));
-
-        let _ = installed::remove(stem);
-        let _ = std::fs::remove_file(ryu_dir().join("models").join(format!("{stem}.gguf")));
+        let err = install_from_descriptor(
+            "acme/desc-repo",
+            &url,
+            None,
+            &format!("{stem}.gguf"),
+            &dc,
+        )
+        .await
+        .expect_err("the shared egress guard must refuse a loopback fixture");
+        let message = format!("{err:#}");
+        assert!(
+            message.contains("private/loopback host is not allowed"),
+            "unexpected error: {message}"
+        );
     }
 
     #[tokio::test]
-    async fn install_file_downloads_from_repo_and_records() {
+    async fn install_file_rejects_loopback_fixture() {
         ensure_test_host();
         ensure_downloads_host();
         let addr = spawn_http(|path| {
@@ -2851,7 +2862,7 @@ mod tests {
         let dc = ryu_downloads::DownloadCenter::with_default_client();
         std::fs::create_dir_all(ryu_dir().join("models")).unwrap();
         let stem = "install-file-unique-c2";
-        let res = install_file(
+        let err = install_file(
             &test_client(),
             &endpoint,
             "acme/inst-file-c2",
@@ -2859,9 +2870,12 @@ mod tests {
             &dc,
         )
         .await
-        .unwrap();
-        assert_eq!(res.repo_id, "acme/inst-file-c2");
-        assert!(installed::load_present().iter().any(|m| m.stem == stem));
+        .expect_err("the shared egress guard must refuse a loopback fixture");
+        let message = format!("{err:#}");
+        assert!(
+            message.contains("private/loopback host is not allowed"),
+            "unexpected error: {message}"
+        );
 
         // Path-traversal + bad-repo guards fire before any network.
         assert!(
@@ -2887,12 +2901,10 @@ mod tests {
             .to_string()
             .contains("not runnable model weights"));
 
-        let _ = installed::remove(stem);
-        let _ = std::fs::remove_file(ryu_dir().join("models").join(format!("{stem}.gguf")));
     }
 
     #[tokio::test]
-    async fn install_snapshot_mirrors_tree_and_records() {
+    async fn install_snapshot_rejects_loopback_fixture() {
         ensure_test_host();
         ensure_downloads_host();
         let addr = spawn_http(|path| {
@@ -2916,7 +2928,7 @@ mod tests {
         };
         let dc = ryu_downloads::DownloadCenter::with_default_client();
         let repo = "acme/snap-c3";
-        let res = install_snapshot(
+        let err = install_snapshot(
             &test_client(),
             &endpoint,
             repo,
@@ -2924,13 +2936,12 @@ mod tests {
             &dc,
         )
         .await
-        .unwrap();
-        let slug = installed::slugify_repo(repo);
-        assert_eq!(res.repo_id, repo);
-        assert!(installed::load_present().iter().any(|m| m.stem == slug));
-        assert!(installed::model_snapshot_dir(&slug)
-            .join("model.safetensors")
-            .exists());
+        .expect_err("the shared egress guard must refuse a loopback fixture");
+        let message = format!("{err:#}");
+        assert!(
+            message.contains("private/loopback host is not allowed"),
+            "unexpected error: {message}"
+        );
 
         // A single-file format is rejected by install_snapshot.
         assert!(
@@ -2939,7 +2950,5 @@ mod tests {
                 .is_err()
         );
 
-        let _ = installed::remove(&slug);
-        let _ = std::fs::remove_dir_all(installed::model_snapshot_dir(&slug));
     }
 }

@@ -237,8 +237,6 @@ function LiveGraphRagProof() {
 		return {
 			space,
 			documents: documents.map(documentRow),
-			ingestTitle: "",
-			ingestContent: "",
 			searchQuery,
 			searchResults: searchResults?.map(matchRow) ?? null,
 			searchBusy,

@@ -30,11 +30,26 @@ import {
 import { Button } from "@ryu/ui/components/button";
 import { Input } from "@ryu/ui/components/input";
 import { Kbd } from "@ryu/ui/components/kbd";
+import {
+	Select,
+	SelectContent,
+	SelectItem,
+	SelectTrigger,
+	SelectValue,
+} from "@ryu/ui/components/select.tsx";
 import { toast } from "@ryu/ui/components/sileo";
 import { useCallback, useEffect, useState } from "react";
 import { useAppSurface } from "@/src/contexts/app-surface-context.tsx";
 import { useApps } from "@/src/hooks/useApps.ts";
 import { usePluginContributions } from "@/src/hooks/usePluginContributions.ts";
+import {
+	QUICK_PREVIEW_MODIFIER_OPTIONS,
+	useQuickPreviewModifier,
+} from "@/src/hooks/useQuickPreviewModifier.ts";
+import {
+	QUICK_REPLY_MODIFIER_OPTIONS,
+	useQuickReplyModifier,
+} from "@/src/hooks/useQuickReplyModifier.ts";
 import { toTarget } from "@/src/lib/api/client.ts";
 import {
 	DEFAULT_DICTATION_PREFS,
@@ -267,6 +282,94 @@ function GlobalRow({
 	);
 }
 
+function QuickReplyModifierRow() {
+	const [modifier, setModifier] = useQuickReplyModifier();
+	return (
+		<SettingsItem
+			actions={
+				<Select
+					onValueChange={(value) => {
+						const option = QUICK_REPLY_MODIFIER_OPTIONS.find(
+							(item) => item.value === value
+						);
+						if (option) {
+							setModifier(option.value);
+						}
+					}}
+					value={modifier}
+				>
+					<SelectTrigger
+						aria-label="Quick reply click modifier"
+						className="w-40"
+						size="sm"
+					>
+						<SelectValue>
+							{(value) =>
+								QUICK_REPLY_MODIFIER_OPTIONS.find(
+									(option) => option.value === value
+								)?.label ?? value
+							}
+						</SelectValue>
+					</SelectTrigger>
+					<SelectContent>
+						{QUICK_REPLY_MODIFIER_OPTIONS.map((option) => (
+							<SelectItem key={option.value} value={option.value}>
+								{option.label}
+							</SelectItem>
+						))}
+					</SelectContent>
+				</Select>
+			}
+			description="Hold this modifier while clicking a chat in the sidebar to open its floating quick-reply bar."
+			title="Quick reply click modifier"
+		/>
+	);
+}
+
+function QuickPreviewModifierRow() {
+	const [modifier, setModifier] = useQuickPreviewModifier();
+	return (
+		<SettingsItem
+			actions={
+				<Select
+					onValueChange={(value) => {
+						const option = QUICK_PREVIEW_MODIFIER_OPTIONS.find(
+							(item) => item.value === value
+						);
+						if (option) {
+							setModifier(option.value);
+						}
+					}}
+					value={modifier}
+				>
+					<SelectTrigger
+						aria-label="Quick preview click modifier"
+						className="w-40"
+						size="sm"
+					>
+						<SelectValue>
+							{(value) =>
+								QUICK_PREVIEW_MODIFIER_OPTIONS.find(
+									(option) => option.value === value
+								)?.label ?? value
+							}
+						</SelectValue>
+					</SelectTrigger>
+					<SelectContent>
+						{QUICK_PREVIEW_MODIFIER_OPTIONS.map((option) => (
+							<SelectItem key={option.value} value={option.value}>
+								{option.label}
+							</SelectItem>
+						))}
+					</SelectContent>
+				</Select>
+			}
+			description="Hold this modifier while clicking and holding a chat in the sidebar to preview its messages without opening it."
+			title="Quick preview click modifier"
+		/>
+	);
+}
+
 export function KeyboardShortcutsTab() {
 	const { canUseNativeShell } = useAppSurface();
 	const {
@@ -380,13 +483,38 @@ export function KeyboardShortcutsTab() {
 		"quests app",
 		"permissions"
 	);
+	const showQuickReply = matchesSearch(
+		"chat",
+		"quick reply",
+		"sidebar",
+		"click",
+		"modifier",
+		"alt",
+		"option"
+	);
+	const showQuickPreview = matchesSearch(
+		"chat",
+		"quick preview",
+		"preview",
+		"sidebar",
+		"click",
+		"hold",
+		"modifier",
+		"shift",
+		"telegram"
+	);
 	const hasMatches =
 		filteredInAppGroups.length > 0 ||
 		showGlobalDictation ||
 		showGlobalAgentAsk ||
 		(showPluginsSection &&
 			(shortcutApps.length === 0 || visibleShortcutApps.length > 0)) ||
-		showQuickCapture;
+		showQuickCapture ||
+		showQuickReply ||
+		showQuickPreview;
+	const hasChatGroup = filteredInAppGroups.some(
+		(group) => group.category === "Chat"
+	);
 
 	const savePluginShortcut = async (appId: string, chord: Chord | null) => {
 		const actionId = `plugin:${appId}`;
@@ -493,9 +621,24 @@ export function KeyboardShortcutsTab() {
 										onReset={() => reset(action.id)}
 									/>
 								))}
+								{group.category === "Chat" && showQuickReply ? (
+									<QuickReplyModifierRow />
+								) : null}
+								{group.category === "Chat" && showQuickPreview ? (
+									<QuickPreviewModifierRow />
+								) : null}
 							</SettingsGroup>
 						</SettingsSection>
 					))}
+
+					{(showQuickReply || showQuickPreview) && !hasChatGroup ? (
+						<SettingsSection title="Chat">
+							<SettingsGroup>
+								{showQuickReply ? <QuickReplyModifierRow /> : null}
+								{showQuickPreview ? <QuickPreviewModifierRow /> : null}
+							</SettingsGroup>
+						</SettingsSection>
+					) : null}
 
 					{canUseNativeShell && (showGlobalDictation || showGlobalAgentAsk) ? (
 						<SettingsSection

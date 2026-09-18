@@ -16,6 +16,7 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 
+use futures_util::StreamExt;
 use petgraph::graph::NodeIndex;
 use petgraph::visit::EdgeRef;
 use petgraph::Direction;
@@ -30,6 +31,7 @@ pub(crate) const SUSPEND_SENTINEL: &str = "__AWAKEABLE_SUSPEND__";
 
 /// Maximum nested SubWorkflow depth, guards against accidental deep nesting.
 const MAX_SUBWORKFLOW_DEPTH: usize = 8;
+const MAX_WEBHOOK_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
 
 /// Defensive cap on how many times a single `While` gate may take its continue
 /// (`true`) branch before it is forced to exit (`false`). Under today's
@@ -2153,18 +2155,38 @@ async fn run_webhook(
     input: &str,
     idem_key: &str,
 ) -> Result<String, String> {
-    // SSRF guard: only http/https, and the host must not resolve to an internal
-    // address. Disable redirect following so a 30x cannot bounce us to one.
-    validate_webhook_url(url).await?;
-    let client = reqwest::Client::builder()
+    let outbound = format!(
+        "{} {}\n{}",
+        method,
+        url,
+        serde_json::json!({ "input": input })
+    );
+    crate::sidecar::gateway::govern_egress(&outbound)
+        .await
+        .map_err(|error| format!("webhook node: outbound DLP denied delivery: {error}"))?;
+    // Resolve, classify, and pin the exact addresses immediately before the
+    // request. The shared helper also disables redirects, so a later DNS
+    // answer or 30x cannot cross the private-network boundary.
+    let (parsed, screened) = crate::server::screen_egress_url_pinned(url, true, None)
+        .await
+        .map_err(|e| format!("webhook node: destination rejected: {e}"))?;
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| "webhook node: destination has no host".to_owned())?;
+    let mut builder = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
+        .timeout(std::time::Duration::from_secs(30));
+    if let crate::server::ScreenedEgress::Pinned(addresses) = screened {
+        builder = builder.resolve_to_addrs(host, &addresses);
+    }
+    let client = builder
         .build()
         .map_err(|e| format!("webhook node: client build failed: {e}"))?;
     let req = match method.to_uppercase().as_str() {
-        "GET" => client.get(url),
-        "PUT" => client.put(url),
-        "DELETE" => client.delete(url),
-        _ => client.post(url),
+        "GET" => client.get(parsed.clone()),
+        "PUT" => client.put(parsed.clone()),
+        "DELETE" => client.delete(parsed.clone()),
+        _ => client.post(parsed.clone()),
     };
     let resp = req
         .header("content-type", "application/json")
@@ -2178,78 +2200,30 @@ async fn run_webhook(
         .await
         .map_err(|e| format!("webhook node: request failed: {e}"))?;
     let status = resp.status();
-    let text = resp.text().await.unwrap_or_default();
+    if resp
+        .content_length()
+        .is_some_and(|length| length > MAX_WEBHOOK_RESPONSE_BYTES as u64)
+    {
+        return Err(format!(
+            "webhook node: response exceeds {MAX_WEBHOOK_RESPONSE_BYTES} bytes"
+        ));
+    }
+    let mut stream = resp.bytes_stream();
+    let mut body = Vec::new();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|e| format!("webhook node: response read failed: {e}"))?;
+        if body.len().saturating_add(chunk.len()) > MAX_WEBHOOK_RESPONSE_BYTES {
+            return Err(format!(
+                "webhook node: response exceeds {MAX_WEBHOOK_RESPONSE_BYTES} bytes"
+            ));
+        }
+        body.extend_from_slice(&chunk);
+    }
+    let text = String::from_utf8_lossy(&body).into_owned();
     if !status.is_success() {
         return Err(format!("webhook node: HTTP {status}: {text}"));
     }
     Ok(text)
-}
-
-/// Reject webhook URLs that could reach internal infrastructure (SSRF). Parses
-/// the URL, requires an http/https scheme, resolves the host, and rejects the
-/// request if *any* resolved address is loopback, link-local, private, CGNAT,
-/// or unspecified.
-async fn validate_webhook_url(url: &str) -> Result<(), String> {
-    let parsed = url::Url::parse(url).map_err(|e| format!("webhook node: invalid url: {e}"))?;
-    match parsed.scheme() {
-        "http" | "https" => {}
-        other => {
-            return Err(format!(
-                "webhook node: unsupported url scheme '{other}' (only http/https allowed)"
-            ));
-        }
-    }
-    let host = parsed
-        .host_str()
-        .ok_or_else(|| "webhook node: url has no host".to_string())?;
-    let port = parsed.port_or_known_default().unwrap_or(443);
-    let addrs = tokio::net::lookup_host((host, port))
-        .await
-        .map_err(|e| format!("webhook node: cannot resolve host '{host}': {e}"))?;
-    let mut resolved = false;
-    for addr in addrs {
-        resolved = true;
-        if is_blocked_ip(&addr.ip()) {
-            return Err(format!(
-                "webhook node: host '{host}' resolves to a disallowed address ({})",
-                addr.ip()
-            ));
-        }
-    }
-    if resolved {
-        Ok(())
-    } else {
-        Err(format!("webhook node: host '{host}' did not resolve"))
-    }
-}
-
-/// True if `ip` is in a range we must never let a webhook reach.
-fn is_blocked_ip(ip: &std::net::IpAddr) -> bool {
-    match ip {
-        std::net::IpAddr::V4(v4) => {
-            let o = v4.octets();
-            v4.is_loopback()
-                || v4.is_private()
-                || v4.is_link_local()
-                || v4.is_unspecified()
-                || v4.is_broadcast()
-                || v4.is_documentation()
-                // CGNAT shared address space 100.64.0.0/10
-                || (o[0] == 100 && (o[1] & 0xc0) == 64)
-        }
-        std::net::IpAddr::V6(v6) => {
-            v6.is_loopback()
-                || v6.is_unspecified()
-                // link-local fe80::/10
-                || (v6.segments()[0] & 0xffc0) == 0xfe80
-                // unique-local fc00::/7
-                || (v6.segments()[0] & 0xfe00) == 0xfc00
-                // IPv4-mapped/compatible: re-check the embedded v4 address
-                || v6
-                    .to_ipv4()
-                    .is_some_and(|m| is_blocked_ip(&std::net::IpAddr::V4(m)))
-        }
-    }
 }
 
 #[cfg(test)]

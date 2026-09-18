@@ -13,6 +13,7 @@ import "@fontsource-variable/inter";
 import "./index.css";
 import { initDialogOverlayBlur } from "./hooks/useDialogOverlayBlur.ts";
 import { initPopupOverlayBlur } from "./hooks/usePopupOverlayBlur.ts";
+import { initWindowTransparency } from "./hooks/useWindowTransparency.ts";
 import { installConsoleCapture } from "./lib/console-buffer.ts";
 import { queryClient } from "./lib/query-client.ts";
 
@@ -26,6 +27,7 @@ installConsoleCapture();
 // dialog that mounts with the app — see @ryu/ui hooks/use-dialog-overlay-blur.ts.
 initDialogOverlayBlur();
 initPopupOverlayBlur();
+initWindowTransparency();
 
 const root = document.getElementById("root");
 if (!root) {

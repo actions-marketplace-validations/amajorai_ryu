@@ -145,10 +145,15 @@ export function useStoreSectionCounts(
 		staleTime: 5 * 60_000,
 	});
 	const sandbox = useSandboxBackends();
+	const contributedQueryOptions = useMemo(
+		() =>
+			contributedTabs.map((tab) =>
+				contributedStoreCatalogQuery(tab, target, tab.app_enabled)
+			),
+		[contributedTabs, target]
+	);
 	const contributedQueries = useQueries({
-		queries: contributedTabs.map((tab) =>
-			contributedStoreCatalogQuery(tab, target, tab.app_enabled)
-		),
+		queries: contributedQueryOptions,
 	});
 
 	return useMemo(() => {

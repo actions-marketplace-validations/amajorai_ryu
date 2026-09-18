@@ -291,6 +291,7 @@ export default function CreditsPage() {
 								source: wallet.source,
 								subscriptionBalanceMicroUsd: wallet.subscriptionBalanceMicroUsd,
 								topupBalanceMicroUsd: wallet.topupBalanceMicroUsd,
+								giftBalanceMicroUsd: wallet.giftBalanceMicroUsd,
 							}
 						: null
 				}

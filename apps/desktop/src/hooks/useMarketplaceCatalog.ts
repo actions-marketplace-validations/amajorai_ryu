@@ -6,7 +6,7 @@
 // affordances key off this list. Plain state + debounced query, mirroring the
 // other :3000-targeted hooks (outside the node-scoped TanStack cache).
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
 	fetchCatalog,
 	type MarketplaceCard,
@@ -33,10 +33,11 @@ export function useMarketplaceCatalog(
 ): UseMarketplaceCatalog {
 	const [kind, setKind] = useState<MarketplaceKind>(initialKind);
 	const [query, setQuery] = useState(initialQuery);
-	const [debouncedQuery, setDebouncedQuery] = useState("");
+	const [debouncedQuery, setDebouncedQuery] = useState(initialQuery);
 	const [items, setItems] = useState<MarketplaceCard[]>([]);
 	const [loading, setLoading] = useState(true);
 	const [error, setError] = useState<MarketplaceError | null>(null);
+	const activeRequestRef = useRef<AbortController | null>(null);
 
 	useEffect(() => {
 		const id = setTimeout(() => setDebouncedQuery(query), DEBOUNCE_MS);
@@ -44,22 +45,40 @@ export function useMarketplaceCatalog(
 	}, [query]);
 
 	const load = useCallback(async () => {
+		activeRequestRef.current?.abort();
+		const controller = new AbortController();
+		activeRequestRef.current = controller;
 		setLoading(true);
 		try {
-			const data = await fetchCatalog(kind, debouncedQuery);
+			const data = await fetchCatalog(kind, debouncedQuery, controller.signal);
+			if (controller.signal.aborted) {
+				return;
+			}
 			setItems(data);
 			setError(null);
 		} catch (e) {
+			if (controller.signal.aborted) {
+				return;
+			}
 			setItems([]);
 			setError(e as MarketplaceError);
 		} finally {
-			setLoading(false);
+			if (activeRequestRef.current === controller) {
+				activeRequestRef.current = null;
+				setLoading(false);
+			}
 		}
 	}, [kind, debouncedQuery]);
 
 	useEffect(() => {
 		load().catch(() => undefined);
+		return () => {
+			activeRequestRef.current?.abort();
+			activeRequestRef.current = null;
+		};
 	}, [load]);
+
+	const refresh = useCallback(() => load(), [load]);
 
 	return {
 		kind,
@@ -69,6 +88,6 @@ export function useMarketplaceCatalog(
 		items,
 		loading,
 		error,
-		refresh: load,
+		refresh,
 	};
 }

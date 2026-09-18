@@ -29,6 +29,13 @@
 import AppIcon from "@ryu/marketplace/catalog/chrome/app-icon";
 import { iconCacheKey } from "@ryu/marketplace/catalog/icon-cache";
 import type { CardDither } from "@ryu/marketplace/catalog/types";
+import {
+	ContextMenu,
+	ContextMenuContent,
+	ContextMenuItem,
+	ContextMenuTrigger,
+} from "@ryu/ui/components/context-menu.tsx";
+import { toast } from "@ryu/ui/components/sileo.tsx";
 import { cn } from "@ryu/ui/lib/utils.ts";
 import {
 	useCallback,
@@ -38,12 +45,14 @@ import {
 	useRef,
 	useState,
 } from "react";
+import { StandaloneAppContextMenuItems } from "@/src/components/apps/standalone-app-menu.tsx";
 import { useTabSelector } from "@/src/contexts/TabsContext.tsx";
 import { useApps } from "@/src/hooks/useApps.ts";
 import {
 	pluginCompanionPath,
 	usePluginContributions,
 } from "@/src/hooks/usePluginContributions.ts";
+import { useStandaloneApps } from "@/src/hooks/useStandaloneApps.ts";
 
 /** Two rows, like Launchpad's own grid — enough to read as a grid, short enough
  *  that the composer above it stays the centre of the page. */
@@ -57,6 +66,8 @@ const MAX_COLUMNS = 8;
 /** One tile. Everything the shared {@link AppIcon} needs to paint an app exactly
  *  as the sidebar and the Store paint it, plus the label and the launch id. */
 export interface LaunchpadItem {
+	/** Owning app id for the standalone host action. */
+	appId?: string;
 	/** Persisted icon-bytes key (`<id>@<version>`), so tiles paint offline. */
 	cacheKey?: string | null;
 	dither?: CardDither | null;
@@ -72,6 +83,8 @@ export interface LaunchpadItem {
 	/** Generative-tile seed. ALWAYS the owning PLUGIN id, so an app that appears
 	 *  in both the sidebar and here tiles identically in both. */
 	seedId: string;
+	standaloneInstalled?: boolean;
+	version?: string;
 }
 
 /** Column count that fits `width`, clamped so a very narrow split still gets a
@@ -95,8 +108,11 @@ function chunk<T>(items: T[], size: number): T[][] {
 export interface AppLaunchpadGridProps {
 	className?: string;
 	items: LaunchpadItem[];
+	onInstallStandalone?: (item: LaunchpadItem) => void;
 	/** `newTab` is true for a middle-click, matching the sidebar's Apps rows. */
 	onOpen: (item: LaunchpadItem, newTab: boolean) => void;
+	onOpenStandalone?: (item: LaunchpadItem) => void;
+	onRemoveStandalone?: (item: LaunchpadItem) => void;
 }
 
 /**
@@ -107,6 +123,9 @@ export function AppLaunchpadGrid({
 	className,
 	items,
 	onOpen,
+	onInstallStandalone,
+	onOpenStandalone,
+	onRemoveStandalone,
 }: AppLaunchpadGridProps) {
 	const scrollerRef = useRef<HTMLDivElement | null>(null);
 	const [width, setWidth] = useState(0);
@@ -187,38 +206,66 @@ export function AppLaunchpadGrid({
 						}}
 					>
 						{pageItems.map((item) => (
-							<button
-								className="group flex flex-col items-center gap-1.5 rounded-xl px-1 py-2 transition-colors hover:bg-muted/60"
-								key={item.id}
-								onAuxClick={(e) => {
-									if (e.button === 1) {
-										e.preventDefault();
-										onOpen(item, true);
-									}
-								}}
-								onClick={() => onOpen(item, false)}
-								title={item.label}
-								type="button"
-							>
-								{/* Identical resolution order and seed to the sidebar's Apps
+							<ContextMenu key={item.id}>
+								<ContextMenuTrigger>
+									<button
+										className="group flex flex-col items-center gap-1.5 rounded-xl px-1 py-2 transition-colors hover:bg-muted/60"
+										onAuxClick={(e) => {
+											if (e.button === 1) {
+												e.preventDefault();
+												onOpen(item, true);
+											}
+										}}
+										onClick={() => onOpen(item, false)}
+										title={item.label}
+										type="button"
+									>
+										{/* Identical resolution order and seed to the sidebar's Apps
 								    rows and the Store's cards, so one app tiles the same way
 								    wherever it is seen. */}
-								<AppIcon
-									cacheKey={item.cacheKey}
-									className="size-12 rounded-[12px] transition-transform group-active:scale-95"
-									dither={item.dither}
-									iconBackground={item.iconBackground}
-									iconId={item.iconId}
-									iconPadding={item.iconPadding}
-									iconUrl={item.iconUrl}
-									name={item.label}
-									seedId={item.seedId}
-									size={22}
-								/>
-								<span className="w-full truncate text-center text-[11px] text-muted-foreground leading-tight group-hover:text-foreground">
-									{item.label}
-								</span>
-							</button>
+										<AppIcon
+											cacheKey={item.cacheKey}
+											className="size-12 rounded-[12px] transition-transform group-active:scale-95"
+											dither={item.dither}
+											iconBackground={item.iconBackground}
+											iconId={item.iconId}
+											iconPadding={item.iconPadding}
+											iconUrl={item.iconUrl}
+											name={item.label}
+											seedId={item.seedId}
+											size={22}
+										/>
+										<span className="w-full truncate text-center text-[11px] text-muted-foreground leading-tight group-hover:text-foreground">
+											{item.label}
+										</span>
+									</button>
+								</ContextMenuTrigger>
+								<ContextMenuContent>
+									<ContextMenuItem onClick={() => onOpen(item, false)}>
+										Open
+									</ContextMenuItem>
+									<StandaloneAppContextMenuItems
+										enabled
+										hasCompanion={Boolean(item.appId)}
+										installed={item.standaloneInstalled ?? false}
+										onInstall={
+											onInstallStandalone
+												? () => onInstallStandalone(item)
+												: undefined
+										}
+										onOpen={
+											onOpenStandalone
+												? () => onOpenStandalone(item)
+												: undefined
+										}
+										onRemove={
+											onRemoveStandalone
+												? () => onRemoveStandalone(item)
+												: undefined
+										}
+									/>
+								</ContextMenuContent>
+							</ContextMenu>
 						))}
 					</div>
 				))}
@@ -252,6 +299,12 @@ export interface AppLaunchpadProps {
 export function AppLaunchpad({ className }: AppLaunchpadProps) {
 	const { companions } = usePluginContributions();
 	const { apps } = useApps();
+	const {
+		install: installStandalone,
+		installedAppIds,
+		open: openStandalone,
+		uninstall: uninstallStandalone,
+	} = useStandaloneApps();
 	const openTab = useTabSelector((state) => state.openTab);
 
 	// The owning app of each companion, so a tile paints the app's real manifest
@@ -280,9 +333,14 @@ export function AppLaunchpad({ className }: AppLaunchpadProps) {
 						id: c.id,
 						label: c.label || c.name,
 						seedId,
+						appId: c.pluginId ?? undefined,
+						standaloneInstalled: c.pluginId
+							? installedAppIds.has(c.pluginId)
+							: false,
+						version: owner?.version ?? "unknown",
 					};
 				}),
-		[companions, appsById]
+		[companions, appsById, installedAppIds]
 	);
 
 	const handleOpen = useCallback(
@@ -295,8 +353,71 @@ export function AppLaunchpad({ className }: AppLaunchpadProps) {
 		[openTab]
 	);
 
+	const handleInstallStandalone = useCallback(
+		(item: LaunchpadItem) => {
+			if (!item.appId) {
+				return;
+			}
+			const target = {
+				appId: item.appId,
+				name: item.label,
+				version: item.version ?? "unknown",
+			};
+			installStandalone(target)
+				.then(() => openStandalone(target))
+				.catch((error: unknown) => {
+					toast.error("Couldn't install the standalone app", {
+						description:
+							error instanceof Error ? error.message : "Please try again.",
+					});
+				});
+		},
+		[installStandalone, openStandalone]
+	);
+
+	const handleOpenStandalone = useCallback(
+		(item: LaunchpadItem) => {
+			if (!item.appId) {
+				return;
+			}
+			openStandalone({
+				appId: item.appId,
+				name: item.label,
+				version: item.version ?? "unknown",
+			}).catch((error: unknown) => {
+				toast.error("Couldn't open the standalone app", {
+					description:
+						error instanceof Error ? error.message : "Please try again.",
+				});
+			});
+		},
+		[openStandalone]
+	);
+
+	const handleRemoveStandalone = useCallback(
+		(item: LaunchpadItem) => {
+			if (!item.appId) {
+				return;
+			}
+			uninstallStandalone(item.appId).catch((error: unknown) => {
+				toast.error("Couldn't remove the standalone app", {
+					description:
+						error instanceof Error ? error.message : "Please try again.",
+				});
+			});
+		},
+		[uninstallStandalone]
+	);
+
 	return (
-		<AppLaunchpadGrid className={className} items={items} onOpen={handleOpen} />
+		<AppLaunchpadGrid
+			className={className}
+			items={items}
+			onInstallStandalone={handleInstallStandalone}
+			onOpen={handleOpen}
+			onOpenStandalone={handleOpenStandalone}
+			onRemoveStandalone={handleRemoveStandalone}
+		/>
 	);
 }
 

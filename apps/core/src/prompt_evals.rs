@@ -14,6 +14,7 @@ use tokio::sync::Mutex;
 use crate::sidecar::download_manager::ryu_dir;
 
 const MAX_SUITE_VERSIONS: i64 = 50;
+const MAX_SUITE_CASES: usize = 10_000;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PromptSuiteRecord {
@@ -246,6 +247,96 @@ impl PromptEvalStore {
         self.get_suite(suite_id).await
     }
 
+    /// Append one trace-derived case to a suite and return the updated suite.
+    ///
+    /// The caller owns authorization and trace-to-case extraction. Keeping the
+    /// mutation here means imported cases use the same suite persistence and
+    /// versioning path as hand-authored Promptfoo cases.
+    pub async fn append_case(
+        &self,
+        suite_id: &str,
+        case: &Value,
+    ) -> Result<Option<PromptSuiteRecord>> {
+        Ok(self
+            .append_case_if_absent(suite_id, case)
+            .await?
+            .map(|(suite, _added)| suite))
+    }
+
+    /// Append one case while holding the SQLite write lock across the duplicate
+    /// check and update. Trace import retries are common (the browser can replay a
+    /// request after a lost response), so an `id` already present in the suite is
+    /// treated as an idempotent no-op. Returning the boolean lets the HTTP layer
+    /// report whether it created a new case without doing a second racy read.
+    pub async fn append_case_if_absent(
+        &self,
+        suite_id: &str,
+        case: &Value,
+    ) -> Result<Option<(PromptSuiteRecord, bool)>> {
+        let conn = self.conn.lock().await;
+        conn.execute_batch("BEGIN IMMEDIATE")?;
+        let result = (|| {
+            let suite = conn
+                .query_row(
+                    "SELECT id, agent_id, name, config, created_at, updated_at
+                     FROM prompt_suites WHERE id = ?1",
+                    params![suite_id],
+                    decode_suite_row,
+                )
+                .optional()?;
+            let Some(suite) = suite else {
+                return Ok(None);
+            };
+
+            let mut config = suite.config.clone();
+            let object = config
+                .as_object_mut()
+                .ok_or_else(|| anyhow::anyhow!("prompt suite config must be a JSON object"))?;
+            let tests = object
+                .entry("tests".to_owned())
+                .or_insert_with(|| Value::Array(Vec::new()));
+            let cases = tests
+                .as_array_mut()
+                .ok_or_else(|| anyhow::anyhow!("prompt suite tests must be an array"))?;
+
+            if let Some(case_id) = case.get("id").and_then(Value::as_str) {
+                if cases.iter().any(|existing| {
+                    existing.get("id").and_then(Value::as_str) == Some(case_id)
+                }) {
+                    return Ok(Some((suite, false)));
+                }
+            }
+            if cases.len() >= MAX_SUITE_CASES {
+                anyhow::bail!("prompt suite cannot contain more than {MAX_SUITE_CASES} cases");
+            }
+            cases.push(case.clone());
+            let now = now_millis();
+            conn.execute(
+                "UPDATE prompt_suites SET config = ?1, updated_at = ?2 WHERE id = ?3",
+                params![serde_json::to_string(&config)?, now, suite_id],
+            )?;
+            let updated = conn
+                .query_row(
+                    "SELECT id, agent_id, name, config, created_at, updated_at
+                     FROM prompt_suites WHERE id = ?1",
+                    params![suite_id],
+                    decode_suite_row,
+                )
+                .optional()?;
+            Ok(updated.map(|suite| (suite, true)))
+        })();
+        match result {
+            Ok(value) => {
+                conn.execute_batch("COMMIT")?;
+                Ok(value)
+            }
+            Err(error) => {
+                let _ = conn.execute_batch("ROLLBACK");
+                Err(error)
+            }
+        }
+    }
+
     pub async fn delete_suite(&self, suite_id: &str) -> Result<bool> {
         let conn = self.conn.lock().await;
         conn.execute_batch("BEGIN IMMEDIATE")?;
@@ -463,7 +554,74 @@ impl PromptEvalStore {
             },
         )
         .optional()
-        .map_err(Into::into)
+            .map_err(Into::into)
+    }
+
+    pub async fn rename_run(
+        &self,
+        suite_id: &str,
+        run_id: &str,
+        name: &str,
+    ) -> Result<Option<PromptRunMeta>> {
+        let name = name.trim();
+        if name.is_empty() {
+            anyhow::bail!("prompt run name is required");
+        }
+        let conn = self.conn.lock().await;
+        let changed = conn.execute(
+            "UPDATE prompt_runs SET name = ?1 WHERE id = ?2 AND suite_id = ?3",
+            params![name, run_id, suite_id],
+        )?;
+        if changed == 0 {
+            return Ok(None);
+        }
+        drop(conn);
+        self.list_runs(suite_id)
+            .await
+            .map(|runs| runs.into_iter().find(|run| run.id == run_id))
+    }
+
+    pub async fn delete_run(&self, suite_id: &str, run_id: &str) -> Result<bool> {
+        let conn = self.conn.lock().await;
+        conn.execute_batch("BEGIN IMMEDIATE")?;
+        let result = (|| {
+            let changed = conn.execute(
+                "DELETE FROM prompt_runs WHERE id = ?1 AND suite_id = ?2",
+                params![run_id, suite_id],
+            )?;
+            if changed > 0 {
+                conn.execute("DELETE FROM prompt_reviews WHERE run_id = ?1", params![run_id])?;
+            }
+            Ok(changed > 0)
+        })();
+        match result {
+            Ok(value) => {
+                conn.execute_batch("COMMIT")?;
+                Ok(value)
+            }
+            Err(error) => {
+                let _ = conn.execute_batch("ROLLBACK");
+                Err(error)
+            }
+        }
+    }
+
+    pub async fn duplicate_run(
+        &self,
+        suite_id: &str,
+        run_id: &str,
+        name: Option<&str>,
+    ) -> Result<Option<PromptRunMeta>> {
+        let Some(run) = self.get_run(suite_id, run_id).await? else {
+            return Ok(None);
+        };
+        self.save_run(
+            suite_id,
+            name.unwrap_or_else(|| "").trim(),
+            &run.request,
+            &run.result,
+        )
+        .await
     }
 
     pub async fn save_review(&self, review: &PromptReview) -> Result<PromptReview> {
@@ -588,6 +746,74 @@ mod tests {
                 .unwrap()
                 .config,
             serde_json::json!({"tests": []})
+        );
+    }
+
+    #[tokio::test]
+    async fn append_case_updates_suite_without_dropping_existing_config() {
+        let store = PromptEvalStore::open_in_memory().unwrap();
+        let suite = store
+            .create_suite(
+                "agent-1",
+                "Regression",
+                &serde_json::json!({
+                    "prompts": ["You are helpful."],
+                    "providers": ["openai:gpt-4o-mini"],
+                    "tests": [{"id": "existing"}]
+                }),
+            )
+            .await
+            .unwrap();
+
+        let updated = store
+            .append_case(
+                &suite.id,
+                &serde_json::json!({
+                    "id": "trace-run-1",
+                    "prompt": "What is 2 + 2?",
+                    "expected": "4",
+                    "metadata": {"source": "ryu-trace"}
+                }),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(updated.config["prompts"][0], "You are helpful.");
+        assert_eq!(updated.config["tests"].as_array().unwrap().len(), 2);
+        assert_eq!(updated.config["tests"][1]["id"], "trace-run-1");
+    }
+
+    #[tokio::test]
+    async fn append_case_is_idempotent_and_atomic_for_duplicate_trace_ids() {
+        let store = PromptEvalStore::open_in_memory().unwrap();
+        let suite = store
+            .create_suite("agent-1", "Regression", &serde_json::json!({"tests": []}))
+            .await
+            .unwrap();
+        let case = serde_json::json!({
+            "id": "trace-run-1",
+            "prompt": "What is 2 + 2?",
+            "expected": "4"
+        });
+
+        let (first, second) = tokio::join!(
+            store.append_case_if_absent(&suite.id, &case),
+            store.append_case_if_absent(&suite.id, &case),
+        );
+        let (first, first_added) = first.unwrap().unwrap();
+        let (second, second_added) = second.unwrap().unwrap();
+        assert_ne!(first_added, second_added, "exactly one concurrent import adds");
+        assert_eq!(
+            first.config["tests"].as_array().unwrap().len(),
+            second.config["tests"].as_array().unwrap().len()
+        );
+        assert_eq!(
+            store.get_suite(&suite.id).await.unwrap().unwrap().config["tests"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
         );
     }
 }

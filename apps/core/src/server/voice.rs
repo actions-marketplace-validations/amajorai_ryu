@@ -14,12 +14,13 @@
 
 use axum::{
     extract::{Multipart, Query, State},
-    http::{header, StatusCode},
+    http::{header, HeaderMap, StatusCode},
     response::IntoResponse,
     Json,
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
+use std::path::{Path, PathBuf};
 
 use super::ServerState;
 
@@ -68,6 +69,42 @@ pub struct SpeakRequest {
     /// Reference wav path/URL for cloning-capable engines (ignored otherwise).
     #[serde(default)]
     pub reference_audio: Option<String>,
+}
+
+/// Reference audio is a local-only, operator-mediated input. Do not forward raw
+/// URLs or arbitrary absolute paths to a cloning backend: those backends may fetch
+/// the value themselves. The narrow root also keeps voice references separate from
+/// Core databases, tokens, and other node data.
+fn validate_reference_audio(value: Option<&str>) -> Result<Option<String>, String> {
+    let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(None);
+    };
+    let path = Path::new(value);
+    if !path.is_absolute() {
+        return Err(
+            "reference_audio must be a file beneath the node voice reference directory".to_owned(),
+        );
+    }
+    let root: PathBuf = crate::paths::ryu_dir()
+        .join("voice")
+        .join("reference-audio");
+    std::fs::create_dir_all(&root)
+        .map_err(|error| format!("voice reference directory: {error}"))?;
+    let metadata = std::fs::symlink_metadata(path)
+        .map_err(|_| "reference_audio file was not found".to_owned())?;
+    if metadata.file_type().is_symlink() {
+        return Err("reference_audio symbolic links are not allowed".to_owned());
+    }
+    let canonical_root = std::fs::canonicalize(&root)
+        .map_err(|error| format!("voice reference directory: {error}"))?;
+    let canonical =
+        std::fs::canonicalize(path).map_err(|_| "reference_audio file was not found".to_owned())?;
+    if !canonical.starts_with(&canonical_root) || !canonical.is_file() {
+        return Err(
+            "reference_audio must be beneath the node voice reference directory".to_owned(),
+        );
+    }
+    Ok(Some(canonical.to_string_lossy().into_owned()))
 }
 
 /// The exact system prompt S1-mini was trained with. Keep this literal stable:
@@ -405,8 +442,21 @@ pub async fn speech_processing(
 )]
 pub async fn speak(
     State(state): State<ServerState>,
+    axum::Extension(caller): axum::Extension<Option<crate::identity_verify::VerifiedCaller>>,
+    headers: HeaderMap,
     Json(req): Json<SpeakRequest>,
 ) -> impl IntoResponse {
+    if let Err(response) = super::media::enforce_host_media_permission(&state, &caller, &headers).await {
+        return response;
+    }
+    let mut req = req;
+    let reference_audio = match validate_reference_audio(req.reference_audio.as_deref()) {
+        Ok(value) => value,
+        Err(error) => {
+            return (StatusCode::BAD_REQUEST, Json(json!({ "error": error }))).into_response();
+        }
+    };
+    req.reference_audio = reference_audio;
     let text = req.text.trim();
     if text.is_empty() {
         return (
@@ -766,6 +816,33 @@ fn gateway_tts_engine_row() -> Value {
 /// voice session (`crate::voice::session`) can reuse it — shipping read-aloud
 /// with a cloud voice while voice mode silently stayed local would be exactly
 /// the half-landed pattern this repo keeps getting burned by.
+const MAX_TTS_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
+
+async fn read_tts_response_bytes(mut response: reqwest::Response) -> Result<Vec<u8>, String> {
+    if response
+        .content_length()
+        .is_some_and(|length| length > MAX_TTS_RESPONSE_BYTES as u64)
+    {
+        return Err(format!(
+            "gateway audio response exceeds {MAX_TTS_RESPONSE_BYTES} bytes"
+        ));
+    }
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|error| format!("reading gateway audio failed: {error}"))?
+    {
+        if bytes.len().saturating_add(chunk.len()) > MAX_TTS_RESPONSE_BYTES {
+            return Err(format!(
+                "gateway audio response exceeds {MAX_TTS_RESPONSE_BYTES} bytes"
+            ));
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    Ok(bytes)
+}
+
 pub(crate) async fn synth_via_gateway(
     client: &reqwest::Client,
     voice: Option<&str>,
@@ -800,13 +877,15 @@ pub(crate) async fn synth_via_gateway(
 
     if !resp.status().is_success() {
         let status = resp.status();
-        let detail = resp.text().await.unwrap_or_default();
+        let detail = read_tts_response_bytes(resp)
+            .await
+            .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+            .unwrap_or_default();
         return Err(format!("gateway audio returned {status}: {detail}"));
     }
 
-    let value: Value = resp
-        .json()
-        .await
+    let response_bytes = read_tts_response_bytes(resp).await?;
+    let value: Value = serde_json::from_slice(&response_bytes)
         .map_err(|e| format!("could not parse gateway audio response: {e}"))?;
 
     // Inline bytes (openai and any provider that answers with audio).
@@ -814,6 +893,11 @@ pub(crate) async fn synth_via_gateway(
         let bytes = base64::engine::general_purpose::STANDARD
             .decode(b64.trim())
             .map_err(|e| format!("gateway audio is not valid base64: {e}"))?;
+        if bytes.len() > MAX_TTS_RESPONSE_BYTES {
+            return Err(format!(
+                "gateway audio exceeds {MAX_TTS_RESPONSE_BYTES} bytes"
+            ));
+        }
         let content_type = value["data"][0]["content_type"]
             .as_str()
             .filter(|s| !s.is_empty())
@@ -825,11 +909,9 @@ pub(crate) async fn synth_via_gateway(
     // Hosted URL (fal/replicate are job-based and can only ever return a link).
     // This is a second, un-gatewayed egress from Core, straight to a provider CDN.
     if let Some(link) = value["data"][0]["url"].as_str() {
-        let media = client
-            .get(link)
-            .send()
+        let media = crate::server::guarded_get(link)
             .await
-            .map_err(|e| format!("gateway audio URL unreachable: {e}"))?;
+            .map_err(|e| format!("gateway audio URL rejected: {e}"))?;
         if !media.status().is_success() {
             return Err(format!("gateway audio URL returned {}", media.status()));
         }
@@ -840,11 +922,8 @@ pub(crate) async fn synth_via_gateway(
             .filter(|s| !s.is_empty())
             .unwrap_or("audio/mpeg")
             .to_string();
-        let bytes = media
-            .bytes()
-            .await
-            .map_err(|e| format!("reading gateway audio failed: {e}"))?;
-        return Ok((bytes.to_vec(), content_type));
+        let bytes = read_tts_response_bytes(media).await?;
+        return Ok((bytes, content_type));
     }
 
     Err(format!(
@@ -1133,6 +1212,12 @@ mod gateway_tts_tests {
         assert_eq!(payload["language"], "en");
         assert_eq!(payload["voice_ref"], "/tmp/reference.wav");
         assert!(payload.get("text").is_none());
+    }
+
+    #[test]
+    fn reference_audio_rejects_urls_and_relative_paths() {
+        assert!(validate_reference_audio(Some("https://example.com/ref.wav")).is_err());
+        assert!(validate_reference_audio(Some("../ref.wav")).is_err());
     }
 
     #[test]

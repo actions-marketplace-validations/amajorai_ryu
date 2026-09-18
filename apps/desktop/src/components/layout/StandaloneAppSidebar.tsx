@@ -3,6 +3,7 @@ import {
 	type SidebarSectionSpec,
 	type SourceItem,
 } from "@ryu/app-host/views";
+import { Button } from "@ryu/ui/components/button.tsx";
 import { Icon } from "@ryu/ui/components/icon.tsx";
 import {
 	Sidebar,
@@ -144,9 +145,11 @@ function ContributedSection({
 export function StandaloneAppSidebar({
 	appId,
 	onNavigate,
+	onRequestRemove,
 }: {
 	appId: string;
 	onNavigate: (navigation: StandaloneAppNavigation) => void;
+	onRequestRemove?: () => void;
 }) {
 	const { companions, sidebar_buttons, sidebar_sections } =
 		usePluginContributions();
@@ -218,9 +221,20 @@ export function StandaloneAppSidebar({
 				))}
 			</SidebarContent>
 			<SidebarFooter>
-				<span className="px-3 py-2 text-muted-foreground text-xs">
-					Ryu app navigation
-				</span>
+				{onRequestRemove ? (
+					<Button
+						className="w-full justify-start text-muted-foreground"
+						onClick={onRequestRemove}
+						size="sm"
+						variant="ghost"
+					>
+						Remove standalone app
+					</Button>
+				) : (
+					<span className="px-3 py-2 text-muted-foreground text-xs">
+						Ryu app navigation
+					</span>
+				)}
 			</SidebarFooter>
 		</Sidebar>
 	);

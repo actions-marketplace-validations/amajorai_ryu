@@ -19,14 +19,21 @@
 //     - presence: text `{ channel: "presence", data }` (awareness deltas / leaves)
 //     - doc-sync: BINARY `<1-byte tag><payload>`
 //
-// Browsers cannot set headers on a WS upgrade, so the node-admittance token and
-// the optional user-identity JWT ride query params (`?token=` / `?jwt=`), exactly
-// as the gateway expects. Uses the global `WebSocket` (a web standard present in
-// browsers, React Native, and Bun/Node) so this stays platform-agnostic like the
-// rest of `core-client`.
+// Browsers cannot set headers on a WS upgrade, so clients exchange their normal
+// HTTP credentials for a short-lived, one-use ticket. Only that opaque ticket
+// rides the upgrade URL; node and user credentials never do. Uses the global
+// `WebSocket` (a web standard present in browsers, React Native, and Bun/Node)
+// so this stays platform-agnostic like the rest of `core-client`.
 
-import { type ApiTarget, apiUrl } from "./client.ts";
+import {
+	appendWebSocketTicket,
+	type ApiTarget,
+	apiUrl,
+	requestWebSocketTicket,
+} from "./client.ts";
 import { createResourceId } from "./ids.ts";
+
+export { appendWebSocketTicket } from "./client.ts";
 
 /** Which resource a room maps to. Mirrors the gateway's `RoomKind`. */
 export type RealtimeKind = "conversation" | "document" | "application";
@@ -178,19 +185,13 @@ export interface RealtimeOptions {
 	roomId: string;
 }
 
-/** Build the `ws(s)://…/api/realtime/ws?token=&jwt=` URL from a node target. */
+/** Build the credential-free `ws(s)://…/api/realtime/ws` URL from a node target. */
 export function realtimeWsUrl(
-	target: ApiTarget,
-	options: RealtimeOptions
+	_target: ApiTarget,
+	_options: RealtimeOptions
 ): string {
-	const url = new URL(apiUrl(target, "/api/realtime/ws"));
+	const url = new URL(apiUrl(_target, "/api/realtime/ws"));
 	url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
-	if (target.token) {
-		url.searchParams.set("token", target.token);
-	}
-	if (options.jwt) {
-		url.searchParams.set("jwt", options.jwt);
-	}
 	return url.toString();
 }
 
@@ -209,11 +210,16 @@ export class RealtimeConnection {
 	private lastPresence: unknown;
 	private keepalive: ReturnType<typeof setInterval> | null = null;
 	private presenceHeartbeat: ReturnType<typeof setInterval> | null = null;
+	private readonly target: ApiTarget;
 	private readonly url: string;
 	private readonly options: RealtimeOptions;
+	private opening = false;
+	private openAttempt = 0;
 	readonly clientId: string;
 
 	constructor(target: ApiTarget, options: RealtimeOptions) {
+		this.target =
+			options.jwt === undefined ? target : { ...target, userJwt: options.jwt };
 		this.options = options;
 		this.clientId = options.clientId ?? createRealtimeClientId();
 		this.url = realtimeWsUrl(target, options);
@@ -222,13 +228,29 @@ export class RealtimeConnection {
 	/** Open the socket and send the `join` frame on connect. Idempotent-ish: a
 	 * second call while already open is a no-op. */
 	connect(): void {
-		if (this.socket) {
+		if (this.socket || this.opening) {
 			return;
 		}
-		const socket = new WebSocket(this.url);
+		this.opening = true;
+		const attempt = ++this.openAttempt;
+		void this.openWithTicket(attempt);
+	}
+
+	private async openWithTicket(attempt: number): Promise<void> {
+		const { handlers } = this.options;
+		try {
+			const ticket = await requestWebSocketTicket(this.target, {
+				appId: this.options.appId,
+				kind: this.options.kind,
+				roomId: this.options.roomId,
+				route: "realtime",
+			});
+			if (this.socket || attempt !== this.openAttempt) {
+				return;
+			}
+			const socket = new WebSocket(appendWebSocketTicket(this.url, ticket));
 		socket.binaryType = "arraybuffer";
 		this.socket = socket;
-		const { handlers } = this.options;
 
 		socket.onopen = () => {
 			// The gateway REQUIRES the join frame first, and it must carry
@@ -256,6 +278,15 @@ export class RealtimeConnection {
 			handlers?.onClose?.(event);
 		};
 		socket.onerror = (event) => handlers?.onError?.(event);
+		} catch {
+			if (typeof Event === "function") {
+				handlers?.onError?.(new Event("error"));
+			}
+		} finally {
+			if (attempt === this.openAttempt) {
+				this.opening = false;
+			}
+		}
 	}
 
 	/** Publish this client's awareness payload (cursor/typing/name/etc.). The
@@ -290,6 +321,8 @@ export class RealtimeConnection {
 
 	/** Send an explicit `leave` (if still open) and close the socket. */
 	close(): void {
+		this.openAttempt += 1;
+		this.opening = false;
 		this.clearKeepalive();
 		this.clearPresenceHeartbeat();
 		if (this.socket?.readyState === WEBSOCKET_OPEN) {

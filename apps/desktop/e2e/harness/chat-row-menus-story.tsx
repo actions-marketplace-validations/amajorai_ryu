@@ -108,6 +108,7 @@ const handlers = {
 	onJumpToMessage: () => undefined,
 	onMarkRead: () => undefined,
 	onMarkUnread: () => undefined,
+	onOpenQuickReply: (id: string) => recordAction(`quick-reply:${id}`),
 	onOpenInNewTab: () => undefined,
 	onOpenInNewWindow: (id: string) => recordAction(`window:${id}`),
 	onOpenNewSideChat: (id: string) => recordAction(`side-chat:${id}`),

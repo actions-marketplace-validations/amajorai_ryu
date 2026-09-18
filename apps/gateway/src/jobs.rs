@@ -65,6 +65,9 @@ pub struct MediaJob {
     /// API key that submitted the job — a poll must present the same key so one
     /// tenant cannot read another's job by guessing an id.
     pub api_key: String,
+    /// Stable per-bearer owner binding. Dynamic org credentials intentionally
+    /// share `api_key`, so polling must also compare this non-secret binding.
+    pub owner_binding: String,
     /// In-flight credit claim held until the provider job reaches a terminal
     /// state and any completion debit finishes. An `Arc` keeps `MediaJob` cheap
     /// to snapshot while the store retains the only owning claim.
@@ -72,6 +75,15 @@ pub struct MediaJob {
 }
 
 impl MediaJob {
+    /// Check the independent tenant and per-bearer ownership bindings used by
+    /// the poll endpoint. The org-scoped `api_key` label alone is insufficient
+    /// for dynamic credentials.
+    pub fn belongs_to(&self, org_id: Option<&str>, api_key: &str, owner_binding: &str) -> bool {
+        self.org_id.as_deref() == org_id
+            && self.api_key == api_key
+            && self.owner_binding == owner_binding
+    }
+
     /// The client-facing JSON for this job. `output` fields are flattened in on
     /// success so a completed poll looks like a normal generation response plus
     /// the `id`/`status` envelope.
@@ -265,6 +277,7 @@ mod tests {
             agent_id: None,
             session_id: None,
             api_key: "key".to_owned(),
+            owner_binding: "owner-key".to_owned(),
             reservation: Some(Arc::new(permit)),
         });
 
@@ -302,6 +315,7 @@ mod tests {
             agent_id: None,
             session_id: None,
             api_key: "key".to_owned(),
+            owner_binding: "owner-key".to_owned(),
             reservation: Some(Arc::new(permit)),
         });
 
@@ -329,6 +343,7 @@ mod tests {
             agent_id: None,
             session_id: None,
             api_key: "key".to_owned(),
+            owner_binding: "owner-key".to_owned(),
             reservation: None,
         });
 
@@ -358,5 +373,31 @@ mod tests {
             jobs.get("video-race").unwrap().output,
             Some(serde_json::json!({ "data": [{ "url": "first" }] }))
         );
+    }
+
+    #[test]
+    fn dynamic_org_label_does_not_authorize_a_different_bearer() {
+        let job = MediaJob {
+            id: "video-owner".to_owned(),
+            provider: ProviderId("test".to_owned()),
+            provider_ref: "provider-owner".to_owned(),
+            model: "video-model".to_owned(),
+            status: JobStatus::Queued,
+            output: None,
+            error: None,
+            created_ms: now_ms(),
+            last_activity_ms: now_ms(),
+            org_id: Some("org-1".to_owned()),
+            user_id: None,
+            agent_id: None,
+            session_id: None,
+            api_key: "rgw_org:org-1".to_owned(),
+            owner_binding: "bearer-a".to_owned(),
+            reservation: None,
+        };
+
+        assert!(job.belongs_to(Some("org-1"), "rgw_org:org-1", "bearer-a"));
+        assert!(!job.belongs_to(Some("org-1"), "rgw_org:org-1", "bearer-b"));
+        assert!(!job.belongs_to(Some("org-2"), "rgw_org:org-1", "bearer-a"));
     }
 }

@@ -14,13 +14,14 @@ import {
 	INCLUDED_CREDIT_FRACTION_MAX,
 	monthlyCreditPoolMicroUsdForSeats,
 	monthlyPriceMicroUsdForSeats,
+	openRouterCreditPurchaseCostUsd,
 	PLAN_IDS,
 	PLAN_VERSIONS,
 	PLANS,
 	type PlanId,
 	planVersionFor,
 	TOPUP_OPENROUTER_FEE_BPS,
-	TOPUP_OPENROUTER_MINIMUM_USD,
+	TOPUP_OPENROUTER_GST_BPS,
 	TOPUP_POLAR_PROCESSING_BPS,
 	TOPUP_POLAR_PROCESSING_FIXED_USD,
 	topupBreakEvenUsd,
@@ -38,8 +39,9 @@ import {
  * $200 with a $150 pool, which is a LOSS on the annual plan at full list price,
  * and set the deposit fee at 10% base / 5% for subscribers when break-even is
  * ~10.3% — so every top-up lost money and the "premium perk" lost the most. Both
- * were invisible because the one cost that makes them losses is not in this
- * repo: OpenRouter charges 5.5% to buy the credits we grant at cost.
+ * were invisible because the costs that make them losses were not in this repo:
+ * OpenRouter charges 5.5% to buy the credits we grant at cost, and Singapore GST
+ * adds 9% to that credit-purchase subtotal from 2026-09-18.
  *
  * Every constant that cost model depends on is named here rather than imported,
  * because they are EXTERNAL rates. When one moves, this file is the place the
@@ -49,8 +51,8 @@ import {
 
 /** OpenRouter's fee to BUY the credits we then meter at cost (5.5%). */
 const OPENROUTER_CREDIT_FEE = TOPUP_OPENROUTER_FEE_BPS / 10_000;
-/** OpenRouter's current minimum fee when buying a small credit balance. */
-const OPENROUTER_CREDIT_MINIMUM_USD = TOPUP_OPENROUTER_MINIMUM_USD;
+/** Singapore GST on the OpenRouter credit-purchase subtotal. */
+const OPENROUTER_GST_RATE = TOPUP_OPENROUTER_GST_BPS / 10_000;
 /** Conservative Polar Starter plus international-card processing case. */
 const POLAR_RATE_ONE_TIME = TOPUP_POLAR_PROCESSING_BPS / 10_000;
 const POLAR_RATE_SUBSCRIPTION = TOPUP_POLAR_PROCESSING_BPS / 10_000;
@@ -91,13 +93,7 @@ const usd = (micro: number): number => micro / 1_000_000;
 
 /** Cost of funding one non-zero included monthly pool through OpenRouter. */
 function fundedPoolUsd(poolUsd: number): number {
-	if (poolUsd <= 0) {
-		return 0;
-	}
-	return (
-		poolUsd +
-		Math.max(poolUsd * OPENROUTER_CREDIT_FEE, OPENROUTER_CREDIT_MINIMUM_USD)
-	);
+	return openRouterCreditPurchaseCostUsd(poolUsd);
 }
 
 /** Plans with a recurring price — the only ones this model describes. */
@@ -309,30 +305,30 @@ describe("current pricing worksheet", () => {
 	const cases = [
 		["marketplace-membership", 1, false, 4.2, 0.21],
 		["marketplace-membership", 1, true, 46.5, 0.2325],
-		["plus", 1, false, 13.165, 0.3376],
-		["plus", 1, true, 90.55, 0.2322],
-		["pro", 1, false, 17.49, 0.3569],
-		["pro", 1, true, 123.75, 0.2526],
-		["max", 1, false, 44.415, 0.4486],
-		["max", 1, true, 353.35, 0.3569],
-		["teams", 5, false, 150.5, 0.602],
-		["teams", 5, true, 1344, 0.5376],
-		["teams-lite", 5, false, 88.65, 0.591],
-		["teams-lite", 5, true, 788.8, 0.5259],
-		["teams-lite", 6, false, 114.3, 0.5715],
-		["teams-lite", 6, true, 1003.1, 0.5016],
-		["teams-lite", 10, false, 301.3, 0.7533],
-		["teams-lite", 10, true, 2873.1, 0.7183],
-		["teams-lite", 25, false, 939.25, 0.8167],
-		["teams-lite", 25, true, 9126, 0.7936],
-		["teams-lite", 50, false, 1972.5, 0.8219],
-		["teams-lite", 50, true, 19_187.5, 0.7995],
-		["business", 5, false, 119.5, 0.3983],
-		["business", 5, true, 878.5, 0.2928],
-		["business", 25, false, 632.5, 0.4865],
-		["business", 25, true, 5164.5, 0.3973],
-		["business", 50, false, 1273.75, 0.4995],
-		["business", 50, true, 10_522, 0.4126],
+		["plus", 1, false, 12.193, 0.3126],
+		["plus", 1, true, 78.886, 0.2023],
+		["pro", 1, false, 16.065_75, 0.3279],
+		["pro", 1, true, 106.659, 0.2177],
+		["max", 1, false, 41.5665, 0.4199],
+		["max", 1, true, 319.168, 0.3224],
+		["teams", 5, false, 145.7525, 0.583],
+		["teams", 5, true, 1287.03, 0.5148],
+		["teams-lite", 5, false, 86.751, 0.5783],
+		["teams-lite", 5, true, 766.012, 0.5107],
+		["teams-lite", 6, false, 110.502, 0.5525],
+		["teams-lite", 6, true, 957.524, 0.4788],
+		["teams-lite", 10, false, 297.502, 0.7438],
+		["teams-lite", 10, true, 2827.524, 0.7069],
+		["teams-lite", 25, false, 929.755, 0.8085],
+		["teams-lite", 25, true, 9012.06, 0.7837],
+		["teams-lite", 50, false, 1953.51, 0.814],
+		["teams-lite", 50, true, 18_959.62, 0.79],
+		["business", 5, false, 110.005, 0.3667],
+		["business", 5, true, 764.56, 0.2549],
+		["business", 25, false, 585.025, 0.45],
+		["business", 25, true, 4594.8, 0.3534],
+		["business", 50, false, 1178.8, 0.4623],
+		["business", 50, true, 9382.6, 0.3679],
 	] as const;
 
 	for (const [id, seats, yearly, contribution, margin] of cases) {
@@ -392,7 +388,7 @@ function topupMarginUsd(faceUsd: number, plan: PlanId | null): number {
 	return (
 		charged -
 		faceUsd -
-		Math.max(faceUsd * OPENROUTER_CREDIT_FEE, OPENROUTER_CREDIT_MINIMUM_USD) -
+		(openRouterCreditPurchaseCostUsd(faceUsd) - faceUsd) -
 		(charged * POLAR_RATE_ONE_TIME + POLAR_FIXED_USD)
 	);
 }
@@ -404,27 +400,35 @@ describe("deposit fee", () => {
 	// the actual guard against a loss band.
 	const SIZES = [5, 10, 12.5, 15, 20, 50, 100, 500];
 
+	it("includes Singapore GST in upstream OpenRouter funding cost", () => {
+		// $15 face -> $0.825 OpenRouter fee, then 9% GST on the $15.825 subtotal.
+		expect(openRouterCreditPurchaseCostUsd(15)).toBeCloseTo(17.249_25, 5);
+	});
+
 	/**
 	 * The largest face value at which the FIXED floor still covers its own costs.
 	 *
 	 * At the floor/percentage join, OpenRouter is above its $0.80 minimum. A flat
-	 * fee `F` nets `F − 0.055·face − (face + F)·0.065 − 0.50`; derive the coverage
-	 * point from the constants rather than writing it down.
+	 * fee `F` nets `F - [0.055 + 0.09 x (1 + 0.055)] x face - (face + F) x
+	 * 0.065 - 0.50`; derive the coverage point from the constants rather than
+	 * writing it down.
 	 */
 	const floorProfitableToUsd = (): number => {
 		const floor = usd(DEPOSIT_FEE_FIXED_MICRO_USD);
 		return (
 			(floor * (1 - POLAR_RATE_ONE_TIME) - POLAR_FIXED_USD) /
-			(OPENROUTER_CREDIT_FEE + POLAR_RATE_ONE_TIME)
+			(OPENROUTER_CREDIT_FEE +
+				OPENROUTER_GST_RATE * (1 + OPENROUTER_CREDIT_FEE) +
+				POLAR_RATE_ONE_TIME)
 		);
 	};
 
 	it("the base rate clears break-even", () => {
-		// The 17% base rate leaves room for the current processor schedule.
-		expect(DEPOSIT_FEE_BPS).toBeGreaterThan(1600);
-		expect(topupBreakEvenUsd(DEPOSIT_FEE_BPS)).toBeCloseTo(13.84, 2);
+		// The 27% base rate leaves room for the processor schedule plus GST.
+		expect(DEPOSIT_FEE_BPS).toBeGreaterThan(2600);
+		expect(topupBreakEvenUsd(DEPOSIT_FEE_BPS)).toBeCloseTo(14.08, 2);
 		expect(topupBreakEvenUsd(DEPOSIT_FEE_BPS_BY_PLAN.max)).toBeCloseTo(
-			16.89,
+			17.76,
 			2
 		);
 	});

@@ -500,6 +500,9 @@ function TeamsBillingTabForOrg({
 							}
 							compact
 							currency={walletQuery.data?.wallet.currency}
+							giftCreditsMicroUsd={
+								walletQuery.data?.wallet.giftBalanceMicroUsd ?? null
+							}
 							onDemandCreditsMicroUsd={
 								walletQuery.data?.wallet.topupBalanceMicroUsd ?? null
 							}

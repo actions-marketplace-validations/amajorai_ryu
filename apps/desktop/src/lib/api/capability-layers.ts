@@ -261,12 +261,13 @@ function toProvider(p: CapabilityProviderWire): CapabilityProvider {
 
 /** Read every capability, its candidate providers, and the current pick. */
 export async function fetchCapabilityLayers(
-	target: ApiTarget
+	target: ApiTarget,
+	signal?: AbortSignal
 ): Promise<CapabilityReadModel> {
 	const json = await request<{
 		capabilities?: CapabilityLayerWire[];
 		verbs?: CapabilityVerbWire[];
-	}>(target, CAPABILITIES_PATH);
+	}>(target, CAPABILITIES_PATH, { signal });
 	return {
 		capabilities: (json.capabilities ?? []).map(
 			(c): CapabilityLayer => ({

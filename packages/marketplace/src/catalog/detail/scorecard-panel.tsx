@@ -154,6 +154,7 @@ export function ScorecardPanel({
 	disclaimer,
 	dataTestId,
 	developerDoctor,
+	developerEvals,
 	developerCommand,
 	scorecard,
 	rulesetLabel = "Catalog ruleset",
@@ -165,6 +166,7 @@ export function ScorecardPanel({
 	dataTestId?: string;
 	developerCommand?: string;
 	developerDoctor?: ReactNode;
+	developerEvals?: ReactNode;
 	rulesetLabel?: string;
 	scorecard: Scorecard;
 	title?: string;
@@ -272,6 +274,8 @@ export function ScorecardPanel({
 						</p>
 					</section>
 				) : null)}
+
+			{developerEvals ?? null}
 
 			{disclaimer ?? (
 				<p className="text-muted-foreground text-xs leading-relaxed">

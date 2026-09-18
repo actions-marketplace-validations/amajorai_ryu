@@ -150,6 +150,33 @@ fn view(state: NodeOnboardingState, can_configure: bool) -> Json<NodeOnboardingS
     })
 }
 
+#[derive(Debug, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+struct OnboardingSkillSelectionUpdate {
+    /// The external recommended packs to install on this node. An empty list
+    /// is an explicit choice to keep only Ryu's built-in/plugin skills.
+    selected_pack_ids: Vec<String>,
+}
+
+fn onboarding_skills_view(
+    selection: &crate::skills_catalog::system_skills::BundledSkillSelectionV1,
+    can_configure: bool,
+    report: Option<&crate::skills_catalog::system_skills::SyncReport>,
+) -> serde_json::Value {
+    let mut value = json!({
+        "canConfigure": can_configure,
+        "configured": selection.configured,
+        "options": crate::skills_catalog::system_skills::bundled_skill_pack_options(),
+        "selectedPackIds": crate::skills_catalog::system_skills::effective_selected_pack_ids(selection),
+        "builtInNotice": "Ryu's built-in skills and enabled plugin skills are not part of this selection.",
+    });
+    if let Some(report) = report {
+        value["syncComplete"] = json!(report.complete);
+        value["report"] = serde_json::to_value(report).unwrap_or_default();
+    }
+    value
+}
+
 /// Whether the verified caller may change node onboarding state.
 ///
 /// An unbound local node has one trusted operator. A personal registered node
@@ -255,10 +282,12 @@ pub fn can_access_user_personalization(
 }
 
 pub fn routes() -> Router<ServerState> {
-    Router::new().route(
-        "/api/onboarding/state",
-        get(get_state).put(put_state).delete(delete_state),
-    )
+    Router::new()
+        .route(
+            "/api/onboarding/state",
+            get(get_state).put(put_state).delete(delete_state),
+        )
+        .route("/api/onboarding/skills", get(get_skills).put(put_skills))
 }
 
 #[utoipa::path(
@@ -280,6 +309,99 @@ pub(crate) async fn get_state(
         )
             .into_response(),
     }
+}
+
+/// `GET /api/onboarding/skills` — return the node's optional external skill
+/// pack catalog and the effective selection. The catalog is static and safe to
+/// read; only the node owner/administrator may save it.
+#[utoipa::path(
+    get,
+    path = "/api/onboarding/skills",
+    tag = "Preferences",
+    summary = "List optional onboarding skill packs",
+    responses((status = 200, description = "Optional skill packs and selection", body = serde_json::Value))
+)]
+pub(crate) async fn get_skills(
+    State(state): State<ServerState>,
+    Extension(caller): Extension<Option<crate::identity_verify::VerifiedCaller>>,
+) -> Response {
+    let selection = crate::skills_catalog::system_skills::read_selection(&state.preferences).await;
+    Json(onboarding_skills_view(
+        &selection,
+        can_configure(&state, &caller).await,
+        None,
+    ))
+    .into_response()
+}
+
+/// `PUT /api/onboarding/skills` — save an owner/admin's node-scoped selection
+/// and reconcile only the selected external packs. The selection is persisted
+/// before downloading so a partial network run can retry on the next boot.
+#[utoipa::path(
+    put,
+    path = "/api/onboarding/skills",
+    tag = "Preferences",
+    summary = "Select optional onboarding skill packs",
+    request_body = OnboardingSkillSelectionUpdate,
+    responses((status = 200, description = "Selection saved and sync report", body = serde_json::Value))
+)]
+pub(crate) async fn put_skills(
+    State(state): State<ServerState>,
+    Extension(caller): Extension<Option<crate::identity_verify::VerifiedCaller>>,
+    Json(update): Json<OnboardingSkillSelectionUpdate>,
+) -> Response {
+    if !can_configure(&state, &caller).await {
+        return denied();
+    }
+
+    let synced_version = state
+        .preferences
+        .get(crate::skills_catalog::system_skills::SYNCED_VERSION_PREF)
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or_default();
+    let selection = match crate::skills_catalog::system_skills::save_selection(
+        &state.preferences,
+        &update.selected_pack_ids,
+    )
+    .await
+    {
+        Ok(selection) => selection,
+        Err(error) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "success": false, "error": error.to_string() })),
+            )
+                .into_response();
+        }
+    };
+
+    let report = crate::skills_catalog::system_skills::sync_selected_bundled_with_preferences(
+        &state.client,
+        &state.preferences,
+        true,
+        &synced_version,
+        &selection.pack_ids,
+    )
+    .await;
+    state.skills.reload();
+    if report.complete {
+        let version =
+            crate::skills_catalog::system_skills::selection_bundle_version(&selection.pack_ids);
+        if let Err(error) = state
+            .preferences
+            .set(
+                crate::skills_catalog::system_skills::SYNCED_VERSION_PREF,
+                &version,
+            )
+            .await
+        {
+            tracing::warn!(error = %error, "saving selected skill-pack sync marker failed");
+        }
+    }
+
+    Json(onboarding_skills_view(&selection, true, Some(&report))).into_response()
 }
 
 #[utoipa::path(
@@ -357,6 +479,21 @@ pub(crate) async fn delete_state(
     }
     if let Err(error) = state
         .preferences
+        .delete(crate::skills_catalog::system_skills::SELECTION_PREF)
+        .await
+    {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": error.to_string() })),
+        )
+            .into_response();
+    }
+    let _ = state
+        .preferences
+        .delete(crate::skills_catalog::system_skills::SYNCED_VERSION_PREF)
+        .await;
+    if let Err(error) = state
+        .preferences
         .delete(NODE_ONBOARDING_STATE_PREF_KEY)
         .await
     {
@@ -417,6 +554,34 @@ mod tests {
         assert!(!state.completed);
         assert_eq!(state.setup_kind, None);
         assert_eq!(state.version, NODE_ONBOARDING_STATE_VERSION);
+    }
+
+    #[test]
+    fn onboarding_skill_selection_uses_camel_case_and_allows_none() {
+        let update: OnboardingSkillSelectionUpdate =
+            serde_json::from_str(r#"{"selectedPackIds":[]}"#).unwrap();
+        assert!(update.selected_pack_ids.is_empty());
+    }
+
+    #[test]
+    fn onboarding_skill_view_defaults_to_external_packs_only() {
+        let view = onboarding_skills_view(
+            &crate::skills_catalog::system_skills::BundledSkillSelectionV1::default(),
+            true,
+            None,
+        );
+        assert_eq!(view["configured"], false);
+        assert_eq!(view["selectedPackIds"].as_array().unwrap().len(), 20);
+        assert_eq!(view["options"].as_array().unwrap().len(), 20);
+        assert!(!view["options"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|option| option["id"]
+                .as_str()
+                .unwrap_or_default()
+                .starts_with("ryu-")));
+        assert!(view["builtInNotice"].as_str().unwrap().contains("built-in"));
     }
 
     #[test]

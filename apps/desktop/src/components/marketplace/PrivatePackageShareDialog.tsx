@@ -32,6 +32,7 @@ import {
 	type PrivatePackageShareCode,
 	revokePrivatePackageShareCode,
 } from "@/src/lib/api/marketplace.ts";
+import { formatDate } from "@/src/lib/timezone.ts";
 
 const SHAREABLE_KINDS: MarketplaceKind[] = [
 	"agent",
@@ -240,10 +241,8 @@ export default function PrivatePackageShareDialog({
 									? "This code is bound to the customer organization."
 									: "Anyone with this code can redeem it."}{" "}
 								It expires{" "}
-								{result.expiresAt
-									? new Date(result.expiresAt).toLocaleDateString()
-									: "soon"}{" "}
-								and allows {result.maxRedemptions} redemption
+								{result.expiresAt ? formatDate(result.expiresAt) : "soon"} and
+								allows {result.maxRedemptions} redemption
 								{result.maxRedemptions === 1 ? "" : "s"}.
 							</span>
 						</div>

@@ -25,6 +25,10 @@
 // a browser, which node origin proxies assets) arrive as `WidgetHostEnv` on the
 // context — see widget-host-context.tsx.
 
+import {
+	COMPANION_THEME_MUTATION_ATTRIBUTES,
+	readCompanionThemeTokens,
+} from "@ryu/app-host/companion-theme";
 import { ExtensionHost } from "@ryu/app-host/ExtensionHost";
 import {
 	type Capability,
@@ -114,10 +118,20 @@ function detectTheme(): "light" | "dark" {
 		return "dark";
 	}
 	const root = document.documentElement;
-	if (root.classList.contains("dark") || root.dataset.theme === "dark") {
+	if (
+		root.classList.contains("dark") ||
+		root.dataset.theme === "dark" ||
+		root.dataset.ryuTheme === "dark"
+	) {
 		return "dark";
 	}
 	return "light";
+}
+
+function readHostThemeTokens(): Record<string, string> {
+	return readCompanionThemeTokens(undefined, {
+		includeStoredPreferences: true,
+	});
 }
 
 const DEFAULT_INLINE_HEIGHT = 360;
@@ -162,6 +176,7 @@ export function AppWidget({ part }: { part: WidgetPartLike }) {
 	>(data?.displayMode ?? "inline");
 	const [height, setHeight] = useState<number | null>(null);
 	const [theme, setTheme] = useState<"light" | "dark">(() => detectTheme());
+	const [themeTokens, setThemeTokens] = useState(readHostThemeTokens);
 	// The app-wide "Friendly names" toggle, read here so it can be baked into the
 	// widget's initial globals and pushed on change — see the effects below.
 	const [friendly] = useFriendlyMode();
@@ -169,9 +184,12 @@ export function AppWidget({ part }: { part: WidgetPartLike }) {
 	// Keep the injected theme in sync with the app root so the widget re-themes.
 	useEffect(() => {
 		const target = document.documentElement;
-		const observer = new MutationObserver(() => setTheme(detectTheme()));
+		const observer = new MutationObserver(() => {
+			setTheme(detectTheme());
+			setThemeTokens(readHostThemeTokens());
+		});
 		observer.observe(target, {
-			attributeFilter: ["class", "data-theme"],
+			attributeFilter: [...COMPANION_THEME_MUTATION_ATTRIBUTES],
 			attributes: true,
 		});
 		return () => observer.disconnect();
@@ -205,6 +223,7 @@ export function AppWidget({ part }: { part: WidgetPartLike }) {
 			friendly,
 			safeArea: { bottom: 0, left: 0, right: 0, top: 0 },
 			theme,
+			themeTokens,
 			toolInput: data.toolInput,
 			toolOutput: data.toolOutput,
 			toolResponseMetadata: data.toolResponseMetadata,
@@ -272,6 +291,9 @@ export function AppWidget({ part }: { part: WidgetPartLike }) {
 	useEffect(() => {
 		pushGlobals({ theme });
 	}, [theme, pushGlobals]);
+	useEffect(() => {
+		pushGlobals({ themeTokens });
+	}, [themeTokens, pushGlobals]);
 	// Friendly names travel exactly like the theme: baked into the initial globals
 	// for first paint, then pushed on every flip so a widget already on screen
 	// re-labels with the rest of the app instead of waiting for a remount.
@@ -450,7 +472,8 @@ export function AppWidget({ part }: { part: WidgetPartLike }) {
 			initialGlobalsRef.current,
 			// Captured once on first mount, so this stays stable and never remounts
 			// the iframe (matching the srcdoc's stable-inputs contract above).
-			assetProxyRef.current ?? undefined
+			assetProxyRef.current ?? undefined,
+			true
 		);
 	}, [nonce, widgetHtml, widgetServer]);
 
@@ -471,6 +494,7 @@ export function AppWidget({ part }: { part: WidgetPartLike }) {
 			pushRef={pushRef}
 			services={hostServices}
 			srcdoc={srcdoc}
+			themeTokens={themeTokens}
 			title={`App widget: ${data.toolName}`}
 		/>
 	);

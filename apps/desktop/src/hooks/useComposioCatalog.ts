@@ -6,6 +6,7 @@
 // data decisions live in Core; these are thin cached fetchers.
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useMemo } from "react";
 import type { ApiTarget } from "@/src/lib/api/client.ts";
 import {
 	type ComposioAction,
@@ -26,32 +27,55 @@ import { useActiveNode } from "./useActiveNode.ts";
 
 function useTarget(): ApiTarget {
 	const activeNode = useActiveNode();
-	return {
-		url: activeNode.url,
-		token: activeNode.token,
-		userJwt: activeNode.userJwt ?? null,
-	};
+	return useMemo(
+		() => ({
+			url: activeNode.url,
+			token: activeNode.token,
+			userJwt: activeNode.userJwt ?? null,
+		}),
+		[activeNode.url, activeNode.token, activeNode.userJwt]
+	);
 }
 
 /** Whether a Composio key is configured on the active node. */
 export function useComposioStatus() {
 	const target = useTarget();
-	return useQuery<ComposioStatus>({
-		queryKey: ["composio", "status", target.url],
-		queryFn: () => fetchComposioStatus(target),
-		staleTime: 30_000,
-	});
+	const options = useMemo(
+		() => ({
+			queryKey: [
+				"composio",
+				"status",
+				target.url,
+				target.token ?? null,
+				target.userJwt ?? null,
+			],
+			queryFn: () => fetchComposioStatus(target),
+			staleTime: 30_000,
+		}),
+		[target]
+	);
+	return useQuery<ComposioStatus>(options);
 }
 
 /** Browse the user's Composio toolkits (only when `enabled`). */
 export function useComposioToolkits(enabled: boolean) {
 	const target = useTarget();
-	return useQuery<ComposioToolkit[]>({
-		queryKey: ["composio", "toolkits", target.url],
-		queryFn: () => fetchComposioToolkits(target),
-		enabled,
-		staleTime: 5 * 60_000,
-	});
+	const options = useMemo(
+		() => ({
+			queryKey: [
+				"composio",
+				"toolkits",
+				target.url,
+				target.token ?? null,
+				target.userJwt ?? null,
+			],
+			queryFn: () => fetchComposioToolkits(target),
+			enabled,
+			staleTime: 5 * 60_000,
+		}),
+		[enabled, target]
+	);
+	return useQuery<ComposioToolkit[]>(options);
 }
 
 /** List a toolkit's actions (only when a toolkit is selected). */
@@ -61,30 +85,49 @@ export function useComposioActions(
 	tags: readonly string[] = []
 ) {
 	const target = useTarget();
-	return useQuery<ComposioAction[]>({
-		queryKey: [
-			"composio",
-			"actions",
-			target.url,
-			toolkit ?? "",
-			query,
-			tags.join(","),
-		],
-		queryFn: () => fetchComposioActions(target, toolkit ?? "", query, tags),
-		enabled: Boolean(toolkit),
-		staleTime: 5 * 60_000,
-	});
+	const tagsKey = tags.join(",");
+	// biome-ignore lint/correctness/useExhaustiveDependencies: tagsKey is the content key for tags.
+	const options = useMemo(
+		() => ({
+			queryKey: [
+				"composio",
+				"actions",
+				target.url,
+				target.token ?? null,
+				target.userJwt ?? null,
+				toolkit ?? "",
+				query,
+				tagsKey,
+			],
+			queryFn: () => fetchComposioActions(target, toolkit ?? "", query, tags),
+			enabled: Boolean(toolkit),
+			staleTime: 5 * 60_000,
+		}),
+		[query, tagsKey, target, toolkit]
+	);
+	return useQuery<ComposioAction[]>(options);
 }
 
 /** List a toolkit's trigger types (only when a toolkit is selected). */
 export function useComposioTriggers(toolkit: string | null) {
 	const target = useTarget();
-	return useQuery<ComposioTrigger[]>({
-		queryKey: ["composio", "triggers", target.url, toolkit ?? ""],
-		queryFn: () => fetchComposioTriggers(target, toolkit ?? ""),
-		enabled: Boolean(toolkit),
-		staleTime: 5 * 60_000,
-	});
+	const options = useMemo(
+		() => ({
+			queryKey: [
+				"composio",
+				"triggers",
+				target.url,
+				target.token ?? null,
+				target.userJwt ?? null,
+				toolkit ?? "",
+			],
+			queryFn: () => fetchComposioTriggers(target, toolkit ?? ""),
+			enabled: Boolean(toolkit),
+			staleTime: 5 * 60_000,
+		}),
+		[target, toolkit]
+	);
+	return useQuery<ComposioTrigger[]>(options);
 }
 
 /**
@@ -95,13 +138,24 @@ export function useComposioTriggers(toolkit: string | null) {
  */
 export function useComposioConnections(toolkit = "", enabled = true) {
 	const target = useTarget();
-	return useQuery<ComposioConnection[]>({
-		queryKey: ["composio", "connections", target.url, toolkit],
-		queryFn: () => fetchComposioConnections(target, toolkit),
-		enabled,
-		staleTime: 15_000,
-		refetchOnWindowFocus: true,
-	});
+	const options = useMemo(
+		() => ({
+			queryKey: [
+				"composio",
+				"connections",
+				target.url,
+				target.token ?? null,
+				target.userJwt ?? null,
+				toolkit,
+			],
+			queryFn: () => fetchComposioConnections(target, toolkit),
+			enabled,
+			staleTime: 15_000,
+			refetchOnWindowFocus: true,
+		}),
+		[enabled, target, toolkit]
+	);
+	return useQuery<ComposioConnection[]>(options);
 }
 
 /**

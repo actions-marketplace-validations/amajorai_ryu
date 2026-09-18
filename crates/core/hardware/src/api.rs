@@ -188,6 +188,9 @@ pub async fn delete_device(
 ) -> (StatusCode, Json<serde_json::Value>) {
     // Also drop the device's dashboard binding so a re-paired id starts clean.
     ctx.dashboards.delete_device(&id).await;
+    // Revoke any already-established socket before deleting the durable row. A
+    // handshake-only token check cannot invalidate a session that is already live.
+    crate::session::live::revoke(&id).await;
     match ctx.hardware.revoke(&id).await {
         Ok(true) => (StatusCode::OK, Json(json!({ "ok": true }))),
         Ok(false) => (

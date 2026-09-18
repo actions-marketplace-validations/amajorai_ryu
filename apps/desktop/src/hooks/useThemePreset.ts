@@ -1,12 +1,26 @@
+import { useI18n } from "@ryu/i18n/react";
 import {
+	effectiveTimeZone,
+	TIMEZONE_CHANGE_EVENT,
+} from "@ryu/ui/lib/timezone.ts";
+import {
+	applyCardSpacing as applyCardSpacingDom,
 	applyContrastToMuted,
 	applyFonts as applyFontVars,
+	applyScale as applyScaleDom,
+	applySpacing as applySpacingDom,
 	applyVariant as applyVariantDom,
+	clearCardSpacing as clearCardSpacingDom,
 	clearVariant,
+	DEFAULT_RADIUS as DEFAULT_THEME_RADIUS,
 	isDarkMode,
 } from "@ryu/ui/theme/apply";
 import {
+	DEFAULT_CARD_SPACING as DEFAULT_THEME_CARD_SPACING,
 	DEFAULT_THEME_MODE,
+	DEFAULT_SCALE as DEFAULT_THEME_SCALE,
+	DEFAULT_SPACING as DEFAULT_THEME_SPACING,
+	THEME_APPEARANCE_CHANGE_EVENT,
 	THEME_PREFS_VERSION,
 	type ThemeMode,
 	type ThemePrefs,
@@ -28,7 +42,7 @@ import {
 } from "@/src/lib/themes/presets.ts";
 import { useNodeStore } from "@/src/store/useNodeStore.ts";
 
-export const DEFAULT_RADIUS = 0.625;
+export const DEFAULT_RADIUS = DEFAULT_THEME_RADIUS;
 // The app runs in a frameless, transparent window, so the visible "window"
 // corners are painted by CSS (PageWrapper + portaled overlays read
 // `--ryu-window-radius-base`), not the OS. The window corner is much larger
@@ -49,31 +63,28 @@ export function applyWindowRadius(radius: number) {
 }
 // Base unit (in rem) all Tailwind v4 spacing utilities derive from. Mirrors the
 // `--spacing` value in apps/desktop/src/index.css; acts as a global UI zoom.
-export const DEFAULT_SPACING = 0.24;
+export const DEFAULT_SPACING = DEFAULT_THEME_SPACING;
 // True browser-style UI scale (Chrome/Electron zoom). Applied as the CSS `zoom`
 // property on the root element, so it scales EVERYTHING — text, spacing, images,
 // canvas — with reflow, unlike `--spacing` which only rescales spacing-derived
 // sizes. 1 = 100%.
-export const DEFAULT_SCALE = 1;
+export const DEFAULT_SCALE = DEFAULT_THEME_SCALE;
 export const SCALE_MIN = 0.5;
 export const SCALE_MAX = 2;
 export const SCALE_STEP = 0.05;
 
 function applyScale(value: number) {
-	document.documentElement.style.zoom = String(value);
+	applyScaleDom(value);
 }
 // Card inner padding (in rem). Mirrors the nova `--card-spacing` default of
 // `--spacing(4)` at the default zoom (0.24rem * 4). Drives the `--card-pad`
 // override consumed by the Card component in packages/ui; the small variant
 // (`--card-pad-sm`) is derived at 0.75x to preserve nova's 4:3 ratio.
-export const DEFAULT_CARD_SPACING = 0.96;
-const CARD_SPACING_SM_RATIO = 0.75;
+export const DEFAULT_CARD_SPACING = DEFAULT_THEME_CARD_SPACING;
 export const DEFAULT_CHAT_WIDTH = 720;
 
 function applyCardSpacing(value: number) {
-	const root = document.documentElement.style;
-	root.setProperty("--card-pad", `${value}rem`);
-	root.setProperty("--card-pad-sm", `${value * CARD_SPACING_SM_RATIO}rem`);
+	applyCardSpacingDom(value);
 }
 
 function currentContrast(): number {
@@ -105,6 +116,21 @@ function applyVariant(variant: ThemeVariant) {
 	applyVariantDom(variant, currentContrast());
 }
 
+function applyAnimationsPreference(enabled: boolean) {
+	if (enabled) {
+		document.documentElement.removeAttribute("data-ryu-animations");
+	} else {
+		document.documentElement.setAttribute("data-ryu-animations", "off");
+	}
+}
+
+/** Stamp the global motion preference before the first desktop surface mounts. */
+export function initAnimationsPreference() {
+	applyAnimationsPreference(
+		localStorage.getItem("ryu:animations-enabled") !== "false"
+	);
+}
+
 // --- Core sync ------------------------------------------------------------
 // Publish the local theme prefs to Core so the island companion (a separate
 // Electron process that cannot share localStorage) renders the same preset.
@@ -113,8 +139,9 @@ function applyVariant(variant: ThemeVariant) {
 const PUSH_DEBOUNCE_MS = 400;
 let pushTimer: ReturnType<typeof setTimeout> | undefined;
 
-function buildThemePrefs(): ThemePrefs {
+function buildThemePrefs(localeOverride?: string): ThemePrefs {
 	const mode = storedThemeMode();
+	const storedCardSpacing = localStorage.getItem(STORAGE_KEYS.cardSpacing);
 	return {
 		version: THEME_PREFS_VERSION,
 		mode,
@@ -124,6 +151,28 @@ function buildThemePrefs(): ThemePrefs {
 			localStorage.getItem(STORAGE_KEYS.darkPreset) ?? DEFAULT_DARK_ID,
 		contrast: currentContrast(),
 		radius: Number(localStorage.getItem(STORAGE_KEYS.radius) ?? DEFAULT_RADIUS),
+		spacing: Number(
+			localStorage.getItem(STORAGE_KEYS.spacing) ?? DEFAULT_SPACING
+		),
+		scale: Number(localStorage.getItem(STORAGE_KEYS.scale) ?? DEFAULT_SCALE),
+		cardSpacing: storedCardSpacing === null ? null : Number(storedCardSpacing),
+		pointerCursor: localStorage.getItem("ryu_pointer_cursor") === "true",
+		chromeShadows: localStorage.getItem("ryu_chrome_shadows") !== "false",
+		dialogOverlayBlur:
+			localStorage.getItem("ryu_dialog_overlay_blur") === "true",
+		popupOverlayBlur: localStorage.getItem("ryu_popup_overlay_blur") === "true",
+		invertedBackgrounds:
+			localStorage.getItem("ryu_inverted_backgrounds") === "true",
+		animationsEnabled:
+			localStorage.getItem("ryu:animations-enabled") !== "false",
+		timezone: effectiveTimeZone(),
+		locale:
+			localeOverride ??
+			(typeof document !== "undefined" && document.documentElement.lang
+				? document.documentElement.lang
+				: typeof navigator === "undefined"
+					? undefined
+					: navigator.language),
 		// The island resolves the selected preset id against this list alone, so it
 		// carries every NON-built-in variant — the user's saved themes AND the ones
 		// installed from the marketplace. Sending only `loadCustomThemes()` would
@@ -137,14 +186,14 @@ function buildThemePrefs(): ThemePrefs {
 }
 
 /** Debounced publish of the current theme prefs to the active Core node. */
-export function publishThemePrefs() {
+export function publishThemePrefs(localeOverride?: string) {
 	if (pushTimer) {
 		clearTimeout(pushTimer);
 	}
 	pushTimer = setTimeout(() => {
 		const target = toTarget(useNodeStore.getState().getActiveNode());
 		// Fire-and-forget: setThemePrefs swallows errors (best-effort sync).
-		setThemePrefs(target, buildThemePrefs()).catch(() => {
+		setThemePrefs(target, buildThemePrefs(localeOverride)).catch(() => {
 			// Ignore: theme sync is best-effort; localStorage remains source of truth.
 		});
 	}, PUSH_DEBOUNCE_MS);
@@ -186,12 +235,14 @@ export function initTheme() {
 	applyFonts(uiFont, headingFont, codeFont);
 	document.documentElement.style.setProperty("--radius", `${radius}rem`);
 	applyWindowRadius(radius);
-	document.documentElement.style.setProperty("--spacing", `${spacing}rem`);
+	applySpacingDom(spacing);
 	applyScale(scale);
 	// Only override card padding when the user has set it; otherwise the Card's
 	// own fallback (calc(var(--spacing) * 4)) keeps it tracking the zoom slider.
 	if (storedCardSpacing) {
 		applyCardSpacing(Number(storedCardSpacing));
+	} else {
+		clearCardSpacingDom();
 	}
 	document.documentElement.style.setProperty(
 		"--an-max-width",
@@ -202,6 +253,7 @@ export function initTheme() {
 
 export function useThemePreset() {
 	const { theme, resolvedTheme } = useTheme();
+	const { locale } = useI18n();
 
 	useEffect(() => {
 		const lightId =
@@ -215,8 +267,18 @@ export function useThemePreset() {
 		} else {
 			clearVariant();
 		}
-		publishThemePrefs();
-	}, [theme, resolvedTheme]);
+		publishThemePrefs(locale);
+	}, [locale, resolvedTheme, theme]);
+
+	useEffect(() => {
+		const publish = () => publishThemePrefs();
+		window.addEventListener(THEME_APPEARANCE_CHANGE_EVENT, publish);
+		window.addEventListener(TIMEZONE_CHANGE_EVENT, publish);
+		return () => {
+			window.removeEventListener(THEME_APPEARANCE_CHANGE_EVENT, publish);
+			window.removeEventListener(TIMEZONE_CHANGE_EVENT, publish);
+		};
+	}, []);
 }
 
 /**
@@ -288,25 +350,27 @@ export function setRadius(value: number) {
 
 export function setSpacing(value: number) {
 	localStorage.setItem(STORAGE_KEYS.spacing, String(value));
-	document.documentElement.style.setProperty("--spacing", `${value}rem`);
+	applySpacingDom(value);
+	publishThemePrefs();
 }
 
 export function setScale(value: number) {
 	localStorage.setItem(STORAGE_KEYS.scale, String(value));
 	applyScale(value);
+	publishThemePrefs();
 }
 
 export function setCardSpacing(value: number) {
 	localStorage.setItem(STORAGE_KEYS.cardSpacing, String(value));
 	applyCardSpacing(value);
+	publishThemePrefs();
 }
 
 /** Clear the card-padding override so cards fall back to the zoom-derived default. */
 export function resetCardSpacing() {
 	localStorage.removeItem(STORAGE_KEYS.cardSpacing);
-	const root = document.documentElement.style;
-	root.removeProperty("--card-pad");
-	root.removeProperty("--card-pad-sm");
+	clearCardSpacingDom();
+	publishThemePrefs();
 }
 
 export function setChatWidth(value: number) {

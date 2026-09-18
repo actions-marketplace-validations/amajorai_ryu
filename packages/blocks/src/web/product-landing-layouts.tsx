@@ -19,10 +19,10 @@ export function ProductHeroFrame({
 }) {
 	return (
 		<section
-			className="mx-auto max-w-6xl px-6 pt-16 pb-16 md:pt-24 md:pb-20"
+			className="mx-auto max-w-6xl px-6 pt-16 pb-12 md:pt-24 md:pb-16"
 			data-product-hero-layout="showcase"
 		>
-			<div className="space-y-12 md:space-y-16">
+			<div className="grid items-center gap-10 lg:grid-cols-[minmax(0,0.85fr)_minmax(0,1.15fr)] lg:gap-16">
 				<div className="min-w-0 max-w-2xl">
 					<h1 className={landingHeadlineClass}>{title}</h1>
 					<p className={landingSubheadlineClass}>{subtitle}</p>
@@ -31,7 +31,7 @@ export function ProductHeroFrame({
 					</div>
 				</div>
 				<div
-					className={`${landingVisualFrameClass} flex min-h-80 min-w-0 items-center justify-center md:min-h-[24rem] [&>*]:w-full [&>*]:max-w-3xl`}
+					className={`${landingVisualFrameClass} flex min-h-72 min-w-0 items-center justify-center md:min-h-[22rem] [&>*]:w-full [&>*]:max-w-3xl`}
 					data-product-visual
 				>
 					{visual}

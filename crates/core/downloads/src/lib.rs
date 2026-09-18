@@ -100,6 +100,9 @@ fn host() -> Arc<dyn DownloadsHost> {
 /// CDN behavior is unchanged.
 pub fn default_http_client() -> reqwest::Client {
     reqwest::Client::builder()
+        // Redirects are followed explicitly in the stream driver so every hop
+        // is SSRF-screened and DNS-pinned before it is contacted.
+        .redirect(reqwest::redirect::Policy::none())
         .user_agent("ryu-core/0.1")
         .build()
         .expect("reqwest client")

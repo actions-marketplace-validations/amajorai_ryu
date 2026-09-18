@@ -15,7 +15,107 @@
 //! path the downloader in Core owns) and passed in, so this crate has ZERO
 //! dependency on `apps/core`.
 
+use std::io::Cursor;
 use std::path::Path;
+
+use anyhow::{bail, Context, Result};
+
+/// Normalize an uploaded WAV to the exact format required by Parakeet's ONNX
+/// model: 16 kHz, mono, signed 16-bit PCM. `transcribe-rs` rejects other WAV
+/// headers instead of resampling them, while browser microphones and TTS
+/// engines commonly produce 24/48 kHz or stereo audio. Keeping conversion at
+/// this boundary makes the public Core route truthful for those valid inputs
+/// and leaves the extracted STT crate independent of Core.
+pub fn normalize_wav_to_16k_mono(audio: &[u8]) -> Result<Vec<u8>> {
+    let mut reader =
+        hound::WavReader::new(Cursor::new(audio)).context("reading WAV input for Parakeet")?;
+    let spec = reader.spec();
+    let channels = usize::from(spec.channels);
+    if channels == 0 {
+        bail!("WAV input has no channels");
+    }
+    if spec.sample_rate == 0 {
+        bail!("WAV input has no sample rate");
+    }
+
+    let interleaved = match (spec.sample_format, spec.bits_per_sample) {
+        (hound::SampleFormat::Int, 8) => reader
+            .samples::<i8>()
+            .map(|sample| sample.map(|value| value as f32 / 128.0))
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .context("decoding 8-bit WAV input")?,
+        (hound::SampleFormat::Int, 16) => reader
+            .samples::<i16>()
+            .map(|sample| sample.map(|value| value as f32 / i16::MAX as f32))
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .context("decoding 16-bit WAV input")?,
+        (hound::SampleFormat::Int, bits @ (24 | 32)) => {
+            let scale = ((1_i64 << (bits - 1)) - 1) as f32;
+            reader
+                .samples::<i32>()
+                .map(|sample| sample.map(|value| value as f32 / scale))
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .context("decoding 24/32-bit WAV input")?
+        }
+        (hound::SampleFormat::Float, 32) => reader
+            .samples::<f32>()
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .context("decoding 32-bit float WAV input")?,
+        _ => bail!(
+            "unsupported WAV format: {} channels, {} Hz, {}-bit {:?}; expected PCM or 32-bit float",
+            spec.channels,
+            spec.sample_rate,
+            spec.bits_per_sample,
+            spec.sample_format
+        ),
+    };
+
+    if interleaved.len() % channels != 0 {
+        bail!("WAV sample count is not divisible by its channel count");
+    }
+    let mono: Vec<f32> = interleaved
+        .chunks_exact(channels)
+        .map(|frame| frame.iter().copied().sum::<f32>() / channels as f32)
+        .collect();
+    if mono.is_empty() {
+        bail!("WAV input has no samples");
+    }
+
+    let output_len =
+        ((mono.len() as f64 * 16_000.0 / spec.sample_rate as f64).round() as usize).max(1);
+    let ratio = spec.sample_rate as f64 / 16_000.0;
+    let mut normalized = Vec::with_capacity(output_len);
+    for index in 0..output_len {
+        let position = index as f64 * ratio;
+        let lower = position.floor() as usize;
+        let upper = (lower + 1).min(mono.len() - 1);
+        let fraction = (position - lower as f64) as f32;
+        let sample = mono[lower.min(mono.len() - 1)]
+            + (mono[upper] - mono[lower.min(mono.len() - 1)]) * fraction;
+        normalized.push((sample.clamp(-1.0, 1.0) * i16::MAX as f32).round() as i16);
+    }
+
+    let output_spec = hound::WavSpec {
+        channels: 1,
+        sample_rate: 16_000,
+        bits_per_sample: 16,
+        sample_format: hound::SampleFormat::Int,
+    };
+    let mut output = Cursor::new(Vec::new());
+    {
+        let mut writer = hound::WavWriter::new(&mut output, output_spec)
+            .context("creating normalized Parakeet WAV")?;
+        for sample in normalized {
+            writer
+                .write_sample(sample)
+                .context("writing normalized Parakeet WAV")?;
+        }
+        writer
+            .finalize()
+            .context("finalizing normalized Parakeet WAV")?;
+    }
+    Ok(output.into_inner())
+}
 
 /// Transcribe audio bytes (a WAV upload) with parakeet. Used by the STT dispatch
 /// (`transcribe_wav_detailed`) when the parakeet engine is selected. `model_dir`
@@ -104,21 +204,22 @@ mod engine {
         *guard = None;
     }
 
-    /// Transcribe raw WAV bytes. The audio must be 16 kHz mono PCM (whisper-style
-    /// uploads from the desktop already meet this); other formats are written
-    /// through to `transcribe_file`, which reads via `hound`.
+    /// Transcribe raw WAV bytes after normalizing the upload to Parakeet's
+    /// required 16 kHz mono PCM format.
     pub fn transcribe_wav_bytes(audio: &[u8], model_dir: &Path) -> Result<String> {
         preload(model_dir)?;
         let mut guard = MODEL.lock().expect("parakeet model mutex");
         let model = guard.as_mut().context("parakeet model not loaded")?;
 
-        // transcribe-rs reads WAV from a path (hound). Stage the upload to a temp
-        // file so we can reuse its decoding + the engine's resampling.
+        // transcribe-rs reads WAV from a path (hound) and requires 16 kHz mono
+        // PCM. Normalize browser/TTS uploads before staging the temp file.
+        let normalized = super::normalize_wav_to_16k_mono(audio)?;
         let mut tmp = tempfile::Builder::new()
             .suffix(".wav")
             .tempfile()
             .context("creating temp wav for parakeet")?;
-        tmp.write_all(audio).context("writing temp wav")?;
+        tmp.write_all(&normalized)
+            .context("writing normalized temp wav")?;
         let path = tmp.path().to_path_buf();
 
         let result = model
@@ -126,6 +227,71 @@ mod engine {
             .map_err(|e| anyhow::anyhow!("{e}"))
             .context("parakeet transcription failed")?;
         Ok(result.text.trim().to_string())
+    }
+}
+
+#[cfg(test)]
+mod normalization_tests {
+    use super::normalize_wav_to_16k_mono;
+    use std::io::Cursor;
+
+    #[test]
+    fn converts_stereo_24khz_input_to_parakeet_format() {
+        let spec = hound::WavSpec {
+            channels: 2,
+            sample_rate: 24_000,
+            bits_per_sample: 16,
+            sample_format: hound::SampleFormat::Int,
+        };
+        let mut input = Cursor::new(Vec::new());
+        {
+            let mut writer = hound::WavWriter::new(&mut input, spec).expect("input wav");
+            for index in 0..2_400 {
+                let sample = if index % 80 < 40 { 12_000 } else { -12_000 };
+                writer.write_sample(sample).expect("left sample");
+                writer.write_sample(sample / 2).expect("right sample");
+            }
+            writer.finalize().expect("finalize input wav");
+        }
+
+        let output = normalize_wav_to_16k_mono(&input.into_inner()).expect("normalize wav");
+        let mut reader = hound::WavReader::new(Cursor::new(output)).expect("output wav");
+        let output_spec = reader.spec();
+        assert_eq!(output_spec.channels, 1);
+        assert_eq!(output_spec.sample_rate, 16_000);
+        assert_eq!(output_spec.bits_per_sample, 16);
+        assert_eq!(output_spec.sample_format, hound::SampleFormat::Int);
+        let samples = reader
+            .samples::<i16>()
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .expect("output samples");
+        assert_eq!(samples.len(), 1_600);
+        assert!(samples.iter().any(|sample| *sample != 0));
+    }
+
+    #[test]
+    fn keeps_native_16khz_mono_input_usable() {
+        let spec = hound::WavSpec {
+            channels: 1,
+            sample_rate: 16_000,
+            bits_per_sample: 16,
+            sample_format: hound::SampleFormat::Int,
+        };
+        let mut input = Cursor::new(Vec::new());
+        {
+            let mut writer = hound::WavWriter::new(&mut input, spec).expect("input wav");
+            for sample in [0_i16, 100, -100, 200] {
+                writer.write_sample(sample).expect("sample");
+            }
+            writer.finalize().expect("finalize input wav");
+        }
+        let output = normalize_wav_to_16k_mono(&input.into_inner()).expect("normalize native wav");
+        let mut reader = hound::WavReader::new(Cursor::new(output)).expect("output wav");
+        let samples = reader
+            .samples::<i16>()
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .expect("output samples");
+        assert_eq!(samples, vec![0, 100, -100, 200]);
     }
 }
 

@@ -561,8 +561,8 @@ const tools = new Proxy({{}}, {{ get: (_t, server) => __mkServer(String(server))
 /// - `fs.write` → `--allow-write=<comma-joined paths>` (omitted when empty).
 /// - `network: true` → bare `--allow-net`; `network: ["h:443", …]` →
 ///   `--allow-net=h:443,…`; `false`/empty → no flag.
-/// - `child_process: true` → `--allow-run` (subprocess spawning). See
-///   [`permission_flags_scoped`] for the scoped-allow-list variant.
+/// - `child_process: true` → a scoped `--allow-run=<names>` only when the host
+///   supplies an explicit program allow-list. An empty list stays deny-all.
 /// - `tool` is NOT a Deno flag — tool calls are brokered over stdio by the host,
 ///   never an OS capability, so it does not appear here.
 ///
@@ -573,8 +573,7 @@ const tools = new Proxy({{}}, {{ get: (_t, server) => __mkServer(String(server))
 fn permission_flags(
     permissions: Option<&ryu_kernel_contracts::manifest::PermissionSet>,
 ) -> Vec<String> {
-    // Delegate with an empty run allow-list — the historical bare `--allow-run`
-    // behaviour, keeping every existing call site + test unchanged.
+    // An empty run allow-list is intentionally deny-all.
     permission_flags_scoped(permissions, &[])
 }
 
@@ -587,8 +586,8 @@ fn permission_flags(
 /// shims it materialized onto the child's PATH) passes those shim names here, and
 /// the sandbox may spawn only those, not arbitrary host binaries.
 ///
-/// `run_allow` empty (the default reached via [`permission_flags`]) preserves
-/// today's bare-`--allow-run` behaviour, so existing callers/tests are unchanged.
+/// `run_allow` empty (the default reached via [`permission_flags`]) keeps child
+/// process execution denied; an explicit host allow-list is required.
 fn permission_flags_scoped(
     permissions: Option<&ryu_kernel_contracts::manifest::PermissionSet>,
     run_allow: &[String],
@@ -613,9 +612,7 @@ fn permission_flags_scoped(
         NetworkPermission::All(false) | NetworkPermission::Hosts(_) => {}
     }
     if p.child_process {
-        if run_allow.is_empty() {
-            flags.push("--allow-run".to_string());
-        } else {
+        if !run_allow.is_empty() {
             flags.push(format!("--allow-run={}", run_allow.join(",")));
         }
     }
@@ -931,6 +928,7 @@ pub async fn run_eval_js(source: &str, payload: &Value, deadline: Duration) -> E
 /// stdout line. An uncaught throw is emitted on the error tag instead.
 fn build_eval_program(user_source: &str, payload: &Value) -> String {
     let ctx_json = serde_json::to_string(payload).unwrap_or_else(|_| "null".to_owned());
+    let source_json = serde_json::to_string(user_source).unwrap_or_else(|_| "\"\"".to_owned());
     format!(
         r#"
 const __enc = new TextEncoder();
@@ -940,8 +938,34 @@ const __ctx = {ctx};
     let __out;
     try {{
         __out = await (async (ctx) => {{
+const input = ctx?.input;
+const output = ctx?.output;
+const expected = ctx?.expected;
+const vars = ctx?.vars ?? {{}};
+const context = ctx ?? {{}};
+const metadata = ctx?.metadata ?? {{}};
 {user}
         }})(__ctx);
+        // Promptfoo's inline assertion form is commonly an expression such as
+        // `output.includes("expected")`, without an explicit `return`. The
+        // primary path above remains the statement/function-body form used by
+        // richer assertions. If it produced `undefined`, evaluate the source
+        // as an expression so both Promptfoo forms share this sandbox.
+        if (__out === undefined) {{
+            try {{
+                __out = await (async (ctx) => {{
+const input = ctx?.input;
+const output = ctx?.output;
+const expected = ctx?.expected;
+const vars = ctx?.vars ?? {{}};
+const context = ctx ?? {{}};
+const metadata = ctx?.metadata ?? {{}};
+return eval({source});
+                }})(__ctx);
+            }} catch (_) {{
+                // Statement-form source with no return remains an invalid result.
+            }}
+        }}
     }} catch (e) {{
         __emit("{err}" + (e && e.message ? e.message : String(e)));
         return;
@@ -954,6 +978,7 @@ const __ctx = {ctx};
 }})();
 "#,
         ctx = ctx_json,
+        source = source_json,
         user = user_source,
         ok = TAG_EVAL_OK,
         err = TAG_EVAL_ERR,
@@ -1149,8 +1174,8 @@ mod tests {
             "true → bare --allow-net"
         );
         assert!(
-            flags.contains(&"--allow-run".to_string()),
-            "child_process → --allow-run"
+            !flags.iter().any(|flag| flag.starts_with("--allow-run")),
+            "child_process without a host allow-list stays deny-all"
         );
         // `tool` is stdio-brokered, never a Deno flag.
         assert!(
@@ -1179,10 +1204,9 @@ mod tests {
             !scoped.contains(&"--allow-run".to_string()),
             "the bare form must not also appear"
         );
-        // Empty run allow-list preserves the historical bare --allow-run.
+        // Empty run allow-list stays deny-all.
         let bare = permission_flags_scoped(Some(&perms), &[]);
-        assert!(bare.contains(&"--allow-run".to_string()));
-        assert!(!bare.iter().any(|f| f.starts_with("--allow-run=")));
+        assert!(!bare.iter().any(|f| f.starts_with("--allow-run")));
         // Without child_process, a run allow-list is inert (no run flag at all).
         let no_child =
             permission_flags_scoped(Some(&PermissionSet::default()), &["ryu-cap".to_string()]);

@@ -29,10 +29,12 @@ const SESSION_ACTIONS = [
 	"Remove from ryu",
 	"Archive chat",
 	"Open side chat",
+	"Quick reply",
 	"Copy",
 	"Fork…",
 	"Add scheduled task…",
 	"Open in new window",
+	"Mark as unread",
 ];
 const COPY_ACTIONS = [
 	"Copy working directory",

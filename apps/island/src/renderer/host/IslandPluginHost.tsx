@@ -21,6 +21,10 @@ import type {
 	RyuCatalogModels,
 	RyuCatalogSnapshot,
 } from "@ryu/app-host/app-bridge";
+import {
+	COMPANION_THEME_MUTATION_ATTRIBUTES,
+	readCompanionThemeTokens,
+} from "@ryu/app-host/companion-theme";
 import { ExtensionHost } from "@ryu/app-host/ExtensionHost";
 import {
 	type BackgroundProcess,
@@ -36,7 +40,7 @@ import {
 	thirdPartyPluginSrcdoc,
 } from "@ryu/app-host/third-party-plugin";
 import { useI18n } from "@ryu/i18n/react";
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import type { PluginCompanion } from "../../shared/ipc.ts";
 import {
 	pluginHostInvoke,
@@ -68,14 +72,33 @@ export function IslandPluginHost({
 	const i18n = useI18n();
 	const [connected, setConnected] = useState(false);
 	const [bundle, setBundle] = useState<BundleState>({ status: "loading" });
+	// Keep a first-paint snapshot and a live copy of the shared Desktop appearance
+	// contract. The island is a separate Electron process, so its own root is the
+	// host for the null-origin Companion frame.
+	const [initialThemeTokens] = useState(readCompanionThemeTokens);
+	const [themeTokens, setThemeTokens] = useState(initialThemeTokens);
+	useEffect(() => {
+		if (typeof MutationObserver === "undefined") {
+			return;
+		}
+		const observer = new MutationObserver(() => {
+			setThemeTokens(readCompanionThemeTokens());
+		});
+		observer.observe(document.documentElement, {
+			attributes: true,
+			attributeFilter: [...COMPANION_THEME_MUTATION_ATTRIBUTES],
+		});
+		return () => observer.disconnect();
+	}, []);
 
 	// Fetch the plugin's bundled code over IPC (the main process holds the token).
 	// Keyed by the OWNING plugin id (the store key), not the companion id.
 	useEffect(() => {
 		let cancelled = false;
+		const requestId = `bundle-${Date.now()}-${Math.random().toString(36).slice(2)}`;
 		setBundle({ status: "loading" });
 		window.island.plugins
-			.uiBundle(companion.pluginId)
+			.uiBundle(companion.pluginId, requestId)
 			.then((result) => {
 				if (cancelled) {
 					return;
@@ -93,6 +116,9 @@ export function IslandPluginHost({
 			});
 		return () => {
 			cancelled = true;
+			void window.island.plugins
+				.abortUiBundle(requestId)
+				.catch(() => undefined);
 		};
 	}, [companion.pluginId]);
 
@@ -107,10 +133,16 @@ export function IslandPluginHost({
 
 	// The granted set comes from the plugin's GATEWAY-APPROVED grants. DENY-SAFE: an
 	// empty approved list yields an empty set (the plugin can call nothing).
-	const granted = useMemo<ReadonlySet<Capability>>(
-		() => capabilitiesFromGrants(companion.approvedGrants),
+	const grantsKey = useMemo(
+		() => [...new Set(companion.approvedGrants)].sort().join(" "),
 		[companion.approvedGrants]
 	);
+	// biome-ignore lint/correctness/useExhaustiveDependencies: grantsKey is the content hash of approvedGrants.
+	const granted = useMemo<ReadonlySet<Capability>>(
+		() => capabilitiesFromGrants(companion.approvedGrants),
+		[grantsKey]
+	);
+	const handleConnected = useCallback(() => setConnected(true), []);
 
 	// The privileged services. `listAgents` returns a minimal `{id,name}` projection
 	// over IPC; `registerRoute` accepts ONLY this plugin's own `/plugin/<id>` path
@@ -119,14 +151,14 @@ export function IslandPluginHost({
 	const services = useMemo<HostServices>(
 		() => ({
 			...createI18nHostServices(i18n),
+			timelineTranscripts: (input) =>
+				window.island.shadow.getSpeechHistory(input),
 			storageCompareAndSet: (input) =>
 				pluginHostInvoke(
 					companion.pluginId,
 					"storage.compareAndSet",
 					input
 				) as Promise<boolean>,
-			timelineTranscripts: (input) =>
-				window.island.shadow.getSpeechHistory(input),
 			listAgents: async () => {
 				const result = await window.island.core.agents();
 				if (!result.available) {
@@ -221,6 +253,27 @@ export function IslandPluginHost({
 					onChunk: emit,
 					signal,
 				}),
+			shellThemeSubscribe: (_input, emit, signal) =>
+				new Promise<void>((resolve) => {
+					const push = () => {
+						emit(JSON.stringify(readCompanionThemeTokens()));
+					};
+					push();
+					const observer = new MutationObserver(push);
+					observer.observe(document.documentElement, {
+						attributes: true,
+						attributeFilter: [...COMPANION_THEME_MUTATION_ATTRIBUTES],
+					});
+					const done = () => {
+						observer.disconnect();
+						resolve();
+					};
+					if (signal.aborted) {
+						done();
+					} else {
+						signal.addEventListener("abort", done, { once: true });
+					}
+				}),
 		}),
 		[companion.id, companion.pluginId, i18n]
 	);
@@ -229,11 +282,22 @@ export function IslandPluginHost({
 		() =>
 			bundle.status === "ready" && bundle.code
 				? /^\s*(?:<!doctype\s+html|<html[\s>])/i.test(bundle.code)
-					? htmlCompanionSrcdoc(nonce, bundle.code, companion.id)
+					? htmlCompanionSrcdoc(
+							nonce,
+							bundle.code,
+							companion.id,
+							undefined,
+							undefined,
+							readCompanionThemeTokens(),
+							true
+						)
 					: thirdPartyPluginSrcdoc(
 							nonce,
 							toBase64Utf8(bundle.code),
-							companion.id
+							companion.id,
+							undefined,
+							readCompanionThemeTokens(),
+							true
 						)
 				: null,
 		[bundle, nonce, companion.id]
@@ -271,9 +335,10 @@ export function IslandPluginHost({
 				<ExtensionHost
 					granted={granted}
 					nonce={nonce}
-					onConnected={() => setConnected(true)}
+					onConnected={handleConnected}
 					services={services}
 					srcdoc={srcdoc}
+					themeTokens={themeTokens}
 					title={`App: ${companion.name}`}
 				/>
 			</div>

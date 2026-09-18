@@ -28,6 +28,7 @@ use anyhow::Context;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use tokio::sync::mpsc;
+use uuid::Uuid;
 
 use crate::sidecar::adapters::acp_probe_cache as probe_cache;
 use crate::sidecar::adapters::{
@@ -481,20 +482,21 @@ fn tool_status_str(status: &ToolCallStatus) -> String {
         .unwrap_or_else(|| "pending".to_owned())
 }
 
-/// The ACP client capabilities Ryu advertises in `initialize`. Ryu is a full
-/// client host: it serves the agent's `fs/*` (read/write text file) and
-/// `terminal/*` requests (handlers live in the session dispatch chain below), so
-/// ACP agents like Claude Code / Codex that mediate file edits and command
-/// execution *through the client* work against Ryu instead of silently having
-/// those requests dropped (the pre-2026-07 default sent `ClientCapabilities`
-/// with everything `false`).
+/// The ACP client capabilities Ryu advertises in `initialize`. File operations
+/// are scoped to the session workspaces. Host terminal execution is not
+/// advertised until a managed sandbox backend is available; the ACP terminal
+/// protocol has no safe way to turn a caller-supplied command into a contained
+/// process on this host.
 fn ryu_client_capabilities() -> ClientCapabilities {
     // These schema structs are `#[non_exhaustive]`, so build from Default and set
     // fields rather than a struct literal.
     let mut caps = ClientCapabilities::default();
     caps.fs.read_text_file = true;
     caps.fs.write_text_file = true;
-    caps.terminal = true;
+    // Do not advertise host terminal execution. `terminal/create` is handled
+    // defensively below as well because a peer may send it despite the
+    // capability projection.
+    caps.terminal = false;
     caps
 }
 
@@ -608,6 +610,9 @@ struct TerminalEntry {
 
 /// Per-ACP-instance terminal registry, keyed by the `terminal_id` string.
 type TerminalRegistry = Arc<tokio::sync::Mutex<BTreeMap<String, TerminalEntry>>>;
+const MAX_TERMINALS_PER_INSTANCE: usize = 8;
+const DEFAULT_TERMINAL_OUTPUT_BYTES: u64 = 4 * 1024 * 1024;
+const MAX_TERMINAL_LIFETIME: Duration = Duration::from_secs(5 * 60);
 
 /// Append `chunk` to a byte-capped buffer, truncating from the FRONT (oldest
 /// output) on overflow to stay within `limit` at a char boundary (per the ACP
@@ -634,6 +639,23 @@ fn append_capped(
     }
 }
 
+/// Build the inherited environment for an ACP-hosted terminal child.
+///
+/// The terminal command is agent-controlled, so a deny-list alone is not
+/// sufficient: a provider, node, or user credential can use an unrecognised
+/// variable name. Start with the existing secret scrubber, then apply the
+/// strict child allowlist. Terminal-request `env` entries are layered by the
+/// caller afterward and are explicit agent input, not inherited Core state.
+fn terminal_child_env(base: impl IntoIterator<Item = (String, String)>) -> Vec<(String, String)> {
+    crate::sidecar::env_scrub::mcp_safe_env(crate::sidecar::env_scrub::scrub_child_env(base, &[]))
+        .into_iter()
+        // The generic MCP allowlist is also used by GUI sidecars; an X11 cookie is
+        // still authentication material for a terminal child and must not cross
+        // this boundary even if another caller allows it.
+        .filter(|(key, _)| !key.eq_ignore_ascii_case("XAUTHORITY"))
+        .collect()
+}
+
 /// Spawn a child process for `terminal/create` and register it. Returns the new
 /// terminal id, or an error if the process could not be spawned.
 ///
@@ -648,7 +670,17 @@ async fn terminal_create(
     session_roots: &[std::path::PathBuf],
     scan_agent: &str,
 ) -> anyhow::Result<String> {
+    anyhow::bail!(
+        "ACP terminal/create is disabled until a verified managed sandbox backend is available"
+    );
+
+    #[allow(unreachable_code)]
+    {
     use std::process::Stdio;
+
+    if registry.lock().await.len() >= MAX_TERMINALS_PER_INSTANCE {
+        anyhow::bail!("terminal process limit reached for this ACP session");
+    }
 
     let line = if req.args.is_empty() {
         req.command.clone()
@@ -684,6 +716,12 @@ async fn terminal_create(
         .unwrap_or_else(|| session_roots[0].clone());
     let mut cmd = tokio::process::Command::new(&req.command);
     cmd.args(&req.args);
+    // A terminal child is agent-controlled code. Start from a scrubbed,
+    // env-cleared environment so it cannot inherit RYU_TOKEN, user JWTs,
+    // provider keys, or Core/Gateway secrets from the ACP parent. Request env
+    // entries are explicit inputs to this terminal only and are applied after
+    // the inherited environment is scrubbed.
+    cmd.env_clear().envs(terminal_child_env(std::env::vars()));
     for env in &req.env {
         cmd.env(&env.name, &env.value);
     }
@@ -702,7 +740,7 @@ async fn terminal_create(
     let exit = Arc::new(tokio::sync::Mutex::new(None));
     let exit_notify = Arc::new(tokio::sync::Notify::new());
     let (kill_tx, mut kill_rx) = tokio::sync::mpsc::channel::<()>(1);
-    let limit = req.output_byte_limit;
+    let limit = Some(req.output_byte_limit.unwrap_or(DEFAULT_TERMINAL_OUTPUT_BYTES));
 
     // Merge stdout + stderr into the one buffer as they arrive. They are distinct
     // reader types, so pump each with its own task via a small generic helper.
@@ -747,7 +785,15 @@ async fn terminal_create(
     let notify_owner = Arc::clone(&exit_notify);
     tokio::spawn(async move {
         let status = tokio::select! {
-            s = child.wait() => s,
+            s = tokio::time::timeout(MAX_TERMINAL_LIFETIME, child.wait()) => {
+                match s {
+                    Ok(status) => status,
+                    Err(_) => {
+                        let _ = child.start_kill();
+                        child.wait().await
+                    }
+                }
+            },
             _ = kill_rx.recv() => {
                 let _ = child.start_kill();
                 child.wait().await
@@ -787,6 +833,7 @@ async fn terminal_create(
         },
     );
     Ok(id)
+    }
 }
 
 /// Process-global monotonic terminal-id source (`term-<n>`).
@@ -998,6 +1045,9 @@ fn read_text_file_scoped_in_roots(
     req: &ReadTextFileRequest,
     roots: &[std::path::PathBuf],
 ) -> String {
+    const MAX_READ_BYTES: usize = 4 * 1024 * 1024;
+    use std::io::Read as _;
+
     let Some(path) = scoped_existing_path(roots, &req.path) else {
         tracing::warn!(
             path = %req.path.display(),
@@ -1005,9 +1055,21 @@ fn read_text_file_scoped_in_roots(
         );
         return String::new();
     };
-    let Ok(content) = std::fs::read_to_string(path) else {
+    let Ok(file) = std::fs::File::open(path) else {
         return String::new();
     };
+    let mut bytes = Vec::new();
+    if file
+        .take((MAX_READ_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)
+        .is_err()
+    {
+        return String::new();
+    }
+    if bytes.len() > MAX_READ_BYTES {
+        bytes.truncate(MAX_READ_BYTES);
+    }
+    let content = String::from_utf8_lossy(&bytes).into_owned();
     if req.line.is_none() && req.limit.is_none() {
         return content;
     }
@@ -1596,7 +1658,8 @@ fn acp_agent_from_spawn(spawn_cmd: &str) -> anyhow::Result<AcpAgent> {
     let agent =
         AcpAgent::from_str(spawn_cmd).map_err(|e| anyhow::anyhow!("ACP spawn parse: {e}"))?;
     let server = match agent.into_server() {
-        agent_client_protocol::schema::McpServer::Stdio(stdio) => {
+        agent_client_protocol::schema::McpServer::Stdio(mut stdio) => {
+            strip_unscoped_acp_bridge_credentials(&mut stdio.env);
             agent_client_protocol::schema::McpServer::Stdio(
                 crate::agent_sandbox::confine_codex_stdio(stdio).map_err(|error| {
                     anyhow::anyhow!("preparing the managed Codex OS deletion boundary: {error}")
@@ -2273,6 +2336,7 @@ pub fn spawn_acp_task(
     // used by the onboarding profile builder.
     composio_connection_scope: Option<Vec<crate::sidecar::adapters::ComposioConnectionBinding>>,
     conversation_scope: Option<Vec<String>>,
+    tool_authority: Option<crate::server::acp_tool_broker::AcpToolSessionAuthority>,
     // User-chosen ACP session controls (permission mode / reasoning effort /
     // model) applied to this turn's session. All agent-reported; see
     // [`AcpTurnConfig`].
@@ -2282,6 +2346,11 @@ pub fn spawn_acp_task(
 ) -> mpsc::UnboundedReceiver<AcpEvent> {
     let (events_tx, events_rx) = mpsc::unbounded_channel();
     crate::acp_runtime::refresh_from_local_file();
+    let tool_authority = if is_managed_pi_extension(&spawn_cmd, &agent_id) {
+        tool_authority
+    } else {
+        None
+    };
     // Resolved concrete agent id for this turn (== the effective/bridge agent id).
     // Folded into the pool key below so the session is keyed by (conversation,
     // agent, spawn_cmd, cwd): switching agents mid-conversation — including the
@@ -2303,6 +2372,9 @@ pub fn spawn_acp_task(
         &composio_connection_scope,
         &conversation_scope,
         &permission_scope_id,
+        tool_authority
+            .as_ref()
+            .map(crate::server::acp_tool_broker::AcpToolSessionAuthority::binding_fingerprint),
     );
     let acp_turn = AcpTurn {
         prompt,
@@ -2338,8 +2410,9 @@ pub fn spawn_acp_task(
         .join("\u{2}");
     if !should_reuse_acp_session(&conversation, fresh_session) {
         // A fresh context turn must not leave the old pooled sender eligible for
-        // a later request: drop it before spawning the unpooled instance. The
-        // in-flight task retains its own permission scope and drains naturally.
+        // a later request: drop it before spawning the unpooled instance. Revocation
+        // is an admission barrier for new callbacks; a callback that already passed
+        // the broker may finish, while the in-flight task drains its current turn.
         if fresh_session && !conversation.is_empty() {
             let key = acp_pool_key(
                 &conversation,
@@ -2351,9 +2424,16 @@ pub fn spawn_acp_task(
                 &security_key,
             );
             if let Ok(mut pool) = acp_pool().lock() {
-                pool.remove(&key);
+                if let Some(entry) = pool.remove(&key) {
+                    if let Some(session_id) = entry.capability_session_id {
+                        crate::server::acp_tool_broker::revoke_session(session_id);
+                    }
+                }
             }
         }
+        let session_grant = tool_authority
+            .as_ref()
+            .and_then(crate::server::acp_tool_broker::issue_session);
         let (turns_tx, turns_rx) = mpsc::unbounded_channel();
         let _ = turns_tx.send(acp_turn); // drop tx → instance ends after this turn
         tokio::spawn(async move {
@@ -2364,6 +2444,7 @@ pub fn spawn_acp_task(
                 cwd,
                 additional_directories,
                 environment,
+                session_grant,
                 turns_rx,
             )
             .await
@@ -2385,13 +2466,46 @@ pub fn spawn_acp_task(
     );
     let mut pool = acp_pool().lock().expect("acp pool mutex poisoned");
     // Drop dead instances (idle-TTL expired or crashed) so the map can't grow.
-    pool.retain(|_, turns| !turns.is_closed());
+    pool.retain(|_, entry| {
+        if entry.turns.is_closed() {
+            if let Some(session_id) = entry.capability_session_id {
+                crate::server::acp_tool_broker::revoke_session(session_id);
+            }
+            false
+        } else {
+            true
+        }
+    });
 
     let mut pending = Some(acp_turn);
-    if let Some(turns) = pool.get(&key) {
-        match turns.send(pending.take().expect("turn present")) {
-            Ok(()) => return events_rx,        // reused this chat's live instance
-            Err(err) => pending = Some(err.0), // raced with teardown; respawn below
+    if let Some(entry) = pool.get_mut(&key) {
+        let authority_is_current = match (
+            entry.capability_session_id,
+            tool_authority.as_ref(),
+        ) {
+            (Some(session_id), Some(authority)) => {
+                crate::server::acp_tool_broker::renew_session(session_id, authority)
+            }
+            (None, None) => true,
+            _ => false,
+        };
+        if authority_is_current {
+            match entry
+                .turns
+                .send(pending.take().expect("turn present"))
+            {
+                Ok(()) => return events_rx,        // reused this chat's live instance
+                Err(err) => pending = Some(err.0), // raced with teardown; respawn below
+            }
+        }
+    }
+
+    if let Some(entry) = pool.remove(&key) {
+        // The old task may still be finishing a turn after its sender is dropped.
+        // Revoke the capability now so no later callback from that task is admitted;
+        // the callback already authorized by Core is intentionally not cancelled.
+        if let Some(session_id) = entry.capability_session_id {
+            crate::server::acp_tool_broker::revoke_session(session_id);
         }
     }
 
@@ -2412,6 +2526,12 @@ pub fn spawn_acp_task(
     let spawn_cmd_task = spawn_cmd.clone();
     let cwd_task = cwd.clone();
     let additional_directories_task = additional_directories.clone();
+    let session_grant = tool_authority
+        .as_ref()
+        .and_then(crate::server::acp_tool_broker::issue_session);
+    let capability_session_id = session_grant
+        .as_ref()
+        .map(crate::server::acp_tool_broker::AcpToolSessionGrant::session_id);
     tokio::spawn(async move {
         crate::acp_runtime::refresh_from_gateway(&reqwest::Client::new()).await;
         let _permit = crate::acp_runtime::acquire().await;
@@ -2420,6 +2540,7 @@ pub fn spawn_acp_task(
             cwd_task,
             additional_directories_task,
             environment,
+            session_grant,
             turns_rx,
         )
         .await
@@ -2427,7 +2548,13 @@ pub fn spawn_acp_task(
             tracing::error!("ACP instance error: {e}");
         }
     });
-    pool.insert(key, turns_tx);
+    pool.insert(
+        key,
+        AcpPoolEntry {
+            turns: turns_tx,
+            capability_session_id,
+        },
+    );
     events_rx
 }
 
@@ -2450,6 +2577,7 @@ fn acp_security_key(
     composio_connection_scope: &Option<Vec<crate::sidecar::adapters::ComposioConnectionBinding>>,
     conversation_scope: &Option<Vec<String>>,
     permission_scope_id: &Option<String>,
+    tool_authority_fingerprint: Option<[u8; 32]>,
 ) -> String {
     let mut allowlist = allowlist.clone();
     if let Some(values) = allowlist.as_mut() {
@@ -2480,6 +2608,7 @@ fn acp_security_key(
         "composioConnectionScope": composio_connection_scope,
         "conversationScope": conversation_scope,
         "permissionScopeId": permission_scope_id,
+        "toolAuthority": tool_authority_fingerprint.map(hex::encode),
     })
     .to_string()
 }
@@ -2502,9 +2631,14 @@ fn acp_pool_key(
 /// Per-chat pool of live ACP instances: conversation id -> that chat's turn queue.
 /// See [`spawn_acp_task`] for the reuse / auto-restore / idle-TTL lifecycle.
 #[allow(clippy::type_complexity)]
-fn acp_pool() -> &'static Mutex<std::collections::HashMap<String, mpsc::UnboundedSender<AcpTurn>>> {
+struct AcpPoolEntry {
+    turns: mpsc::UnboundedSender<AcpTurn>,
+    capability_session_id: Option<Uuid>,
+}
+
+fn acp_pool() -> &'static Mutex<std::collections::HashMap<String, AcpPoolEntry>> {
     static POOL: OnceLock<
-        Mutex<std::collections::HashMap<String, mpsc::UnboundedSender<AcpTurn>>>,
+        Mutex<std::collections::HashMap<String, AcpPoolEntry>>,
     > = OnceLock::new();
     POOL.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
 }
@@ -2553,6 +2687,7 @@ impl AgentAdapter for AcpAdapter {
                 vec![],
                 agent_id.clone(),
                 vec![],
+                None,
                 None,
                 None,
                 AcpTurnConfig::default(),
@@ -2905,6 +3040,10 @@ fn ryu_tool_access(spawn_cmd: &str) -> RyuToolAccess {
     RyuToolAccess::None
 }
 
+pub(crate) fn is_managed_pi_extension(spawn_cmd: &str, agent_id: &str) -> bool {
+    agent_id == "ryu" && ryu_tool_access(spawn_cmd) == RyuToolAccess::PiExtension
+}
+
 /// The full decision for whether an ACP session gets Ryu's MCP tool bridge:
 /// the transport must support it AND the user must not have opted this agent out.
 ///
@@ -2937,6 +3076,7 @@ pub async fn run_acp_instance(
     cwd: PathBuf,
     additional_directories: Vec<PathBuf>,
     environment: Vec<(String, String)>,
+    session_grant: Option<crate::server::acp_tool_broker::AcpToolSessionGrant>,
     turns_rx: mpsc::UnboundedReceiver<AcpTurn>,
 ) -> anyhow::Result<()> {
     // The spawn command is consumed below (`AcpAgent::from_str` then the move into
@@ -3010,9 +3150,21 @@ pub async fn run_acp_instance(
     let server = match parsed_agent.into_server() {
         agent_client_protocol::schema::McpServer::Stdio(mut stdio) => {
             for (name, value) in environment {
-                stdio
-                    .env
-                    .push(agent_client_protocol::schema::EnvVariable::new(name, value));
+                set_stdio_env(&mut stdio.env, name, value);
+            }
+            if is_managed_pi {
+                if let Some(grant) = session_grant.as_ref() {
+                    set_stdio_env(
+                        &mut stdio.env,
+                        "RYU_MCP_SESSION_CAPABILITY".to_owned(),
+                        grant.capability().to_owned(),
+                    );
+                    set_stdio_env(
+                        &mut stdio.env,
+                        "RYU_MCP_ACP_SESSION_ID".to_owned(),
+                        grant.session_id().to_string(),
+                    );
+                }
             }
             agent_client_protocol::schema::McpServer::Stdio(stdio)
         }
@@ -3207,6 +3359,16 @@ pub async fn run_acp_instance(
                 } else {
                     session_builder.start_session().await?
                 };
+
+                if let Some(grant) = session_grant.as_ref() {
+                    let native_session_id = session.session_id().to_string();
+                    if !grant.bind_native_session(&native_session_id) {
+                        tracing::warn!(
+                            "managed Pi ACP tool session could not bind to its native session"
+                        );
+                        return Ok(());
+                    }
+                }
 
                 // `session/new` is the first authoritative native-session id. Persist
                 // it immediately for conversation-bound ACP resume/load; later
@@ -4856,6 +5018,12 @@ pub fn ryu_pi_acp_cmd_for_agent(
     let pi_path = bin.to_string_lossy().into_owned();
     let config_dir = crate::pi_config::config_dir_str();
     let gateway = crate::pi_config::is_gateway_routing();
+    if gateway && crate::sidecar::gateway::remote_data_plane() {
+        tracing::error!(
+            "refusing to spawn managed Pi on a remote data plane without a brokered, expiring ACP credential"
+        );
+        return None;
+    }
     // Enforce the managed-Pi config invariants before spawn: Pi-side skill
     // auto-injection off (Core injects the governed skill block itself; QA B1),
     // a valid zero-key defaultModel in Gateway mode (Pi with no model parrots
@@ -4950,6 +5118,12 @@ fn codex_acp_cmd() -> String {
 }
 
 fn codex_acp_cmd_for_agent(agent_id: Option<&str>) -> String {
+    if crate::sidecar::gateway::remote_data_plane() {
+        tracing::error!(
+            "refusing to spawn Codex ACP on a remote data plane without a brokered, expiring credential"
+        );
+        return String::new();
+    }
     let token = match crate::sidecar::gateway::gateway_bearer_for_agent(agent_id, None, None) {
         Ok(token) => token,
         Err(error) => {
@@ -4997,78 +5171,27 @@ fn codex_acp_cmd() -> String {
     codex_acp_cmd_for_agent(None)
 }
 
-/// The environment values the managed Pi's extensions need to reach Core.
+/// Build the base environment for the managed Pi Ryu extension.
 ///
-/// **Two consumers now, not one.** `ryu-mcp.ts` calls `/api/mcp/tools/call` with
-/// them, and `ryu-plan.ts` calls `/api/exec/scan` — the gateway command gate for
-/// the flagship's `bash`, which fails OPEN at that hop. So renaming or dropping
-/// one of these vars does not merely cost the agent its tools: it silently
-/// removes a safety gate, with the extension logging into a stderr stream pi-acp
-/// discards. The `RYU_MCP_` prefix is historical; treat it as the Pi-extension
-/// channel, not as MCP's.
-///
-/// **Extracted because it has two callers and they drifted.** Pi cannot accept the
-/// in-process MCP bridge (`pi-acp` advertises `mcpCapabilities {http:false,sse:false}`
-/// and drops `session/new`'s `mcpServers`), so this extension is its ONLY road to
-/// Ryu's tools. There are two spawn paths to the same agent — [`ryu_pi_acp_cmd`] for
-/// the managed binary and the PATH fallback in `super::ryu_agent_route` — and only the
-/// first injected these. The fallback's Pi silently used the extension's compiled-in
-/// defaults instead: `http://127.0.0.1:7980` (the wrong port under any non-release
-/// `RYU_PROFILE`) and an empty bearer. The agent still started and answered; it just
-/// never had a tool.
-///
-/// The values are returned as structured name/value pairs. ACP's stdio/process
-/// environment API consumes them directly; they must never be rendered into shell
-/// command text because `host_conversation_id` originates at an HTTP boundary.
+/// Caller, agent, conversation, and profile scopes are resolved server-side by
+/// the ACP tool broker and are deliberately not duplicated as process-supplied
+/// authorization fields. A per-session capability is added later, as a
+/// structured stdio entry after Core selects the exact pooled ACP session.
+/// Neither a node bearer nor a user JWT crosses this boundary.
 pub(crate) fn pi_mcp_extension_env(
-    user_jwt: Option<&str>,
-    composio_connection_scope: Option<&[crate::sidecar::adapters::ComposioConnectionBinding]>,
-    conversation_scope: Option<&[String]>,
-    host_conversation_id: Option<&str>,
+    _user_jwt: Option<&str>,
+    _composio_connection_scope: Option<&[crate::sidecar::adapters::ComposioConnectionBinding]>,
+    _conversation_scope: Option<&[String]>,
+    _host_conversation_id: Option<&str>,
 ) -> Vec<(String, String)> {
-    let core_url = crate::sidecar::gateway::core_self_url();
-    let mcp_agent_id = crate::registry::DEFAULT_AGENT_ID;
-    let core_token = crate::node_token::active_token()
-        .map(|v| v.trim().to_owned())
-        .filter(|s| !s.is_empty());
-    let mut env = vec![
-        ("RYU_MCP_CORE_URL".to_owned(), core_url),
-        ("RYU_MCP_AGENT_ID".to_owned(), mcp_agent_id.to_owned()),
-    ];
-    if let Some(t) = &core_token {
-        env.push(("RYU_MCP_CORE_TOKEN".to_owned(), t.clone()));
-    }
-    if let Some(jwt) = user_jwt.map(str::trim).filter(|value| !value.is_empty()) {
-        env.push(("RYU_MCP_USER_JWT".to_owned(), jwt.to_owned()));
-    }
-    if let Some(conversation_id) =
-        host_conversation_id.filter(|value| is_safe_host_conversation_id(value))
-    {
-        env.push((
-            "RYU_MCP_HOST_CONVERSATION_ID".to_owned(),
-            conversation_id.to_owned(),
-        ));
-    }
-    if composio_connection_scope.is_some() || conversation_scope.is_some() {
-        use base64::Engine as _;
-
-        let payload = serde_json::json!({
-            "profile_composio_connection_scope": composio_connection_scope,
-            "profile_conversation_scope": conversation_scope,
-        });
-        if let Ok(encoded) = serde_json::to_vec(&payload)
-            .map(|bytes| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes))
-        {
-            env.push(("RYU_MCP_PROFILE_SCOPE".to_owned(), encoded));
-        }
-    }
-    env
+    vec![(
+        "RYU_MCP_CORE_URL".to_owned(),
+        crate::sidecar::gateway::core_self_url(),
+    )]
 }
 
-/// Conversation ids are carried into the Pi extension through a structured
-/// environment value and are also accepted by a few legacy internal call paths.
-/// Keep the portable identifier grammar bounded so an old text-rendering caller
-/// cannot reintroduce shell syntax or oversized log/request values.
+/// Keep the portable conversation identifier grammar bounded for server-side
+/// ACP session and broker bindings.
 pub(crate) fn is_safe_host_conversation_id(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 128
@@ -5078,11 +5201,38 @@ pub(crate) fn is_safe_host_conversation_id(value: &str) -> bool {
 }
 
 fn set_stdio_env(env: &mut Vec<EnvVariable>, name: String, value: String) {
+    if is_unscoped_acp_bridge_credential(&name) {
+        return;
+    }
     if let Some(existing) = env.iter_mut().find(|entry| entry.name == name) {
         existing.value = value;
     } else {
         env.push(EnvVariable::new(name, value));
     }
+}
+
+/// Bearers that used to authorize the managed-Pi HTTP extension are intentionally
+/// never allowed into an ACP process environment. They are node-wide or user-wide,
+/// not session-scoped, and this boundary has no broker that can safely attenuate
+/// them for an agent process.
+const UNSCOPED_ACP_BRIDGE_CREDENTIALS: [&str; 7] = [
+    "RYU_MCP_CORE_TOKEN",
+    "RYU_MCP_USER_JWT",
+    "RYU_TOKEN",
+    "RYU_GATEWAY_TOKEN",
+    "RYU_NODE_TOKEN",
+    "RYU_USER_JWT",
+    "X_RYU_USER_JWT",
+];
+
+fn is_unscoped_acp_bridge_credential(name: &str) -> bool {
+    UNSCOPED_ACP_BRIDGE_CREDENTIALS
+        .iter()
+        .any(|credential| credential.eq_ignore_ascii_case(name))
+}
+
+fn strip_unscoped_acp_bridge_credentials(env: &mut Vec<EnvVariable>) {
+    env.retain(|entry| !is_unscoped_acp_bridge_credential(&entry.name));
 }
 
 /// Serialize an ACP stdio configuration as JSON. ACP's structured transport
@@ -5117,6 +5267,7 @@ pub(crate) fn acp_spawn_with_env(
         McpServer::Stdio(stdio) => stdio,
         _ => anyhow::bail!("ACP spawn declaration is not a stdio process"),
     };
+    strip_unscoped_acp_bridge_credentials(&mut stdio.env);
     for (name, value) in env {
         set_stdio_env(&mut stdio.env, name, value);
     }
@@ -7615,9 +7766,9 @@ mod tests {
         ] {
             assert!(is_safe_host_conversation_id(valid), "{valid}");
             let env = pi_mcp_extension_env(None, None, None, Some(valid));
-            assert!(env
+            assert!(!env
                 .iter()
-                .any(|(name, value)| { name == "RYU_MCP_HOST_CONVERSATION_ID" && value == valid }));
+                .any(|(name, _)| name == "RYU_MCP_HOST_CONVERSATION_ID"));
         }
 
         for invalid in [
@@ -7638,6 +7789,143 @@ mod tests {
                 .any(|(name, _)| name == "RYU_MCP_HOST_CONVERSATION_ID"));
         }
         assert!(!is_safe_host_conversation_id(&"a".repeat(129)));
+    }
+
+    #[test]
+    fn pi_extension_env_exports_only_core_location_metadata() {
+        let env = pi_mcp_extension_env(
+            Some("user-jwt-must-not-cross-acp"),
+            Some(&[crate::sidecar::adapters::ComposioConnectionBinding {
+                id: "connection-1".to_owned(),
+                toolkit: "example".to_owned(),
+            }]),
+            Some(&["conversation-1".to_owned()]),
+            Some("conversation-1"),
+        );
+
+        assert!(env.iter().any(|(name, _)| name == "RYU_MCP_CORE_URL"));
+        for forbidden_name in [
+            "RYU_MCP_CORE_TOKEN",
+            "RYU_MCP_USER_JWT",
+            "RYU_TOKEN",
+            "RYU_MCP_AGENT_ID",
+            "RYU_MCP_HOST_CONVERSATION_ID",
+            "RYU_MCP_PROFILE_SCOPE",
+        ] {
+            assert!(
+                !env.iter().any(|(name, _)| name == forbidden_name),
+                "{forbidden_name} must not be agent-readable"
+            );
+        }
+        assert_eq!(env.len(), 1);
+        assert!(env
+            .iter()
+            .all(|(_, value)| value != "user-jwt-must-not-cross-acp"));
+    }
+
+    #[test]
+    fn session_capability_and_id_stay_in_structured_stdio_environment() {
+        let serialized = acp_stdio_spawn_json(
+            "ryu-pi",
+            PathBuf::from("npx"),
+            vec!["-y".to_owned(), "pi-acp".to_owned()],
+            vec![],
+        )
+        .expect("base ACP config serializes");
+        let with_capability = acp_spawn_with_env(
+            &serialized,
+            vec![
+                (
+                    "RYU_MCP_SESSION_CAPABILITY".to_owned(),
+                    "opaque-session-capability".to_owned(),
+                ),
+                (
+                    "RYU_MCP_ACP_SESSION_ID".to_owned(),
+                    "550e8400-e29b-41d4-a716-446655440000".to_owned(),
+                ),
+            ],
+        )
+        .expect("capability is added through ACP structured env");
+        let agent = acp_agent_from_spawn(&with_capability).expect("structured config parses");
+        let McpServer::Stdio(stdio) = agent.into_server() else {
+            panic!("expected stdio ACP config")
+        };
+        assert!(stdio.env.iter().any(|entry| {
+            entry.name == "RYU_MCP_SESSION_CAPABILITY"
+                && entry.value == "opaque-session-capability"
+        }));
+        assert!(stdio.args.iter().all(|arg| !arg.contains("opaque-session-capability")));
+        let extension = include_str!("../../../../core/assets/pi-extensions/ryu-mcp.ts");
+        assert!(extension.contains("getSessionId"));
+        assert!(extension.contains("x-ryu-acp-native-session-id"));
+    }
+
+    #[test]
+    fn structured_acp_spawn_drops_unscoped_bridge_credentials() {
+        let serialized = serde_json::to_string(&McpServer::Stdio(
+            McpServerStdio::new("test", "sh")
+                .args(vec!["-c".to_owned(), "true".to_owned()])
+                .env(vec![
+                    EnvVariable::new("RYU_MCP_CORE_TOKEN", "node-secret"),
+                    EnvVariable::new("RYU_MCP_USER_JWT", "user-secret"),
+                    EnvVariable::new("RYU_MCP_HOST_CONVERSATION_ID", "conversation-1"),
+                ]),
+        ))
+        .expect("structured ACP config serializes");
+        let agent = acp_agent_from_spawn(&serialized).expect("structured ACP parses");
+        let McpServer::Stdio(stdio) = agent.into_server() else {
+            panic!("expected stdio ACP process")
+        };
+
+        assert!(stdio
+            .env
+            .iter()
+            .all(|entry| !is_unscoped_acp_bridge_credential(&entry.name)));
+        assert!(stdio.env.iter().any(|entry| {
+            entry.name == "RYU_MCP_HOST_CONVERSATION_ID" && entry.value == "conversation-1"
+        }));
+    }
+
+    #[test]
+    fn terminal_child_env_is_allowlisted_after_secret_scrubbing() {
+        let env = terminal_child_env([
+            ("PATH".to_owned(), "/usr/bin".to_owned()),
+            ("HOME".to_owned(), "/home/user".to_owned()),
+            ("TERM".to_owned(), "xterm".to_owned()),
+            ("RYU_DIR".to_owned(), "/home/user/.ryu-dev".to_owned()),
+            ("RYU_PROFILE".to_owned(), "dev".to_owned()),
+            ("OPENAI_API_KEY".to_owned(), "provider-secret".to_owned()),
+            ("RYU_TOKEN".to_owned(), "node-secret".to_owned()),
+            ("RYU_MCP_USER_JWT".to_owned(), "user-secret".to_owned()),
+            ("USER_JWT".to_owned(), "user-secret-2".to_owned()),
+            ("DATABASE_URL".to_owned(), "postgres-secret".to_owned()),
+            ("XAUTHORITY".to_owned(), "/home/user/.Xauthority".to_owned()),
+            (
+                "UNLISTED_RUNTIME_SETTING".to_owned(),
+                "not-inherited".to_owned(),
+            ),
+        ]);
+
+        for safe_name in ["PATH", "HOME", "TERM", "RYU_DIR", "RYU_PROFILE"] {
+            assert!(
+                env.iter().any(|(name, _)| name == safe_name),
+                "{safe_name} should remain available to terminal commands"
+            );
+        }
+        for secret_name in [
+            "OPENAI_API_KEY",
+            "RYU_TOKEN",
+            "RYU_MCP_USER_JWT",
+            "USER_JWT",
+            "DATABASE_URL",
+            "XAUTHORITY",
+            "UNLISTED_RUNTIME_SETTING",
+        ] {
+            assert!(
+                !env.iter().any(|(name, _)| name == secret_name),
+                "{secret_name} must not be inherited by terminal children"
+            );
+        }
     }
 
     #[test]
@@ -8374,6 +8662,7 @@ mod tests {
             &None,
             &None,
             &Some("conv".into()),
+            None,
         );
         let explicit_no_tools = acp_security_key(
             &None,
@@ -8384,6 +8673,7 @@ mod tests {
             &None,
             &None,
             &Some("conv".into()),
+            None,
         );
         let different_action = acp_security_key(
             &None,
@@ -8394,6 +8684,7 @@ mod tests {
             &None,
             &None,
             &Some("conv".into()),
+            None,
         );
         assert_ne!(no_tools, explicit_no_tools);
         assert_ne!(explicit_no_tools, different_action);

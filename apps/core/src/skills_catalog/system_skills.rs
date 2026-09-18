@@ -1,10 +1,10 @@
-//! Bundled **system skills** — skills Ryu installs and manages for the user,
-//! kept in sync with the bundled catalog.
+//! Optional **recommended skill packs** — the external skills Ryu can install
+//! for a node after its owner or administrator makes an explicit selection.
 //!
-//! A fresh Ryu ships a curated set of skills (the [`BUILTIN_PACKS`] repo catalog
-//! plus the pinned single-skill defaults in [`DEFAULT_SKILLS`]) so the Skills
-//! surface is useful before the user goes shopping. Unlike the old run-once
-//! defaults, this is a **sync**, not a one-shot:
+//! A fresh Ryu does not fetch this catalog on boot. The embedded Ryu and pstack
+//! skills are owned by the `ryu-skills` crate and remain available offline; this
+//! module only manages the separate third-party pack catalog. Unlike the old
+//! run-once defaults, the selected set is a **sync**, not a one-shot:
 //!
 //! - a bundled skill missing from the disk is installed (origin `system`);
 //! - a bundled skill **dropped** from the catalog is removed — unless the user
@@ -23,8 +23,8 @@
 //!
 //! Ryu-authored skills under `apps/skills` are embedded by `ryu-skills` and
 //! installed offline. Third-party catalog packs are different: they are
-//! installed from their upstream repos at sync time (the `npx skills` CLI,
-//! falling back to Core's own fetcher). Several upstream packs carry
+//! installed from their upstream repos at sync time through Core's fetcher.
+//! Several upstream packs carry
 //! proprietary per-skill licenses that forbid redistribution, so never copy
 //! those third-party bytes into this tree or mirror them from a Ryu-controlled
 //! host.
@@ -100,23 +100,173 @@ pub fn origin_of(slug: &str) -> SkillOrigin {
     OriginRegistry::load().origin(slug)
 }
 
-/// Preference gate. Default ON; set `false` to stop the boot sync from touching
-/// the skills dir. Existing system skills are left alone (the gate governs
-/// writes, not a cleanup).
+/// Preference gate for reconciling an already-configured selection on boot.
+/// The selection itself is the required opt-in for a fresh node.
 pub const SYNC_ENABLED_PREF: &str = "skills.sync-system";
 /// The catalog version the last successful sync applied. A catalog change bumps
-/// [`bundle_version`], so a boot only runs the sync when the set actually moved.
+/// the selection-aware version, so a boot only runs the sync when the catalog or
+/// the selected pack set actually moved.
 pub const SYNCED_VERSION_PREF: &str = "skills.synced-bundle-version";
 
-/// The pinned single-skill defaults the bundle installs (besides the repo packs
-/// in [`packs::BUILTIN_PACKS`]): the remote document/design defaults, fetched
-/// from `anthropics/skills` exactly like the old defaults. Ryu's `pdf` skill is
-/// compiled into Core and is deliberately not part of this remote set.
-///
-/// Single source of truth is [`super::default_skills`] (the run-once installer
-/// that shells out to `npx skills add`); this module re-exports the constants so
-/// the sync and the old installer can never disagree about what "the defaults"
-/// are.
+/// Node-scoped preference written by the onboarding/admin skill picker.
+pub const SELECTION_PREF: &str = "skills.optional-bundle-selection.v1";
+pub const SELECTION_VERSION: u8 = 1;
+
+/// The persisted optional-pack selection. `configured = false` is deliberately
+/// distinct from an explicit empty selection: the former means onboarding has
+/// not asked yet, while the latter means the administrator chose no optional
+/// packs.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct BundledSkillSelectionV1 {
+    pub configured: bool,
+    pub pack_ids: Vec<String>,
+    pub version: u8,
+}
+
+impl Default for BundledSkillSelectionV1 {
+    fn default() -> Self {
+        Self {
+            configured: false,
+            pack_ids: Vec::new(),
+            version: SELECTION_VERSION,
+        }
+    }
+}
+
+/// A safe, user-facing entry in the onboarding picker. These are pack-level
+/// choices because the current forced bundle is repository-based: selecting a
+/// row installs all of that repository's skills through the existing per-skill
+/// installer.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BundledSkillPackOption {
+    pub description: String,
+    pub id: String,
+    pub name: String,
+}
+
+/// Return the external recommended packs. Ryu-authored and plugin-contributed
+/// skills are intentionally absent: they have their own built-in/plugin
+/// lifecycle and are not onboarding choices.
+pub fn bundled_skill_pack_options() -> Vec<BundledSkillPackOption> {
+    packs::builtin_packs()
+        .into_iter()
+        .map(|pack| BundledSkillPackOption {
+            description: pack.description,
+            id: pack.id,
+            name: pack.name,
+        })
+        .collect()
+}
+
+/// All current external pack ids, in catalog order. The UI uses this as the
+/// recommended default before an administrator has made a choice.
+pub fn default_selected_pack_ids() -> Vec<String> {
+    packs::BUILTIN_PACKS
+        .iter()
+        .map(|(id, _)| (*id).to_owned())
+        .collect()
+}
+
+/// Validate and canonicalize a selection. Unknown ids are rejected rather than
+/// becoming a way to smuggle an arbitrary repository into the node's automatic
+/// boot installer. The returned order is the stable catalog order.
+pub fn normalize_selected_pack_ids(ids: &[String]) -> Result<Vec<String>> {
+    let allowed = packs::BUILTIN_PACKS
+        .iter()
+        .map(|(id, _)| *id)
+        .collect::<HashSet<_>>();
+    for id in ids {
+        if !allowed.contains(id.as_str()) {
+            anyhow::bail!("unknown bundled skill pack `{id}`");
+        }
+    }
+    let selected = ids.iter().map(String::as_str).collect::<HashSet<_>>();
+    Ok(packs::BUILTIN_PACKS
+        .iter()
+        .filter(|(id, _)| selected.contains(id))
+        .map(|(id, _)| (*id).to_owned())
+        .collect())
+}
+
+/// Read the stored selection, failing closed to an unconfigured node when the
+/// JSON is malformed, has an unknown version, or names an unknown pack.
+pub async fn read_selection(
+    preferences: &crate::server::preferences::PreferencesStore,
+) -> BundledSkillSelectionV1 {
+    let Some(raw) = preferences.get(SELECTION_PREF).await.ok().flatten() else {
+        return BundledSkillSelectionV1::default();
+    };
+    let Ok(stored) = serde_json::from_str::<BundledSkillSelectionV1>(&raw) else {
+        tracing::warn!("optional bundled skill selection is invalid; treating it as unconfigured");
+        return BundledSkillSelectionV1::default();
+    };
+    if stored.version != SELECTION_VERSION {
+        tracing::warn!(
+            version = stored.version,
+            "optional bundled skill selection version is unsupported"
+        );
+        return BundledSkillSelectionV1::default();
+    }
+    let Ok(pack_ids) = normalize_selected_pack_ids(&stored.pack_ids) else {
+        tracing::warn!("optional bundled skill selection contains an unknown pack; treating it as unconfigured");
+        return BundledSkillSelectionV1::default();
+    };
+    BundledSkillSelectionV1 {
+        configured: stored.configured,
+        pack_ids,
+        version: SELECTION_VERSION,
+    }
+}
+
+/// Persist a validated administrator choice. The write happens before the
+/// network sync so a partially completed install can retry on the next boot.
+pub async fn save_selection(
+    preferences: &crate::server::preferences::PreferencesStore,
+    pack_ids: &[String],
+) -> Result<BundledSkillSelectionV1> {
+    let selection = BundledSkillSelectionV1 {
+        configured: true,
+        pack_ids: normalize_selected_pack_ids(pack_ids)?,
+        version: SELECTION_VERSION,
+    };
+    preferences
+        .set(SELECTION_PREF, &serde_json::to_string(&selection)?)
+        .await?;
+    Ok(selection)
+}
+
+/// The UI's effective selection: all external packs before the first explicit
+/// choice, or the exact persisted set afterwards. This default is presentation
+/// only; `run_on_boot` never installs until `configured` is true.
+pub fn effective_selected_pack_ids(selection: &BundledSkillSelectionV1) -> Vec<String> {
+    if selection.configured {
+        selection.pack_ids.clone()
+    } else {
+        default_selected_pack_ids()
+    }
+}
+
+/// Include both the catalog revision and the selected pack set so changing a
+/// selection cannot be mistaken for an already-synced catalog on the next boot.
+pub fn selection_bundle_version(pack_ids: &[String]) -> String {
+    let normalized = normalize_selected_pack_ids(pack_ids).unwrap_or_default();
+    let mut input = bundle_version();
+    input.push('|');
+    input.push_str(&normalized.join(","));
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in input.bytes() {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    format!("{:016x}", hash)
+}
+
+/// Historical single-skill defaults from the Anthropic pack. They are retained
+/// as explicit member ids so a selected pack remains compatible with older
+/// catalog revisions. Ryu's `pdf` skill is compiled into Core and is deliberately
+/// not fetched as an external default.
 pub const DEFAULT_SKILLS: &[&str] = super::default_skills::DEFAULT_SKILLS;
 /// The repo those single-skill defaults live in.
 pub const DEFAULT_SKILL_REPO: &str = super::default_skills::DEFAULT_SKILL_REPO;
@@ -270,7 +420,14 @@ fn report_distribution_warning(
 /// Verify/copy the installed canonical defaults into remembered agent targets.
 /// The source path is intentionally exact: distribution receives each default's
 /// canonical `SKILL.md`, never a scanned alias root.
-fn distribute_default_skills(target_ids: &[String], report: &mut SyncReport) {
+fn distribute_default_skills(
+    target_ids: &[String],
+    selected_pack_ids: &[String],
+    report: &mut SyncReport,
+) {
+    if !selected_pack_ids.iter().any(|id| id == DEFAULT_SKILL_REPO) {
+        return;
+    }
     let context = match DistributionContext::current() {
         Ok(context) => context,
         Err(error) => {
@@ -324,39 +481,62 @@ fn distribute_default_skills(target_ids: &[String], report: &mut SyncReport) {
     }
 }
 
-/// Run the bundled-catalog sync: install missing bundled skills (origin
-/// `System`), remove `System`-owned skills that a catalog change dropped, and
-/// leave every `User`-owned skill alone. Idempotent; safe to run on boot and on
-/// demand.
-///
-/// `enabled` is the preference gate and `synced_version` the catalog version the
-/// last run applied; the caller reads both so this stays independent of the
-/// preference store and unit-testable. When `synced_version` already equals
-/// [`bundle_version`] the canonical catalog reconcile is skipped, but remembered
-/// default-skill targets are still verified and fanned out.
-pub async fn sync_bundled(
+/// Run the selected external-pack sync: install missing skills with origin
+/// `System`, remove `System`-owned skills outside the selected set, and leave
+/// every `User`-owned or embedded Ryu skill alone. Idempotent and safe to run on
+/// boot or after an onboarding selection.
+pub async fn sync_bundled_selected(
     client: &reqwest::Client,
     enabled: bool,
     synced_version: &str,
+    selected_pack_ids: &[String],
     target_ids: &[String],
+) -> SyncReport {
+    let current_version = selection_bundle_version(selected_pack_ids);
+    sync_bundled_inner(
+        client,
+        enabled,
+        synced_version,
+        selected_pack_ids,
+        target_ids,
+        current_version,
+    )
+    .await
+}
+
+async fn sync_bundled_inner(
+    client: &reqwest::Client,
+    enabled: bool,
+    synced_version: &str,
+    selected_pack_ids: &[String],
+    target_ids: &[String],
+    current_version: String,
 ) -> SyncReport {
     let mut report = SyncReport::default();
     if !enabled {
         tracing::debug!("system-skills sync disabled via `{SYNC_ENABLED_PREF}`");
         return report;
     }
-    let version = bundle_version();
-    if synced_version == version {
+    let selected_pack_ids = match normalize_selected_pack_ids(selected_pack_ids) {
+        Ok(pack_ids) => pack_ids,
+        Err(error) => {
+            report.errors.push(error.to_string());
+            return report;
+        }
+    };
+    if synced_version == current_version {
         report.complete = true;
-        return fan_out_after_catalog_sync(report, target_ids, distribute_default_skills);
+        return fan_out_after_catalog_sync(report, target_ids, |target_ids, report| {
+            distribute_default_skills(target_ids, &selected_pack_ids, report);
+        });
     }
 
     let installed = crate::skills_catalog::installed_slugs();
 
-    // 1. Resolve every bundled repo → member ids.
+    // 1. Resolve only the repositories the administrator selected → member ids.
     let mut desired_ids: Vec<String> = Vec::new();
     let mut resolution_complete = true;
-    for repo in bundled_repos() {
+    for repo in &selected_pack_ids {
         let source = PackSource::Repo { repo: repo.clone() };
         match packs::resolve_member_ids(client, &source).await {
             Ok(ids) => desired_ids.extend(ids),
@@ -369,9 +549,13 @@ pub async fn sync_bundled(
             }
         }
     }
-    // The pinned single-skill defaults ride along as explicit ids.
-    for slug in DEFAULT_SKILLS {
-        desired_ids.push(format!("{DEFAULT_SKILL_REPO}/{slug}"));
+    // The pinned document defaults ride along when the Anthropic pack is
+    // selected. This keeps the historical default ids available even if the
+    // upstream tree temporarily omits one of their directories.
+    if selected_pack_ids.iter().any(|id| id == DEFAULT_SKILL_REPO) {
+        for slug in DEFAULT_SKILLS {
+            desired_ids.push(format!("{DEFAULT_SKILL_REPO}/{slug}"));
+        }
     }
     let desired_ids = dedupe_skill_ids(desired_ids);
     report.resolved = desired_ids.clone();
@@ -435,19 +619,28 @@ pub async fn sync_bundled(
     registry_for_removal.save();
 
     report.complete = report.errors.is_empty();
-    fan_out_after_catalog_sync(report, target_ids, distribute_default_skills)
+    fan_out_after_catalog_sync(report, target_ids, |target_ids, report| {
+        distribute_default_skills(target_ids, &selected_pack_ids, report);
+    })
 }
 
-/// Shared active reconcile entry point for boot and manual system sync. Both
-/// paths resolve saved targets the same way before calling the catalog sync.
-pub async fn sync_bundled_with_preferences(
+/// Selected-pack variant used by onboarding and the boot reconciler.
+pub async fn sync_selected_bundled_with_preferences(
     client: &reqwest::Client,
     preferences: &crate::server::preferences::PreferencesStore,
     enabled: bool,
     synced_version: &str,
+    selected_pack_ids: &[String],
 ) -> SyncReport {
     let target_ids = remembered_global_target_ids(preferences).await;
-    sync_bundled(client, enabled, synced_version, &target_ids).await
+    sync_bundled_selected(
+        client,
+        enabled,
+        synced_version,
+        selected_pack_ids,
+        &target_ids,
+    )
+    .await
 }
 
 /// Remove a `System`-owned skill directory and deactivate it. Only ever called
@@ -470,6 +663,15 @@ pub async fn run_on_boot(
     client: &reqwest::Client,
     preferences: &crate::server::preferences::PreferencesStore,
 ) {
+    let selection = read_selection(preferences).await;
+    if !selection.configured {
+        // The external catalog is available from onboarding and the Skills
+        // page, but a fresh node must never download it before an owner/admin
+        // has made the node-scoped choice.
+        tracing::debug!("optional bundled skills are awaiting an onboarding selection");
+        return;
+    }
+
     let enabled = preferences
         .get(SYNC_ENABLED_PREF)
         .await
@@ -489,8 +691,15 @@ pub async fn run_on_boot(
         .flatten()
         .unwrap_or_default();
 
-    let report = sync_bundled_with_preferences(client, preferences, enabled, &synced_version).await;
-    let version = bundle_version();
+    let report = sync_selected_bundled_with_preferences(
+        client,
+        preferences,
+        enabled,
+        &synced_version,
+        &selection.pack_ids,
+    )
+    .await;
+    let version = selection_bundle_version(&selection.pack_ids);
     // A partial network/filesystem run must retry next boot. Checkpoint only a
     // completely applied catalog; otherwise a transient outage can permanently
     // suppress missing installs (and used to remove skills from unresolved repos).
@@ -521,6 +730,53 @@ mod tests {
         assert_eq!(v1.len(), 16);
         assert!(bundled_repos().iter().any(|r| r == DEFAULT_SKILL_REPO));
         assert_eq!(bundle_version(), v1, "stable across calls");
+    }
+
+    #[test]
+    fn onboarding_options_are_the_external_pack_catalog_only() {
+        let options = bundled_skill_pack_options();
+        assert_eq!(options.len(), packs::BUILTIN_PACKS.len());
+        assert!(options
+            .iter()
+            .all(|option| !option.name.is_empty() && !option.description.is_empty()));
+        assert!(options.iter().any(|option| option.id == "wshobson/agents"));
+        assert!(options.iter().all(|option| !option.id.starts_with("ryu-")));
+    }
+
+    #[test]
+    fn selection_defaults_to_all_for_presentation_but_not_for_boot() {
+        let selection = BundledSkillSelectionV1::default();
+        assert!(!selection.configured);
+        assert_eq!(
+            effective_selected_pack_ids(&selection),
+            default_selected_pack_ids()
+        );
+    }
+
+    #[test]
+    fn selected_pack_ids_are_validated_and_canonicalized() {
+        let selected = normalize_selected_pack_ids(&[
+            "openai/plugins".to_owned(),
+            "mattpocock/skills".to_owned(),
+            "openai/plugins".to_owned(),
+        ])
+        .unwrap();
+        assert_eq!(selected, ["mattpocock/skills", "openai/plugins"]);
+        assert!(normalize_selected_pack_ids(&["owner/untrusted-pack".to_owned()]).is_err());
+    }
+
+    #[test]
+    fn selection_version_changes_when_the_selected_set_changes() {
+        let all = default_selected_pack_ids();
+        let none = Vec::new();
+        assert_ne!(
+            selection_bundle_version(&all),
+            selection_bundle_version(&none)
+        );
+        assert_eq!(
+            selection_bundle_version(&all),
+            selection_bundle_version(&all)
+        );
     }
 
     #[test]
@@ -600,7 +856,7 @@ mod tests {
     #[tokio::test]
     async fn sync_respects_enabled_gate() {
         let client = reqwest::Client::new();
-        let report = sync_bundled(&client, false, "", &[]).await;
+        let report = sync_bundled_selected(&client, false, "", &[], &[]).await;
         assert!(report.installed.is_empty());
         assert!(report.removed.is_empty());
         assert!(!report.complete);
@@ -609,8 +865,9 @@ mod tests {
     #[tokio::test]
     async fn sync_skips_when_version_matches() {
         let client = reqwest::Client::new();
-        let version = bundle_version();
-        let report = sync_bundled(&client, true, &version, &[]).await;
+        let selected = default_selected_pack_ids();
+        let version = selection_bundle_version(&selected);
+        let report = sync_bundled_selected(&client, true, &version, &selected, &[]).await;
         assert!(report.installed.is_empty());
         assert!(report.removed.is_empty());
         assert!(report.complete);

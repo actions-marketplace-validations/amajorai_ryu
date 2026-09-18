@@ -7,6 +7,10 @@
 // implements the privileged `listAgents` service. The plugin (in the iframe) sees
 // none of that: it only gets RPC results for granted methods.
 
+import {
+	COMPANION_THEME_MUTATION_ATTRIBUTES,
+	readCompanionThemeTokens,
+} from "@ryu/app-host/companion-theme";
 import { ExtensionHost } from "@ryu/app-host/ExtensionHost";
 import { examplePluginSrcdoc } from "@ryu/app-host/example-plugin";
 import {
@@ -15,15 +19,33 @@ import {
 	type HostServices,
 } from "@ryu/app-host/rpc";
 import { useI18n } from "@ryu/i18n/react";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { fetchAgents } from "@/src/lib/api/agents.ts";
 import { toTarget } from "@/src/lib/api/client.ts";
 import { useNodeStore } from "@/src/store/useNodeStore.ts";
+
+function readHostThemeTokens(): Record<string, string> {
+	return readCompanionThemeTokens(undefined, {
+		includeStoredPreferences: true,
+	});
+}
 
 export function ExamplePluginPanel() {
 	const getActiveNode = useNodeStore((s) => s.getActiveNode);
 	const i18n = useI18n();
 	const [connected, setConnected] = useState(false);
+	const [initialThemeTokens] = useState(readHostThemeTokens);
+	const [themeTokens, setThemeTokens] = useState(initialThemeTokens);
+	useEffect(() => {
+		const observer = new MutationObserver(() => {
+			setThemeTokens(readHostThemeTokens());
+		});
+		observer.observe(document.documentElement, {
+			attributes: true,
+			attributeFilter: [...COMPANION_THEME_MUTATION_ATTRIBUTES],
+		});
+		return () => observer.disconnect();
+	}, []);
 
 	// One nonce per mount. Host-generated, never plugin/user input.
 	const nonce = useMemo(
@@ -33,7 +55,10 @@ export function ExamplePluginPanel() {
 				: `nonce-${Date.now()}-${Math.round(Math.random() * 1e9)}`,
 		[]
 	);
-	const srcdoc = useMemo(() => examplePluginSrcdoc(nonce), [nonce]);
+	const srcdoc = useMemo(
+		() => examplePluginSrcdoc(nonce, initialThemeTokens, true),
+		[nonce, initialThemeTokens]
+	);
 
 	// The capabilities the host grants this example. MVP: host-provided config
 	// (reading from manifest.json grants is #443).
@@ -75,6 +100,7 @@ export function ExamplePluginPanel() {
 					onConnected={() => setConnected(true)}
 					services={services}
 					srcdoc={srcdoc}
+					themeTokens={themeTokens}
 					title="Example plugin"
 				/>
 			</div>

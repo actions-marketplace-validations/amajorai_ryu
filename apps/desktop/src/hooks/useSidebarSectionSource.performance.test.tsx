@@ -48,11 +48,12 @@ const section: PluginSidebarSection = {
 		},
 	},
 };
+const sections = [section];
 let first: ReturnType<typeof useSidebarSectionSources>;
 let second: ReturnType<typeof useSidebarSectionSources>;
 let root = createRoot(document.createElement("div"));
 function Reader({ slot }: { slot: number }) {
-	const result = useSidebarSectionSources([section]);
+	const result = useSidebarSectionSources(sections);
 	if (slot === 0) {
 		first = result;
 	} else {
@@ -102,6 +103,20 @@ test("multiple app section readers share a request and retain it while one remai
 	installFetch();
 	await act(async () => root.render(<Harness />));
 	expect(reads).toHaveLength(1);
+	const queryFn = client
+		.getQueryCache()
+		.getAll()
+		.find((query) => query.queryKey[0] === "contributed-section-source")
+		?.options.queryFn;
+	expect(queryFn).toBeDefined();
+	await act(async () => root.render(<Harness />));
+	expect(
+		client
+			.getQueryCache()
+			.getAll()
+			.find((query) => query.queryKey[0] === "contributed-section-source")
+			?.options.queryFn
+	).toBe(queryFn);
 	await act(async () => root.render(<Harness count={1} />));
 	expect(reads[0].signal.aborted).toBe(false);
 	await settle(0, "Shared row");

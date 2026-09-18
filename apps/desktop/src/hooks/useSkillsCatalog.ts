@@ -152,11 +152,14 @@ export function installedSkillsQuery(target: ApiTarget) {
 export function useSkillsCatalog(initialQuery = ""): UseSkillsCatalogResult {
 	const { installCatalogSkill } = useSkillDistributionFlow();
 	const activeNode = useActiveNode();
-	const target: ApiTarget = {
-		url: activeNode.url,
-		token: activeNode.token ?? null,
-		userJwt: activeNode.userJwt ?? null,
-	};
+	const target = useMemo<ApiTarget>(
+		() => ({
+			url: activeNode.url,
+			token: activeNode.token ?? null,
+			userJwt: activeNode.userJwt ?? null,
+		}),
+		[activeNode.url, activeNode.token, activeNode.userJwt]
+	);
 	const { url, token, userJwt } = target;
 	const qc = useQueryClient();
 
@@ -181,7 +184,9 @@ export function useSkillsCatalog(initialQuery = ""): UseSkillsCatalogResult {
 	// Store instance. This mirrors the Apps catalog: two open clients cannot
 	// re-point one another by writing a node-global preference, and the default is
 	// the live federated `all` view.
-	const sourcesQuery = useQuery(skillSourcesQuery(target));
+	const sourcesQuery = useQuery(
+		useMemo(() => skillSourcesQuery(target), [target])
+	);
 	const sources = sourcesQuery.data?.sources ?? [];
 	const [sourceOverride, setSourceOverride] = useState<string | null>(null);
 	const activeSource = sourceOverride ?? ALL_SKILL_SOURCES_ID;
@@ -247,26 +252,36 @@ export function useSkillsCatalog(initialQuery = ""): UseSkillsCatalogResult {
 		[reorderMarketplaceMutation]
 	);
 
-	const listQuery = useQuery({
-		...skillListQuery(target, {
-			query: debouncedQuery,
-			installedOnly,
-			source: activeSource,
-		}),
-		placeholderData: keepPreviousData,
-	});
+	const listQuery = useQuery(
+		useMemo(
+			() => ({
+				...skillListQuery(target, {
+					query: debouncedQuery,
+					installedOnly,
+					source: activeSource,
+				}),
+				placeholderData: keepPreviousData,
+			}),
+			[target, debouncedQuery, installedOnly, activeSource]
+		)
+	);
 
 	const detailSource = selectedSource ?? activeSource;
-	const detailQuery = useQuery({
-		queryKey: ["skills", "detail", url, selectedId, detailSource],
-		queryFn: () =>
-			fetchSkillDetail(
-				{ url, token, userJwt },
-				selectedId as string,
-				detailSource === ALL_SKILL_SOURCES_ID ? undefined : detailSource
-			),
-		enabled: selectedId !== null,
-	});
+	const detailQuery = useQuery(
+		useMemo(
+			() => ({
+				queryKey: ["skills", "detail", url, selectedId, detailSource],
+				queryFn: () =>
+					fetchSkillDetail(
+						target,
+						selectedId as string,
+						detailSource === ALL_SKILL_SOURCES_ID ? undefined : detailSource
+					),
+				enabled: selectedId !== null,
+			}),
+			[target, url, selectedId, detailSource]
+		)
+	);
 
 	const installMutation = useMutation({
 		mutationFn: (vars: { id: string; source?: string }) =>
@@ -308,7 +323,9 @@ export function useSkillsCatalog(initialQuery = ""): UseSkillsCatalogResult {
 	// Installed skills + their enabled (active) state. Distinct from the catalog
 	// list (which is the browsable directory): this reflects what's on disk and
 	// whether each skill is active. Drives the enable/disable toggle.
-	const installedQuery = useQuery(installedSkillsQuery(target));
+	const installedQuery = useQuery(
+		useMemo(() => installedSkillsQuery(target), [target])
+	);
 
 	const setActiveMutation = useMutation({
 		mutationFn: (vars: { id: string; active: boolean }) =>

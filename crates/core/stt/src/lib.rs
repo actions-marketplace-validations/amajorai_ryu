@@ -835,6 +835,7 @@ mod tests {
         );
     }
 
+    #[cfg(not(feature = "voice-parakeet"))]
     #[tokio::test]
     async fn empty_engine_selector_falls_through_to_compiled_default() {
         // Without `voice-parakeet` (the cargo-test build), the compiled default is
@@ -1029,6 +1030,7 @@ mod tests {
 
     // ── parakeet dispatch (feature off in `cargo test`) ───────────────────────
 
+    #[cfg(not(feature = "voice-parakeet"))]
     #[tokio::test]
     async fn parakeet_engine_without_feature_reports_not_built() {
         let host = FakeHost::default();

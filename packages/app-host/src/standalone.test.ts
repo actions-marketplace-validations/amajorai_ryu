@@ -1,10 +1,14 @@
 import { describe, expect, test } from "bun:test";
 import {
 	parseStandaloneAppBundle,
+	parseStandaloneAppRegistry,
+	removeStandaloneAppInstallation,
+	serializeStandaloneAppRegistry,
 	standaloneCompanionId,
 	standaloneDataDir,
 	standalonePortOffset,
 	standalonePortOffsetBounds,
+	upsertStandaloneAppInstallation,
 } from "./standalone.ts";
 
 describe("standalone app contract", () => {
@@ -45,5 +49,46 @@ describe("standalone app contract", () => {
 			})?.appId
 		).toBe("@ryu/expenses");
 		expect(parseStandaloneAppBundle({ appId: "@ryu/expenses" })).toBeNull();
+	});
+
+	test("keeps standalone surfaces separate from the app lifecycle record", () => {
+		const installedAt = "2026-09-10T00:00:00.000Z";
+		const first = upsertStandaloneAppInstallation([], {
+			appId: "@ryu/expenses",
+			installedAt,
+			version: "1.0.0",
+		});
+		const refreshed = upsertStandaloneAppInstallation(first, {
+			appId: "@ryu/expenses",
+			installedAt,
+			version: "1.1.0",
+		});
+		const serialized = serializeStandaloneAppRegistry(refreshed);
+
+		expect(parseStandaloneAppRegistry(serialized)).toEqual([
+			{
+				appId: "@ryu/expenses",
+				installedAt,
+				version: "1.1.0",
+			},
+		]);
+		expect(removeStandaloneAppInstallation(refreshed, "@ryu/expenses")).toEqual(
+			[]
+		);
+		expect(parseStandaloneAppRegistry("not json")).toEqual([]);
+		expect(
+			parseStandaloneAppRegistry(
+				JSON.stringify({
+					apps: [
+						{
+							appId: "../../outside",
+							installedAt,
+							version: "1.0.0",
+						},
+					],
+					schemaVersion: 1,
+				})
+			)
+		).toEqual([]);
 	});
 });

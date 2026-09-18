@@ -162,6 +162,13 @@ export interface SubscriptionStatus {
 	 * in step by hand.
 	 */
 	features: Record<string, boolean>;
+	/** Non-renewing personal access received through a gift. */
+	giftSubscription?: {
+		endsAt: string;
+		id: string;
+		plan: string;
+		startsAt: string;
+	} | null;
 	hostedAgents: HostedAgentEntitlement | null;
 	organizationId: string | null;
 	plan: string | null;
@@ -325,6 +332,8 @@ export interface WalletView {
 	balanceBreakdownAvailable?: boolean;
 	balanceMicroUsd: number;
 	currency: string;
+	/** Remaining redeemed gift credit; each gift has its own expiry. */
+	giftBalanceMicroUsd?: number | null;
 	id: string;
 	providerAllocations?: CreditProviderAllocation[];
 	source?: "local" | "polar";

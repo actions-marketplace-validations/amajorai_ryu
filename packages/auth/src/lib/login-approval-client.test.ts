@@ -1,4 +1,6 @@
 import { afterEach, describe, expect, it } from "bun:test";
+import { once } from "node:events";
+import { createServer } from "node:net";
 import {
 	approveLoginApproval,
 	listLoginApprovals,
@@ -108,6 +110,7 @@ describe("login approval client", () => {
 		});
 
 		expect(events).toEqual([{ request, type: "created" }, resolved]);
+		expect(stream.locked).toBe(false);
 	});
 
 	it("polls the browser session endpoint with the device grant", async () => {
@@ -136,4 +139,148 @@ describe("login approval client", () => {
 			grant_type: "urn:ietf:params:oauth:grant-type:device_code",
 		});
 	});
+});
+
+it("cancels pending approval reads before headers and during the response body", async () => {
+	for (const sendHeaders of [false, true]) {
+		let received!: () => void;
+		const entered = new Promise<void>((resolve) => {
+			received = resolve;
+		});
+		let disconnected!: () => void;
+		const closed = new Promise<void>((resolve) => {
+			disconnected = resolve;
+		});
+		const sockets = new Set<import("node:net").Socket>();
+		const server = createServer((socket) => {
+			sockets.add(socket);
+			socket.once("close", () => {
+				sockets.delete(socket);
+				disconnected();
+			});
+			socket.once("data", () => {
+				if (sendHeaders) {
+					socket.write(
+						'HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 1000\r\n\r\n{"requests":['
+					);
+				}
+				received();
+			});
+		});
+		const listening = once(server, "listening");
+		server.listen(0, "127.0.0.1");
+		await listening;
+		const address = server.address();
+		if (!address || typeof address === "string") {
+			throw new Error("Expected TCP listener");
+		}
+		const controller = new AbortController();
+		let bodyStarted!: () => void;
+		const readingBody = new Promise<void>((resolve) => {
+			bodyStarted = resolve;
+		});
+		if (sendHeaders) {
+			globalThis.fetch = async (input, init) => {
+				const response = await originalFetch(input, init);
+				const json = response.json.bind(response);
+				response.json = () => {
+					const pending = json();
+					bodyStarted();
+					return pending;
+				};
+				return response;
+			};
+		}
+		let timer: ReturnType<typeof setTimeout> | undefined;
+		const deadline = new Promise<never>((_resolve, reject) => {
+			timer = setTimeout(
+				() => reject(new Error("Cancellation timed out")),
+				2000
+			);
+		});
+		try {
+			const pending = listLoginApprovals(
+				`http://127.0.0.1:${address.port}`,
+				{},
+				controller.signal
+			);
+			const rejected = pending.then(
+				() => null,
+				(error: unknown) => error
+			);
+			await Promise.race([entered, deadline]);
+			if (sendHeaders) {
+				await Promise.race([readingBody, deadline]);
+			}
+			controller.abort();
+			expect(await Promise.race([rejected, deadline])).toBeInstanceOf(Error);
+			await Promise.race([closed, deadline]);
+			expect(controller.signal.aborted).toBe(true);
+		} finally {
+			clearTimeout(timer);
+			globalThis.fetch = originalFetch;
+			controller.abort();
+			for (const socket of sockets) {
+				socket.destroy();
+			}
+			await new Promise<void>((resolve, reject) =>
+				server.close((error) => (error ? reject(error) : resolve()))
+			);
+		}
+	}
+});
+
+it("releases the stream when its event consumer throws", async () => {
+	let cancelled = 0;
+	const body = new ReadableStream<Uint8Array>({
+		start(controller) {
+			controller.enqueue(
+				new TextEncoder().encode(
+					'data: {"type":"approved","requestId":"fixture"}\n\n'
+				)
+			);
+		},
+		cancel() {
+			cancelled += 1;
+		},
+	});
+	globalThis.fetch = async () => new Response(body);
+	await expect(
+		streamLoginApprovals("https://api.example", {}, () => {
+			throw new Error("Consumer stopped");
+		})
+	).rejects.toThrow("Consumer stopped");
+	expect(cancelled).toBe(1);
+	expect(body.locked).toBe(false);
+});
+
+it("stops buffered events and releases its reader when the consumer aborts", async () => {
+	let cancelled = 0;
+	const body = new ReadableStream<Uint8Array>({
+		start(controller) {
+			controller.enqueue(
+				new TextEncoder().encode(
+					'data: {"type":"approved","requestId":"first"}\n\ndata: {"type":"approved","requestId":"second"}\n\n'
+				)
+			);
+		},
+		cancel() {
+			cancelled += 1;
+		},
+	});
+	globalThis.fetch = async () => new Response(body);
+	const controller = new AbortController();
+	const events: unknown[] = [];
+	await streamLoginApprovals(
+		"https://api.example",
+		{},
+		(event) => {
+			events.push(event);
+			controller.abort();
+		},
+		controller.signal
+	);
+	expect(events).toEqual([{ type: "approved", requestId: "first" }]);
+	expect(cancelled).toBe(1);
+	expect(body.locked).toBe(false);
 });

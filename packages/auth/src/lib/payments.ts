@@ -1,9 +1,9 @@
 import { HTTPClient, Polar } from "@polar-sh/sdk";
-import {
-	WebhookVerificationError as PolarWebhookVerificationError,
-	validateEvent as polarValidateEvent,
-} from "@polar-sh/sdk/webhooks";
 import { env } from "@ryu/env/server";
+import {
+	PolarWebhookVerificationError,
+	validatePolarEvent,
+} from "./newpolar-webhooks.ts";
 import { POLAR_API_VERSION } from "./polar-api.ts";
 
 const polarHttpClient = new HTTPClient();
@@ -18,13 +18,12 @@ export const polarClient = new Polar({
 });
 
 /**
- * Re-export the Polar SDK's Standard-Webhooks verifier through `@ryu/auth` so
- * webhook handlers in other packages (e.g. `@ryu/api`) can verify Polar events
- * without taking a direct dependency on `@polar-sh/sdk` (which is installed only
- * here). Mirrors how this module wraps the rest of the Polar SDK surface.
+ * Re-export the unified Polar webhook verifier through `@ryu/auth` so handlers
+ * in other packages (e.g. `@ryu/api`) do not need a direct Polar SDK dependency.
+ * New `whsec_` keys use Standard Webhooks directly; legacy raw secrets retain
+ * the SDK verifier's established behavior.
  */
-export const validatePolarEvent = polarValidateEvent;
-export { PolarWebhookVerificationError };
+export { PolarWebhookVerificationError, validatePolarEvent };
 
 export interface EnsurePolarCustomerInput {
 	email: string;
@@ -94,6 +93,16 @@ export const syncPolarCustomer = async ({
 		});
 		return true;
 	} catch (error) {
+		const status =
+			typeof error === "object" && error !== null
+				? ((error as { statusCode?: unknown }).statusCode ??
+					(error as { status?: unknown }).status)
+				: undefined;
+		// Personal customers are created lazily at checkout so an account update
+		// before the first purchase has no provider row to synchronize yet.
+		if (status === 404) {
+			return false;
+		}
 		console.error(
 			"Failed to sync Polar customer (non-critical):",
 			error instanceof Error ? error.message : error

@@ -53,6 +53,21 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilte
 
 use crate::{config::GatewayConfig, state::AppState};
 
+fn auth_disabled_startup_rejected(bind_addr: &str, fleet: bool, require_auth: bool) -> bool {
+    if require_auth {
+        return false;
+    }
+    let is_loopback_bind = bind_addr
+        .parse::<std::net::SocketAddr>()
+        .map(|address| address.ip().is_loopback())
+        .unwrap_or_else(|_| {
+            bind_addr
+                .rsplit_once(':')
+                .is_some_and(|(host, _)| host == "localhost")
+        });
+    !is_loopback_bind || fleet
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     // OpenTelemetry export seam (#540, P1): build an OPTIONAL OTLP layer that is
@@ -146,19 +161,13 @@ async fn main() -> anyhow::Result<()> {
     );
 
     // Even an explicit development auth opt-out cannot expose a billable proxy.
-    let is_loopback_bind = bind_addr
-        .parse::<std::net::SocketAddr>()
-        .map(|address| address.ip().is_loopback())
-        .unwrap_or_else(|_| {
-            bind_addr
-                .rsplit_once(':')
-                .is_some_and(|(host, _)| host == "localhost")
-        });
-    if !is_loopback_bind && !config.auth.require_auth {
+    if auth_disabled_startup_rejected(&bind_addr, config.fleet, config.auth.require_auth) {
         anyhow::bail!(
-            "refusing to start: gateway is bound to a non-loopback address ({bind_addr}) \
-             with auth DISABLED — anyone who can reach this port could use your providers \
-             and spend your credits. Enable auth.require_auth and provision credentials, or bind to 127.0.0.1 for local-only use."
+            "refusing to start: gateway auth is DISABLED for an externally reachable posture \
+             (bind={bind_addr}, fleet={}). Anyone who can reach this port could use your \
+             providers and spend your credits. Enable auth.require_auth; fleet replicas \
+             must never run unauthenticated even when their listener is loopback behind a load balancer.",
+            config.fleet
         );
     }
 
@@ -177,23 +186,22 @@ async fn main() -> anyhow::Result<()> {
     // U28: if this gateway is bound to a control plane, fetch its effective
     // policy now and refresh it periodically. The control plane has already
     // cascaded org/team/project/user layers and frozen admin-locked fields, so
-    // the data plane just enforces what it receives. A missing/unreachable
-    // control plane fails open (no extra policy) so the gateway still serves.
+    // the data plane just enforces what it receives. A configured managed
+    // control plane is required for startup; refresh failures retain the last
+    // verified policy instead of serving an empty policy.
     if let Some(source) = policy::PolicySource::from_env() {
-        match source.fetch(&state.http).await {
-            Ok(policy) => {
-                tracing::info!(
-                    approved_models = policy.approved_models.len(),
-                    locked_guardrails = policy.locked_guardrails.len(),
-                    allowed_regions = policy.allowed_regions.len(),
-                    "policy: fetched effective control-plane policy"
-                );
-                state.set_policy(policy);
-            }
-            Err(e) => tracing::warn!(
-                "policy: initial control-plane fetch failed ({e}); serving with no distributed policy until next refresh"
-            ),
-        }
+        let policy = source.fetch(&state.http).await.map_err(|error| {
+            anyhow::anyhow!(
+                "refusing to start: initial control-plane policy fetch failed: {error}"
+            )
+        })?;
+        tracing::info!(
+            approved_models = policy.approved_models.len(),
+            locked_guardrails = policy.locked_guardrails.len(),
+            allowed_regions = policy.allowed_regions.len(),
+            "policy: fetched effective control-plane policy"
+        );
+        state.set_policy(policy);
 
         let s = Arc::clone(&state);
         tokio::spawn(async move {
@@ -318,4 +326,17 @@ async fn main() -> anyhow::Result<()> {
     .await?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::auth_disabled_startup_rejected;
+
+    #[test]
+    fn fleet_mode_rejects_auth_disabled_even_on_loopback() {
+        assert!(auth_disabled_startup_rejected("127.0.0.1:8981", true, false));
+        assert!(auth_disabled_startup_rejected("0.0.0.0:8981", false, false));
+        assert!(!auth_disabled_startup_rejected("127.0.0.1:8981", false, false));
+        assert!(!auth_disabled_startup_rejected("0.0.0.0:8981", true, true));
+    }
 }

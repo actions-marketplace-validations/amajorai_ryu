@@ -1,3 +1,4 @@
+import { INDIVIDUAL_PLANS_FLAG } from "@ryu/auth/lib/feature-flags";
 import { OnboardingView } from "@ryu/blocks/desktop/onboarding";
 import { Button } from "@ryu/ui/components/button";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -28,11 +29,11 @@ import { PrivacyStep } from "@/src/components/onboarding/PrivacyStep.tsx";
 import { SafetyPostureStep } from "@/src/components/onboarding/SafetyPostureStep.tsx";
 import { TelegramOnboardingStep } from "@/src/components/onboarding/TelegramOnboardingStep.tsx";
 import { UpdateStep } from "@/src/components/onboarding/UpdateStep.tsx";
-import { WelcomeStep } from "@/src/components/onboarding/WelcomeStep.tsx";
 import { useStepUp } from "@/src/components/StepUpDialog.tsx";
 import { useAppSurface } from "@/src/contexts/app-surface-context.tsx";
 import { useAutoImportThreads } from "@/src/hooks/useAutoImportThreads.ts";
 import { useCreditsWallet } from "@/src/hooks/useCreditsWallet.ts";
+import { useFeatureFlag } from "@/src/hooks/useFeatureFlag.ts";
 import { AgentCatalogLogo } from "@/src/lib/agent-catalog-logo.tsx";
 import { buildSuggestedAgentInput } from "@/src/lib/agent-suggestion.ts";
 import { track } from "@/src/lib/analytics.ts";
@@ -82,6 +83,11 @@ import {
 	saveNodeOnboardingState,
 	startProfileJob,
 } from "@/src/lib/api/onboarding-profile.ts";
+import {
+	fetchOnboardingSkills,
+	type OnboardingSkillsSnapshot,
+	saveOnboardingSkillSelection,
+} from "@/src/lib/api/onboarding-skills.ts";
 import {
 	getActiveOrgId,
 	listOrgs,
@@ -169,10 +175,10 @@ const withAgentLogo = (entry: AgentCatalogEntry) => ({
 	logo: <AgentCatalogLogo entry={entry} size="20px" />,
 });
 
-// The 'agents', 'features', 'mic', 'theme', 'preferences', 'privacy', and 'welcome' phases
+// The 'agents', 'features', 'mic', 'theme', 'preferences', and 'welcome' phases
 // are interactive: the user picks which extra agents to add, optionally enables
-// the microphone, sets the look, tunes a few general + privacy settings, and
-// acknowledges the final welcome screen.
+// the microphone, sets the look, tunes general settings, and reviews the final
+// privacy + getting-started screen.
 // Every other phase auto-advances.
 type Phase =
 	| "starting"
@@ -181,6 +187,7 @@ type Phase =
 	| "connect"
 	| "installing"
 	| "agents"
+	| "skills"
 	| "node-setup"
 	| "local-default"
 	| "organization"
@@ -196,7 +203,6 @@ type Phase =
 	| "theme"
 	| "safety"
 	| "preferences"
-	| "privacy"
 	| "welcome"
 	| "activation-source"
 	| "activation-apps"
@@ -211,6 +217,7 @@ const PHASE_TITLES: Partial<Record<Phase, string>> = {
 	choose: "Where should Ryu do the work?",
 	connect: "Connect the place where work runs",
 	agents: "Choose what you want to run",
+	skills: "Choose your recommended skills",
 	"node-setup": "Set up this node",
 	"local-default": "Choose your local starting point",
 	organization: "Choose the workspace you work in",
@@ -223,13 +230,12 @@ const PHASE_TITLES: Partial<Record<Phase, string>> = {
 	telegram: "Take the work to Telegram",
 	features: "Choose what Ryu can do",
 	mic: "Choose how you talk to Ryu",
-	// The theme/preferences/privacy steps render their own headers; these entries
+	// The theme/preferences/final step render their own headers; these entries
 	// only satisfy the map.
 	theme: "Make it yours",
 	safety: "Choose your workflow autonomy",
 	preferences: "Set your preferences",
-	privacy: "Your privacy",
-	welcome: "Your workspace is ready",
+	welcome: "A few things to know",
 	done: "Ready to finish real work",
 };
 
@@ -238,6 +244,8 @@ const PHASE_SUBTITLES: Partial<Record<Phase, string>> = {
 		"Want the easiest setup? Start with Ryu Cloud. You can also run Ryu here or use a server your team already has.",
 	connect: "Use an existing Ryu node as the place your work runs",
 	agents: "Start with one capability; add more when a workflow needs it",
+	skills:
+		"Choose the optional skill collections this node should install; Ryu's built-in skills stay available",
 	"node-setup":
 		"Choose whether this node is for private work or a shared team workspace",
 	"local-default":
@@ -256,7 +264,7 @@ const PHASE_SUBTITLES: Partial<Record<Phase, string>> = {
 	features: "Turn capabilities on or off; change them later",
 	mic: "Talk to Ryu when typing is not the fastest way",
 	safety: "Choose how much autonomy each workflow can have",
-	welcome: "Ready when you are",
+	welcome: "Ryu works with your approval and keeps you in control.",
 	done: "Ready to finish real work",
 };
 
@@ -1083,6 +1091,14 @@ export default function OnboardingPage({
 	const [agentsNode, setAgentsNode] = useState<Node | null>(null);
 	const [agentsRetrying, setAgentsRetrying] = useState(false);
 	const [submitting, setSubmitting] = useState(false);
+	const [onboardingSkills, setOnboardingSkills] =
+		useState<OnboardingSkillsSnapshot | null>(null);
+	const [selectedSkillPackIds, setSelectedSkillPackIds] = useState<Set<string>>(
+		new Set()
+	);
+	const [skillsLoading, setSkillsLoading] = useState(false);
+	const [skillsSubmitting, setSkillsSubmitting] = useState(false);
+	const [skillsError, setSkillsError] = useState<string | null>(null);
 	const [nodeSetupKind, setNodeSetupKind] = useState<NodeSetupKind | null>(
 		() => nodeOnboardingState?.setupKind ?? null
 	);
@@ -1194,6 +1210,7 @@ export default function OnboardingPage({
 	// Which feature the one-feature-per-step wizard is currently showing.
 	const [featureIndex, setFeatureIndex] = useState(0);
 	const paidPlan = Boolean(entitlement?.managedInference);
+	const individualPlansEnabled = useFeatureFlag(INDIVIDUAL_PLANS_FLAG);
 	const freeCloud = !paidPlan;
 	const selectedOrganization = organizations.find(
 		(organization) => organization.id === selectedOrganizationId
@@ -1307,6 +1324,24 @@ export default function OnboardingPage({
 			});
 	}, [finish, getActiveNode, submitting]);
 
+	const loadOnboardingSkills = useCallback(async (target: ApiTarget) => {
+		setSkillsLoading(true);
+		setSkillsError(null);
+		try {
+			const snapshot = await fetchOnboardingSkills(target);
+			setOnboardingSkills(snapshot);
+			setSelectedSkillPackIds(new Set(snapshot.selectedPackIds));
+		} catch (error) {
+			setSkillsError(
+				error instanceof Error
+					? error.message
+					: "Ryu couldn't load the recommended skills. Try again."
+			);
+		} finally {
+			setSkillsLoading(false);
+		}
+	}, []);
+
 	const handleNodeSetupContinue = useCallback(
 		async (
 			input: SaveNodeOnboardingStateInput & {
@@ -1352,7 +1387,8 @@ export default function OnboardingPage({
 					local.agent_id || local.model ? local : defaultLocalAgentSelection()
 				);
 				setCloudSelection(cloud);
-				setPhase("local-default");
+				setPhase("skills");
+				await loadOnboardingSkills(target);
 			} catch (error) {
 				setNodeSetupError(
 					error instanceof Error
@@ -1363,7 +1399,7 @@ export default function OnboardingPage({
 				setSubmitting(false);
 			}
 		},
-		[getActiveNode, submitting]
+		[getActiveNode, loadOnboardingSkills, submitting]
 	);
 
 	// Install the user's Add Agents choices before the lane pickers render. This
@@ -2450,6 +2486,72 @@ export default function OnboardingPage({
 		});
 	}, []);
 
+	const toggleSkillPack = useCallback((id: string) => {
+		setSelectedSkillPackIds((previous) => {
+			const next = new Set(previous);
+			if (next.has(id)) {
+				next.delete(id);
+			} else {
+				next.add(id);
+			}
+			return next;
+		});
+	}, []);
+
+	const selectAllSkillPacks = useCallback(() => {
+		setSelectedSkillPackIds(
+			new Set(onboardingSkills?.options.map((option) => option.id) ?? [])
+		);
+	}, [onboardingSkills]);
+
+	const clearAllSkillPacks = useCallback(() => {
+		setSelectedSkillPackIds(new Set());
+	}, []);
+
+	const retryOnboardingSkills = useCallback(() => {
+		if (skillsLoading) {
+			return;
+		}
+		const active = getActiveNode();
+		const node = isLocalNode(active)
+			? refreshLocalNode()
+			: Promise.resolve(active);
+		void node.then((resolved) => loadOnboardingSkills(toTarget(resolved)));
+	}, [getActiveNode, loadOnboardingSkills, skillsLoading]);
+
+	const handleContinueSkills = useCallback(async () => {
+		if (skillsSubmitting || skillsLoading) {
+			return;
+		}
+		setSkillsSubmitting(true);
+		setSkillsError(null);
+		try {
+			const active = getActiveNode();
+			const node = isLocalNode(active) ? await refreshLocalNode() : active;
+			const snapshot = await saveOnboardingSkillSelection(
+				toTarget(node),
+				Array.from(selectedSkillPackIds)
+			);
+			setOnboardingSkills(snapshot);
+			setSelectedSkillPackIds(new Set(snapshot.selectedPackIds));
+			if (snapshot.syncComplete === false) {
+				setSkillsError(
+					"Your choice was saved, but one or more selected packs could not be installed. Retry to finish setting up this node."
+				);
+				return;
+			}
+			setPhase("local-default");
+		} catch (error) {
+			setSkillsError(
+				error instanceof Error
+					? error.message
+					: "Ryu couldn't save the recommended skill selection. Try again."
+			);
+		} finally {
+			setSkillsSubmitting(false);
+		}
+	}, [getActiveNode, skillsLoading, skillsSubmitting, selectedSkillPackIds]);
+
 	const handleContinue = useCallback(() => {
 		goToFeatures(Array.from(selected));
 	}, [goToFeatures, selected]);
@@ -2514,21 +2616,12 @@ export default function OnboardingPage({
 	}, [submitting]);
 
 	// The preferences step persists each toggle as it's flipped, so Continue just
-	// hands off to the privacy step.
-	const goToPrivacy = useCallback(() => {
+	// hands off to the final getting-started + privacy screen.
+	const goToFinalStep = useCallback(() => {
 		if (submitting) {
 			return;
 		}
 		setSubmitting(false);
-		setPhase("privacy");
-	}, [submitting]);
-
-	// The privacy step already persisted every consent as it was made. Show the
-	// final welcome animation before installing agents and handing off to chat.
-	const handleFinishPrivacy = useCallback(() => {
-		if (submitting) {
-			return;
-		}
 		setPhase("welcome");
 	}, [submitting]);
 
@@ -2919,6 +3012,31 @@ export default function OnboardingPage({
 		);
 	}
 
+	if (phase === "skills") {
+		return (
+			<div className="size-full" data-tauri-drag-region="true">
+				<OnboardingView
+					onClearAllSkillPacks={clearAllSkillPacks}
+					onContinueSkillPacks={() => {
+						void handleContinueSkills();
+					}}
+					onRetrySkillPacks={retryOnboardingSkills}
+					onSelectAllSkillPacks={selectAllSkillPacks}
+					onToggleSkillPack={toggleSkillPack}
+					selectedSkillPackIds={selectedSkillPackIds}
+					skillPacks={onboardingSkills?.options}
+					skillPacksCanConfigure={onboardingSkills?.canConfigure ?? true}
+					skillPacksError={skillsError}
+					skillPacksLoading={skillsLoading}
+					skillPacksSubmitting={skillsSubmitting}
+					step="skills"
+					subtitle={PHASE_SUBTITLES.skills}
+					title={PHASE_TITLES.skills!}
+				/>
+			</div>
+		);
+	}
+
 	if (phase === "node-setup") {
 		return (
 			<div className="size-full" data-tauri-drag-region="true">
@@ -2968,7 +3086,7 @@ export default function OnboardingPage({
 		);
 	}
 
-	// The theme/safety/preferences/privacy steps are desktop-only (they drive the
+	// The theme/safety/preferences/final step are desktop-only (they drive the
 	// desktop's own theme setters, appearance toggles, autostart registration,
 	// and Core privacy prefs), so they render here rather than through the shared
 	// block, whose `OnboardingStep` union has no member for them.
@@ -2995,15 +3113,7 @@ export default function OnboardingPage({
 	if (phase === "preferences") {
 		return (
 			<div className="size-full" data-tauri-drag-region="true">
-				<PreferencesStep busy={submitting} onContinue={goToPrivacy} />
-			</div>
-		);
-	}
-
-	if (phase === "privacy") {
-		return (
-			<div className="size-full" data-tauri-drag-region="true">
-				<PrivacyStep busy={submitting} onContinue={handleFinishPrivacy} />
+				<PreferencesStep busy={submitting} onContinue={goToFinalStep} />
 			</div>
 		);
 	}
@@ -3011,7 +3121,7 @@ export default function OnboardingPage({
 	if (phase === "welcome") {
 		return (
 			<div className="size-full" data-tauri-drag-region="true">
-				<WelcomeStep onContinue={continueAfterWelcome} />
+				<PrivacyStep busy={submitting} onContinue={continueAfterWelcome} />
 			</div>
 		);
 	}
@@ -3061,6 +3171,7 @@ export default function OnboardingPage({
 					checkoutOpened={activationCheckoutOpened}
 					dialog={stepUp.dialog}
 					error={activationError}
+					individualPlansEnabled={individualPlansEnabled}
 					onConfirmCheckout={confirmActivationSubscription}
 					onContinue={continueActivationOffer}
 					onSkip={finishOnboarding}

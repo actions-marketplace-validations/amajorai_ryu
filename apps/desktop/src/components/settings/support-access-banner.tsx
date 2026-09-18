@@ -4,8 +4,7 @@
 // docs/observability-analytics-support-access.md). The §5.2 / §6 design requires
 // a visible indicator while the local Core diagnostic channel is granted, plus a
 // one-click end (WorkOS/Notion pattern). This is mounted app-level in the layout
-// shell (next to PrivacyDisclosure) so it shows on EVERY route, not just the
-// Privacy settings tab.
+// shell so it shows on EVERY route, not just the Privacy settings tab.
 //
 // The active-state predicate mirrors Core's `SupportAccessLocal::is_active`:
 // granted = enabled AND (no expiry OR now < expiry). Ending the grant flips the

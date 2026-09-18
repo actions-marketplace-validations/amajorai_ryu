@@ -28,13 +28,13 @@ pub(crate) use ryu_composio::auth as composio_auth;
 pub(crate) use ryu_composio::catalog as composio_catalog;
 pub(crate) use ryu_composio::connect as composio_connect;
 pub(crate) use ryu_composio::triggers as composio_triggers;
+mod backups;
 mod config_file;
 mod connections;
 mod crash;
 mod crypto_host;
 mod dashboards_client;
 mod data_path;
-mod backups;
 /// The `document.parse` extraction facade. Shipped in `9bf1e2023` **without a
 /// `mod` line**, so it was never in the module tree and never compiled — the
 /// deepest form of the gap it was written to close. Declared here so
@@ -115,6 +115,7 @@ mod pairing;
 mod paths;
 mod payment;
 mod pi_config;
+mod plugin_evals;
 mod plugin_host;
 mod plugin_manifest;
 mod plugin_secrets;
@@ -346,7 +347,9 @@ async fn main() {
         ),
         // A credential initialization failure must never weaken API admission,
         // including on loopback. No listener or child service is started.
-        None => boot_fail!("node credentials could not be initialized; refusing unauthenticated startup"),
+        None => boot_fail!(
+            "node credentials could not be initialized; refusing unauthenticated startup"
+        ),
     }
 
     // Ghost sidecar env: the Ghost MCP server moved from a hardcoded built-in to
@@ -2032,11 +2035,11 @@ async fn main() {
         Err(e) => tracing::warn!("purging stale sidecar provider entries failed: {e}"),
     }
 
-    // Reconcile the bundled system-skills catalog in the background: install
-    // missing bundled skills, remove `System`-owned skills dropped from the
-    // catalog (never `User`-owned ones), on first boot and whenever the catalog
-    // version changes. Spawned (not awaited) so a slow network sync never delays
-    // the listener bind; idempotent and gated on `skills.sync-system`.
+    // Reconcile the administrator-selected external skill packs in the
+    // background. A fresh node has no selection, so this task is a no-op until
+    // onboarding explicitly saves one; embedded Ryu/pstack skills are seeded
+    // separately and remain available offline. Spawned (not awaited) so a slow
+    // network sync never delays the listener bind.
     {
         let sync_state = server_state.clone();
         let sync_preferences = server_state.preferences.clone();
@@ -2087,6 +2090,8 @@ async fn main() {
             .unwrap_or_else(|e| boot_fail!("failed to read local address of {bind_addr}: {e}"))
     );
 
+    server::connect_events::spawn_workers(server_state.clone());
+
     // Start the optional headroom compression proxy before the gateway so it is
     // reachable when the gateway's compression transform first runs. Best-effort
     // and fully graceful: disabled by default, and a missing binary just leaves
@@ -2101,23 +2106,6 @@ async fn main() {
                 ),
                 Ok(false) => {}
                 Err(e) => tracing::warn!("headroom: start error (compression inactive): {e}"),
-            }
-        });
-    }
-
-    // Start the local ryu-gateway (data plane) so Core hands every model call
-    // it makes to the gateway, which forwards to the engine/provider (U18).
-    // Runs in the background: a missing/unhealthy gateway must not block the
-    // Core HTTP API from coming up — chat requests surface a clear error.
-    {
-        let gateway_ref = Arc::clone(&gateway);
-        tokio::spawn(async move {
-            match gateway_ref.start().await {
-                Ok(true) => tracing::info!("gateway: ready on {}", sidecar::gateway::gateway_url()),
-                Ok(false) => {}
-                Err(e) => tracing::error!(
-                    "gateway: failed to start ({e}); Core chat will return an error until a gateway is available"
-                ),
             }
         });
     }
@@ -2223,6 +2211,7 @@ async fn main() {
                     "control-plane: no gateway key (RYU_GATEWAY_KEY) set; using local MCP registry only"
                 ),
                 Ok(Some(scope)) => {
+                    sidecar::control_plane::set_resolved_scope(scope.clone());
                     if let Err(error) = scope
                         .apply_governance(
                             &governance_state.preferences,
@@ -2479,11 +2468,22 @@ async fn main() {
         );
     }
 
-    // Start sidecars in background (only installed ones will actually start)
+    // Start sidecars before the local Gateway. The Gateway's automatic
+    // `LOCAL_LLM_URL` is now gated by the resident sidecar's verified liveness;
+    // starting it after this task prevents a persisted llama.cpp selection from
+    // being published while an old listener still owns the profile port.
     let sidecars_ref = Arc::clone(&sidecars);
+    let gateway_ref = Arc::clone(&gateway);
     tokio::spawn(async move {
         if let Err(e) = sidecars_ref.start_all().await {
             tracing::error!("sidecar startup failed: {e}");
+        }
+        match gateway_ref.start().await {
+            Ok(true) => tracing::info!("gateway: ready on {}", sidecar::gateway::gateway_url()),
+            Ok(false) => {}
+            Err(e) => tracing::error!(
+                "gateway: failed to start ({e}); Core chat will return an error until a gateway is available"
+            ),
         }
     });
 
@@ -2538,13 +2538,49 @@ async fn main() {
     // (the local single user) from a remote holder of the shared `RYU_TOKEN` when
     // deciding access to unpersisted rooms. Handlers that don't extract
     // `ConnectInfo` are unaffected — it is a superset of the plain make-service.
-    if let Err(e) = axum::serve(
+    let result = axum::serve(
         listener,
         router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
     )
-    .await
-    {
+    .with_graceful_shutdown(wait_for_shutdown_signal())
+    .await;
+    if let Err(e) = result {
         boot_fail!("HTTP server error: {e}");
+    }
+    tracing::info!("shutdown signal received; stopping managed Gateway and sidecars");
+    if let Err(e) = gateway.stop().await {
+        tracing::warn!(error = %e, "could not stop managed Gateway during shutdown");
+    }
+    if let Err(e) = headroom.stop().await {
+        tracing::warn!(error = %e, "could not stop headroom during shutdown");
+    }
+    sidecars.stop_all().await;
+}
+
+/// Wait for a user interrupt or an OS termination request so Core can stop the
+/// child processes it owns before exiting. `std::process::Child` does not kill a
+/// child on drop, so relying on Rust destructors leaves llama.cpp (and other
+/// sidecars) listening after a Core restart.
+async fn wait_for_shutdown_signal() {
+    #[cfg(unix)]
+    {
+        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            Ok(mut terminate) => {
+                tokio::select! {
+                    _ = tokio::signal::ctrl_c() => {}
+                    _ = terminate.recv() => {}
+                }
+            }
+            Err(error) => {
+                tracing::warn!(error = %error, "could not install SIGTERM handler; waiting for Ctrl-C");
+                let _ = tokio::signal::ctrl_c().await;
+            }
+        }
+    }
+
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
     }
 }
 

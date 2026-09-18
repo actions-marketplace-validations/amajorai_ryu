@@ -10,6 +10,7 @@ import {
 } from "@ryu/ui/components/context-menu.tsx";
 import { cn } from "@ryu/ui/lib/utils.ts";
 import type { KeyboardEvent } from "react";
+import { StandaloneAppContextMenuItems } from "@/src/components/apps/standalone-app-menu.tsx";
 
 /** The same density progression as the pinned-agent shelf. */
 export type AppStageLayout = "hero" | "pair" | "grid";
@@ -24,6 +25,7 @@ export interface PinnedAppItem {
 	id: string;
 	label: string;
 	seedId: string;
+	standaloneInstalled?: boolean;
 	target: string;
 }
 
@@ -140,11 +142,17 @@ export function PinnedAppStage({
 	onOpenNewWindow,
 	onOpen,
 	onReport,
+	onInstallStandalone,
+	onOpenStandalone,
+	onRemoveStandalone,
 }: {
 	apps: PinnedAppItem[];
 	onOpenNewWindow?: (app: PinnedAppItem) => void;
 	onOpen: (app: PinnedAppItem, newTab: boolean) => void;
 	onReport?: (app: PinnedAppItem) => void;
+	onInstallStandalone?: (app: PinnedAppItem) => void;
+	onOpenStandalone?: (app: PinnedAppItem) => void;
+	onRemoveStandalone?: (app: PinnedAppItem) => void;
 }) {
 	if (apps.length === 0) {
 		return null;
@@ -191,6 +199,22 @@ export function PinnedAppStage({
 									Report
 								</ContextMenuItem>
 							) : null}
+							<StandaloneAppContextMenuItems
+								enabled
+								hasCompanion
+								installed={app.standaloneInstalled ?? false}
+								onInstall={
+									onInstallStandalone
+										? () => onInstallStandalone(app)
+										: undefined
+								}
+								onOpen={
+									onOpenStandalone ? () => onOpenStandalone(app) : undefined
+								}
+								onRemove={
+									onRemoveStandalone ? () => onRemoveStandalone(app) : undefined
+								}
+							/>
 						</ContextMenuContent>
 					</ContextMenu>
 				))}

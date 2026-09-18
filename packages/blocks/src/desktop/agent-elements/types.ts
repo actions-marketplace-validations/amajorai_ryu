@@ -10,6 +10,7 @@ import type { SuggestionItem } from "./input/suggestions.tsx";
 import type { LinkPreviewResolvers } from "./link-preview.tsx";
 import type { MemoryCitation } from "./memory-citations.ts";
 import type { MessageReactionBucket } from "./message-reactions.tsx";
+import type { MessageReadReceiptState } from "./message-read-receipt.tsx";
 import type {
 	QuestionAnswer,
 	QuestionConfig,
@@ -210,6 +211,7 @@ export interface ChatSlots {
 		actions?: React.ReactNode;
 		message: UIMessage;
 		className?: string;
+		readReceipt?: MessageReadReceiptState;
 		messageActionState?: MessageActionRuntimeState;
 		messageActions?: ContributedMessageAction[];
 		onContributedMessageAction?: (
@@ -367,6 +369,8 @@ export interface AgentChatProps {
 	 * context-usage ring in each completed assistant turn's stats footer.
 	 */
 	contextSize?: number;
+	/** Optional host-owned identity row rendered above the scrollable conversation. */
+	conversationHeader?: React.ReactNode;
 	/** Identity of the thread being shown. Fires the open-at-bottom jump once per
 	 * conversation; pass the conversation id when the surface has one. */
 	conversationKey?: string;
@@ -444,6 +448,8 @@ export interface AgentChatProps {
 	 *  after the built-in toolbar buttons. Dispatches through
 	 *  {@link AgentChatProps.onContributedMessageAction}. */
 	messageActions?: ContributedMessageAction[];
+	/** Durable read markers grouped by message id for the transcript footer. */
+	messageReadReceipts?: ReadonlyMap<string, MessageReadReceiptState>;
 	messages: UIMessage[];
 	/** Submit a value from an agent-rendered UI as a new chat message. */
 	onAgentUiSubmit?: AgentUiSubmit;
@@ -486,6 +492,8 @@ export interface AgentChatProps {
 	onEditMessage?: (messageId: string, newText: string) => void;
 	/** Request the next older message page when the viewport reaches the top. */
 	onLoadOlderMessages?: () => Promise<void>;
+	/** Called when a persisted user message enters the viewport. */
+	onMessageVisible?: (messageId: string) => void;
 
 	/**
 	 * Open the full context-window breakdown (the workspace Context tab). When

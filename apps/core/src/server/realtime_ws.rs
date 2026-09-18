@@ -9,21 +9,12 @@
 //!
 //! ## Auth placement (auth-in-handler, mirroring `hardware_ws.rs`)
 //!
-//! This route lives on the **public** router, not behind `require_auth`. Two
-//! reasons:
-//!   - Browsers cannot set custom headers on a WS upgrade, so the node token and
-//!     the user JWT both ride query params (`?token=` / `?jwt=`). The node token
-//!     also accepts an `Authorization: Bearer` header (non-browser clients).
-//!   - The access decision is per-resource, not per-route, so it must run inside
-//!     the handler after the `join` frame names the room.
-//!
-//! Admittance vs identity are distinct, exactly as elsewhere in Core:
-//!   - **Node admittance** — `RYU_TOKEN`. If configured, the upgrade is REJECTED
-//!     unless the presented token matches (mirrors [`crate::server::require_auth`]).
-//!     If not configured (loopback dev), the upgrade is allowed.
-//!   - **User identity** — an OPTIONAL Better Auth JWT, verified OFFLINE via the
-//!     Phase 0 path ([`crate::server::verified_caller_from_token`]). Absent /
-//!     invalid ⇒ anonymous, never rejected at this layer.
+//! This route lives on the **public** router because a browser WebSocket
+//! constructor cannot set an authorization header. Clients first exchange their
+//! normal HTTP node/user credentials for a short-lived, one-use ticket at
+//! `/api/ws/ticket`; the ticket is the only query value accepted here. It carries
+//! the verified caller and node-token generation in Core memory, so credentials
+//! never enter the upgrade URL.
 //!
 //! ## Access decision (fail-closed, but never lock out the single user)
 //!
@@ -53,17 +44,14 @@
 //! node as single-tenant, fail-OPEN, and hand any holder of the shared
 //! `RYU_TOKEN` full access to other users' scoped resources.
 
-use std::{
-    net::SocketAddr,
-    time::{Duration, Instant},
-};
+use std::time::{Duration, Instant};
 
 use axum::{
     extract::{
         ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade},
-        ConnectInfo, Query, State,
+        Query, State,
     },
-    http::{HeaderMap, StatusCode},
+    http::StatusCode,
     response::{IntoResponse, Response},
 };
 use serde::Deserialize;
@@ -102,15 +90,13 @@ const KEEPALIVE_TIMEOUT: Duration = Duration::from_secs(45);
 /// keystroke). Each applied update resets the timer.
 const QUIESCE_DURATION: std::time::Duration = std::time::Duration::from_secs(3);
 
-/// Query params on the upgrade URL. Both optional: `token` is the node-admittance
-/// `RYU_TOKEN` (also accepted via `Authorization: Bearer`), `jwt` is the optional
-/// user identity JWT (browsers cannot set custom headers on a WS upgrade).
+/// Query params on the upgrade URL. The opaque one-use ticket is the only
+/// accepted credential; node/user credentials must be exchanged over HTTP first.
 #[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RealtimeQuery {
     #[serde(default)]
-    token: Option<String>,
-    #[serde(default)]
-    jwt: Option<String>,
+    ticket: Option<String>,
 }
 
 /// The kind of resource a room maps to. Decides which store resolves the room's
@@ -121,6 +107,16 @@ enum RoomKind {
     Conversation,
     Document,
     Application,
+}
+
+impl RoomKind {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Conversation => "conversation",
+            Self::Document => "document",
+            Self::Application => "application",
+        }
+    }
 }
 
 /// The first control frame: names the room to join and its kind.
@@ -152,66 +148,43 @@ struct JoinFrame {
 pub async fn realtime_ws(
     ws: WebSocketUpgrade,
     State(state): State<ServerState>,
-    ConnectInfo(peer): ConnectInfo<SocketAddr>,
-    headers: HeaderMap,
     Query(query): Query<RealtimeQuery>,
 ) -> Response {
-    // ── Node admittance (mirror `require_auth`) ──────────────────────────────
-    // Treat an empty/whitespace configured token as "not configured" (loopback
-    // dev) — exactly like `require_auth`, which only enforces a non-empty token.
-    let active_node_token = crate::node_token::active_token();
-    if let Some(expected) = active_node_token
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-    {
-        let provided = query
-            .token
-            .as_deref()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(str::to_owned)
-            .or_else(|| bearer_token(&headers));
-        if provided.as_deref() != Some(expected) {
-            return (StatusCode::UNAUTHORIZED, "missing or invalid node token").into_response();
+    let ticket = match crate::server::ws_ticket::consume(
+        query.ticket.as_deref(),
+        crate::server::ws_ticket::WsTicketRoute::Realtime,
+        None,
+    ) {
+        Some(ticket) => ticket,
+        None => {
+            return (
+                StatusCode::UNAUTHORIZED,
+                "missing or invalid WebSocket ticket",
+            )
+                .into_response();
         }
-    }
-
-    // ── Optional user identity (Phase 0 verify path, reused) ─────────────────
-    // Source order: `?jwt=` query (browser-friendly), then the REST header for
-    // non-browser clients. Any failure resolves to anonymous (None), never an
-    // error — `RYU_TOKEN` is the gate.
-    let jwt = query
-        .jwt
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(str::to_owned)
-        .or_else(|| super::header_str(&headers, "x-ryu-user-jwt"));
-    let caller = match jwt {
-        Some(token) => super::verified_caller_from_token(&token).await,
-        None => None,
     };
+    if ticket
+        .jwt_expires_at
+        .is_some_and(|expires_at| expires_at <= chrono::Utc::now().timestamp())
+    {
+        return (StatusCode::UNAUTHORIZED, "WebSocket ticket user identity expired")
+            .into_response();
+    }
+    let caller = ticket.caller.clone();
+    let peer_is_loopback = ticket.peer_is_loopback;
+	let token_generation = ticket.node_generation;
 
-    // Whether the upgrade came from a genuine local peer. Tailcat re-originates
-    // remote streams as loopback TCP connections, so its active forwarding
-    // listener must not receive the single-user local allowance for unknown
-    // rooms. This is still independent of the node's org binding.
-    let peer_is_loopback =
-        super::is_trusted_local_peer(peer.ip(), crate::sidecar::tailcat::proxy_is_active());
-
-    ws.on_upgrade(move |socket| handle_socket(socket, state, caller, peer_is_loopback))
-}
-
-/// Extract a bearer token from the `Authorization` header.
-fn bearer_token(headers: &HeaderMap) -> Option<String> {
-    headers
-        .get("authorization")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "))
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(str::to_owned)
+	ws.on_upgrade(move |socket| {
+		handle_socket(
+			socket,
+			state,
+			caller,
+			peer_is_loopback,
+			token_generation,
+			ticket,
+		)
+	})
 }
 
 /// The outcome of the per-room access decision.
@@ -267,11 +240,17 @@ fn decide_access(
         };
     };
 
-    // Legacy single-tenant row: untenanted data predates the multi-user columns
-    // and must keep working with full access. This is the genuine local-first
-    // path (no JWT ⇒ NULL `author_user_id` ⇒ NULL owner).
+    // Legacy single-tenant rows predate the multi-user columns and have no
+    // identity that can be checked. Keep the local-first path working, but do
+    // not expose an unowned row to a remote node-token caller: a remote caller
+    // could otherwise join another user's backfilled row before tenancy is
+    // repaired.
     if tenancy.owner_user_id.is_none() && tenancy.org_id.is_none() {
-        return AccessOutcome::Grant(Access::Write);
+        return if peer_is_loopback {
+            AccessOutcome::Grant(Access::Write)
+        } else {
+            AccessOutcome::Deny("legacy-resource-requires-local-peer")
+        };
     }
 
     // Scoped (owned or org-scoped) resource. A row is scoped ONLY because someone
@@ -304,18 +283,26 @@ fn decide_access(
 /// Per-connection driver: read the `join` frame, enforce access, then bridge the
 /// room broadcast to the socket and the socket's frames into the room.
 async fn handle_socket(
-    socket: WebSocket,
-    state: ServerState,
-    caller: Option<VerifiedCaller>,
-    peer_is_loopback: bool,
+	socket: WebSocket,
+	state: ServerState,
+	caller: Option<VerifiedCaller>,
+	peer_is_loopback: bool,
+	token_generation: u64,
+	ticket: crate::server::ws_ticket::WsTicketClaims,
 ) {
     use futures_util::{SinkExt, StreamExt};
 
     let (mut ws_tx, mut ws_rx) = socket.split();
+    let jwt_expiry = crate::server::ws_ticket::wait_for_jwt_expiry(ticket.jwt_expires_at);
+    tokio::pin!(jwt_expiry);
 
     // ── Handshake: the first frame must be `join` ────────────────────────────
     let join = loop {
-        match ws_rx.next().await {
+        let frame = tokio::select! {
+            _ = &mut jwt_expiry => return,
+            frame = ws_rx.next() => frame,
+        };
+        match frame {
             Some(Ok(Message::Text(text))) => match serde_json::from_str::<Value>(&text) {
                 Ok(value) if value.get("type").and_then(Value::as_str) == Some("join") => {
                     match serde_json::from_value::<JoinFrame>(value) {
@@ -355,6 +342,18 @@ async fn handle_socket(
     if room_id.trim().is_empty() {
         let _ = ws_tx
             .send(close(CLOSE_UNSUPPORTED, "join.room_id is empty".into()))
+            .await;
+        return;
+    }
+    if ticket.room_id.as_deref() != Some(room_id.as_str())
+        || ticket.kind.as_deref() != Some(join.kind.as_str())
+        || ticket.app_id.as_deref() != join.app_id.as_deref()
+    {
+        let _ = ws_tx
+            .send(close(
+                CLOSE_POLICY,
+                "WebSocket ticket is not bound to this room".into(),
+            ))
             .await;
         return;
     }
@@ -435,7 +434,11 @@ async fn handle_socket(
 
     // ── Access decision ──────────────────────────────────────────────────────
     let access = match join.kind {
-        RoomKind::Application => AccessOutcome::Grant(Access::Write),
+        // `app:realtime` proves that the app may use the transport, not that it
+        // owns the model-selected room id. Until the app host supplies a
+        // Core-issued per-resource binding, fail closed instead of allowing one
+        // granted app to join another app's room namespace.
+        RoomKind::Application => AccessOutcome::Deny("application-resource-binding-required"),
         RoomKind::Conversation => decide_access(
             state.conversations.get_access_meta(&room_id).await,
             caller.as_ref(),
@@ -554,10 +557,10 @@ async fn handle_socket(
 
     // Prime the interval so the first server ping is one full cadence after the
     // join acknowledgement, then require a pong before the bounded timeout.
-    let mut keepalive = tokio::time::interval(KEEPALIVE_INTERVAL);
-    keepalive.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    keepalive.tick().await;
-    let mut last_pong = Instant::now();
+	let mut keepalive = tokio::time::interval(KEEPALIVE_INTERVAL);
+	keepalive.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+	keepalive.tick().await;
+	let mut last_pong = Instant::now();
 
     // ── Document rooms: drive the authoritative CRDT engine ──────────────────
     // Rehydrate the doc (this resolves/creates the in-memory `yrs` replica) and
@@ -604,10 +607,36 @@ async fn handle_socket(
         None
     };
 
-    // ── Receive loop: client frames -> room ──────────────────────────────────
-    loop {
-        tokio::select! {
-            _ = keepalive.tick() => {
+	let mut token_updates = crate::node_token::subscribe_generation();
+	if *token_updates.borrow() != token_generation {
+		let _ = out_tx
+			.send(close(CLOSE_POLICY, "node token rotated".into()))
+			.await;
+		drop(quiesce_tx);
+		drop(out_tx);
+		forward_task.abort();
+		let _ = send_task.await;
+		return;
+	}
+
+	// ── Receive loop: client frames -> room ──────────────────────────────────
+	loop {
+		tokio::select! {
+			_ = &mut jwt_expiry => {
+				let _ = out_tx
+					.send(close(CLOSE_POLICY, "user identity expired".into()))
+					.await;
+				break;
+			}
+			changed = token_updates.changed() => {
+				if changed.is_ok() && *token_updates.borrow() != token_generation {
+					let _ = out_tx
+						.send(close(CLOSE_POLICY, "node token rotated".into()))
+						.await;
+					break;
+				}
+			}
+			_ = keepalive.tick() => {
                 if last_pong.elapsed() >= KEEPALIVE_TIMEOUT {
                     tracing::debug!(room_id, "realtime: keepalive timeout");
                     break;
@@ -620,8 +649,14 @@ async fn handle_socket(
                     break;
                 }
             }
-            frame = ws_rx.next() => {
-                let Some(frame) = frame else {
+			frame = ws_rx.next() => {
+				if crate::node_token::active_generation() != token_generation {
+					let _ = out_tx
+						.send(close(CLOSE_POLICY, "node token rotated".into()))
+						.await;
+					break;
+				}
+				let Some(frame) = frame else {
                     break;
                 };
                 let frame = match frame {
@@ -963,20 +998,18 @@ mod tests {
         assert_eq!(deny_reason(&outcome), Some("forbidden"));
     }
 
-    /// Legacy single-tenant data (NULL owner + NULL org) keeps full access — the
-    /// genuine local-first path that must never be locked out.
+    /// Legacy single-tenant data remains local-first, but remote callers cannot
+    /// use an unowned row as a cross-user access path.
     #[test]
     fn legacy_untenanted_row_grants_write() {
-        // True for any caller/peer combination (fresh `meta` per call — an
-        // `anyhow::Result` is not `Clone`).
-        assert!(is_grant(
-            &decide_access(Ok(Some(scoped(None, None, "private"))), None, false),
-            Access::Write
-        ));
         assert!(is_grant(
             &decide_access(Ok(Some(scoped(None, None, "private"))), None, true),
             Access::Write
         ));
+        assert_eq!(
+            deny_reason(&decide_access(Ok(Some(scoped(None, None, "private"))), None, false)),
+            Some("legacy-resource-requires-local-peer")
+        );
     }
 
     /// The resource owner gets write on their own scoped row.
@@ -1181,19 +1214,14 @@ mod tests {
         }
     }
 
-    /// `bearer_token` extracts a well-formed `Bearer <t>` from the upgrade headers and
-    /// rejects a wrong scheme / empty token — the node-admittance fallback path.
+    /// The upgrade query accepts only the opaque ticket field; bearer credentials
+    /// are exchanged over HTTP before the socket is opened.
     #[test]
-    fn bearer_token_parses_authorization_header() {
-        use axum::http::HeaderValue;
-        let mut h = HeaderMap::new();
-        h.insert("authorization", HeaderValue::from_static("Bearer node-tok"));
-        assert_eq!(bearer_token(&h).as_deref(), Some("node-tok"));
-
-        let mut bad = HeaderMap::new();
-        bad.insert("authorization", HeaderValue::from_static("Bearer   "));
-        assert_eq!(bearer_token(&bad), None);
-        assert_eq!(bearer_token(&HeaderMap::new()), None);
+    fn realtime_query_contains_only_a_ticket() {
+        let query: RealtimeQuery =
+            serde_json::from_value(json!({ "ticket": "opaque-ticket" })).unwrap();
+        assert_eq!(query.ticket.as_deref(), Some("opaque-ticket"));
+        assert!(serde_json::from_value::<RealtimeQuery>(json!({ "token": "legacy" })).is_err());
     }
 
     /// The `join` frame deserializes the room id + kind (lowercase-tagged), so a

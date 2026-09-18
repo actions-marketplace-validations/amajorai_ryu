@@ -72,7 +72,7 @@ export default function Footer({
 								</a>
 								<a
 									className="block text-muted-foreground transition-colors hover:text-foreground"
-									href="/marketplace/apps"
+									href="/products/apps"
 								>
 									<LocalizedFooterCopy value="Ryu Apps" />
 								</a>

@@ -34,6 +34,7 @@ const SECRET_PREFERENCE_KEYS: &[&str] = &[
     "replicate-api-key",
     "smithery-api-key",
     "smtp-password",
+    "unsplash-access-key",
     "node-onboarding-state",
 ];
 
@@ -352,6 +353,7 @@ mod tests {
     fn secret_key_allowlist_is_explicit() {
         assert!(is_secret_preference_key("composio-api-key"));
         assert!(is_secret_preference_key("smtp-password"));
+        assert!(is_secret_preference_key("unsplash-access-key"));
         assert!(is_secret_preference_key("node-onboarding-state"));
         assert!(!is_secret_preference_key("context.max-tokens"));
         assert!(!is_secret_preference_key("theme"));

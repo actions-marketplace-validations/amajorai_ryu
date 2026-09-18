@@ -483,6 +483,10 @@ fn default_grant_allowlist() -> Vec<String> {
         // `conversation:set-title` can only rewrite a title on a conversation the
         // caller is already in, so neither widens reach beyond the app's own chat.
         "conversation:set-title",
+        // Agent reaction replies use the current conversation binding and the
+        // existing Core message-reactions store; the agent cannot choose a
+        // different conversation or actor at the host bridge.
+        "conversation:reactions",
         "preferences:read",
         // Read-only node activity + subscription usage for the `node.readings` kernel
         // capability. Counts and percentages only — no run titles, ids or folder
@@ -711,6 +715,24 @@ pub fn validate_grants_for(app_id: Option<&str>, grants: &[String]) -> GrantDeci
         };
         return ryu_gw_governance::validate_grants_for(app_id, grants, &policy);
     }
+    // Life Recorder is the only shipped app that requests the sensitive
+    // microphone/speech host primitives. Keep these grants out of the global
+    // allowlist (so a marketplace app cannot self-request them), but permit the
+    // exact first-party owner on the same re-enable path as the seeded manifest.
+    if app_id.is_some_and(|id| {
+        id.trim().eq_ignore_ascii_case("@ryu/life-recorder")
+            || id.trim().eq_ignore_ascii_case("com.ryu.life-recorder")
+    }) {
+        let mut allowlist = grant_allowlist().clone();
+        allowlist.extend(["timeline:speech".to_owned(), "media:record".to_owned()]);
+        let policy = GrantPolicy {
+            allowlist: &allowlist,
+            reserved_namespaces: reserved_namespace_list(),
+            owner_scoped: owner_scoped_grants_enabled(),
+            protected_owner_ids: protected_owner_id_list(),
+        };
+        return ryu_gw_governance::validate_grants_for(app_id, grants, &policy);
+    }
     ryu_gw_governance::validate_grants_for(app_id, grants, &grant_policy())
 }
 
@@ -904,6 +926,22 @@ mod tests {
         let d = validate_grants_for(Some("@ryu/mpp"), &scopes(&["egress:http"]));
         assert!(d.all_approved());
         assert_eq!(d.approved, vec!["egress:http".to_owned()]);
+    }
+
+    #[test]
+    fn conversation_reactions_grant_is_reviewed() {
+        let d = validate_grants_for(Some("@ryu/agent-comms"), &scopes(&["conversation:reactions"]));
+        assert!(d.all_approved(), "denied: {:?}", d.denied);
+        assert_eq!(d.approved, vec!["conversation:reactions".to_owned()]);
+    }
+
+    #[test]
+    fn life_recorder_sensitive_grants_are_exact_owner_scoped() {
+        let grants = scopes(&["timeline:speech", "media:record"]);
+        assert!(validate_grants_for(Some("@ryu/life-recorder"), &grants).all_approved());
+        assert!(!validate_grants_for(Some("com.evil.life-recorder"), &grants).all_approved());
+        assert!(!validate_grants_for(Some("com.evil.media"), &scopes(&["media:record"]))
+            .all_approved());
     }
 
     #[test]

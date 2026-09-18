@@ -228,6 +228,32 @@ pub const MAX_COMMAND_OUTPUT_BYTES: usize = 1024 * 1024; // 1 MiB
 
 /// Max length of a single interpolated command argument value.
 pub const MAX_COMMAND_ARG_LEN: usize = 8 * 1024;
+const MAX_HTTP_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
+
+async fn read_http_response_text_capped(mut response: reqwest::Response) -> Result<String, String> {
+    if response
+        .content_length()
+        .is_some_and(|length| length > MAX_HTTP_RESPONSE_BYTES as u64)
+    {
+        return Err(format!(
+            "http tool response exceeds {MAX_HTTP_RESPONSE_BYTES} bytes"
+        ));
+    }
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|error| format!("http tool response read failed: {error}"))?
+    {
+        if bytes.len().saturating_add(chunk.len()) > MAX_HTTP_RESPONSE_BYTES {
+            return Err(format!(
+                "http tool response exceeds {MAX_HTTP_RESPONSE_BYTES} bytes"
+            ));
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    Ok(String::from_utf8_lossy(&bytes).into_owned())
+}
 
 /// Extract the egress domain (host) from an `http` tool's URL, for the
 /// `tool:http-egress:<domain>` grant check. `None` for a URL with no host.
@@ -241,24 +267,11 @@ pub fn http_egress_domain(url: &str) -> Option<String> {
 /// sinks (cloud metadata `169.254.169.254`, `127.0.0.1`, internal LAN) a plugin
 /// granted a *public* domain must never reach.
 fn is_internal_v4(v4: &std::net::Ipv4Addr) -> bool {
-    let o = v4.octets();
-    v4.is_loopback()
-        || v4.is_private()
-        || v4.is_link_local()
-        || o[0] == 0 // 0.0.0.0/8
-        || (o[0] == 100 && (64..128).contains(&o[1])) // 100.64.0.0/10 CGNAT
+    ryu_egress::is_blocked_ip(std::net::IpAddr::V4(*v4))
 }
 
 fn is_internal_ip(ip: &std::net::IpAddr) -> bool {
-    match ip {
-        std::net::IpAddr::V4(v4) => is_internal_v4(v4),
-        std::net::IpAddr::V6(v6) => {
-            v6.is_loopback()
-                || (v6.segments()[0] & 0xffc0) == 0xfe80 // fe80::/10 link-local
-                || (v6.segments()[0] & 0xfe00) == 0xfc00 // fc00::/7 unique-local
-                || v6.to_ipv4_mapped().is_some_and(|v4| is_internal_v4(&v4))
-        }
-    }
+    ryu_egress::is_blocked_ip(*ip)
 }
 
 /// SSRF guard for the `http` plugin tool: reject a `url` whose host is — or
@@ -485,6 +498,25 @@ fn finalize_http_result(
     body_or_text: Value,
     transport_err: Option<String>,
 ) -> (Result<Value, String>, i32, Option<String>) {
+    finalize_http_result_with_secrets(
+        fail_open,
+        unwrap_body,
+        status,
+        body_or_text,
+        transport_err,
+        &[],
+    )
+}
+
+fn finalize_http_result_with_secrets(
+    fail_open: bool,
+    unwrap_body: bool,
+    status: Option<u16>,
+    body_or_text: Value,
+    transport_err: Option<String>,
+    secret_values: &[String],
+) -> (Result<Value, String>, i32, Option<String>) {
+    let body_or_text = redact_secret_values(body_or_text, secret_values);
     match (status, transport_err) {
         // A response arrived.
         (Some(status), _) => {
@@ -532,6 +564,33 @@ fn finalize_http_result(
     }
 }
 
+fn redact_secret_values(mut value: Value, secret_values: &[String]) -> Value {
+    fn visit(value: &mut Value, secret_values: &[String]) {
+        match value {
+            Value::String(text) => {
+                for secret in secret_values {
+                    if !secret.is_empty() {
+                        *text = text.replace(secret, "[REDACTED]");
+                    }
+                }
+            }
+            Value::Array(items) => {
+                for item in items {
+                    visit(item, secret_values);
+                }
+            }
+            Value::Object(fields) => {
+                for item in fields.values_mut() {
+                    visit(item, secret_values);
+                }
+            }
+            Value::Null | Value::Bool(_) | Value::Number(_) => {}
+        }
+    }
+    visit(&mut value, secret_values);
+    value
+}
+
 /// One `env:`/`vault:` token's resolution within a `secret_headers` template.
 ///
 /// `PartialEq`/`Debug` exist for the resolver's tests only — a real secret is
@@ -556,9 +615,9 @@ enum SecretToken {
 const ENV_SECRET_ALLOWLIST: &str = "RYU_PLUGIN_ENV_ALLOWLIST";
 
 /// The per-plugin env-var prefix a Community-tier plugin may read from without any
-/// operator configuration: `RYU_PLUGIN_<UPPER(plugin_id)>_`, with every
-/// non-alphanumeric character folded to `_` (so `com.acme.weather` →
-/// `RYU_PLUGIN_COM_ACME_WEATHER_`).
+/// operator configuration. Non-alphanumeric bytes use an explicit hex escape,
+/// making the mapping injective: two different plugin ids can never share the
+/// same credential namespace.
 ///
 /// # Why the `RYU_PLUGIN_` infix rather than the bare `RYU_<ID>_` BYOK shape
 ///
@@ -588,18 +647,13 @@ const ENV_SECRET_ALLOWLIST: &str = "RYU_PLUGIN_ENV_ALLOWLIST";
 fn plugin_env_prefix(plugin_id: &str) -> String {
     let mut out = String::with_capacity(plugin_id.len() + 12);
     out.push_str("RYU_PLUGIN_");
-    // A scoped id's leading `@` is dropped rather than folded, so `@acme/weather`
-    // yields `RYU_PLUGIN_ACME_WEATHER_` instead of a double-underscore
-    // `RYU_PLUGIN__ACME_WEATHER_`. The `/` still folds like any other separator, so
-    // the namespace stays unambiguous — `@a/b` and `a-b` both fold to `A_B`, and
-    // colliding there costs a third-party plugin only its own namespace.
-    for ch in plugin_id.trim_start_matches('@').chars() {
-        if ch.is_ascii_alphanumeric() {
-            out.push(ch.to_ascii_uppercase());
-        } else {
-            out.push('_');
-        }
-    }
+    for byte in plugin_id.trim().as_bytes() {
+        if byte.is_ascii_alphanumeric() {
+            out.push((*byte as char).to_ascii_uppercase());
+       } else {
+            out.push_str(&format!("_X{byte:02X}_"));
+       }
+   }
     out.push('_');
     out
 }
@@ -639,7 +693,7 @@ pub(crate) fn may_read_env_secret(plugin_id: &str, var: &str) -> bool {
         return true;
     }
     // The allowlist var itself is never readable through the gate it configures:
-    // a plugin whose id folds to `env` would otherwise sit exactly on
+    // a plugin whose id encodes to the `env` namespace would otherwise sit exactly on
     // `RYU_PLUGIN_ENV_` and read the policy naming its own escape hatch.
     if var == ENV_SECRET_ALLOWLIST {
         return false;
@@ -963,6 +1017,29 @@ pub fn resolve_core_url(url: &str) -> String {
     resolve_core_url_with(url, &core_loopback_origin())
 }
 
+fn node_token_target_is_local_core(url: &str) -> bool {
+    let Ok(parsed) = reqwest::Url::parse(url) else {
+        return false;
+    };
+    let Some(host) = parsed.host_str() else {
+        return false;
+    };
+    let is_loopback = host
+        .parse::<std::net::IpAddr>()
+        .is_ok_and(|address| address.is_loopback());
+    is_loopback && parsed.port_or_known_default() == Some(core_port_from_bind(std::env::var("RYU_BIND").ok().as_deref()))
+}
+
+fn core_request_path_and_query(url: &str) -> Option<String> {
+    let parsed = reqwest::Url::parse(url).ok()?;
+    let mut path = parsed.path().to_owned();
+    if let Some(query) = parsed.query() {
+        path.push('?');
+        path.push_str(query);
+    }
+    Some(path)
+}
+
 /// Proxy a plugin `http` tool call to `url`, Gateway-governed and egress-grant-gated.
 ///
 /// Order matters. The **egress-grant check runs first** (deterministic — no
@@ -1079,11 +1156,34 @@ pub async fn run_http_tool_with_secret_context(
     // Expand `core:` to this profile's loopback origin BEFORE the egress/SSRF
     // guards, so they screen the URL that is actually dialled.
     let url = resolve_core_url(url);
+    if !secret_headers.is_empty() {
+        let scheme = reqwest::Url::parse(&url)
+            .map_err(|error| format!("http tool: invalid secret-header URL: {error}"))?
+            .scheme()
+            .to_owned();
+        if scheme != "https" {
+            return Err(
+                "http tool: secret headers require an HTTPS destination".to_owned()
+            );
+        }
+    }
     // Secret headers are deliberately omitted from this first lowering pass. The
     // URL, query, and body do not depend on them, and this lets the cheap egress /
     // SSRF / gateway gates run before Core decrypts any user-managed value.
-    let (final_url, query_pairs, mut body, _) =
+    let (final_url, query_pairs, mut body, ordinary_headers) =
         build_rest_request(&url, &args, bodyless, header_params, &[])?;
+
+    let uses_node_token = secret_headers.values().any(|source| {
+        source
+            .split_whitespace()
+            .any(|word| word == "env:RYU_TOKEN")
+    });
+    if uses_node_token && !node_token_target_is_local_core(&final_url) {
+        return Err(
+            "http tool: the Core node token may only authenticate loopback Core destinations"
+                .to_owned(),
+        );
+    }
 
     // 0c. Apply the manifest's static `body_defaults` UNDER the model-provided body
     //     (model args win; nested objects merge key-by-key). This is a declarative,
@@ -1151,6 +1251,135 @@ pub async fn run_http_tool_with_secret_context(
         }
     }
 
+    // Remote identity mode consumes vault state inside Passport. Other secret
+    // sources retain the owning plugin's existing resolution rules; structured
+    // parts ensure their values cannot become new vault references.
+    let uses_vault = secret_headers.values().any(|source| {
+        source
+            .split_whitespace()
+            .any(|word| word.starts_with("vault:"))
+    });
+    if uses_vault && std::env::var_os("RYU_PASSPORT_URL").is_some() {
+        let base = std::env::var("RYU_PASSPORT_URL")
+            .map_err(|_| "Invalid Passport URL configuration".to_owned())?;
+        let calling_agent = audit_agent_id.ok_or_else(|| {
+            "Passport HTTP execution requires the calling agent identity".to_owned()
+        })?;
+        let mut templates = BTreeMap::new();
+        for (name, source) in secret_headers {
+            let mut parts = Vec::new();
+            let mut saw_token = false;
+            let mut absent = false;
+            for part in source.split_inclusive(char::is_whitespace) {
+                use ryu_vault::passport::HeaderPart;
+                let word = part.trim_end_matches(char::is_whitespace);
+                if let Some(domain) = word.strip_prefix("vault:") {
+                    parts.push(HeaderPart::Vault(domain.to_owned()));
+                    saw_token = true;
+                } else {
+                    match resolve_secret_token(
+                        word,
+                        agent_id,
+                        profile_ids,
+                        session_id,
+                        secret_context,
+                    )
+                    .await
+                    {
+                        SecretToken::Literal => parts.push(HeaderPart::Literal(word.to_owned())),
+                        SecretToken::Value(value) => {
+                            parts.push(HeaderPart::Sensitive(value));
+                            saw_token = true;
+                        }
+                        SecretToken::Absent => {
+                            absent = true;
+                            break;
+                        }
+                    }
+                }
+                let whitespace = &part[word.len()..];
+                if !whitespace.is_empty() {
+                    parts.push(HeaderPart::Literal(whitespace.to_owned()));
+                }
+            }
+            if absent {
+                continue;
+            }
+            if !saw_token {
+                return Err("Passport HTTP header requires a secret source".to_owned());
+            }
+            templates.insert(name.clone(), parts);
+        }
+        let mut target =
+            url::Url::parse(&final_url).map_err(|_| "Invalid Passport HTTP target".to_owned())?;
+        if bodyless && !query_pairs.is_empty() {
+            target.query_pairs_mut().extend_pairs(&query_pairs);
+        }
+        let started = std::time::Instant::now();
+        let response = crate::identity::passport::execute_http(
+            &base,
+            calling_agent,
+            profile_ids,
+            crate::identity::passport::HttpRequest {
+                url: target.to_string(),
+                method: method_upper.clone(),
+                headers: ordinary_headers.into_iter().collect(),
+                credential_headers: BTreeMap::new(),
+                header_templates: Some(templates),
+                body: (!bodyless).then_some(body),
+            },
+            session_id.map(str::to_owned),
+        )
+        .await;
+        let (result, exit_code, audit_err) = match response {
+            Ok(response) => {
+                target.set_query(None);
+                target.set_fragment(None);
+                let payment = if response.status == 402 {
+                    crate::payment::PaymentRequiredEnvelope::from_http_headers(
+                        response.payment_challenges.iter().map(String::as_str),
+                        serde_json::json!({"kind":"http_tool","method":method_upper,"url":target.as_str()}),
+                    )
+                } else {
+                    None
+                };
+                if let Some(envelope) = payment {
+                    (
+                        Ok(envelope.into_value()),
+                        2,
+                        Some("MPP payment required".to_owned()),
+                    )
+                } else {
+                    finalize_http_result(
+                        fail_open,
+                        unwrap_body,
+                        Some(response.status),
+                        response.body,
+                        None,
+                    )
+                }
+            }
+            Err(error) => finalize_http_result(
+                fail_open,
+                unwrap_body,
+                None,
+                Value::Null,
+                Some(error.to_string()),
+            ),
+        };
+        report_exec_audit_with_attribution(
+            backend,
+            "tool_http",
+            started.elapsed().as_millis() as u64,
+            exit_code,
+            session_id.map(str::to_owned),
+            audit_err,
+            audit_attribution,
+        )
+        .await;
+        return result;
+    }
+
     // 2b. Resolve server-side SECRET headers only after the destination and
     // governance gates pass. Each source (`env:` / `vault:` / `secret:`) resolves
     // to a concrete value or "absent" (header omitted). Secret VALUES never enter
@@ -1185,6 +1414,31 @@ pub async fn run_http_tool_with_secret_context(
         header_params,
         &resolved_secret_headers,
     )?;
+    let resolved_secret_values: Vec<String> = resolved_secret_headers
+        .iter()
+        .map(|(_, value)| value.clone())
+        .collect();
+
+    // The Browser managed-Bot lane is Core-owned. When a manifest tool calls
+    // the local Core ext-proxy, stamp the actual dispatcher-selected agent with
+    // an HMAC tied to this exact request; the sidecar rejects a bare query lane.
+    let browser_agent_lane = audit_agent_id
+        .filter(|_| {
+            node_token_target_is_local_core(&final_url)
+                && reqwest::Url::parse(&final_url)
+                    .ok()
+                    .is_some_and(|url| url.path().starts_with("/api/ext/@ryu/browser"))
+        })
+        .and_then(|agent_id| {
+            core_request_path_and_query(&final_url).and_then(|path_and_query| {
+                crate::sidecar::ext_proxy::sign_agent_lane(
+                    agent_id,
+                    &method_upper,
+                    &path_and_query,
+                )
+                .map(|proof| (agent_id, proof))
+            })
+        });
 
     // 3. Perform the request. Body is the tool args as JSON for methods that carry
     //    one; GET/HEAD send none. Response is `{ status, body }` (JSON if parseable).
@@ -1211,6 +1465,11 @@ pub async fn run_http_tool_with_secret_context(
     for (name, value) in &headers {
         // Invalid header name/value surfaces as a request error at `.send()`.
         req = req.header(name, value);
+    }
+    if let Some((agent_id, proof)) = browser_agent_lane {
+        req = req
+            .header(crate::sidecar::ext_proxy::HDR_CALLER_AGENT_ID, agent_id)
+            .header(crate::sidecar::ext_proxy::HDR_CALLER_AGENT_PROOF, proof);
     }
     if bodyless {
         if !query_pairs.is_empty() {
@@ -1250,14 +1509,52 @@ pub async fn run_http_tool_with_secret_context(
                         Some("MPP payment required".to_owned()),
                     )
                 } else {
-                    let text = resp.text().await.unwrap_or_default();
-                    let body: Value = serde_json::from_str(&text).unwrap_or(Value::String(text));
-                    finalize_http_result(fail_open, unwrap_body, Some(status), body, None)
+                    match read_http_response_text_capped(resp).await {
+                        Ok(text) => {
+                            let body: Value =
+                                serde_json::from_str(&text).unwrap_or(Value::String(text));
+                            finalize_http_result_with_secrets(
+                                fail_open,
+                                unwrap_body,
+                                Some(status),
+                                body,
+                                None,
+                                &resolved_secret_values,
+                            )
+                        }
+                        Err(error) => finalize_http_result_with_secrets(
+                            fail_open,
+                            unwrap_body,
+                            Some(status),
+                            Value::Null,
+                            Some(error),
+                            &resolved_secret_values,
+                        ),
+                    }
                 }
             } else {
-                let text = resp.text().await.unwrap_or_default();
-                let body: Value = serde_json::from_str(&text).unwrap_or(Value::String(text));
-                finalize_http_result(fail_open, unwrap_body, Some(status), body, None)
+                match read_http_response_text_capped(resp).await {
+                    Ok(text) => {
+                        let body: Value =
+                            serde_json::from_str(&text).unwrap_or(Value::String(text));
+                        finalize_http_result_with_secrets(
+                            fail_open,
+                            unwrap_body,
+                            Some(status),
+                            body,
+                            None,
+                            &resolved_secret_values,
+                        )
+                    }
+                    Err(error) => finalize_http_result_with_secrets(
+                        fail_open,
+                        unwrap_body,
+                        Some(status),
+                        Value::Null,
+                        Some(error),
+                        &resolved_secret_values,
+                    ),
+                }
             }
         }
         Err(e) => finalize_http_result(
@@ -1909,23 +2206,12 @@ pub async fn run_command_tool_with_agent_and_workspace(
 
     prepare_workspace_path_args(&mut args, workspace_path_args, workspace_root)?;
 
-    // 1b. EGRESS SCREEN (SSRF): when this command fetches a URL arg (a crawler /
-    //     scraper), screen that arg's value BEFORE any spawn — scheme allowlist +
-    //     internal-address rejection (loopback / RFC1918 / link-local /
-    //     169.254.169.254 metadata / ULA / CGNAT), the SAME guard `run_http_tool`
-    //     applies. Runs before allowlist/gateway/spawn so a network CLI can never
-    //     be turned into an SSRF probe. The child re-resolves DNS itself, so this
-    //     is a pre-spawn screen (no IP-pinning) — the inherent residual for any
-    //     shell-out fetcher, env-tunable via `RYU_AGENT_EGRESS_SSRF_GUARD` /
-    //     `RYU_AGENT_EGRESS_ALLOW_HOSTS`.
     if let Some(arg_name) = egress_url_arg {
-        let url = args
-            .get(arg_name)
-            .and_then(Value::as_str)
-            .ok_or_else(|| format!("command tool: missing required url argument '{arg_name}'"))?;
-        crate::server::screen_agent_egress_url(url)
-            .await
-            .map_err(|e| e.to_string())?;
+        let _ = arg_name;
+        return Err(
+            "command tool: URL-fetching child processes are disabled until a mediated pinned egress broker is available"
+                .to_owned(),
+        );
     }
 
     // 2. ALLOWLIST RESOLUTION (the control): KEY → absolute path, file-verified.
@@ -2741,17 +3027,8 @@ mod tests {
         );
     }
 
-    /// Run a granted command tool with an `egress_url_arg` pointed at `url` and
-    /// return the outcome. The SSRF screen runs after the grant check but BEFORE
-    /// allowlist resolution / spawn, so a blocked URL never needs a real binary.
-    ///
-    /// No `RYU_COMMAND_TOOL_ALLOWLIST` is configured, so a URL that PASSES the
-    /// screen fails DOWNSTREAM at allowlist resolution with an error containing
-    /// `"allowlist"` — a string the egress screen's own errors (scheme / "blocked
-    /// egress to …") never contain. That textual distinction is what lets the
-    /// tests below tell "blocked by the screen" apart from "failed later anyway",
-    /// so they actually verify the `egress_url_arg` guard rather than passing
-    /// vacuously on the allowlist error.
+    /// URL-fetching command tools fail closed before any child spawn because a
+    /// subprocess can re-resolve DNS or follow links after an in-process screen.
     async fn crawl_url(url: &str) -> Result<Value, String> {
         // Pin the guard to its default posture (ON, no host allowlist) so the
         // assertions don't depend on ambient env; these are the process defaults,
@@ -2776,8 +3053,8 @@ mod tests {
         .await
     }
 
-    /// A URL was rejected BY THE EGRESS SCREEN (not by some later stage): it is an
-    /// error, and that error is NOT the downstream allowlist error.
+    /// URL-fetching child processes are rejected before any downstream allowlist
+    /// or network behavior.
     fn assert_blocked_by_screen(res: &Result<Value, String>, what: &str) {
         let err = res.as_ref().expect_err(what);
         assert!(
@@ -2787,25 +3064,15 @@ mod tests {
         );
     }
 
-    // The following tests re-host the SSRF contract previously guarded by the
-    // deleted native `sidecar/mcp/spider.rs` provider (its `non_http_scheme`,
-    // `flag_smuggling`, `metadata_ip`, `private_ip` tests) onto the generic
-    // `command` backend's `egress_url_arg` screen — the crawler is now declarative.
+    // These tests pin the fail-closed command-network boundary for the deleted
+    // native crawler provider.
 
     #[tokio::test]
     async fn command_tool_egress_passes_public_ip_to_allowlist() {
-        // POSITIVE CONTROL: a public literal IP must PASS the screen (proving the
-        // screen discriminates and is not a block-everything no-op). With no
-        // command allowlist configured it then fails DOWNSTREAM — and that error
-        // DOES mention the allowlist, which is exactly what the negative assertion
-        // in the blocked tests keys off of.
         let err = crawl_url("http://93.184.216.34/")
             .await
-            .expect_err("no allowlist configured, so it fails after the screen");
-        assert!(
-            err.contains("allowlist"),
-            "a public IP must pass the screen and reach allowlist resolution, got: {err}"
-        );
+            .expect_err("URL-fetching command tools must fail closed");
+        assert!(!err.contains("allowlist"), "network child must be refused at the boundary");
     }
 
     #[tokio::test]
@@ -3114,21 +3381,21 @@ mod tests {
         // was ungated, so keeping it would mean this test silently asserted the hole.
         // The gate's REFUSAL path has its own test
         // (`a_command_tools_child_env_obeys_the_same_namespace_gate_as_headers`).
-        std::env::set_var("RYU_PLUGIN_COM_TEST_CMD_SRC", "injected-value");
+        std::env::set_var("RYU_PLUGIN_COM_X2E_TEST_X2E_CMD_SRC", "injected-value");
         assert_eq!(
-            std::env::var("RYU_PLUGIN_COM_TEST_CMD_SRC").as_deref(),
+            std::env::var("RYU_PLUGIN_COM_X2E_TEST_X2E_CMD_SRC").as_deref(),
             Ok("injected-value")
         );
         assert!(may_read_env_secret(
             "com.test.cmd",
-            "RYU_PLUGIN_COM_TEST_CMD_SRC"
+            "RYU_PLUGIN_COM_X2E_TEST_X2E_CMD_SRC"
         ));
         // A secret-shaped inherited var that must be scrubbed from the child.
         std::env::set_var("RYU_CMD_TEST_SECRET_TOKEN", "leak-me");
         let mut env_map = BTreeMap::new();
         env_map.insert(
             "RYU_CMD_TEST_DEST".to_string(),
-            "env:RYU_PLUGIN_COM_TEST_CMD_SRC".to_string(),
+            "env:RYU_PLUGIN_COM_X2E_TEST_X2E_CMD_SRC".to_string(),
         );
         let out = run_command_tool(
             "env",
@@ -3164,7 +3431,7 @@ mod tests {
             !stdout.contains("leak-me") && !stdout.contains("RYU_CMD_TEST_SECRET_TOKEN"),
             "secret-shaped inherited var must be scrubbed, got: {stdout}"
         );
-        std::env::remove_var("RYU_PLUGIN_COM_TEST_CMD_SRC");
+        std::env::remove_var("RYU_PLUGIN_COM_X2E_TEST_X2E_CMD_SRC");
         std::env::remove_var("RYU_CMD_TEST_SECRET_TOKEN");
     }
 
@@ -3449,6 +3716,18 @@ mod tests {
         let (r, exit, _) = finalize_http_result(true, true, Some(401), Value::Null, None);
         assert_eq!(r.unwrap()["available"], false);
         assert_eq!(exit, 1);
+    }
+
+    #[test]
+    fn http_tool_redacts_resolved_secret_values_from_reflected_bodies() {
+        let body = serde_json::json!({
+            "echo": "Bearer super-secret",
+            "nested": ["super-secret", "safe"],
+        });
+        let redacted = redact_secret_values(body, &[String::from("super-secret")]);
+        assert_eq!(redacted["echo"], "Bearer [REDACTED]");
+        assert_eq!(redacted["nested"][0], "[REDACTED]");
+        assert_eq!(redacted["nested"][1], "safe");
     }
 
     #[test]
@@ -3979,12 +4258,12 @@ mod tests {
     #[tokio::test]
     async fn community_plugin_reads_its_own_prefixed_env_secret() {
         let _lock = lock_env_secret();
-        std::env::set_var("RYU_PLUGIN_COM_ACME_WEATHER_API_KEY", "acme-key");
+        std::env::set_var("RYU_PLUGIN_COM_X2E_ACME_X2E_WEATHER_API_KEY", "acme-key");
         std::env::remove_var(ENV_SECRET_ALLOWLIST);
 
         let out = resolve_secret_header_source(
             "Authorization",
-            "Bearer env:RYU_PLUGIN_COM_ACME_WEATHER_API_KEY",
+            "Bearer env:RYU_PLUGIN_COM_X2E_ACME_X2E_WEATHER_API_KEY",
             "com.acme.weather",
             &[],
             None,
@@ -3993,7 +4272,7 @@ mod tests {
         .expect("own-namespace var resolves");
         assert_eq!(out.as_deref(), Some("Bearer acme-key"));
 
-        std::env::remove_var("RYU_PLUGIN_COM_ACME_WEATHER_API_KEY");
+        std::env::remove_var("RYU_PLUGIN_COM_X2E_ACME_X2E_WEATHER_API_KEY");
     }
 
     /// NAMESPACE SQUATTING: plugin ids are free-form (a bare kebab id is legal), so
@@ -4159,19 +4438,24 @@ mod tests {
     /// names its var `RYU_PLUGIN_<ID>_API_KEY` and needs no operator configuration.
     #[test]
     fn the_prefix_rule_is_rooted_under_the_plugin_namespace() {
-        assert_eq!(plugin_env_prefix("@ryu/exa"), "RYU_PLUGIN_RYU_EXA_");
-        assert!("RYU_PLUGIN_RYU_EXA_API_KEY".starts_with(&plugin_env_prefix("@ryu/exa")));
+        assert_eq!(
+            plugin_env_prefix("@ryu/exa"),
+            "RYU_PLUGIN__X40_RYU_X2F_EXA_"
+        );
+        assert!("RYU_PLUGIN__X40_RYU_X2F_EXA_API_KEY".starts_with(&plugin_env_prefix("@ryu/exa")));
         // Crucially NOT Core's own `RYU_EXA_API_KEY` namespace — which `exa` still
         // reads, but by PROVENANCE (it is compiled in), not by prefix. Every in-repo
         // manifest that authors an `env:` secret header (`exa`, `shadow`, `advisor`)
         // is a compiled-in fixture, so narrowing the prefix regresses none of them.
         assert!(!"RYU_EXA_API_KEY".starts_with(&plugin_env_prefix("@ryu/exa")));
         assert!(may_read_env_secret("@ryu/exa", "RYU_EXA_API_KEY"));
-        // Dots and dashes in a reverse-DNS id fold to `_`.
-        assert_eq!(
-            plugin_env_prefix("com.acme.my-app"),
-            "RYU_PLUGIN_COM_ACME_MY_APP_"
-        );
+        // Every punctuation byte is escaped, so scoped and flat ids cannot
+        // collide even when their punctuation would previously fold together.
+       assert_eq!(
+           plugin_env_prefix("com.acme.my-app"),
+            "RYU_PLUGIN_COM_X2E_ACME_X2E_MY_X2D_APP_"
+       );
+        assert_ne!(plugin_env_prefix("@a/b"), plugin_env_prefix("a-b"));
         // And the rule is a real fence: the shared loopback token fits no prefix.
         assert!(!may_read_env_secret("com.acme.weather", "RYU_TOKEN"));
     }
@@ -4280,11 +4564,11 @@ mod tests {
         );
         // Its own namespace still works — the gate is a fence, not a wall.
         store
-            .set(evil, "RYU_PLUGIN_COM_EVIL_PLUGIN_API_KEY", "mine")
+            .set(evil, "RYU_PLUGIN_COM_X2E_EVIL_X2E_PLUGIN_API_KEY", "mine")
             .await
             .unwrap();
         assert_eq!(
-            resolve_env_secret_from(evil, "RYU_PLUGIN_COM_EVIL_PLUGIN_API_KEY", Some(&store)).await,
+            resolve_env_secret_from(evil, "RYU_PLUGIN_COM_X2E_EVIL_X2E_PLUGIN_API_KEY", Some(&store)).await,
             SecretToken::Value("mine".to_string())
         );
     }
@@ -4295,14 +4579,14 @@ mod tests {
     #[tokio::test]
     async fn an_empty_stored_secret_resolves_to_absent() {
         let _lock = lock_env_secret();
-        std::env::remove_var("RYU_PLUGIN_COM_ACME_WEATHER_API_KEY");
+        std::env::remove_var("RYU_PLUGIN_COM_X2E_ACME_X2E_WEATHER_API_KEY");
         std::env::remove_var(ENV_SECRET_ALLOWLIST);
 
         let store = crate::plugin_secrets::PluginSecretStore::in_memory().unwrap();
         store
             .set(
                 "com.acme.weather",
-                "RYU_PLUGIN_COM_ACME_WEATHER_API_KEY",
+                "RYU_PLUGIN_COM_X2E_ACME_X2E_WEATHER_API_KEY",
                 "k",
             )
             .await
@@ -4311,7 +4595,7 @@ mod tests {
         store
             .set(
                 "com.acme.weather",
-                "RYU_PLUGIN_COM_ACME_WEATHER_API_KEY",
+                "RYU_PLUGIN_COM_X2E_ACME_X2E_WEATHER_API_KEY",
                 "  ",
             )
             .await
@@ -4320,7 +4604,7 @@ mod tests {
         assert_eq!(
             resolve_env_secret_from(
                 "com.acme.weather",
-                "RYU_PLUGIN_COM_ACME_WEATHER_API_KEY",
+                "RYU_PLUGIN_COM_X2E_ACME_X2E_WEATHER_API_KEY",
                 Some(&store)
             )
             .await,
@@ -4502,6 +4786,16 @@ mod tests {
             assert_eq!(resolve_core_url(url), url);
             assert_eq!(resolve_core_url_with(url, "http://127.0.0.1:8980"), url);
         }
+    }
+
+    #[test]
+    fn node_tokens_are_only_allowed_on_loopback_core_port() {
+        assert!(node_token_target_is_local_core(&format!(
+            "http://127.0.0.1:{}/api/ext/core",
+            core_port_from_bind(None)
+        )));
+        assert!(!node_token_target_is_local_core("https://example.test/api"));
+        assert!(!node_token_target_is_local_core("http://127.0.0.1:9999/api"));
     }
 
     /// Every shipped manifest that addresses Core must use `core:`, or it silently

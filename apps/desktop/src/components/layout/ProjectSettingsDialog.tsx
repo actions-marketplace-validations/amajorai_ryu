@@ -732,28 +732,19 @@ function EnvironmentEditor({
 				</Button>
 			</div>
 
-			<ScriptEditor
-				description="Runs once at the project root after Ryu creates a worktree."
-				label="Setup script"
-				onChange={(setup) => onChange({ ...environment, setup })}
-				placeholder={"bun install --frozen-lockfile\ncargo fetch"}
-				scripts={environment.setup}
-			/>
-			<ScriptEditor
-				description="Runs from the worktree before Ryu removes it."
-				label="Cleanup script"
-				onChange={(cleanup) => onChange({ ...environment, cleanup })}
-				placeholder="docker compose down --remove-orphans"
-				scripts={environment.cleanup}
-			/>
+			<div className="rounded-md border border-status-warning/40 bg-status-warning/10 px-3 py-2 text-muted-foreground text-xs">
+				Setup and cleanup shell hooks are unavailable for chat worktrees. Use a
+				local action or a reviewed project instruction instead; environment
+				variables remain available to the coding agent.
+			</div>
 
 			<div className="space-y-2">
 				<div className="flex items-center justify-between">
 					<div>
 						<Label>Variables</Label>
 						<p className="text-muted-foreground text-xs">
-							Inherited by setup, cleanup, actions, and the coding agent. Do not
-							store secrets here.
+							Inherited by actions and the coding agent. Do not store secrets
+							here.
 						</p>
 					</div>
 					<Button

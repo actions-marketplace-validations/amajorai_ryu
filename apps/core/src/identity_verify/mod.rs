@@ -497,6 +497,9 @@ struct RawClaims {
     /// Defaulted so every token minted before teams were embedded still verifies.
     #[serde(default)]
     teams: Vec<RawTeam>,
+    /// Required by the live-session boundary as well as the handshake validator.
+    #[serde(default)]
+    exp: Option<i64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -528,6 +531,16 @@ struct RawTeam {
 /// signature, `exp`, `iss` (== BASE_URL) and `aud` (== BASE_URL). On success the
 /// `orgs` membership array is returned for org narrowing.
 pub async fn verify_jwt(token: &str) -> Result<VerifiedClaims, AuthError> {
+    verify_jwt_with_expiry(token).await.map(|(claims, _)| claims)
+}
+
+/// Verify a Better Auth JWT and retain its validated expiration timestamp for
+/// transports that outlive the request that authenticated them (WebSockets).
+/// The returned timestamp is taken from the same signature- and claim-validated
+/// decode as [`verify_jwt`], never from an untrusted payload parse.
+pub async fn verify_jwt_with_expiry(
+    token: &str,
+) -> Result<(VerifiedClaims, i64), AuthError> {
     let header = decode_header(token).map_err(|_| AuthError::Malformed)?;
     // Defense in depth: explicit alg check rejects `none`/confusion before we
     // ever touch a key; `Validation::new(EdDSA)` rejects them again at decode.
@@ -552,6 +565,7 @@ pub async fn verify_jwt(token: &str) -> Result<VerifiedClaims, AuthError> {
 
     let decoded = decode::<RawClaims>(token, &key, &validation).map_err(map_jwt_error)?;
     let claims = decoded.claims;
+    let expires_at = claims.exp.ok_or(AuthError::Expired)?;
 
     let user_id = claims
         .id
@@ -578,12 +592,15 @@ pub async fn verify_jwt(token: &str) -> Result<VerifiedClaims, AuthError> {
         })
         .collect();
 
-    Ok(VerifiedClaims {
-        user_id,
-        email: claims.email,
-        orgs,
-        teams,
-    })
+    Ok((
+        VerifiedClaims {
+            user_id,
+            email: claims.email,
+            orgs,
+            teams,
+        },
+        expires_at,
+    ))
 }
 
 /// Translate a `jsonwebtoken` error into an [`AuthError`], preserving the

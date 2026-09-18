@@ -128,71 +128,108 @@ export interface StoreForYou {
 export function useStoreHome(): UseStoreHomeResult {
 	const { installCatalogSkill } = useSkillDistributionFlow();
 	const activeNode = useActiveNode();
-	const target: ApiTarget = {
-		url: activeNode.url,
-		token: activeNode.token ?? null,
-		userJwt: activeNode.userJwt ?? null,
-	};
+	const target = useMemo<ApiTarget>(
+		() => ({
+			url: activeNode.url,
+			token: activeNode.token ?? null,
+			userJwt: activeNode.userJwt ?? null,
+		}),
+		[activeNode.url, activeNode.token, activeNode.userJwt]
+	);
 	const { url, token, userJwt } = target;
 
 	// Node realms — Core (:7980). Each uses the realm's default ranking with no
 	// query, which is exactly the "browse the best of this realm" feed we want.
-	const modelsQuery = useQuery({
-		queryKey: ["store-home", "models", url],
-		queryFn: () =>
-			searchModels(
-				{ url, token, userJwt },
-				{ sort: "trending", limit: PER_ROW_LIMIT }
-			),
-	});
+	const modelsQuery = useQuery(
+		useMemo(
+			() => ({
+				queryKey: ["store-home", "models", url],
+				queryFn: () =>
+					searchModels(target, {
+						sort: "trending",
+						limit: PER_ROW_LIMIT,
+					}),
+			}),
+			[target, url]
+		)
+	);
 
-	const skillsQuery = useQuery({
-		queryKey: ["store-home", "skills", url],
-		queryFn: () =>
-			searchSkills(
-				{ url, token, userJwt },
-				{ limit: PER_ROW_LIMIT, source: ALL_SKILL_SOURCES_ID }
-			),
-	});
+	const skillsQuery = useQuery(
+		useMemo(
+			() => ({
+				queryKey: ["store-home", "skills", url],
+				queryFn: () =>
+					searchSkills(target, {
+						limit: PER_ROW_LIMIT,
+						source: ALL_SKILL_SOURCES_ID,
+					}),
+			}),
+			[target, url]
+		)
+	);
 
-	const mcpQuery = useQuery({
-		queryKey: ["store-home", "mcp", url],
-		queryFn: () =>
-			searchMcpCatalog({ url, token, userJwt }, { limit: PER_ROW_LIMIT }),
-	});
+	const mcpQuery = useQuery(
+		useMemo(
+			() => ({
+				queryKey: ["store-home", "mcp", url],
+				queryFn: () => searchMcpCatalog(target, { limit: PER_ROW_LIMIT }),
+			}),
+			[target, url]
+		)
+	);
 
 	// Plugins + Agents have no search endpoint — reuse the sections' full-catalog
 	// query keys so the cache dedupes with their tabs instead of double-fetching.
-	const appsQuery = useQuery({
-		queryKey: ["apps", "catalog", url],
-		queryFn: () => fetchAppsCatalog({ url, token, userJwt }),
-	});
+	const appsQuery = useQuery(
+		useMemo(
+			() => ({
+				queryKey: ["apps", "catalog", url],
+				queryFn: () => fetchAppsCatalog(target),
+			}),
+			[target, url]
+		)
+	);
 
-	const agentsQuery = useQuery({
-		queryKey: ["agents", "catalog", url],
-		queryFn: () => fetchAgentCatalog({ url, token, userJwt }),
-	});
+	const agentsQuery = useQuery(
+		useMemo(
+			() => ({
+				queryKey: ["agents", "catalog", url],
+				queryFn: () => fetchAgentCatalog(target),
+			}),
+			[target, url]
+		)
+	);
 
 	// The plugin catalog carries discovery metadata only — no installed flag — so
 	// the apps/plugins rows join it against the live lifecycle records, exactly as
 	// `useAppsCatalog` does. Same query key, so the two share one fetch and can
 	// never disagree about what is already on the node.
-	const appsInstalledQuery = useQuery({
-		queryKey: ["apps", "list", url],
-		queryFn: () => fetchApps({ url, token, userJwt }),
-	});
+	const appsInstalledQuery = useQuery(
+		useMemo(
+			() => ({
+				queryKey: ["apps", "list", url],
+				queryFn: () => fetchApps(target),
+			}),
+			[target, url]
+		)
+	);
 
-	const recommendationsQuery = useQuery({
-		queryKey: ["store-home", "recommendations", url],
-		queryFn: async () => {
-			const wire = await request<RecommendationWire>(
-				target,
-				"/api/marketplace/recommendations"
-			);
-			return normalizeRecommendations(wire);
-		},
-		staleTime: 5 * 60 * 1000,
-	});
+	const recommendationsQuery = useQuery(
+		useMemo(
+			() => ({
+				queryKey: ["store-home", "recommendations", url],
+				queryFn: async () => {
+					const wire = await request<RecommendationWire>(
+						target,
+						"/api/marketplace/recommendations"
+					);
+					return normalizeRecommendations(wire);
+				},
+				staleTime: 5 * 60 * 1000,
+			}),
+			[target, url]
+		)
+	);
 
 	// One `add` per realm, each the realm's own single endpoint. Wrapped once here
 	// rather than per row so the shared-flag bookkeeping (and the refresh that
@@ -321,7 +358,7 @@ export function useStoreHome(): UseStoreHomeResult {
 					[["store-home", "models", url], ["models"]]
 				),
 		};
-	}, [installCatalogSkill, runAdd, url, token]);
+	}, [installCatalogSkill, runAdd, url, token, userJwt]);
 
 	const rows = useMemo<HomeRow[]>(() => {
 		const result: HomeRow[] = [];

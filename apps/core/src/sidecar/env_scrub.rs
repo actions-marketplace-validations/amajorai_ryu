@@ -32,6 +32,7 @@ const SENSITIVE_MARKERS: [&str; 7] = [
     "CREDENTIAL",
     "AUTH",
 ];
+const SENSITIVE_EXACT: [&str; 1] = ["DATABASE_URL"];
 
 /// The exact env-var names an MCP stdio server may inherit from Core. Everything
 /// else (except `XDG_*`) is dropped; the server config's declared env is layered
@@ -84,11 +85,6 @@ pub const MCP_SAFE_ALLOWLIST: &[&str] = &[
     // screen the desktop app streams. The variable names the display, not a secret;
     // the spawned MCP child inherits whatever display the node operator configured.
     "DISPLAY",
-    // `XAUTHORITY` (X11): the cookie file the display uses for access control. Same
-    // reasoning as DISPLAY — an X server started with a non-default auth file needs
-    // it passed through or the child cannot connect. Not a secret (a cookie is not a
-    // credential in this deployment model; the display is loopback/private).
-    "XAUTHORITY",
     // Research (same move as ghost: from a hardcoded built-in MCP provider to its
     // app manifest's `mcp_servers`, `ryu-research mcp`). In-process, the tools read
     // this var straight out of Core's env; spawned as a child they get nothing but
@@ -108,7 +104,10 @@ pub const MCP_SAFE_ALLOWLIST: &[&str] = &[
 /// case-insensitive).
 fn is_sensitive_key(key: &str) -> bool {
     let upper = key.to_ascii_uppercase();
-    SENSITIVE_MARKERS.iter().any(|m| upper.contains(m))
+    SENSITIVE_EXACT
+        .iter()
+        .any(|name| upper == *name)
+        || SENSITIVE_MARKERS.iter().any(|m| upper.contains(m))
 }
 
 /// Deny-list scrub: drop every var whose KEY matches (case-insensitive) any of
@@ -179,6 +178,7 @@ mod tests {
             ("SUDO_PASSWD", "pw2"),
             ("AWS_CREDENTIAL_FILE", "cred"),
             ("HTTP_AUTHORIZATION", "bearer"),
+            ("DATABASE_URL", "postgres://db/ryu"),
             ("HOME", "/home/u"),
             ("DENO_DIR", "/cache/deno"),
         ]);
@@ -198,6 +198,7 @@ mod tests {
             "SUDO_PASSWD",
             "AWS_CREDENTIAL_FILE",
             "HTTP_AUTHORIZATION",
+            "DATABASE_URL",
         ] {
             assert!(!has(&out, dropped), "{dropped} should be scrubbed");
         }
@@ -260,7 +261,6 @@ mod tests {
             ("RYU_PROFILE", "dev"),
             // A virtual-desktop node: the X display the desktop app streams.
             ("DISPLAY", ":99"),
-            ("XAUTHORITY", "/home/u/.Xauthority"),
             // A neighbouring RYU_* var that is NOT allowlisted must still drop —
             // the entries above are individual decisions, not a prefix rule.
             ("RYU_GATEWAY_URL", "http://127.0.0.1:7981"),
@@ -270,7 +270,10 @@ mod tests {
         assert!(has(&out, "RYU_GHOST_OVERLAY_URL"));
         assert!(has(&out, "GHOST_DATA_DIR"));
         assert!(has(&out, "DISPLAY"), "the virtual display must reach Ghost");
-        assert!(has(&out, "XAUTHORITY"));
+        assert!(
+            !has(&out, "XAUTHORITY"),
+            "the display authentication cookie must not cross the generic MCP boundary"
+        );
         assert!(has(&out, "RYU_DIR"));
         assert!(has(&out, "RYU_PROFILE"));
         assert!(!has(&out, "RYU_GATEWAY_URL"));

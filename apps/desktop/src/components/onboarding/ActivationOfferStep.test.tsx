@@ -30,4 +30,18 @@ describe("activation checkout offer", () => {
 		expect(html).toContain("five-seat Teams floor is $250/month");
 		expect(html).toContain("Start first month for $50");
 	});
+
+	test("does not offer a dead personal checkout while the rollout is closed", () => {
+		const html = renderToStaticMarkup(
+			<ActivationOfferStep
+				{...baseProps}
+				individualPlansEnabled={false}
+				organizationPlan={false}
+			/>
+		);
+
+		expect(html).toContain("Personal Pro checkout is temporarily unavailable");
+		expect(html).toContain("Continue with local setup");
+		expect(html).not.toContain("Start Pro for $49/month");
+	});
 });

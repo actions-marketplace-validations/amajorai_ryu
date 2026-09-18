@@ -43,6 +43,7 @@ import {
 	SYNCABLE_KEYS,
 	type SyncGroup,
 } from "@/src/lib/settings-sync/keys.ts";
+import { formatDate } from "@/src/lib/timezone.ts";
 import {
 	SettingsCard,
 	SettingsGroup,
@@ -86,7 +87,7 @@ function relativeTime(at: number): string {
 	if (seconds < 86_400) {
 		return `${Math.round(seconds / 3600)} h ago`;
 	}
-	return new Date(at).toLocaleDateString();
+	return formatDate(at);
 }
 
 /** A short, readable rendering of a stored value for the conflict list. */

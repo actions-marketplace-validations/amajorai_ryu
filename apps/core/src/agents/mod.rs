@@ -31,8 +31,8 @@ use tokio::sync::Mutex;
 use crate::sidecar::adapters::AcpAgentRegistry;
 use crate::sidecar::download_manager::ryu_dir;
 
-/// Marker used by new agent records to keep access open as tools are added to
-/// the node. An empty legacy tool list is also treated as unrestricted by
+/// Explicit opt-in marker for an agent that may call every MCP tool currently
+/// registered on the node. An empty or missing persisted list is fail-closed by
 /// [`AgentRecord::mcp_tool_allowlist`].
 pub const ALL_MCP_TOOLS: &str = "*";
 
@@ -277,7 +277,6 @@ pub struct ExpressiveSpec {
     pub eye_scale: Option<f64>,
     #[serde(rename = "animationDuration", skip_serializing_if = "Option::is_none")]
     pub animation_duration: Option<f64>,
-
 }
 
 /// Persona slot: name, avatar, and tone instructions.
@@ -491,10 +490,12 @@ impl AgentRecord {
     /// Resolve the persisted tool setting into the shape used by the MCP
     /// registry: `None` is unrestricted, `Some([])` is explicitly empty.
     pub fn mcp_tool_allowlist(&self) -> Option<Vec<String>> {
-        if self.tools.is_empty() || self.tools.iter().any(|tool| tool == ALL_MCP_TOOLS) {
+        if self.tools.iter().any(|tool| tool == ALL_MCP_TOOLS) {
             return None;
         }
-        if self.tools.iter().any(|tool| tool == NO_AGENT_CAPABILITIES) {
+        if self.tools.is_empty()
+            || self.tools.iter().any(|tool| tool == NO_AGENT_CAPABILITIES)
+        {
             return Some(Vec::new());
         }
         Some(self.tools.clone())
@@ -533,9 +534,9 @@ pub struct CreateAgent {
     pub description: Option<String>,
     #[serde(default)]
     pub system_prompt: Option<String>,
-    /// Tool/MCP allowlist. Omitted on create means all current and future
-    /// registered tools (`*`); an explicit list narrows it.
-    #[serde(default = "default_all_mcp_tools")]
+    /// Tool/MCP allowlist. Omitted on create means no MCP tools; an explicit
+    /// wildcard (`*`) is required to opt into every current and future tool.
+    #[serde(default = "default_agent_tools")]
     pub tools: Vec<String>,
     /// Composio action names this agent may call (gateway-route only).
     #[serde(default)]
@@ -598,7 +599,7 @@ impl Default for CreateAgent {
             title: String::new(),
             description: None,
             system_prompt: None,
-            tools: default_all_mcp_tools(),
+            tools: default_agent_tools(),
             composio_actions: vec![],
             skills: vec![],
             identity_profile_ids: vec![],
@@ -624,16 +625,15 @@ impl Default for CreateAgent {
 impl CreateAgent {
     /// Apply the shared capability defaults at the persistence boundary.
     ///
-    /// `serde(default = "default_all_mcp_tools")` covers normal API payloads,
+    /// `serde(default = "default_agent_tools")` covers normal API payloads,
     /// but internal creators and older template/import paths can construct a
     /// `CreateAgent` literal with an empty `tools` vector. Treat that legacy
-    /// shape as the same broad default so ACP installs, onboarding records,
-    /// plugin-provided agents, and user-created cards cannot drift. The
-    /// private marker remains the explicit opt-out for users who turn every
-    /// tool off.
+    /// shape as the same least-privilege default so ACP installs, onboarding
+    /// records, plugin-provided agents, and user-created cards cannot drift.
+    /// The wildcard remains an explicit opt-in for users who grant every tool.
     pub fn with_capability_defaults(mut self) -> Self {
         if self.tools.is_empty() {
-            self.tools = default_all_mcp_tools();
+            self.tools = default_agent_tools();
         }
         self
     }
@@ -738,12 +738,39 @@ pub struct AgentPromptVersion {
     pub prompt: String,
 }
 
+/// Metadata for one saved agent configuration version. The complete record is
+/// fetched separately so history lists stay small.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentConfigVersionMeta {
+    pub agent_id: String,
+    pub created_at: i64,
+    pub id: String,
+    pub label: Option<String>,
+    pub name: String,
+    pub version: String,
+}
+
+/// A complete saved agent configuration version. `source` is the exact
+/// canonical JSON used by the diff view; `agent` is the typed projection used
+/// by callers that want to inspect or restore the record.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentConfigVersion {
+    pub agent: AgentRecord,
+    pub agent_id: String,
+    pub created_at: i64,
+    pub id: String,
+    pub label: Option<String>,
+    pub name: String,
+    pub source: String,
+    pub version: String,
+}
+
 fn default_version() -> String {
     "1.0.0".to_owned()
 }
 
-fn default_all_mcp_tools() -> Vec<String> {
-    vec![ALL_MCP_TOOLS.to_owned()]
+fn default_agent_tools() -> Vec<String> {
+    vec![NO_AGENT_CAPABILITIES.to_owned()]
 }
 
 fn db_path() -> PathBuf {
@@ -757,6 +784,25 @@ fn source_history() -> SourceHistory {
 fn source_history_path(agent_id: &str) -> String {
     let key = hex::encode(agent_id.as_bytes());
     format!("agents/{key}/system-prompt.md")
+}
+
+fn agent_config_version_meta(
+    agent_id: &str,
+    history_version: SourceHistoryVersion,
+    record: &AgentRecord,
+) -> AgentConfigVersionMeta {
+    AgentConfigVersionMeta {
+        agent_id: agent_id.to_owned(),
+        created_at: history_version.created_at,
+        id: history_version.id,
+        label: history_version.label,
+        name: record.name.clone(),
+        version: record.version.clone(),
+    }
+}
+
+fn serialize_agent_record(record: &AgentRecord) -> Result<String> {
+    serde_json::to_string_pretty(record).context("serializing agent configuration")
 }
 
 fn agent_config_history_path(agent_id: &str) -> String {
@@ -930,7 +976,7 @@ impl AgentStore {
                 name          TEXT NOT NULL,
                 description   TEXT,
                 system_prompt TEXT,
-                tools         TEXT NOT NULL DEFAULT '[\"*\"]',
+                tools         TEXT NOT NULL DEFAULT '[\"__ryu_none__\"]',
                 model         TEXT,
                 engine        TEXT,
                 built_in      INTEGER NOT NULL DEFAULT 0,
@@ -939,6 +985,53 @@ impl AgentStore {
             );",
         )
         .context("running agents schema migration (base table)")?;
+
+        // Step 1b: existing versions used an empty list or `*` as the implicit
+        // default. Normalize those legacy rows exactly once. The marker table
+        // keeps a later restart from rewriting a user who deliberately chose
+        // the explicit wildcard after this migration ran.
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS agent_capability_migrations (
+                name       TEXT PRIMARY KEY,
+                applied_at TEXT NOT NULL
+            );",
+        )
+        .context("creating agent capability migration ledger")?;
+        let normalized = conn.execute(
+            "INSERT OR IGNORE INTO agent_capability_migrations (name, applied_at)
+             VALUES (?1, ?2)",
+            params![
+                "least-privilege-mcp-defaults",
+                chrono::Utc::now().to_rfc3339()
+            ],
+        )?;
+        if normalized > 0 {
+            conn.execute(
+                "UPDATE agents
+                 SET tools = ?1
+                 WHERE tools IS NULL
+                    OR trim(tools) IN ('', '[]', '[\"*\"]')",
+                params![serde_json::to_string(&default_agent_tools())?],
+            )?;
+        }
+
+        // The protected built-in flagship is the one deliberate exception to the
+        // least-privilege default: its managed Pi extension is the product's
+        // tool-using Ryu surface, and the Desktop agent-egress contract already
+        // treats it as the full Ryu bridge. Repair rows created by the previous
+        // blanket default without changing any user-created agent or an explicit
+        // user grant/deny on another row.
+        conn.execute(
+            "UPDATE agents
+             SET tools = ?1
+             WHERE id = 'ryu'
+               AND built_in = 1
+               AND trim(tools) = ?2",
+            params![
+                serde_json::to_string(&vec![ALL_MCP_TOOLS.to_owned()])?,
+                serde_json::to_string(&default_agent_tools())?,
+            ],
+        )?;
 
         // Step 2: idempotently add the per-attribute slot columns. SQLite does not
         // support ADD COLUMN IF NOT EXISTS before 3.37, so we catch the "duplicate
@@ -1275,12 +1368,17 @@ impl AgentStore {
             // DB the migration's `UPDATE … WHERE id='ryu'` runs before this row
             // exists; the migration UPDATE covers the existing-DB upgrade path.
             let ryu_caps: Option<i64> = (entry.id == "ryu").then_some(1);
+            let tools_json = if entry.id == "ryu" {
+                serde_json::to_string(&vec![ALL_MCP_TOOLS.to_owned()])?
+            } else {
+                serde_json::to_string(&default_agent_tools())?
+            };
             conn.execute(
                 "INSERT OR IGNORE INTO agents
                     (id, name, description, system_prompt, tools, model, engine, built_in,
                      chat_model, installed, orchestrator, can_create_agents,
                      created_at, updated_at)
-                 VALUES (?1, ?2, ?3, NULL, '[\"*\"]', NULL, ?4, 1, ?5, ?6, ?8, ?8, ?7, ?7)",
+                 VALUES (?1, ?2, ?3, NULL, ?9, NULL, ?4, 1, ?5, ?6, ?8, ?8, ?7, ?7)",
                 params![
                     entry.id,
                     entry.name,
@@ -1290,6 +1388,7 @@ impl AgentStore {
                     installed_flag,
                     now,
                     ryu_caps,
+                    tools_json,
                 ],
             )?;
         }
@@ -1425,7 +1524,7 @@ impl AgentStore {
         if changed == 0 {
             return Ok(None);
         }
-        Ok(conn
+        let updated = conn
             .query_row(
                 "SELECT id, name, description, system_prompt, tools, model, engine, built_in,
                     created_at, updated_at,
@@ -1437,7 +1536,19 @@ impl AgentStore {
                 params![id],
                 row_to_record,
             )
-            .optional()?)
+            .optional()?;
+        drop(conn);
+        if let Some(record) = &updated {
+            if let Ok(snapshot) = serialize_agent_record(record) {
+                checkpoint_source_history_best_effort(
+                    agent_config_history_path(id),
+                    snapshot,
+                    Some("Agent saved".to_owned()),
+                )
+                .await;
+            }
+        }
+        Ok(updated)
     }
 
     pub async fn create(&self, input: CreateAgent) -> Result<AgentRecord> {
@@ -1541,6 +1652,15 @@ impl AgentStore {
         match result {
             Ok(value) => {
                 conn.execute_batch("COMMIT")?;
+                drop(conn);
+                if let Ok(snapshot) = serialize_agent_record(&value.0) {
+                    checkpoint_source_history_best_effort(
+                        agent_config_history_path(&value.0.id),
+                        snapshot,
+                        Some("Agent created".to_owned()),
+                    )
+                    .await;
+                }
                 Ok(value)
             }
             Err(error) => {
@@ -1828,7 +1948,7 @@ impl AgentStore {
             }
             if let Some(tools) = patch.tools {
                 record.tools = if tools.is_empty() {
-                    default_all_mcp_tools()
+                    default_agent_tools()
                 } else {
                     tools
                 };
@@ -1964,6 +2084,232 @@ impl AgentStore {
                     error = %error,
                     "agent source-history snapshot could not be serialized"
                 ),
+            }
+        }
+        Ok(updated)
+    }
+
+    /// Snapshot the complete persisted agent definition as an immutable Git
+    /// checkpoint. The live SQLite row remains authoritative; Git is the
+    /// durable, inspectable history projection.
+    pub async fn snapshot_config_version(
+        &self,
+        agent_id: &str,
+        label: Option<&str>,
+    ) -> Result<Option<AgentConfigVersionMeta>> {
+        let Some(record) = self.get(agent_id).await? else {
+            return Ok(None);
+        };
+        let source = serialize_agent_record(&record)?;
+        let history_version = checkpoint_source_history(
+            agent_config_history_path(agent_id),
+            source,
+            label.map(str::to_owned),
+        )
+        .await?;
+        Ok(Some(agent_config_version_meta(
+            agent_id,
+            history_version,
+            &record,
+        )))
+    }
+
+    /// List complete agent-definition checkpoints, newest first. Invalid or
+    /// unrelated source entries are ignored so one damaged history item cannot
+    /// hide the rest of an agent's usable rollback points.
+    pub async fn list_config_versions(
+        &self,
+        agent_id: &str,
+    ) -> Result<Vec<AgentConfigVersionMeta>> {
+        let path = agent_config_history_path(agent_id);
+        let history_versions = list_source_history(path.clone(), None).await?;
+        let mut versions = Vec::new();
+        for history_version in history_versions {
+            let Some(source) =
+                read_source_history(path.clone(), history_version.id.clone()).await?
+            else {
+                continue;
+            };
+            let Ok(record) = serde_json::from_str::<AgentRecord>(&source) else {
+                continue;
+            };
+            if record.id != agent_id {
+                continue;
+            }
+            versions.push(agent_config_version_meta(
+                agent_id,
+                history_version,
+                &record,
+            ));
+        }
+        versions.sort_by(|left, right| right.created_at.cmp(&left.created_at));
+        Ok(versions)
+    }
+
+    /// Load one complete agent-definition checkpoint. The source path is
+    /// derived from the requested agent id and the embedded id is checked too,
+    /// keeping a malformed or cross-agent history entry from being restored.
+    pub async fn get_config_version(
+        &self,
+        agent_id: &str,
+        version_id: &str,
+    ) -> Result<Option<AgentConfigVersion>> {
+        if !is_git_version_id(version_id) {
+            return Ok(None);
+        }
+        let path = agent_config_history_path(agent_id);
+        let Some(source) = read_source_history(path.clone(), version_id.to_owned()).await? else {
+            return Ok(None);
+        };
+        let agent = serde_json::from_str::<AgentRecord>(&source)
+            .context("decoding agent configuration version")?;
+        if agent.id != agent_id {
+            return Ok(None);
+        }
+        let history_version = list_source_history(path, Some(1000))
+            .await?
+            .into_iter()
+            .find(|version| version.id == version_id);
+        let Some(history_version) = history_version else {
+            return Ok(None);
+        };
+        Ok(Some(AgentConfigVersion {
+            agent_id: agent_id.to_owned(),
+            created_at: history_version.created_at,
+            id: history_version.id,
+            label: history_version.label,
+            name: agent.name.clone(),
+            source,
+            version: agent.version.clone(),
+            agent,
+        }))
+    }
+
+    /// Restore a complete agent definition. The current row is checkpointed as
+    /// a named undo point first. Identity and install metadata stay attached to
+    /// the live row; only the versioned definition fields are replaced.
+    pub async fn restore_config_version(
+        &self,
+        agent_id: &str,
+        version_id: &str,
+    ) -> Result<Option<AgentRecord>> {
+        let Some(version) = self.get_config_version(agent_id, version_id).await? else {
+            return Ok(None);
+        };
+        let Some(current) = self.get(agent_id).await? else {
+            return Ok(None);
+        };
+        if current.locked {
+            anyhow::bail!("cannot restore a version on locked agent '{agent_id}'");
+        }
+        if current.built_in != version.agent.built_in {
+            anyhow::bail!("agent version identity does not match '{agent_id}'");
+        }
+        if !current
+            .lifecycle_status
+            .can_transition_to(version.agent.lifecycle_status)
+        {
+            anyhow::bail!(
+                "invalid lifecycle transition for agent '{agent_id}': {} -> {}",
+                current.lifecycle_status.as_str(),
+                version.agent.lifecycle_status.as_str()
+            );
+        }
+
+        let before_source = serialize_agent_record(&current)?;
+        checkpoint_source_history_best_effort(
+            agent_config_history_path(agent_id),
+            before_source,
+            Some("Before restore".to_owned()),
+        )
+        .await;
+
+        let mut restored = version.agent;
+        // These fields identify the live row rather than its mutable
+        // configuration and must never be taken from a historical payload.
+        restored.id = current.id.clone();
+        restored.built_in = current.built_in;
+        restored.created_at = current.created_at.clone();
+        restored.updated_at = Some(chrono::Utc::now().to_rfc3339());
+        let updated = {
+            let conn = self.conn.lock().await;
+            let tools_json =
+                serde_json::to_string(&restored.tools).unwrap_or_else(|_| "[]".to_owned());
+            let composio_json = serde_json::to_string(&restored.composio_actions)
+                .unwrap_or_else(|_| "[]".to_owned());
+            let skills_json =
+                serde_json::to_string(&restored.skills).unwrap_or_else(|_| "[]".to_owned());
+            let identity_json = serde_json::to_string(&restored.identity_profile_ids)
+                .unwrap_or_else(|_| "[]".to_owned());
+            let approval_json =
+                serde_json::to_string(&restored.approval_tools).unwrap_or_else(|_| "[]".to_owned());
+            let changed = conn.execute(
+                "UPDATE agents SET name = ?2, description = ?3, system_prompt = ?4,
+                    tools = ?5, model = ?6, engine = ?7,
+                    chat_model = ?8, stt = ?9, tts = ?10, image_model = ?11,
+                    video_model = ?24,
+                    memory = ?12, persona = ?13, policy_ref = ?14, inference = ?15,
+                    version = ?16, locked = ?17, composio_actions = ?18, skills = ?19,
+                    identity_profile_ids = ?20, orchestrator = ?22,
+                    can_create_agents = ?23, updated_at = ?21, title = ?25,
+                    lifecycle_status = ?26, safety_profile = ?27, approval_tools = ?28
+                 WHERE id = ?1",
+                params![
+                    agent_id,
+                    &restored.name,
+                    &restored.description,
+                    &restored.system_prompt,
+                    tools_json,
+                    &restored.model,
+                    &restored.engine,
+                    serialize_slot(&restored.chat_model),
+                    serialize_slot(&restored.stt),
+                    serialize_slot(&restored.tts),
+                    serialize_slot(&restored.image_model),
+                    serialize_slot(&restored.memory),
+                    serialize_slot(&restored.persona),
+                    serialize_slot(&restored.policy_ref),
+                    serialize_slot(&restored.inference),
+                    &restored.version,
+                    restored.locked as i64,
+                    composio_json,
+                    skills_json,
+                    identity_json,
+                    &restored.updated_at,
+                    restored.orchestrator.map(i64::from),
+                    restored.can_create_agents.map(i64::from),
+                    serialize_slot(&restored.video_model),
+                    &restored.title,
+                    restored.lifecycle_status.as_str(),
+                    restored.safety_profile.as_str(),
+                    approval_json,
+                ],
+            )?;
+            if changed == 0 {
+                None
+            } else {
+                conn.query_row(
+                    "SELECT id, name, description, system_prompt, tools, model, engine, built_in,
+                        created_at, updated_at,
+                        chat_model, stt, tts, image_model, memory, persona, policy_ref,
+                        version, locked, inference, composio_actions, skills,
+                        identity_profile_ids, orchestrator, can_create_agents, video_model, title,
+                        lifecycle_status, safety_profile, approval_tools
+                     FROM agents WHERE id = ?1",
+                    params![agent_id],
+                    row_to_record,
+                )
+                .optional()?
+            }
+        };
+        if let Some(record) = &updated {
+            if let Ok(source) = serialize_agent_record(record) {
+                checkpoint_source_history_best_effort(
+                    agent_config_history_path(agent_id),
+                    source,
+                    Some("Restore agent version".to_owned()),
+                )
+                .await;
             }
         }
         Ok(updated)
@@ -2700,16 +3046,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn new_agents_default_to_all_tools_and_support_explicit_none() {
+    async fn new_agents_default_to_no_tools_and_support_explicit_grants() {
         let store = store();
         let default_input: CreateAgent = serde_json::from_value(serde_json::json!({
-            "name": "All access"
+            "name": "No access by default"
         }))
         .unwrap();
-        assert_eq!(default_input.tools, vec![ALL_MCP_TOOLS.to_owned()]);
+        assert_eq!(default_input.tools, vec![NO_AGENT_CAPABILITIES.to_owned()]);
 
         let all = store.create(default_input).await.unwrap();
-        assert_eq!(all.mcp_tool_allowlist(), None);
+        assert_eq!(all.mcp_tool_allowlist(), Some(Vec::new()));
         assert!(
             all.skill_allowlist().is_empty(),
             "an empty persisted skill list keeps all enabled skills available"
@@ -2718,7 +3064,7 @@ mod tests {
         assert_eq!(all.safety_profile, AgentSafetyProfile::ReadOnly);
 
         // Internal creators that still use the legacy empty literal converge on
-        // the same persisted live-all marker at the store boundary.
+        // the same persisted least-privilege marker at the store boundary.
         let legacy_literal = store
             .create(CreateAgent {
                 name: "Legacy literal".into(),
@@ -2727,9 +3073,19 @@ mod tests {
             })
             .await
             .unwrap();
-        assert_eq!(legacy_literal.tools, vec![ALL_MCP_TOOLS.to_owned()]);
-        assert_eq!(legacy_literal.mcp_tool_allowlist(), None);
+        assert_eq!(legacy_literal.tools, vec![NO_AGENT_CAPABILITIES.to_owned()]);
+        assert_eq!(legacy_literal.mcp_tool_allowlist(), Some(Vec::new()));
         assert!(legacy_literal.skill_allowlist().is_empty());
+
+        let explicit_all = store
+            .create(CreateAgent {
+                name: "Explicit all access".into(),
+                tools: vec![ALL_MCP_TOOLS.into()],
+                ..CreateAgent::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(explicit_all.mcp_tool_allowlist(), None);
 
         let none = store
             .create(CreateAgent {
@@ -4389,6 +4745,122 @@ mod tests {
             .unwrap();
         let error = store
             .set_space_access(&agent.id, "space", true)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("locked agent"));
+    }
+
+    #[tokio::test]
+    async fn config_versions_snapshot_and_restore_the_complete_agent_definition() {
+        let store = store();
+        let agent = store
+            .create(CreateAgent {
+                name: "Version baseline".to_owned(),
+                title: "Research".to_owned(),
+                description: Some("Baseline description".to_owned()),
+                system_prompt: Some("Use the baseline instructions.".to_owned()),
+                tools: vec!["web.search".to_owned()],
+                skills: vec!["research".to_owned()],
+                model: Some("baseline-model".to_owned()),
+                engine: Some("openai_compat".to_owned()),
+                persona: Some(PersonaSlot {
+                    display_name: Some("Baseline voice".to_owned()),
+                    tone: Some("precise".to_owned()),
+                    ..Default::default()
+                }),
+                memory: Some(MemorySlot {
+                    space_ids: vec!["space-baseline".to_owned()],
+                    read_levels: vec!["project".to_owned()],
+                    write_enabled: false,
+                }),
+                version: "1.2.0".to_owned(),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+
+        let baseline = store
+            .snapshot_config_version(&agent.id, Some("Regression baseline"))
+            .await
+            .unwrap()
+            .unwrap();
+        let changed = store
+            .update(
+                &agent.id,
+                UpdateAgent {
+                    name: Some("Changed agent".to_owned()),
+                    system_prompt: Some("Changed instructions.".to_owned()),
+                    tools: Some(vec!["calendar.create".to_owned()]),
+                    version: Some("1.3.0".to_owned()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(changed.name, "Changed agent");
+
+        let saved = store
+            .get_config_version(&agent.id, &baseline.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(saved.agent.name, "Version baseline");
+        assert_eq!(saved.agent.title, "Research");
+        assert_eq!(saved.agent.tools, vec!["web.search".to_owned()]);
+        assert_eq!(saved.agent.version, "1.2.0");
+        assert!(saved.source.contains("Baseline description"));
+
+        let restored = store
+            .restore_config_version(&agent.id, &baseline.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(restored.id, agent.id);
+        assert_eq!(restored.name, "Version baseline");
+        assert_eq!(
+            restored.system_prompt.as_deref(),
+            Some("Use the baseline instructions.")
+        );
+        assert_eq!(restored.tools, vec!["web.search".to_owned()]);
+        assert_eq!(restored.skills, vec!["research".to_owned()]);
+        assert_eq!(restored.version, "1.2.0");
+        assert_eq!(
+            restored
+                .persona
+                .as_ref()
+                .and_then(|persona| persona.display_name.as_deref()),
+            Some("Baseline voice")
+        );
+        assert_eq!(
+            restored
+                .memory
+                .as_ref()
+                .map(|memory| memory.space_ids.as_slice()),
+            Some(["space-baseline".to_owned()].as_slice())
+        );
+
+        let versions = store.list_config_versions(&agent.id).await.unwrap();
+        assert!(versions.iter().any(|version| version.id == baseline.id));
+        assert!(versions
+            .iter()
+            .any(|version| version.label.as_deref() == Some("Before restore")));
+        assert!(versions
+            .iter()
+            .any(|version| version.label.as_deref() == Some("Restore agent version")));
+
+        store
+            .update(
+                &agent.id,
+                UpdateAgent {
+                    locked: Some(true),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let error = store
+            .restore_config_version(&agent.id, &baseline.id)
             .await
             .unwrap_err();
         assert!(error.to_string().contains("locked agent"));

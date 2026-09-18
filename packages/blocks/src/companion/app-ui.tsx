@@ -19,6 +19,7 @@ import {
 	useLocalizedText,
 } from "@ryu/i18n/react";
 import { I18nDirectionProvider } from "@ryu/ui/components/direction.tsx";
+import { useTimezoneRevision } from "@ryu/ui/lib/timezone.ts";
 import { cn } from "@ryu/ui/lib/utils.ts";
 import type { ComponentProps, ReactNode } from "react";
 import { useEffect, useRef } from "react";
@@ -111,6 +112,10 @@ function CompanionI18nSync({ children }: { children: ReactNode }) {
 				return;
 			}
 			const current = i18nRef.current;
+			document.documentElement.style.setProperty(
+				"--ryu-locale",
+				snapshot.locale
+			);
 			if (
 				snapshot.packId &&
 				current.availablePacks.some((pack) => pack.id === snapshot.packId)
@@ -127,6 +132,10 @@ function CompanionI18nSync({ children }: { children: ReactNode }) {
 				current.setLocale(snapshot.locale);
 			}
 		};
+		document.documentElement.style.setProperty(
+			"--ryu-locale",
+			i18nRef.current.locale
+		);
 
 		void bridge
 			.get()
@@ -157,6 +166,10 @@ export function RyuAppShell({
 	surface = "standard",
 	...props
 }: RyuAppShellProps) {
+	// Date/time formatters are pure functions, so the shell owns the single
+	// subscription that makes every app repaint when Desktop changes its display
+	// zone or locale through the host bridge.
+	useTimezoneRevision();
 	return (
 		<I18nProvider
 			initialLocale={

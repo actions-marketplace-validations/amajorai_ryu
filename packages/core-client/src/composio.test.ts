@@ -1,5 +1,58 @@
 import { expect, test } from "bun:test";
-import { completeComposioConnection } from "./composio.ts";
+import {
+	completeComposioConnection,
+	fetchComposioStatus,
+	fetchComposioTriggers,
+} from "./composio.ts";
+
+test("Composio status preserves the Connect owner without projecting private fields", async () => {
+	const status = await fetchComposioStatus({
+		url: "https://node.example.test",
+		token: "fixture",
+		fetch: async () =>
+			Response.json({
+				configured: true,
+				execution_owner: "connect",
+				private_token: "not-returned",
+			}),
+	});
+	expect(status).toEqual({
+		configured: true,
+		baseUrl: "",
+		executionOwner: "connect",
+	});
+});
+
+test("trigger catalog preserves configuration schemas for the picker", async () => {
+	const result = await fetchComposioTriggers(
+		{
+			url: "https://node.example.test",
+			token: "fixture",
+			fetch: async () =>
+				Response.json({
+					data: [
+						{
+							name: "GMAIL_EVENT",
+							display_name: "New mail",
+							toolkit: "gmail",
+							config: { label: { type: "string", required: true } },
+							private_state: "not-returned",
+						},
+					],
+				}),
+		},
+		"gmail"
+	);
+	expect(result).toEqual([
+		{
+			name: "GMAIL_EVENT",
+			displayName: "New mail",
+			description: null,
+			toolkit: "gmail",
+			config: { label: { type: "string", required: true } },
+		},
+	]);
+});
 
 test("completion carries Core identity headers and only the callback session body", async () => {
 	let seen: Request | undefined;

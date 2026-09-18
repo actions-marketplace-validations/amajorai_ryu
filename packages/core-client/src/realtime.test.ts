@@ -7,6 +7,7 @@
 
 import { expect, test } from "bun:test";
 import {
+	appendWebSocketTicket,
 	createRealtimeClientId,
 	DOC_SYNC_AWARENESS,
 	DOC_SYNC_STEP1,
@@ -83,7 +84,7 @@ test("docsync decode fails closed on empty buffer and unknown tag", () => {
 	expect(decodeDocSync(new Uint8Array([0xff, 1, 2]))).toBeNull();
 });
 
-test("realtimeWsUrl upgrades scheme and attaches token + jwt", () => {
+test("realtimeWsUrl upgrades scheme without placing credentials in the URL", () => {
 	const url = realtimeWsUrl(
 		{ url: "http://127.0.0.1:7980", token: "node-secret", userJwt: null },
 		{ roomId: "conv_1", kind: "conversation", jwt: "user.jwt.token" }
@@ -91,8 +92,9 @@ test("realtimeWsUrl upgrades scheme and attaches token + jwt", () => {
 	const parsed = new URL(url);
 	expect(parsed.protocol).toBe("ws:");
 	expect(parsed.pathname).toBe("/api/realtime/ws");
-	expect(parsed.searchParams.get("token")).toBe("node-secret");
-	expect(parsed.searchParams.get("jwt")).toBe("user.jwt.token");
+	expect(parsed.searchParams.get("token")).toBeNull();
+	expect(parsed.searchParams.get("jwt")).toBeNull();
+	expect(appendWebSocketTicket(url, "ticket-1")).toContain("ticket=ticket-1");
 });
 
 test("realtimeWsUrl uses wss for an https node and omits an absent jwt", () => {
@@ -122,5 +124,5 @@ test("application room options carry app_id only in the join frame contract", ()
 		}
 	);
 	expect(url).not.toContain("com.example.app");
-	expect(url).toContain("token=node-secret");
+	expect(url).not.toContain("node-secret");
 });

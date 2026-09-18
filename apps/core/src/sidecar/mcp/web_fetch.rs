@@ -118,6 +118,10 @@ async fn do_get(arguments: Value, credential: Option<SecretState>) -> Result<Val
         .ok_or_else(|| anyhow::anyhow!("missing required string argument 'url'"))?;
 
     let authenticated = credential.is_some();
+    let secret_values = credential
+        .as_ref()
+        .map(credential_secret_values)
+        .unwrap_or_default();
     // Convert (and immediately drop) the secret into request headers. The secret
     // does not outlive this call and is never logged.
     let headers = credential
@@ -126,6 +130,7 @@ async fn do_get(arguments: Value, credential: Option<SecretState>) -> Result<Val
 
     match crate::server::guarded_fetch_text_with_headers(&url, &headers).await {
         Ok((status, body)) => {
+            let body = redact_secret_values(&body, &secret_values);
             let truncated = body.chars().count() > CONTENT_MAX_CHARS;
             let content: String = if truncated {
                 body.chars().take(CONTENT_MAX_CHARS).collect()
@@ -204,6 +209,38 @@ fn credential_to_headers(secret: &SecretState) -> Vec<(String, String)> {
     vec![("Cookie".to_owned(), raw.to_owned())]
 }
 
+fn credential_secret_values(secret: &SecretState) -> Vec<String> {
+    let raw = secret.expose().trim();
+    if raw.is_empty() {
+        return Vec::new();
+    }
+    let mut values = vec![raw.to_owned()];
+    if let Ok(Value::Object(map)) = serde_json::from_str::<Value>(raw) {
+        for value in map.values() {
+            match value {
+                Value::String(value) if !value.is_empty() => values.push(value.clone()),
+                Value::Object(fields) => values.extend(
+                    fields
+                        .values()
+                        .filter_map(Value::as_str)
+                        .filter(|value| !value.is_empty())
+                        .map(str::to_owned),
+                ),
+                _ => {}
+            }
+        }
+    }
+    values.sort_by_key(|value| std::cmp::Reverse(value.len()));
+    values.dedup();
+    values
+}
+
+fn redact_secret_values(body: &str, secrets: &[String]) -> String {
+    secrets.iter().fold(body.to_owned(), |redacted, secret| {
+        redacted.replace(secret, "[REDACTED]")
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -227,6 +264,16 @@ mod tests {
     #[tokio::test]
     async fn missing_url_is_an_error() {
         assert!(dispatch("get", json!({}), None).await.is_err());
+    }
+
+    #[test]
+    fn authenticated_page_reflections_are_redacted() {
+        let secret = SecretState::new("session=abc123".to_owned());
+        let values = credential_secret_values(&secret);
+        assert_eq!(
+            redact_secret_values("hello session=abc123", &values),
+            "hello [REDACTED]"
+        );
     }
 
     #[test]

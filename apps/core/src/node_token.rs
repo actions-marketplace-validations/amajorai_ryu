@@ -29,7 +29,12 @@
 //! bearer every peer rejects. So [`TokenSource`] is tracked and callers that mean
 //! "the shared fleet secret" ask for [`shared_fleet_token`], not just any token.
 
-use std::sync::{OnceLock, RwLock};
+use std::sync::{
+	atomic::{AtomicU64, Ordering},
+	OnceLock, RwLock,
+};
+
+use tokio::sync::watch;
 
 /// Where the active node token came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -52,6 +57,12 @@ pub struct ResolvedToken {
 }
 
 static RESOLVED: OnceLock<RwLock<Option<ResolvedToken>>> = OnceLock::new();
+static GENERATION: AtomicU64 = AtomicU64::new(0);
+static GENERATION_WATCH: OnceLock<watch::Sender<u64>> = OnceLock::new();
+
+fn generation_sender() -> &'static watch::Sender<u64> {
+	GENERATION_WATCH.get_or_init(|| watch::channel(GENERATION.load(Ordering::SeqCst)).0)
+}
 
 fn resolved_state() -> &'static RwLock<Option<ResolvedToken>> {
     RESOLVED.get_or_init(|| {
@@ -102,7 +113,10 @@ fn resolve_uncached() -> Option<ResolvedToken> {
     //    and the startup gate use, so all three agree on what counts as unset.
     if let Ok(env_token) = std::env::var("RYU_TOKEN") {
         let trimmed = env_token.trim();
-        if !trimmed.is_empty() && !ryu_mesh::is_insecure_auth_token_placeholder(trimmed) {
+        if !trimmed.is_empty()
+            && !ryu_mesh::is_insecure_auth_token_placeholder(trimmed)
+            && !ryu_mesh::is_weak_auth_token(trimmed)
+        {
             return Some(ResolvedToken {
                 token: trimmed.to_owned(),
                 source: TokenSource::Env,
@@ -202,7 +216,21 @@ fn write_token_file(path: &std::path::Path, token: &str) -> std::io::Result<()> 
 /// The active token, whatever its provenance. This is what `require_auth`
 /// compares against.
 pub fn active_token() -> Option<String> {
-    active_from(resolved_state())
+	active_from(resolved_state())
+}
+
+/// Monotonic generation for the live node bearer. WebSocket handlers capture
+/// this at authentication time and terminate established sessions when token
+/// rotation advances it.
+pub fn active_generation() -> u64 {
+	GENERATION.load(Ordering::SeqCst)
+}
+
+/// Subscribe to node-token rotations. The receiver is initialized with the
+/// current generation, so a caller can compare it with the generation captured
+/// during authentication before entering a long-lived session.
+pub fn subscribe_generation() -> watch::Receiver<u64> {
+	generation_sender().subscribe()
 }
 
 fn active_from(state: &RwLock<Option<ResolvedToken>>) -> Option<String> {
@@ -259,11 +287,13 @@ fn rotate_at(
     }
     let token = mint_token();
     write_token_file(path, &token)?;
-    *active = Some(ResolvedToken {
-        token: token.clone(),
-        source: TokenSource::File,
-    });
-    Ok(token)
+	*active = Some(ResolvedToken {
+		token: token.clone(),
+		source: TokenSource::File,
+	});
+	let generation = GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
+	let _ = generation_sender().send(generation);
+	Ok(token)
 }
 
 #[cfg(test)]
@@ -347,12 +377,14 @@ mod tests {
             source: TokenSource::File,
         }));
         let old = state.read().unwrap().as_ref().unwrap().token.clone();
+        let generation_before = active_generation();
 
         let new = rotate_at(&state, &path).unwrap();
 
         assert_ne!(new, old);
         assert_eq!(active_from(&state).as_deref(), Some(new.as_str()));
         assert_eq!(std::fs::read_to_string(path).unwrap(), new);
+        assert!(active_generation() > generation_before);
     }
 
     #[test]

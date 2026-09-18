@@ -16,7 +16,7 @@
 // the API payload.
 
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { createElement, useEffect, useState } from "react";
+import { createElement, useCallback, useEffect, useState } from "react";
 import { HelloDeclarativeViewHarness } from "@/src/components/views/DeclarativeView.tsx";
 import { contributionRegistry } from "@/src/contributions/registry.ts";
 import {
@@ -59,6 +59,7 @@ const EMPTY: PluginContributions = {
 	companions: [],
 	widget_apps: [],
 };
+const PLUGIN_CONTRIBUTION_DATA_PROPS: "data"[] = ["data"];
 
 /** The route path a contributed companion surface is navigable at. The companion
  *  id (`app__<runnable id>`) is a single opaque segment; encode it so any exotic
@@ -93,11 +94,12 @@ export const DECLARATIVE_VIEW_HARNESS_PATH = "/dev/declarative-view";
  * evict real data on every cold start. Readers that only render what they are given
  * want `usePluginContributions()` instead.
  */
-export function usePluginContributionsQuery() {
+export function usePluginContributionsQuery(options?: {
+	notifyOnChangeProps?: "data"[];
+}) {
 	const node = useActiveNode();
-	return useQuery({
-		queryKey: ["plugin-contributions", node.url, node.token, node.userJwt],
-		queryFn: ({ signal }) =>
+	const fetchContributions = useCallback(
+		({ signal }: { signal: AbortSignal }) =>
 			getPluginContributions(
 				{
 					url: node.url,
@@ -106,18 +108,30 @@ export function usePluginContributionsQuery() {
 				},
 				signal
 			),
+		[node.url, node.token, node.userJwt]
+	);
+	return useQuery({
+		queryKey: ["plugin-contributions", node.url, node.token, node.userJwt],
+		queryFn: fetchContributions,
 		// Best-effort surface: a stale window avoids hammering Core, and any error
 		// simply leaves `data` undefined → the stable EMPTY payload below. `retry`
 		// is off so an older Core lacking this endpoint fails once, quietly, rather
 		// than retrying three times per mount.
 		staleTime: 30_000,
 		retry: false,
+		notifyOnChangeProps: options?.notifyOnChangeProps,
 	});
 }
 
 /** Shared, cached read of the enabled plugins' declarative contributions. */
 export function usePluginContributions(): PluginContributions {
-	const { data } = usePluginContributionsQuery();
+	// These consumers only read the payload. Suppress query status notifications
+	// (`isFetching` during a stale-window refresh) so a background plugin refresh
+	// cannot rebuild every sidebar/command consumer; payload identity still wakes
+	// them when a plugin actually changes.
+	const { data } = usePluginContributionsQuery({
+		notifyOnChangeProps: PLUGIN_CONTRIBUTION_DATA_PROPS,
+	});
 	return data ?? EMPTY;
 }
 

@@ -25,6 +25,29 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 const EXPO_PUSH_URL: &str = "https://exp.host/--/api/v2/push/send";
+const MAX_WEBHOOK_RESPONSE_BYTES: u64 = 2 * 1024 * 1024;
+
+async fn guarded_webhook_post(url: &str, body: Vec<u8>) -> Result<u16, String> {
+	let response = ryu_egress::guarded_request(
+		ryu_egress::GuardedRequest {
+			method: "POST".to_owned(),
+			url: url.to_owned(),
+			headers: vec![(
+				"content-type".to_owned(),
+				"application/json".to_owned(),
+			)],
+			body: Some(body),
+		},
+		ryu_egress::GuardedFetchPolicy {
+			allow_http: false,
+			max_body_bytes: MAX_WEBHOOK_RESPONSE_BYTES,
+			max_redirect_hops: 0,
+			timeout: std::time::Duration::from_secs(15),
+		},
+	)
+	.await?;
+	Ok(response.status)
+}
 
 /// A notification destination (per-monitor or node-level policy-alert channel).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -63,20 +86,15 @@ pub struct AlertDeliveryTargets {
 /// both `text` (Slack) and `content` (Discord) so one URL fits either service.
 /// Returns `Ok(())` only on a 2xx response.
 pub async fn send_webhook_text(
-    http: &reqwest::Client,
+	_http: &reqwest::Client,
     url: &str,
     text: &str,
 ) -> Result<(), String> {
     let body = json!({ "text": text, "content": text });
-    let resp = http
-        .post(url)
-        .json(&body)
-        .timeout(std::time::Duration::from_secs(15))
-        .send()
+    let status = guarded_webhook_post(url, serde_json::to_vec(&body).map_err(|e| e.to_string())?)
         .await
         .map_err(|e| format!("webhook send failed: {e}"))?;
-    let status = resp.status();
-    if status.is_success() {
+    if (200..300).contains(&status) {
         Ok(())
     } else {
         Err(format!("webhook returned HTTP {status}"))
@@ -113,7 +131,7 @@ pub async fn send_telegram_text(
 /// framing and the structured payload ride one URL. `alert` is the full JSON
 /// carrier (embedded under `"alert"`).
 pub async fn send_webhook_alert(
-    http: &reqwest::Client,
+	_http: &reqwest::Client,
     url: &str,
     title: &str,
     message: &str,
@@ -124,14 +142,10 @@ pub async fn send_webhook_alert(
         "content": format!("{title}\n{message}"),
         "alert": alert,
     });
-    let result = http
-        .post(url)
-        .json(&body)
-        .timeout(std::time::Duration::from_secs(15))
-        .send()
-        .await;
-    if let Err(e) = result {
-        tracing::warn!("notify: webhook to {url} failed: {e}");
+    match guarded_webhook_post(url, serde_json::to_vec(&body).unwrap_or_default()).await {
+        Ok(status) if (200..300).contains(&status) => {}
+        Ok(status) => tracing::warn!("notify: webhook to {url} returned HTTP {status}"),
+        Err(error) => tracing::warn!("notify: webhook to {url} failed: {error}"),
     }
 }
 
@@ -347,31 +361,27 @@ mod tests {
         a
     }
 
-    // ---- send_webhook_text: full 2xx-gate coverage ------------------------
+    // ---- send_webhook_text: local destinations are denied before dispatch --
 
     #[tokio::test]
-    async fn webhook_text_ok_on_2xx_and_sends_text_and_content() {
+    async fn webhook_text_rejects_local_destination_before_dispatch() {
         let (addr, recorded) = spawn_server(StatusCode::OK).await;
         let http = reqwest::Client::new();
         let url = format!("http://{addr}/hook");
         let out = send_webhook_text(&http, &url, "hello world").await;
-        assert!(out.is_ok(), "2xx must map to Ok: {out:?}");
+        assert!(out.is_err(), "local webhook destinations must be denied");
 
         let rec = recorded.lock().unwrap();
-        assert_eq!(rec.len(), 1);
-        assert_eq!(rec[0].path, "/hook");
-        // Both a Slack `text` and a Discord `content` field carry the message.
-        assert_eq!(rec[0].body["text"], "hello world");
-        assert_eq!(rec[0].body["content"], "hello world");
+        assert!(rec.is_empty(), "denied destinations must not receive a request");
     }
 
     #[tokio::test]
-    async fn webhook_text_err_on_non_2xx() {
+    async fn webhook_text_err_on_local_destination_before_status_check() {
         let (addr, _rec) = spawn_server(StatusCode::INTERNAL_SERVER_ERROR).await;
         let http = reqwest::Client::new();
         let url = format!("http://{addr}/hook");
         let err = send_webhook_text(&http, &url, "x").await.unwrap_err();
-        assert!(err.contains("HTTP 500"), "unexpected error: {err}");
+        assert!(err.contains("webhook send failed"), "unexpected error: {err}");
     }
 
     #[tokio::test]
@@ -408,7 +418,7 @@ mod tests {
     // ---- best-effort alert sends: shape + non-panic on failure ------------
 
     #[tokio::test]
-    async fn webhook_alert_posts_title_message_and_alert_payload() {
+    async fn webhook_alert_rejects_local_destination() {
         let (addr, recorded) = spawn_server(StatusCode::OK).await;
         let http = reqwest::Client::new();
         let url = format!("http://{addr}/hook");
@@ -416,10 +426,8 @@ mod tests {
         send_webhook_alert(&http, &url, "Down!", "site is 500ing", &alert).await;
 
         let rec = recorded.lock().unwrap();
-        assert_eq!(rec.len(), 1);
-        assert_eq!(rec[0].body["text"], "Down!\nsite is 500ing");
-        assert_eq!(rec[0].body["content"], "Down!\nsite is 500ing");
-        assert_eq!(rec[0].body["alert"], alert);
+        assert_eq!(rec.len(), 0);
+        assert!(rec.is_empty(), "denied destinations must not receive a request");
     }
 
     #[tokio::test]

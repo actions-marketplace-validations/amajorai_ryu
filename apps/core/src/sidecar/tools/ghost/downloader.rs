@@ -233,13 +233,12 @@ impl GhostDownloader {
         // is hashed separately below and recorded in `versions.json` under the
         // `ghost` key. The two are different values over different bytes; feeding
         // either into the other's comparison would invert the fast path.
-        let sha256 = self.fetch_release_sha256(&url).await;
-        if sha256.is_none() {
-            tracing::warn!(
-                "ghost: no usable .sha256 published at {} — downloading unverified",
+        let sha256 = self.fetch_release_sha256(&url).await.ok_or_else(|| {
+            anyhow::anyhow!(
+                "ghost archive has no trusted sibling checksum at {}; refusing to install",
                 sha256_sibling_url(&url)
-            );
-        }
+            )
+        })?;
 
         let archive_path = downloads
             .download_blocking(crate::downloads::DownloadSpec {
@@ -248,7 +247,7 @@ impl GhostDownloader {
                 label: "Ghost".to_string(),
                 url: url.to_string(),
                 dest: archive_dest,
-                sha256,
+                sha256: Some(sha256),
                 version_record: None,
             })
             .await

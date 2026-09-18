@@ -1,4 +1,6 @@
 import "@fontsource-variable/inter";
+import "@fontsource-variable/geist";
+import "@fontsource-variable/geist-mono";
 import { installHorizontalWheelScrolling } from "@ryu/ui/lib/horizontal-wheel-scroll";
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";

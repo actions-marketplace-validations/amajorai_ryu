@@ -749,16 +749,122 @@ function renderPluginDoctorResponse(result: PluginDoctorResponseView): string {
 	return `${lines.join("\n").trimEnd()}\n`;
 }
 
+interface PluginEvalResponseView {
+	artifactKind: string;
+	cases: {
+		failed: number;
+		name: string;
+		passed: number;
+		score: number | null;
+		status: string;
+	}[];
+	evidenceLevel: string;
+	pluginId: string;
+	score: number | null;
+	status: string;
+	suite: {
+		caseCount: number;
+		graderCount: number;
+		status: string;
+		unsupportedGraders: string[];
+	};
+}
+
+function parsePluginEvalResponse(value: unknown): PluginEvalResponseView {
+	const record = doctorRecord(value, "plugin eval response");
+	const suite = doctorRecord(record.suite, "plugin eval suite");
+	const cases = Array.isArray(record.cases) ? record.cases : [];
+	return {
+		artifactKind: doctorString(record, "artifactKind", "plugin"),
+		cases: cases.map((value) => {
+			const item = doctorRecord(value, "plugin eval case");
+			return {
+				failed: doctorCount(item, "failed"),
+				name: doctorString(item, "name", "Unknown case"),
+				passed: doctorCount(item, "passed"),
+				score:
+					typeof item.score === "number" && Number.isFinite(item.score)
+						? item.score
+						: null,
+				status: doctorString(item, "status", "unknown"),
+			};
+		}),
+		evidenceLevel: doctorString(record, "evidenceLevel", "unknown"),
+		pluginId: doctorString(record, "pluginId", "unknown"),
+		score:
+			typeof record.score === "number" && Number.isFinite(record.score)
+				? record.score
+				: null,
+		status: doctorString(record, "status", "unknown"),
+		suite: {
+			caseCount: doctorCount(suite, "caseCount"),
+			graderCount: doctorCount(suite, "graderCount"),
+			status: doctorString(suite, "status", "unknown"),
+			unsupportedGraders: Array.isArray(suite.unsupportedGraders)
+				? suite.unsupportedGraders.filter(
+						(value): value is string => typeof value === "string"
+					)
+				: [],
+		},
+	};
+}
+
+function renderPluginEvalResponse(result: PluginEvalResponseView): string {
+	const score =
+		result.score === null ? "—" : `${Math.round(result.score * 100)}/100`;
+	const lines = [
+		`Plugin Evals · ${result.pluginId} · ${score} · ${result.status}`,
+		`${result.suite.caseCount} case${result.suite.caseCount === 1 ? "" : "s"} · ${result.suite.graderCount} grader${result.suite.graderCount === 1 ? "" : "s"} · evidence ${result.evidenceLevel}`,
+		"",
+	];
+	for (const item of result.cases) {
+		const caseScore =
+			item.score === null ? "—" : `${Math.round(item.score * 100)}/100`;
+		lines.push(`  ${item.status.padEnd(11)} ${caseScore}  ${item.name}`);
+	}
+	if (result.suite.unsupportedGraders.length > 0) {
+		lines.push(
+			"",
+			`Skipped grader types: ${result.suite.unsupportedGraders.join(", ")}`
+		);
+	}
+	lines.push(
+		"",
+		"Ryu runs the enabled artifact through Core's normal agent path. The no-plugin baseline is not run because Ryu never disables a live installation."
+	);
+	return `${lines.join("\n").trimEnd()}\n`;
+}
+
 const pluginDoctorCommand: Command = {
 	aliases: ["app"],
 	name: "plugin",
-	summary: "Validate an installed plugin or app",
-	usage: "ryu plugin doctor [id] [--json]",
+	summary: "Validate or evaluate an installed plugin or app",
+	usage: "ryu plugin <doctor|eval> [id] [--json]",
 	run: async (ctx) => {
-		if (ctx.args[0] !== "doctor" || ctx.args.length > 2) {
-			throw new UsageError("Usage: ryu plugin doctor [id] [--json]");
+		const action = ctx.args[0];
+		if (action !== "doctor" && action !== "eval") {
+			throw new UsageError("Usage: ryu plugin <doctor|eval> [id] [--json]");
+		}
+		if (ctx.args.length > 2) {
+			throw new UsageError("Usage: ryu plugin <doctor|eval> [id] [--json]");
 		}
 		const id = ctx.args[1];
+		if (action === "eval") {
+			if (!id) {
+				throw new UsageError("Usage: ryu plugin eval <id> [--json]");
+			}
+			const raw = await callCore(ctx, "/api/plugins/evals/run", {
+				method: "POST",
+				body: { id },
+			});
+			const result = parsePluginEvalResponse(raw);
+			ctx.io.out(
+				ctx.flags.json
+					? `${JSON.stringify(raw, null, 2)}\n`
+					: renderPluginEvalResponse(result)
+			);
+			return result.status === "passed" ? 0 : 1;
+		}
 		const path = id
 			? `/api/plugins/doctor?id=${encodeURIComponent(id)}`
 			: "/api/plugins/doctor";
@@ -796,6 +902,147 @@ const statusCommand: Command = {
 			`${ctx.flags.json ? JSON.stringify(data, null, 2) : JSON.stringify(data)}\n`
 		);
 		return 0;
+	},
+};
+
+function writeObservabilityResult(ctx: CliContext, result: unknown): void {
+	ctx.io.out(`${JSON.stringify(result, null, 2)}\n`);
+}
+
+/** `ryu trace <run-id>` — inspect the Core spans correlated to one run. */
+const traceCommand: Command = {
+	aliases: ["traces"],
+	name: "trace",
+	summary: "Inspect the Core trace for a run",
+	usage: "ryu trace <run-id> [--json]",
+	run: async (ctx) => {
+		const runId = requireArg(ctx, "run id", "ryu trace <run-id>");
+		const result = await callCore(
+			ctx,
+			`/api/runs/${encodeURIComponent(runId)}/trace`,
+			{ method: "GET" }
+		);
+		writeObservabilityResult(ctx, result);
+		return 0;
+	},
+};
+
+/** `ryu eval [agent-id] [model]` — run the shared Gateway eval contract. */
+const evalCommand: Command = {
+	aliases: ["evaluate"],
+	name: "eval",
+	summary: "Run the Gateway evaluation dataset",
+	usage: "ryu eval [agent-id] [model] [--json]",
+	run: async (ctx) => {
+		const agentId = ctx.args[0] ?? ctx.flags.agent;
+		const model = ctx.args[1]?.trim();
+		const result = await callCore(ctx, "/api/gateway/evals/run", {
+			body: {
+				agent_id: agentId ?? null,
+				...(model ? { model } : {}),
+			},
+		});
+		writeObservabilityResult(ctx, result);
+		return 0;
+	},
+};
+
+/** `ryu redteam <agent-id> [model]` — run the bounded local security probes. */
+const redteamCommand: Command = {
+	aliases: ["red-team", "security-sweep"],
+	name: "redteam",
+	summary: "Run bounded local agent security probes",
+	usage: "ryu redteam <agent-id> [model] [--json]",
+	run: async (ctx) => {
+		const agentId = ctx.args[0] ?? ctx.flags.agent;
+		if (!agentId) {
+			throw new UsageError(
+				"Missing agent id. Usage: ryu redteam <agent-id> [model] [--json]"
+			);
+		}
+		const model = ctx.args[1]?.trim();
+		const result = await callCore(ctx, "/api/gateway/redteam/run", {
+			body: {
+				agent_id: agentId,
+				...(model ? { model } : {}),
+			},
+		});
+		writeObservabilityResult(ctx, result);
+		return 0;
+	},
+};
+
+/**
+ * `ryu observability <audit|trace|eval|redteam|score>` is the scriptable umbrella
+ * for the same observe → inspect → evaluate → secure workflow shown in Desktop.
+ * The focused top-level aliases remain available for CI and shell scripts.
+ */
+const observabilityCommand: Command = {
+	aliases: ["obs"],
+	name: "observability",
+	summary: "Inspect traces, audits, evals, and security probes",
+	usage: "ryu observability <audit|trace|eval|redteam|score|audit-prune> …",
+	run: async (ctx) => {
+		const action = ctx.args[0] ?? "audit";
+		if (action === "audit") {
+			const agentId = ctx.args[1] ?? ctx.flags.agent;
+			const query = new URLSearchParams({ limit: "100" });
+			if (agentId) {
+				query.set("agent_id", agentId);
+			}
+			const result = await callCore(ctx, `/api/gateway/audit?${query}`, {
+				method: "GET",
+			});
+			writeObservabilityResult(ctx, result);
+			return 0;
+		}
+		if (action === "audit-prune") {
+			const result = await callCore(ctx, "/api/gateway/audit/prune", {
+				method: "POST",
+			});
+			writeObservabilityResult(ctx, result);
+			return 0;
+		}
+		if (action === "score") {
+			const agentId = ctx.args[1] ?? ctx.flags.agent;
+			const responseText = ctx.args[2] ?? process.env.RYU_EVAL_RESPONSE;
+			if (!(agentId && responseText)) {
+				throw new UsageError(
+					"Usage: ryu observability score <agent-id> <response> [model] [--json]"
+				);
+			}
+			let response: unknown = responseText;
+			try {
+				response = JSON.parse(responseText) as unknown;
+			} catch {
+				// Plain text is the normal CLI form; JSON remains available for
+				// already-shaped provider output.
+			}
+			const result = await callCore(ctx, "/api/gateway/evals/score", {
+				body: {
+					agent_id: agentId,
+					model: ctx.args[3],
+					prompt: "ryu observability score",
+					response,
+				},
+			});
+			writeObservabilityResult(ctx, result);
+			return 0;
+		}
+		const command =
+			action === "trace"
+				? traceCommand
+				: action === "eval"
+					? evalCommand
+					: action === "redteam"
+						? redteamCommand
+						: null;
+		if (!command) {
+			throw new UsageError(
+				"Usage: ryu observability <audit|trace|eval|redteam|score|audit-prune> …"
+			);
+		}
+		return command.run({ ...ctx, args: ctx.args.slice(1) });
 	},
 };
 
@@ -1282,6 +1529,10 @@ const mailCommand: Command = {
 const BASE_COMMANDS: Command[] = [
 	actionCommand,
 	statusCommand,
+	observabilityCommand,
+	traceCommand,
+	evalCommand,
+	redteamCommand,
 	sidecarCommand("start"),
 	sidecarCommand("stop"),
 	sidecarCommand("restart"),
@@ -1362,6 +1613,10 @@ export function renderHelp(): string {
 		"  ryu doctor --dry-run",
 		"  ryu doctor --fix",
 		"  ryu doctor --fix --dry-run --json",
+		"  ryu plugin eval <id> --json",
+		"  ryu observability audit --agent <id>",
+		"  ryu trace <run-id> --json",
+		"  ryu redteam <agent-id> --json",
 		"",
 		"Apps vs plugins: both install, enable, disable and uninstall by id through the",
 		"same commands — an app is a plugin that also ships a full-page UI. Use --kind",

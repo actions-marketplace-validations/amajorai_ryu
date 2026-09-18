@@ -43,6 +43,13 @@ export interface OnboardingAgentOption {
 	name: string;
 }
 
+/** An optional external skill collection offered during node onboarding. */
+export interface OnboardingSkillPackOption {
+	description: string;
+	id: string;
+	name: string;
+}
+
 /** A toggleable feature offered on the `features` step. The container supplies
  *  the catalog (name + one-line purpose); the view only renders it. */
 export interface OnboardingFeatureOption {
@@ -54,13 +61,14 @@ export interface OnboardingFeatureOption {
 
 /** Which step of the wizard to render. `installing`/`starting`/`finishing`/
  *  `done` all share the same shell with an indeterminate (or full) progress
- *  bar; `agents`, `features`, and `mic` are the interactive steps. */
+ *  bar; `agents`, `skills`, `features`, and `mic` are the interactive steps. */
 export type OnboardingStep =
 	| "starting"
 	| "choose"
 	| "connect"
 	| "installing"
 	| "agents"
+	| "skills"
 	| "features"
 	| "mic"
 	| "finishing"
@@ -122,22 +130,27 @@ export interface OnboardingViewProps {
 	/** Pick "connect to an existing node" on the `choose` step — opens the
 	 *  `connect` form rather than committing to anything. */
 	onChooseRemote?: () => void;
+	onClearAllSkillPacks?: () => void;
 	/** Submit the `connect` form: probe `url`, then adopt it as the active node.
 	 *  `token` is optional (a node with auth off accepts an empty one). */
 	onConnectRemote?: (url: string, token: string) => void;
 	onContinueAgents?: () => void;
 	onContinueMic?: () => void;
+	onContinueSkillPacks?: () => void;
 	/** Open the desktop-app download page (webapp, local unreachable). */
 	onDownloadDesktop?: () => void;
 	/** Keep the current feature on and advance to the next step. */
 	onEnableFeature?: () => void;
 	/** Re-run the agent lookup from the `agents` step's failure notice. */
 	onRetryAgents?: () => void;
+	onRetrySkillPacks?: () => void;
+	onSelectAllSkillPacks?: () => void;
 	onSkipAgents?: () => void;
 	/** Turn the current feature off (hides its sidebar section) and advance. */
 	onSkipFeature?: () => void;
 	onSkipMic?: () => void;
 	onToggleAgent?: (id: string) => void;
+	onToggleSkillPack?: (id: string) => void;
 	/** 0–100 progress for the auto-advancing steps, derived from the phase by the
 	 *  container. Drives the real Progress bar on starting/installing/finishing. */
 	progress?: number;
@@ -147,6 +160,17 @@ export interface OnboardingViewProps {
 	remoteError?: string | null;
 	/** Ids of the currently-selected agents. */
 	selected?: ReadonlySet<string>;
+	/** The optional skill collections currently selected for installation. */
+	selectedSkillPackIds?: ReadonlySet<string>;
+	/** Optional external skill collections available for this node. */
+	skillPacks?: OnboardingSkillPackOption[];
+	/** Whether the current caller may save the node-scoped selection. */
+	skillPacksCanConfigure?: boolean;
+	/** A previous skill-pack catalog or save request failed. */
+	skillPacksError?: string | null;
+	/** The skill-pack catalog is loading from the active node. */
+	skillPacksLoading?: boolean;
+	skillPacksSubmitting?: boolean;
 	step: OnboardingStep;
 	/** Supporting line under the title (login-style PageHeader). */
 	subtitle?: string;
@@ -457,6 +481,202 @@ function AgentPicker({
 					</Button>
 					<Button onClick={onContinueAgents} size="lg" variant="mono">
 						{selectedCount > 0 ? `Add ${selectedCount} & continue` : "Continue"}
+					</Button>
+				</div>
+			</StaggerReveal>
+		</div>
+	);
+}
+
+function SkillPackRow({
+	pack,
+	isSelected,
+	disabled,
+	onToggle,
+}: {
+	pack: OnboardingSkillPackOption;
+	isSelected: boolean;
+	disabled: boolean;
+	onToggle?: (id: string) => void;
+}) {
+	return (
+		<button
+			aria-pressed={isSelected}
+			className={`flex items-start gap-3 rounded-4xl p-3 text-left transition-colors ${
+				isSelected ? "bg-primary/10" : "bg-card hover:bg-muted/50"
+			}`}
+			data-testid={`onboarding-skill-pack-${pack.id.replaceAll("/", "-")}`}
+			disabled={disabled}
+			onClick={() => onToggle?.(pack.id)}
+			type="button"
+		>
+			<span
+				className={`mt-0.5 flex size-5 shrink-0 items-center justify-center rounded-full border ${
+					isSelected
+						? "border-primary bg-primary text-primary-foreground"
+						: "border-muted-foreground/40"
+				}`}
+			>
+				{isSelected ? (
+					<HugeiconsIcon className="size-3.5" icon={Tick02Icon} />
+				) : null}
+			</span>
+			<span className="min-w-0 flex-1">
+				<span className="flex flex-wrap items-center gap-2">
+					<span className="font-medium">{pack.name}</span>
+					<Badge className="text-xs" variant="secondary">
+						Recommended
+					</Badge>
+				</span>
+				<span className="mt-1 block text-muted-foreground text-sm leading-relaxed">
+					{pack.description}
+				</span>
+			</span>
+		</button>
+	);
+}
+
+function SkillPackPicker({
+	skillPacks = [],
+	skillPacksCanConfigure = true,
+	skillPacksError,
+	skillPacksLoading = false,
+	selectedSkillPackIds,
+	skillPacksSubmitting = false,
+	onClearAllSkillPacks,
+	onContinueSkillPacks,
+	onRetrySkillPacks,
+	onSelectAllSkillPacks,
+	onToggleSkillPack,
+}: Pick<
+	OnboardingViewProps,
+	| "skillPacks"
+	| "skillPacksCanConfigure"
+	| "skillPacksError"
+	| "skillPacksLoading"
+	| "selectedSkillPackIds"
+	| "skillPacksSubmitting"
+	| "onClearAllSkillPacks"
+	| "onContinueSkillPacks"
+	| "onRetrySkillPacks"
+	| "onSelectAllSkillPacks"
+	| "onToggleSkillPack"
+>) {
+	const selectedCount = selectedSkillPackIds?.size ?? 0;
+	const disabled =
+		skillPacksLoading ||
+		skillPacksSubmitting ||
+		!skillPacksCanConfigure ||
+		Boolean(skillPacksError);
+	return (
+		<div className="flex w-full max-w-2xl flex-col gap-3">
+			<StaggerReveal startDelay={ONBOARDING_CONTENT_DELAY_MS} wrap>
+				<div className="flex flex-col gap-2">
+					<p className="text-muted-foreground text-sm">
+						These optional collections add useful workflows for engineering,
+						documents, design, security, research, and more. Only the
+						collections you select are installed on this node.
+					</p>
+					<p className="text-muted-foreground text-sm">
+						Ryu&apos;s built-in skills and skills contributed by enabled Ryu
+						plugins stay available and are not part of this choice.
+					</p>
+				</div>
+
+				<div className="flex flex-wrap items-center justify-between gap-2">
+					<p className="font-medium text-foreground text-sm">
+						Recommended skill collections
+					</p>
+					<div className="flex gap-2">
+						<Button
+							disabled={disabled}
+							onClick={onSelectAllSkillPacks}
+							size="sm"
+							variant="outline"
+						>
+							Select all
+						</Button>
+						<Button
+							disabled={disabled}
+							onClick={onClearAllSkillPacks}
+							size="sm"
+							variant="ghost"
+						>
+							Unselect all
+						</Button>
+					</div>
+				</div>
+
+				{skillPacksError ? (
+					<div
+						className="flex items-center gap-3 rounded-4xl bg-card p-3"
+						role="alert"
+					>
+						<p className="flex-1 text-muted-foreground text-xs">
+							{skillPacksError}
+						</p>
+						{onRetrySkillPacks ? (
+							<Button
+								disabled={skillPacksLoading}
+								onClick={onRetrySkillPacks}
+								size="sm"
+								variant="outline"
+							>
+								{skillPacksLoading ? "Loading…" : "Retry"}
+							</Button>
+						) : null}
+					</div>
+				) : null}
+
+				{skillPacksCanConfigure ? null : (
+					<p className="text-sm text-status-destructive" role="alert">
+						Only a node owner or administrator can choose optional skills for
+						this node.
+					</p>
+				)}
+
+				{skillPacksLoading ? (
+					<p className="rounded-4xl bg-card p-4 text-muted-foreground text-sm">
+						Loading recommended skills…
+					</p>
+				) : skillPacks.length > 0 ? (
+					<div className="flex flex-col gap-2">
+						{skillPacks.map((pack) => (
+							<SkillPackRow
+								disabled={disabled}
+								isSelected={selectedSkillPackIds?.has(pack.id) ?? false}
+								key={pack.id}
+								onToggle={onToggleSkillPack}
+								pack={pack}
+							/>
+						))}
+					</div>
+				) : (
+					<p className="rounded-4xl bg-card p-4 text-muted-foreground text-sm">
+						No optional skill collections are available right now. Ryu&apos;s
+						built-in skills are still ready to use.
+					</p>
+				)}
+
+				<div className="sticky bottom-0 mt-2 flex items-center justify-between gap-3 bg-background/80 py-2 backdrop-blur-sm">
+					<p
+						className="text-muted-foreground text-xs"
+						data-testid="onboarding-skills-selected-count"
+					>
+						{selectedCount} of {skillPacks.length} selected
+					</p>
+					<Button
+						disabled={disabled}
+						loading={skillPacksSubmitting}
+						onClick={onContinueSkillPacks}
+						size="lg"
+						variant="mono"
+					>
+						{skillPacksSubmitting
+							? "Installing…"
+							: selectedCount > 0
+								? `Install ${selectedCount} pack${selectedCount === 1 ? "" : "s"} & continue`
+								: "Continue with no optional packs"}
 					</Button>
 				</div>
 			</StaggerReveal>
@@ -912,6 +1132,11 @@ export function OnboardingView(props: OnboardingViewProps) {
 			headerSubtitle = "Pick any you'd like to set up, and install more later";
 		}
 	}
+	if (step === "skills") {
+		headerTitle = "Choose recommended skills";
+		headerSubtitle =
+			"Select the optional skill collections to install on this node";
+	}
 
 	if (step === "choose") {
 		return (
@@ -933,6 +1158,14 @@ export function OnboardingView(props: OnboardingViewProps) {
 		return (
 			<OnboardingShell subtitle={headerSubtitle} title={headerTitle}>
 				<AgentPicker {...props} />
+			</OnboardingShell>
+		);
+	}
+
+	if (step === "skills") {
+		return (
+			<OnboardingShell subtitle={headerSubtitle} title={headerTitle}>
+				<SkillPackPicker {...props} />
 			</OnboardingShell>
 		);
 	}

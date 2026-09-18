@@ -133,6 +133,8 @@ export interface Agent {
 	/** Skill id allowlist. Empty = all enabled skills; non-empty = only these.
 	 * The private `__ryu_none__` marker represents an explicit all-off choice. */
 	skills: string[];
+	/** Canonical JSON source returned by single-agent endpoints for exact diffs. */
+	source?: string;
 	systemPrompt: string | null;
 	/** Optional role/title badge shown beside the agent name. */
 	title: string;
@@ -379,7 +381,7 @@ function toSummary(a: AgentSummaryWire): AgentSummary {
 	};
 }
 
-function toAgent(a: AgentRecordWire): Agent {
+function toAgent(a: AgentRecordWire, source?: string): Agent {
 	const engine = a.engine ?? null;
 	const model = a.model ?? a.chat_model?.model_id ?? null;
 	return {
@@ -421,6 +423,7 @@ function toAgent(a: AgentRecordWire): Agent {
 		canCreateAgents: a.can_create_agents ?? null,
 		persona: a.persona ?? null,
 		safetyProfile: safetyProfile(a.safety_profile),
+		source,
 	};
 }
 
@@ -850,18 +853,18 @@ export async function fetchAgent(
 	target: ApiTarget,
 	id: string
 ): Promise<Agent> {
-	const json = await request<{ agent: AgentRecordWire }>(
+	const json = await request<{ agent: AgentRecordWire; source?: string }>(
 		target,
 		`/api/agents/${id}`
 	);
-	return toAgent(json.agent);
+	return toAgent(json.agent, json.source);
 }
 
 export async function createAgent(
 	target: ApiTarget,
 	input: AgentInput
 ): Promise<Agent> {
-	const json = await request<{ agent: AgentRecordWire }>(
+	const json = await request<{ agent: AgentRecordWire; source?: string }>(
 		target,
 		"/api/agents",
 		{
@@ -869,7 +872,7 @@ export async function createAgent(
 			body: toAgentBody(input),
 		}
 	);
-	return toAgent(json.agent);
+	return toAgent(json.agent, json.source);
 }
 
 export async function updateAgent(
@@ -877,7 +880,7 @@ export async function updateAgent(
 	id: string,
 	input: AgentInput
 ): Promise<Agent> {
-	const json = await request<{ agent: AgentRecordWire }>(
+	const json = await request<{ agent: AgentRecordWire; source?: string }>(
 		target,
 		`/api/agents/${id}`,
 		{
@@ -885,7 +888,110 @@ export async function updateAgent(
 			body: toAgentBody(input),
 		}
 	);
-	return toAgent(json.agent);
+	return toAgent(json.agent, json.source);
+}
+
+// ── Complete agent configuration version history ─────────────────────────────
+
+/** Metadata for one immutable full-agent configuration snapshot. */
+export interface AgentVersionMeta {
+	agentId: string;
+	createdAt: number;
+	id: string;
+	label: string | null;
+	name: string;
+	version: string;
+}
+
+interface AgentVersionMetaWire {
+	agent_id: string;
+	created_at: number;
+	id: string;
+	label?: string | null;
+	name: string;
+	version: string;
+}
+
+function toAgentVersionMeta(version: AgentVersionMetaWire): AgentVersionMeta {
+	return {
+		agentId: version.agent_id,
+		createdAt: version.created_at,
+		id: version.id,
+		label: version.label ?? null,
+		name: version.name,
+		version: version.version,
+	};
+}
+
+/** List complete saved agent definitions, newest first. */
+export async function listAgentVersions(
+	target: ApiTarget,
+	agentId: string
+): Promise<AgentVersionMeta[]> {
+	const json = await request<{ versions?: AgentVersionMetaWire[] }>(
+		target,
+		`/api/agents/${encodeURIComponent(agentId)}/versions`
+	);
+	return (json.versions ?? []).map(toAgentVersionMeta);
+}
+
+/** Fetch the canonical JSON source for one full-agent version. */
+export async function getAgentVersionSource(
+	target: ApiTarget,
+	agentId: string,
+	versionId: string
+): Promise<string> {
+	const json = await request<{
+		version?: { agent?: AgentRecordWire; source?: string };
+	}>(
+		target,
+		`/api/agents/${encodeURIComponent(agentId)}/versions/${encodeURIComponent(versionId)}`
+	);
+	const version = json.version;
+	if (version?.source) {
+		return version.source;
+	}
+	return version?.agent ? JSON.stringify(version.agent, null, 2) : "";
+}
+
+/** Save the current complete agent definition as an immutable checkpoint. */
+export async function createAgentVersion(
+	target: ApiTarget,
+	agentId: string,
+	label?: string
+): Promise<AgentVersionMeta> {
+	const json = await request<{ version?: AgentVersionMetaWire }>(
+		target,
+		`/api/agents/${encodeURIComponent(agentId)}/versions`,
+		{
+			method: "POST",
+			body: label?.trim() ? { label: label.trim() } : {},
+		}
+	);
+	if (!json.version) {
+		throw new Error("Core did not return the saved agent version");
+	}
+	return toAgentVersionMeta(json.version);
+}
+
+/** Restore a full-agent checkpoint and return the restored live record. */
+export async function restoreAgentVersion(
+	target: ApiTarget,
+	agentId: string,
+	versionId: string
+): Promise<Agent> {
+	const json = await request<{
+		agent?: AgentRecordWire;
+		source?: string;
+	}>(
+		target,
+		`/api/agents/${encodeURIComponent(agentId)}/versions/${encodeURIComponent(versionId)}/restore`,
+		{ method: "POST" }
+	);
+	if (!json.agent) {
+		throw new Error("Core did not return the restored agent");
+	}
+	return toAgent(json.agent, json.source);
 }
 
 // ── Prompt Studio version history ───────────────────────────────────────────

@@ -1,3 +1,4 @@
+import { abortableDelay } from "@/src/lib/abortable-delay.ts";
 // apps/desktop/src/hooks/useWalletStream.ts
 //
 // Live platform-credits balance for the caller's active org, streamed from the
@@ -32,21 +33,6 @@ const MAX_BACKOFF_MS = 10_000;
  */
 const TERMINAL_RETRY_MS = 300_000;
 
-/** Pause that resolves early when the stream is torn down. */
-function delay(ms: number, signal: AbortSignal): Promise<void> {
-	return new Promise((resolve) => {
-		const timer = setTimeout(resolve, ms);
-		signal.addEventListener(
-			"abort",
-			() => {
-				clearTimeout(timer);
-				resolve();
-			},
-			{ once: true }
-		);
-	});
-}
-
 /** Run (and keep reconnecting) the wallet stream until `signal` aborts. */
 async function runWalletStream(
 	signal: AbortSignal,
@@ -59,6 +45,9 @@ async function runWalletStream(
 		if (hasCreditsAuth()) {
 			try {
 				for await (const message of openWalletStream(signal)) {
+					if (signal.aborted) {
+						break;
+					}
 					onWallet(message.data);
 					backoff = INITIAL_BACKOFF_MS; // a live frame resets the backoff
 				}
@@ -73,13 +62,13 @@ async function runWalletStream(
 			break;
 		}
 		if (terminal) {
-			await delay(TERMINAL_RETRY_MS, signal);
+			await abortableDelay(TERMINAL_RETRY_MS, signal);
 			backoff = INITIAL_BACKOFF_MS;
 			continue;
 		}
 		// When signed out we have no token; wait a full interval before retrying so
 		// a later sign-in is picked up without hot-looping.
-		await delay(hasCreditsAuth() ? backoff : MAX_BACKOFF_MS, signal);
+		await abortableDelay(hasCreditsAuth() ? backoff : MAX_BACKOFF_MS, signal);
 		backoff = Math.min(backoff * 2, MAX_BACKOFF_MS);
 	}
 }

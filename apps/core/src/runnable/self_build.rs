@@ -464,6 +464,14 @@ async fn write_ryu_json(
     let manifest: PluginManifest = serde_json::from_value(Value::Object(manifest_val.clone()))
         .with_context(|| "manifest is not a valid PluginManifest")?;
 
+    // Deserialization only checks the Rust shape. The live loader also enforces
+    // plugin-id/path/code-source/capability invariants; hot-replacing a manifest
+    // before that canonical validation would create an unvalidated executable
+    // surface until restart.
+    manifest
+        .validate()
+        .map_err(|error| anyhow!("manifest validation failed: {error}"))?;
+
     // Validate semver.
     semver::Version::parse(&manifest.version).with_context(|| {
         format!(
@@ -847,6 +855,14 @@ async fn check_self_build_grant(app_id: &str) -> Result<()> {
 }
 
 fn is_stub_mode() -> bool {
+    // The stub is a local development seam only. A release build must never
+    // allow an environment variable to turn the Gateway authorization check
+    // into a no-op.
+    #[cfg(not(debug_assertions))]
+    {
+        return false;
+    }
+    #[cfg(debug_assertions)]
     match std::env::var(ENV_STUB_GRANTS) {
         Ok(v) => matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes"),
         Err(_) => false,

@@ -6,6 +6,7 @@ describe("CreditBalanceBreakdown", () => {
 	it("shows total, separate buckets, and each free-provider allocation", () => {
 		const html = renderToStaticMarkup(
 			<CreditBalanceBreakdown
+				giftCreditsMicroUsd={3_000_000}
 				onDemandCreditsMicroUsd={20_000_000}
 				planAllowanceMicroUsd={15_000_000}
 				planCreditsMicroUsd={7_500_000}
@@ -32,6 +33,7 @@ describe("CreditBalanceBreakdown", () => {
 			"$41.75",
 			"Free-provider credits",
 			"Plan credits",
+			"Gift balance",
 			"On-demand credits",
 			"$4.25",
 			"Ryu Fast",
@@ -48,6 +50,7 @@ describe("CreditBalanceBreakdown", () => {
 	it("keeps a depleted plan bucket at zero instead of falling back to its allowance", () => {
 		const html = renderToStaticMarkup(
 			<CreditBalanceBreakdown
+				giftCreditsMicroUsd={0}
 				onDemandCreditsMicroUsd={0}
 				planAllowanceMicroUsd={15_000_000}
 				planCreditsMicroUsd={0}

@@ -79,18 +79,18 @@ pub struct SeedSpec {
 /// pre-installed set: the explicit install path derives opt-in companion bundles from
 /// this same table. Adding a 16th companion to a second list is what caused the
 /// original carriage bug; there is no second list.
-fn seed_overrides() -> [SeedSpec; 39] {
+fn seed_overrides() -> [SeedSpec; 40] {
     use crate::plugin_manifest::{
         ACTIVITY_UI_HTML, APPROVALS_UI_HTML, AUTOPILOT_UI_HTML, BLUEPRINT_UI_HTML,
         CALENDAR_UI_HTML, CANVAS_PLUGIN_ID, CANVAS_UI_HTML, CHAT_BROADCAST_UI_HTML, CLIPS_UI_HTML,
-        CONVERT_PLUGIN_ID, CONVERT_UI_HTML, DRAWSOME_PLUGIN_ID, DRAWSOME_UI_HTML, EXPENSES_UI_HTML, FINETUNE_PLUGIN_ID,
-        FINETUNE_UI_HTML, HELP_CENTER_UI_HTML, INVOICES_UI_HTML, LEARNING_UI_HTML, MAIL_UI_HTML,
-        MEETINGS_UI_HTML, MONITORS_UI_HTML, NEWS_UI_HTML, OUTREACH_UI_HTML, PEOPLE_UI_HTML,
-        PROJECTS_UI_HTML, PULL_REQUESTS_UI_HTML, QUESTS_UI_HTML, REASONING_PLUGIN_ID,
-        REASONING_UI_HTML, RLM_UI_HTML, SITES_UI_HTML, SKILL_EDITOR_UI_HTML, SLIDES_PLUGIN_ID,
-        SLIDES_UI_HTML, SOCIAL_UI_HTML, SUBTITLES_UI_HTML, TIMELINE_UI_HTML, TUITION_UI_HTML,
-        WARMUP_UI_HTML, WEBHOOKS_UI_HTML, WHITEBOARD_PLUGIN_ID, WHITEBOARD_UI_HTML,
-        WORKFLOWS_UI_HTML,
+        CONVERT_PLUGIN_ID, CONVERT_UI_HTML, DRAWSOME_PLUGIN_ID, DRAWSOME_UI_HTML, EXPENSES_UI_HTML,
+        FINETUNE_PLUGIN_ID, FINETUNE_UI_HTML, HELP_CENTER_UI_HTML, INVOICES_UI_HTML,
+        LEARNING_UI_HTML, MAIL_UI_HTML, MEETINGS_UI_HTML, MONITORS_UI_HTML, NEWS_UI_HTML,
+        OUTREACH_UI_HTML, PEOPLE_UI_HTML, PROJECTS_UI_HTML, PULL_REQUESTS_UI_HTML, QUESTS_UI_HTML,
+        REASONING_PLUGIN_ID, REASONING_UI_HTML, RLM_UI_HTML, SECURITY_UI_HTML, SITES_UI_HTML,
+        SKILL_EDITOR_UI_HTML, SLIDES_PLUGIN_ID, SLIDES_UI_HTML, SOCIAL_UI_HTML, SUBTITLES_UI_HTML,
+        TIMELINE_UI_HTML, TUITION_UI_HTML, WARMUP_UI_HTML, WEBHOOKS_UI_HTML, WHITEBOARD_PLUGIN_ID,
+        WHITEBOARD_UI_HTML, WORKFLOWS_UI_HTML,
     };
     [
         SeedSpec {
@@ -297,7 +297,7 @@ fn seed_overrides() -> [SeedSpec; 39] {
             // tab through the route-allowlisted `shell.openTab` (replacing the old bespoke
             // `activity.openSession` verb). Ships a prebuilt companion UI. Core-tier, so it
             // must NOT declare `sidecar:process` (the Gateway denies that grant at enable).
-            grants: &["activity:read", "shell:integrate"],
+            grants: &["activity:read", "activity:run", "shell:integrate"],
             ui_code: Some(ACTIVITY_UI_HTML),
         },
         SeedSpec {
@@ -319,10 +319,17 @@ fn seed_overrides() -> [SeedSpec; 39] {
         },
         SeedSpec {
             id: crate::plugins::builtins::SITES_PLUGIN_ID,
-            // The first slice is a truthful local companion. Public-edge route
-            // admission and managed hosting remain control-plane owned; there
-            // is no app-specific network grant to approve here.
-            grants: &[],
+            // Sites is pre-installed and its managed sidecar declares these
+            // host capabilities. Persist the reviewed manifest set here because
+            // fresh-install seeding cannot call the Gateway grant validator.
+            grants: &[
+                "app:http",
+                "hook:side-model",
+                "hook:run-agent",
+                "spaces:docs",
+                "identity:read",
+                "security:check",
+            ],
             ui_code: Some(SITES_UI_HTML),
         },
         SeedSpec {
@@ -512,7 +519,15 @@ fn seed_overrides() -> [SeedSpec; 39] {
         },
         SeedSpec {
             id: crate::plugins::builtins::PROJECTS_PLUGIN_ID,
-            grants: &["storage:kv", "shell:integrate", "ui:toast"],
+            grants: &[
+                "app:http",
+                "tool:http-egress:127.0.0.1",
+                "chat.sendFollowUp",
+                "shell:integrate",
+                "spaces:docs",
+                "storage:kv",
+                "ui:toast",
+            ],
             ui_code: Some(PROJECTS_UI_HTML),
         },
         SeedSpec {
@@ -620,6 +635,15 @@ fn seed_overrides() -> [SeedSpec; 39] {
             // the Gateway-approved set, while this row carries the compiled UI.
             grants: &["app:http", "shell:integrate"],
             ui_code: Some(PULL_REQUESTS_UI_HTML),
+        },
+        SeedSpec {
+            id: "@ryu/security",
+            // Security is opt-in because enabling it grants a local process read
+            // access to an explicitly selected repository. The Companion only
+            // needs the generic app:http bridge; the sidecar owns path validation
+            // and never applies a generated proposal.
+            grants: &["app:http"],
+            ui_code: Some(SECURITY_UI_HTML),
         },
         SeedSpec {
             id: crate::plugins::builtins::RECIPES_PLUGIN_ID,

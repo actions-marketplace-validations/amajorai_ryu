@@ -27,6 +27,7 @@ test("keeps every payment family on the shared receipt surface", () => {
 		"subscription",
 		"upgrade",
 		"purchase",
+		"gift",
 		"cloud",
 	];
 

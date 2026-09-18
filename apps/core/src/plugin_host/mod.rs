@@ -98,6 +98,11 @@ pub struct HookContext {
     /// storage and notifications; it is never model-supplied.
     #[serde(default)]
     pub caller_user_id: Option<String>,
+    /// The verified caller carried only inside Core. It is skipped when the
+    /// context is serialized into the sandbox, but lets host mutations enforce
+    /// the same organization/resource ACL as the originating request.
+    #[serde(skip)]
+    pub(crate) verified_caller: Option<crate::identity_verify::VerifiedCaller>,
     /// Recent transcript (oldest → newest), so a hook can review the last answer.
     #[serde(default)]
     pub transcript: Vec<HookMessage>,
@@ -921,6 +926,7 @@ struct MiddlewareIdentity {
     caller_user_id: Option<String>,
     conversation_id: Option<String>,
     flags: std::collections::HashMap<String, bool>,
+    verified_caller: Option<crate::identity_verify::VerifiedCaller>,
 }
 
 impl From<&HookContext> for MiddlewareIdentity {
@@ -930,6 +936,7 @@ impl From<&HookContext> for MiddlewareIdentity {
             caller_user_id: ctx.caller_user_id.clone(),
             conversation_id: ctx.conversation_id.clone(),
             flags: ctx.flags.clone(),
+            verified_caller: ctx.verified_caller.clone(),
         }
     }
 }
@@ -942,6 +949,7 @@ fn preserve_middleware_identity(
     ctx.caller_user_id = identity.caller_user_id.clone();
     ctx.conversation_id = identity.conversation_id.clone();
     ctx.flags = identity.flags.clone();
+    ctx.verified_caller = identity.verified_caller.clone();
     ctx
 }
 
@@ -1037,12 +1045,14 @@ async fn run_middleware_hook(
     };
     let program = build_middleware_hook_program(ctx, &hook.code);
     let bridge = Arc::new(
-        PluginHookBridge::new_with_tenant(
+        PluginHookBridge::new_for_request(
             hook.plugin_id.clone(),
             hook.grants.clone(),
             state.clone(),
-            ctx.caller_user_id.clone(),
+            ctx.verified_caller.clone(),
+            ctx.conversation_id.clone(),
         )
+        .with_calling_agent(ctx.agent_id.clone())
         .with_middleware_next(next),
     );
     let invoker = Arc::new(SandboxToolInvoker::bridge(bridge));
@@ -1238,12 +1248,16 @@ pub async fn run_hook(state: &ServerState, hook: &HookPlugin, ctx: &HookContext)
         return HookDirective::None;
     };
     let program = build_hook_program(ctx, &hook.code);
-    let bridge = Arc::new(PluginHookBridge::new_with_tenant(
-        hook.plugin_id.clone(),
-        hook.grants.clone(),
-        state.clone(),
-        ctx.caller_user_id.clone(),
-    ));
+    let bridge = Arc::new(
+        PluginHookBridge::new_for_request(
+            hook.plugin_id.clone(),
+            hook.grants.clone(),
+            state.clone(),
+            ctx.verified_caller.clone(),
+            ctx.conversation_id.clone(),
+        )
+        .with_calling_agent(ctx.agent_id.clone()),
+    );
     let invoker = Arc::new(SandboxToolInvoker::bridge(bridge));
     let agent_id = ctx
         .agent_id
@@ -1326,6 +1340,9 @@ const host = {{
   sideModel: (a) => tools.host.sideModel(a ?? {{}}),
   runAgent: (a) => tools.host.runAgent(a ?? {{}}),
   runFanout: (a) => tools.host.runFanout(a ?? {{}}),
+  reactions: {{
+    add: (a) => tools.host.addMessageReaction(a ?? {{}}),
+  }},
   notify: (a) => tools.host.notify(a ?? {{}}),
   setConversationTitle: (a) => tools.host.setConversationTitle(a ?? {{}}),
   getPreference: (a) => tools.host.getPreference(a ?? {{}}),

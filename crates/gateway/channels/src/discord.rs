@@ -25,8 +25,10 @@ use crate::media::{self, Attachment, AttachmentKind, VoiceDelivery};
 use crate::pairing::PairingStore;
 use crate::status::StatusReporter;
 use crate::{
-    handle_turn, pack_thread, unpack_thread, BotProfile, Channel, ChannelCaps, ChannelHost,
-    ChannelRuntime, DiscordChannelConfig, DiscordChannelOptions, GroupReplyMode, InboundMessage,
+    claim_inbound_delivery, deliver_inbound, handle_turn_with_delivery, pack_thread,
+    run_claimed_delivery, scoped_delivery_id, unpack_thread, BotProfile, Channel, ChannelCaps,
+    ChannelHost, ChannelRuntime, DiscordChannelConfig, DiscordChannelOptions, GroupReplyMode,
+    InboundMessage,
 };
 
 /// Discord REST API base. Pinned to v10 (the current stable version).
@@ -431,14 +433,55 @@ impl DiscordChannel {
             is_group,
             attachments: parse_attachments(&message),
         };
+        let provider_id = format!("message:{}", message.id);
         let channel = Arc::clone(self);
         tokio::spawn(async move {
+            let (delivery_id, claim) = match claim_inbound_delivery(&*channel, &provider_id).await {
+                Ok(result) => result,
+                Err(error) => {
+                    warn!(
+                        channel = "discord",
+                        %error,
+                        "discord delivery could not be durably claimed; processing once without dedupe"
+                    );
+                    let delivery_id = scoped_delivery_id(&*channel, &provider_id);
+                    let mut inbound = inbound;
+                    let downloaded = channel.download_speech(&inbound).await;
+                    if !downloaded.is_empty() {
+                        channel.runtime.ingest_media(&mut inbound, downloaded).await;
+                    }
+                    let _ =
+                        handle_turn_with_delivery(channel, host, inbound, Some(&delivery_id)).await;
+                    return;
+                }
+            };
+            if !matches!(claim, crate::pairing::DeliveryClaim::Claimed) {
+                debug!(
+                    channel = "discord",
+                    delivery_id = %delivery_id,
+                    ?claim,
+                    "duplicate discord delivery suppressed"
+                );
+                return;
+            }
             let mut inbound = inbound;
             let downloaded = channel.download_speech(&inbound).await;
             if !downloaded.is_empty() {
                 channel.runtime.ingest_media(&mut inbound, downloaded).await;
             }
-            handle_turn(channel, host, inbound).await;
+            let work_channel = Arc::clone(&channel);
+            let work_host = Arc::clone(&host);
+            let work_delivery_id = delivery_id.clone();
+            run_claimed_delivery(channel, delivery_id, move || {
+                let channel = Arc::clone(&work_channel);
+                let host = Arc::clone(&work_host);
+                let message = inbound.clone();
+                let delivery_id = work_delivery_id.clone();
+                async move {
+                    handle_turn_with_delivery(channel, host, message, Some(&delivery_id)).await
+                }
+            })
+            .await;
         });
     }
 
@@ -484,7 +527,7 @@ impl DiscordChannel {
         if value["type"].as_u64() != Some(2) {
             return;
         }
-        let Some(interaction_id) = value["id"].as_str() else {
+        let Some(interaction_id) = value["id"].as_str().map(str::to_string) else {
             return;
         };
         let Some(token) = value["token"].as_str() else {
@@ -582,7 +625,19 @@ impl DiscordChannel {
             is_group,
             attachments: Vec::new(),
         };
-        handle_turn(Arc::clone(self), host, inbound).await;
+        let channel = Arc::clone(self);
+        let provider_id = format!("interaction:{interaction_id}");
+        let turn_delivery_id = scoped_delivery_id(&*channel, &provider_id);
+        deliver_inbound(channel, provider_id, move || {
+            let channel = Arc::clone(self);
+            let host = Arc::clone(&host);
+            let inbound = inbound.clone();
+            let delivery_id = turn_delivery_id.clone();
+            async move {
+                handle_turn_with_delivery(channel, host, inbound, Some(&delivery_id)).await
+            }
+        })
+        .await;
     }
 }
 
@@ -1466,7 +1521,9 @@ mod tests {
         // Long prompts are clipped to a readable single line.
         let long = thread_name(&"x".repeat(200));
         assert_eq!(long.chars().count(), THREAD_NAME_CHARS);
-        assert!(THREAD_NAME_CHARS <= 100, "Discord caps thread names at 100");
+        const {
+            assert!(THREAD_NAME_CHARS <= 100, "Discord caps thread names at 100");
+        }
         // An uncaptioned image must still yield a nameable thread.
         assert_eq!(thread_name("   "), THREAD_NAME_FALLBACK);
         assert_eq!(thread_name(""), THREAD_NAME_FALLBACK);

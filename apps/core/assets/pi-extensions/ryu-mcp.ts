@@ -40,15 +40,12 @@
  *
  * TRUST / SCOPE
  * -------------
- * Injected at spawn by Core (`acp.rs::ryu_pi_acp_cmd`) into the MANAGED Pi ONLY:
- *   - RYU_MCP_CORE_URL   Core's own base URL (loopback).
- *   - RYU_MCP_AGENT_ID   the agent id whose allowlist gates the call ("ryu").
- *   - RYU_MCP_CORE_TOKEN Core node-admittance bearer (RYU_TOKEN); absent on
- *                        loopback dev where Core requires no token.
- *   - RYU_MCP_USER_JWT  verified human identity for shared-node requests.
- *   - RYU_MCP_HOST_CONVERSATION_ID server-derived conversation principal.
- * The call is attributed to RYU_MCP_AGENT_ID so Core enforces that agent's tool
- * allowlist and the Gateway governs execution — never a fail-open bypass.
+ * Core injects one short-lived capability for this exact ACP session. It is
+ * accepted only by Core's dedicated ACP callback; the callback resolves the
+ * verified caller, conversation, agent, and narrowing scopes from Core's
+ * server-side record. Once Pi has created its native session, each tool request
+ * also carries that native id so Core can reject a capability replayed by a
+ * different ACP session. No node-wide bearer or user JWT crosses this boundary.
  *
  * BEYOND TOOLS: COMMANDS + ctx.ui
  * -------------------------------
@@ -90,33 +87,10 @@ import { Type } from "typebox";
 const CORE_URL = (
 	process.env.RYU_MCP_CORE_URL || "http://127.0.0.1:7980"
 ).replace(/\/+$/, "");
-const AGENT_ID = process.env.RYU_MCP_AGENT_ID || "ryu";
-const CORE_TOKEN = process.env.RYU_MCP_CORE_TOKEN || "";
-const USER_JWT = process.env.RYU_MCP_USER_JWT || "";
-const HOST_CONVERSATION_ID = process.env.RYU_MCP_HOST_CONVERSATION_ID || "";
-
-/** Decode the optional Core-injected onboarding source scope. */
-function profileScope(): Record<string, unknown> {
-	const encoded = process.env.RYU_MCP_PROFILE_SCOPE || "";
-	if (!encoded) {
-		return {};
-	}
-	try {
-		const padded = encoded.replace(/-/g, "+").replace(/_/g, "/");
-		const binary = atob(padded + "=".repeat((4 - (padded.length % 4)) % 4));
-		const bytes = Uint8Array.from(binary, (character) =>
-			character.charCodeAt(0)
-		);
-		const value = JSON.parse(new TextDecoder().decode(bytes)) as unknown;
-		return value && typeof value === "object" && !Array.isArray(value)
-			? (value as Record<string, unknown>)
-			: {};
-	} catch {
-		return {};
-	}
-}
-
-const PROFILE_SCOPE = profileScope();
+const SESSION_CAPABILITY = process.env.RYU_MCP_SESSION_CAPABILITY || "";
+// This is the Core broker record id. The native ACP session id is read from
+// `ctx.sessionManager` once Pi has created its session and sent separately.
+const BROKER_SESSION_ID = process.env.RYU_MCP_ACP_SESSION_ID || "";
 
 /** Cap on how many tools we fold into a prompt/description to keep it lean. */
 const CATALOG_CAP = 60;
@@ -184,15 +158,31 @@ let catalogCache: CatalogTool[] = [];
 /** One-line description of the most recent Ryu tool activity, for the status. */
 let lastActivity = "";
 
-function authHeaders(): Record<string, string> {
-	const headers: Record<string, string> = {
-		"content-type": "application/json",
-	};
-	if (CORE_TOKEN) {
-		headers.authorization = `Bearer ${CORE_TOKEN}`;
+function nativeSessionId(ctx?: ExtensionContext): string | undefined {
+	try {
+		const id = ctx?.sessionManager?.getSessionId?.();
+		return typeof id === "string" && id.length > 0 ? id : undefined;
+	} catch {
+		// A detached callback may observe a stale extension context during reload.
+		return undefined;
 	}
-	if (USER_JWT) {
-		headers["x-ryu-user-jwt"] = USER_JWT;
+}
+
+function sessionCapabilityHeaders(
+	nativeSession?: string
+): Record<string, string> {
+	if (!(SESSION_CAPABILITY && BROKER_SESSION_ID)) {
+		throw new Error(
+			"Core did not provision this managed Pi session for Ryu tools"
+		);
+	}
+	const headers: Record<string, string> = {
+		authorization: `Bearer ${SESSION_CAPABILITY}`,
+		"content-type": "application/json",
+		"x-ryu-acp-session-id": BROKER_SESSION_ID,
+	};
+	if (nativeSession) {
+		headers["x-ryu-acp-native-session-id"] = nativeSession;
 	}
 	return headers;
 }
@@ -249,12 +239,15 @@ interface CatalogTool {
 }
 
 /** Fetch the agent's tool catalog. Best-effort — returns [] on any failure. */
-async function fetchCatalog(query?: string): Promise<CatalogTool[]> {
+async function fetchCatalog(
+	query?: string,
+	ctx?: ExtensionContext
+): Promise<CatalogTool[]> {
 	try {
-		const url = new URL(`${CORE_URL}/api/mcp/tools`);
-		url.searchParams.set("agent", AGENT_ID);
-		const res = await fetch(url.toString(), {
-			headers: authHeaders(),
+		const res = await fetch(`${CORE_URL}/api/acp/tools`, {
+			method: "POST",
+			headers: sessionCapabilityHeaders(nativeSessionId(ctx)),
+			body: JSON.stringify({ action: "list_tools" }),
 			signal: AbortSignal.timeout(CATALOG_TIMEOUT_MS),
 		});
 		if (!res.ok) {
@@ -280,8 +273,8 @@ async function fetchCatalog(query?: string): Promise<CatalogTool[]> {
  * Fetch the FULL catalog and refresh the display cache. Never rejects — it
  * delegates to `fetchCatalog`, whose failure mode is an empty list.
  */
-async function refreshCatalog(): Promise<CatalogTool[]> {
-	const tools = await fetchCatalog();
+async function refreshCatalog(ctx?: ExtensionContext): Promise<CatalogTool[]> {
+	const tools = await fetchCatalog(undefined, ctx);
 	catalogCache = tools;
 	return tools;
 }
@@ -296,17 +289,15 @@ async function refreshCatalog(): Promise<CatalogTool[]> {
  * the result `isError` and reports it to the model), while the command catches
  * it and reports through the UI instead.
  */
-async function callTool(tool: string, args: unknown): Promise<unknown> {
-	const res = await fetch(`${CORE_URL}/api/mcp/tools/call`, {
+async function callTool(
+	tool: string,
+	args: unknown,
+	ctx?: ExtensionContext
+): Promise<unknown> {
+	const res = await fetch(`${CORE_URL}/api/acp/tools`, {
 		method: "POST",
-		headers: authHeaders(),
-		body: JSON.stringify({
-			tool,
-			arguments: args,
-			agent_id: AGENT_ID,
-			host_conversation_id: HOST_CONVERSATION_ID || undefined,
-			...PROFILE_SCOPE,
-		}),
+		headers: sessionCapabilityHeaders(nativeSessionId(ctx)),
+		body: JSON.stringify({ action: "call_tool", tool, arguments: args }),
 	});
 	const body = (await res.json().catch(() => ({}))) as {
 		ok?: boolean;
@@ -490,7 +481,7 @@ export default async function (pi: ExtensionAPI) {
 			lastActivity = `calling ${tool}`;
 			paintRyuState(ctx);
 			try {
-				const output = await callTool(tool, args);
+				const output = await callTool(tool, args, ctx);
 				lastActivity = `ok ${tool}`;
 				return {
 					content: [{ type: "text", text: resultText(output) }],
@@ -527,9 +518,9 @@ export default async function (pi: ExtensionAPI) {
 				})
 			),
 		}),
-		async execute(_toolCallId, params) {
+		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
 			const query = String((params as { query?: unknown })?.query ?? "").trim();
-			const tools = await fetchCatalog(query || undefined);
+			const tools = await fetchCatalog(query || undefined, ctx);
 			const text = tools.length
 				? renderCatalog(tools)
 				: "No Ryu tools are available for this agent.";
@@ -551,7 +542,7 @@ export default async function (pi: ExtensionAPI) {
 		// catalog bound to every single session start) and this handler's only job
 		// is decoration.
 		paintRyuState(ctx);
-		refreshCatalog()
+		refreshCatalog(ctx)
 			.then(() => paintRyuState(ctx))
 			.catch(() => {
 				// `fetchCatalog` already swallows its own failures; this is belt-and-
@@ -575,7 +566,9 @@ export default async function (pi: ExtensionAPI) {
 			// An unfiltered listing doubles as a cache refresh so the status count and
 			// the /ryu-call completions stay honest; a filtered one must not clobber
 			// the cache with a subset.
-			const tools = query ? await fetchCatalog(query) : await refreshCatalog();
+			const tools = query
+				? await fetchCatalog(query, ctx)
+				: await refreshCatalog(ctx);
 			lastActivity = query
 				? `listed ${tools.length} matching "${query}"`
 				: `listed ${tools.length}`;
@@ -627,7 +620,7 @@ export default async function (pi: ExtensionAPI) {
 			lastActivity = `calling ${tool}`;
 			paintRyuState(ctx);
 			try {
-				const output = await callTool(tool, parsed.args);
+				const output = await callTool(tool, parsed.args, ctx);
 				const text = resultText(output);
 				lastActivity = `ok ${tool}`;
 				withUi(ctx, (ui) => {

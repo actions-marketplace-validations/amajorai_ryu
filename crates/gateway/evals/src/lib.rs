@@ -440,7 +440,11 @@ pub struct AssertionOptions {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider: Option<String>,
     /// Promptfoo-compatible custom rubric prompt.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        alias = "rubricPrompt",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub rubric_prompt: Option<String>,
     /// Promptfoo-compatible output transform. Execution is deliberately
     /// sandbox-owned; this field is retained in the wire contract.
@@ -452,6 +456,10 @@ pub struct AssertionOptions {
     /// Provider-specific assertion configuration.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub config: Option<Value>,
+    /// Negate the assertion verdict. The score is inverted as well so exports
+    /// remain meaningful for thresholded and weighted assertions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub not: Option<bool>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -509,6 +517,41 @@ pub enum Assertion {
     },
     ContainsJson {
         value: String,
+        #[serde(flatten)]
+        options: AssertionOptions,
+    },
+    ContainsHtml {
+        value: String,
+        #[serde(flatten)]
+        options: AssertionOptions,
+    },
+    ContainsXml {
+        value: String,
+        #[serde(flatten)]
+        options: AssertionOptions,
+    },
+    ContainsSql {
+        value: String,
+        #[serde(flatten)]
+        options: AssertionOptions,
+    },
+    Levenshtein {
+        value: String,
+        #[serde(flatten)]
+        options: AssertionOptions,
+    },
+    Latency {
+        value: String,
+        #[serde(flatten)]
+        options: AssertionOptions,
+    },
+    Cost {
+        value: String,
+        #[serde(flatten)]
+        options: AssertionOptions,
+    },
+    AssertSet {
+        assertions: Vec<Assertion>,
         #[serde(flatten)]
         options: AssertionOptions,
     },
@@ -571,6 +614,11 @@ pub enum Assertion {
         #[serde(flatten)]
         options: AssertionOptions,
     },
+    Similar {
+        value: String,
+        #[serde(flatten)]
+        options: AssertionOptions,
+    },
     Factuality {
         rubric: String,
         #[serde(flatten)]
@@ -600,6 +648,11 @@ pub struct AssertionResult {
     pub score: f32,
     /// Human-readable explanation (matched text, regex error, judge verdict, …).
     pub detail: String,
+    /// Whether the assertion actually executed. Deterministic assertions are
+    /// true; missing judge/runtime prerequisites are false and never look like
+    /// a passing score.
+    #[serde(default)]
+    pub executed: bool,
 }
 
 /// Result of scoring one registry `evaluators::Evaluator` (gateway) against a
@@ -639,15 +692,26 @@ pub struct EvaluatorAggregate {
 }
 
 /// A single case in an eval dataset.
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct EvalCase {
+    /// Stable case id used by result matrices and exports.
+    #[serde(default)]
+    pub id: Option<String>,
+    /// Human-readable case description.
+    #[serde(default)]
+    pub description: Option<String>,
     /// The prompt to replay through the gateway pipeline. May contain {{vars}}.
+    #[serde(default)]
     pub prompt: String,
     /// Legacy optional expected substring. STILL drives the scalar
     /// `substring_match` (case-insensitive contains) exactly as before, AND is
     /// synthesized as an extra `contains` assertion. Absent => scalar omitted.
     #[serde(default)]
     pub expected: Option<String>,
+    /// Optional reference/context payload for factuality and faithfulness
+    /// assertions. Model-graded checks report `executed:false` when it is absent.
+    #[serde(default)]
+    pub context: Option<Value>,
     /// Optional Promptfoo-style pass threshold for the mean assertion score.
     /// Defaults to `1.0`, which requires every assertion to pass.
     #[serde(default)]
@@ -667,6 +731,49 @@ pub struct EvalCase {
     /// to any run-level ids. Empty by default => today's assertion-only behavior.
     #[serde(default)]
     pub evaluators: Vec<String>,
+    /// Optional per-case provider/model target. The Gateway treats this as the
+    /// selected model for this case and keeps the run-level model as fallback.
+    #[serde(default)]
+    pub provider: Option<String>,
+    /// Optional Promptfoo provider/model alternatives for this case. The first
+    /// non-empty entry wins in the single-case replay path.
+    #[serde(default)]
+    pub providers: Vec<String>,
+    /// A precomputed provider response. When present, the provider is not called;
+    /// the result is scored as a deterministic replay fixture.
+    #[serde(default, alias = "providerOutput")]
+    pub provider_output: Option<Value>,
+    /// Arbitrary case metadata preserved in results and exports.
+    #[serde(default)]
+    pub metadata: std::collections::HashMap<String, Value>,
+    /// Promptfoo-compatible per-case prompt/output options.
+    #[serde(default)]
+    pub options: EvalCaseOptions,
+}
+
+/// Promptfoo-compatible case options that can be applied without executing
+/// arbitrary renderer code. Unknown/dynamic options remain in the imported
+/// suite configuration, while these portable fields are honored by Gateway.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct EvalCaseOptions {
+    /// Text prepended to the rendered user prompt.
+    #[serde(default)]
+    pub prefix: Option<String>,
+    /// Text appended to the rendered user prompt.
+    #[serde(default)]
+    pub suffix: Option<String>,
+    /// A bounded built-in output transform (`trim`, `lower`, `upper`, `json`).
+    #[serde(default)]
+    pub transform: Option<String>,
+    /// A bounded built-in variable transform (`json` or `identity`).
+    #[serde(default, alias = "transformVars")]
+    pub transform_vars: Option<String>,
+    /// Per-case provider timeout override in milliseconds.
+    #[serde(default)]
+    pub timeout_ms: Option<u64>,
+    /// Whether a provider response may be reused within one run.
+    #[serde(default)]
+    pub cache: Option<bool>,
 }
 
 /// One ordered chat turn in a Promptfoo-style prompt.
@@ -679,6 +786,54 @@ pub struct EvalMessage {
 /// Per-case scores returned by the dataset runner.
 #[derive(Debug, Clone, Serialize)]
 pub struct CaseScore {
+    /// Stable case id when supplied by the dataset.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    /// Human-readable case description when supplied by the dataset.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// Prompt variant id/name supplied by the caller, when available.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prompt_id: Option<String>,
+    /// Model selected for this case.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// Gateway provider selected for this case.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    /// Rendered prompt sent to the provider, or the fixture prompt.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rendered_prompt: Option<String>,
+    /// Typed variables used for this case.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub vars: Option<std::collections::HashMap<String, Value>>,
+    /// Case metadata preserved for filtering and export.
+    #[serde(default)]
+    pub metadata: std::collections::HashMap<String, Value>,
+    /// Optional reference/context payload used by model-graded assertions.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context: Option<Value>,
+    /// Input tokens observed or estimated for this case.
+    #[serde(default)]
+    pub input_tokens: u64,
+    /// Output tokens observed or estimated for this case.
+    #[serde(default)]
+    pub output_tokens: u64,
+    /// Total provider tokens for this case.
+    #[serde(default)]
+    pub total_tokens: u64,
+    /// Provider-reported cost in micro-USD, when available.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cost_micro_usd: Option<u64>,
+    /// Raw provider/replay latency in milliseconds.
+    #[serde(default)]
+    pub latency_ms: u64,
+    /// Whether this result reused a precomputed or in-run cached output.
+    #[serde(default)]
+    pub cache_hit: bool,
+    /// Safe error detail when the provider or transform failed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
     /// The original prompt.
     pub prompt: String,
     /// The response text the provider returned (or an error message).
@@ -724,6 +879,19 @@ pub struct EvalRunAggregate {
     pub mean_substring_match: Option<f32>,
     /// Total number of cases run.
     pub total_cases: usize,
+    /// Aggregate input token count.
+    #[serde(default)]
+    pub total_input_tokens: u64,
+    /// Aggregate output token count.
+    #[serde(default)]
+    pub total_output_tokens: u64,
+    /// Aggregate cost in micro-USD when every priced case reported a cost;
+    /// otherwise `None` keeps the unknown-cost distinction visible.
+    #[serde(default)]
+    pub total_cost_micro_usd: Option<u64>,
+    /// Fraction of cases whose assertion threshold passed.
+    #[serde(default)]
+    pub assertion_pass_rate: f32,
     /// NEW (P2): per-evaluator aggregate keyed by evaluator id. Empty when no
     /// registry evaluators were requested. Lets the UI render one row per
     /// evaluator (mean score, pass rate, executed count).
@@ -786,6 +954,25 @@ pub fn score_case(
     };
 
     CaseScore {
+        id: case.id.clone(),
+        description: case.description.clone(),
+        prompt_id: None,
+        model: None,
+        provider: None,
+        rendered_prompt: None,
+        vars: Some(case.vars.clone()),
+        metadata: case.metadata.clone(),
+        context: case.context.clone(),
+        input_tokens: response["usage"]["prompt_tokens"].as_u64().unwrap_or(0),
+        output_tokens: response["usage"]["completion_tokens"].as_u64().unwrap_or(0),
+        total_tokens: response["usage"]["total_tokens"].as_u64().unwrap_or_else(|| {
+            response["usage"]["prompt_tokens"].as_u64().unwrap_or(0)
+                + response["usage"]["completion_tokens"].as_u64().unwrap_or(0)
+        }),
+        cost_micro_usd: response["usage"]["cost_micro_usd"].as_u64(),
+        latency_ms,
+        cache_hit: false,
+        error: None,
         prompt: case.prompt.clone(),
         response_text,
         latency_score,
@@ -1032,10 +1219,87 @@ fn is_truthy(value: &Value) -> bool {
         Value::Object(items) => !items.is_empty(),
     }
 }
-/// Evaluate one DETERMINISTIC assertion (everything except `LlmJudge`/`LlmRubric`) against
-/// `response_text`. `vars` is already applied to the assertion before this call.
-/// Returns the `AssertionResult`.
+/// Runtime measurements available to operational assertions. Missing values
+/// stay explicit: a latency/cost assertion cannot pass when its provider did
+/// not return the corresponding measurement.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct AssertionMetrics {
+    pub latency_ms: Option<u64>,
+    pub cost_micro_usd: Option<u64>,
+}
+
+fn assertion_options(assertion: &Assertion) -> &AssertionOptions {
+    match assertion {
+        Assertion::Contains { options, .. }
+        | Assertion::NotContains { options, .. }
+        | Assertion::Equals { options, .. }
+        | Assertion::Regex { options, .. }
+        | Assertion::Icontains { options, .. }
+        | Assertion::StartsWith { options, .. }
+        | Assertion::ContainsAny { options, .. }
+        | Assertion::ContainsAll { options, .. }
+        | Assertion::IcontainsAny { options, .. }
+        | Assertion::IcontainsAll { options, .. }
+        | Assertion::ContainsJson { options, .. }
+        | Assertion::ContainsHtml { options, .. }
+        | Assertion::ContainsXml { options, .. }
+        | Assertion::ContainsSql { options, .. }
+        | Assertion::Levenshtein { options, .. }
+        | Assertion::Latency { options, .. }
+        | Assertion::Cost { options, .. }
+        | Assertion::AssertSet { options, .. }
+        | Assertion::IsHtml { options }
+        | Assertion::IsXml { options }
+        | Assertion::IsSql { options }
+        | Assertion::IsRefusal { options }
+        | Assertion::Moderation { options, .. }
+        | Assertion::Javascript { options, .. }
+        | Assertion::Python { options, .. }
+        | Assertion::Ruby { options, .. }
+        | Assertion::Webhook { options, .. }
+        | Assertion::IsJson { options }
+        | Assertion::JsonValid { options }
+        | Assertion::LlmJudge { options, .. }
+        | Assertion::LlmRubric { options, .. }
+        | Assertion::Similar { options, .. }
+        | Assertion::Factuality { options, .. }
+        | Assertion::ContextFaithfulness { options, .. }
+        | Assertion::AnswerRelevance { options, .. } => options,
+    }
+}
+
+/// Apply the threshold and optional negation controls to an assertion result.
+/// Unexecuted results stay failed even when a caller asks for negation: missing
+/// prerequisites must never become a passing result by inversion.
+pub fn apply_assertion_options(
+    mut result: AssertionResult,
+    options: &AssertionOptions,
+) -> AssertionResult {
+    if result.executed {
+        if let Some(threshold) = options.threshold {
+            result.pass = result.score >= threshold.clamp(0.0, 1.0);
+        }
+        if options.not == Some(true) {
+            result.pass = !result.pass;
+            result.score = 1.0 - result.score;
+            result.detail = format!("negated: {}", result.detail);
+        }
+    }
+    result
+}
+
+/// Evaluate one deterministic assertion (everything except model-graded
+/// assertions) against `response_text`.
 pub fn eval_assertion_deterministic(assertion: &Assertion, response_text: &str) -> AssertionResult {
+    eval_assertion_deterministic_with_metrics(assertion, response_text, AssertionMetrics::default())
+}
+
+/// Metrics-aware deterministic assertion evaluator used by the Gateway runner.
+pub fn eval_assertion_deterministic_with_metrics(
+    assertion: &Assertion,
+    response_text: &str,
+    metrics: AssertionMetrics,
+) -> AssertionResult {
     let (kind, pass, detail): (&str, bool, String) = match assertion {
         Assertion::Contains { value, .. } => {
             let pass = response_text.to_lowercase().contains(&value.to_lowercase());
@@ -1162,10 +1426,141 @@ pub fn eval_assertion_deterministic(assertion: &Assertion, response_text: &str) 
             };
             ("contains_json", pass, detail)
         }
+        Assertion::ContainsHtml { value, .. } => {
+            let pass = is_html_like(response_text) && response_text.contains(value);
+            let detail = if pass {
+                "found the expected HTML fragment"
+            } else {
+                "expected HTML fragment was not found"
+            };
+            ("contains_html", pass, detail.to_owned())
+        }
+        Assertion::ContainsXml { value, .. } => {
+            let pass = is_xml_like(response_text) && response_text.contains(value);
+            let detail = if pass {
+                "found the expected XML fragment"
+            } else {
+                "expected XML fragment was not found"
+            };
+            ("contains_xml", pass, detail.to_owned())
+        }
+        Assertion::ContainsSql { value, .. } => {
+            let pass = is_sql_like(response_text) && response_text.to_lowercase().contains(&value.to_lowercase());
+            let detail = if pass {
+                "found the expected SQL fragment"
+            } else {
+                "expected SQL fragment was not found"
+            };
+            ("contains_sql", pass, detail.to_owned())
+        }
+        Assertion::Levenshtein { value, options } => {
+            // Levenshtein is intentionally quadratic. A caller can submit
+            // eval input over the network, so do not let two very large strings
+            // turn an otherwise bounded scoring endpoint into a CPU/memory DoS.
+            const MAX_LEVENSHTEIN_CHARS: usize = 2_048;
+            if response_text.chars().count() > MAX_LEVENSHTEIN_CHARS
+                || value.chars().count() > MAX_LEVENSHTEIN_CHARS
+            {
+                return apply_assertion_options(
+                    AssertionResult {
+                        kind: "levenshtein".to_owned(),
+                        pass: false,
+                        score: 0.0,
+                        detail: format!(
+                            "levenshtein inputs are limited to {MAX_LEVENSHTEIN_CHARS} characters"
+                        ),
+                        executed: false,
+                    },
+                    options,
+                );
+            }
+            let score = normalized_levenshtein(response_text.trim(), value.trim());
+            let threshold = options.threshold.unwrap_or(0.8).clamp(0.0, 1.0);
+            let pass = score >= threshold;
+            let detail = format!("similarity {score:.3}; threshold {threshold:.3}");
+            return apply_assertion_options(AssertionResult {
+                kind: "levenshtein".to_owned(),
+                pass,
+                score,
+                detail,
+                executed: true,
+            }, options);
+        }
+        Assertion::Latency { value, options } => {
+            let expected = value.trim().parse::<u64>().ok();
+            let pass = expected.zip(metrics.latency_ms).is_some_and(|(limit, actual)| actual <= limit);
+            let detail = match (expected, metrics.latency_ms) {
+                (Some(limit), Some(actual)) => format!("latency {actual}ms; limit {limit}ms"),
+                (None, _) => format!("invalid latency limit: {value}"),
+                (_, None) => "latency measurement unavailable".to_owned(),
+            };
+            let score = match (expected, metrics.latency_ms) {
+                (Some(limit), Some(actual)) if limit > 0 => (1.0 - actual as f32 / limit as f32).clamp(0.0, 1.0),
+                (Some(_), Some(_)) => f32::from(pass),
+                _ => 0.0,
+            };
+            let _ = options;
+            return apply_assertion_options(AssertionResult {
+                kind: "latency".to_owned(),
+                pass,
+                score,
+                detail,
+                executed: expected.is_some() && metrics.latency_ms.is_some(),
+            }, options);
+        }
+        Assertion::Cost { value, options } => {
+            let expected = value.trim().parse::<f64>().ok();
+            let actual = metrics.cost_micro_usd.map(|micro| micro as f64 / 1_000_000.0);
+            let pass = expected.zip(actual).is_some_and(|(limit, observed)| observed <= limit);
+            let detail = match (expected, actual) {
+                (Some(limit), Some(observed)) => format!("cost ${observed:.6}; limit ${limit:.6}"),
+                (None, _) => format!("invalid cost limit: {value}"),
+                (_, None) => "cost measurement unavailable".to_owned(),
+            };
+            let score = match (expected, actual) {
+                (Some(limit), Some(observed)) if limit > 0.0 => (1.0 - observed as f32 / limit as f32).clamp(0.0, 1.0),
+                (Some(_), Some(_)) => f32::from(pass),
+                _ => 0.0,
+            };
+            let _ = options;
+            return apply_assertion_options(AssertionResult {
+                kind: "cost".to_owned(),
+                pass,
+                score,
+                detail,
+                executed: expected.is_some() && metrics.cost_micro_usd.is_some(),
+            }, options);
+        }
+        Assertion::AssertSet { assertions, options } => {
+            if assertions.is_empty() {
+                return apply_assertion_options(AssertionResult {
+                    kind: "assert_set".to_owned(),
+                    pass: true,
+                    score: 1.0,
+                    detail: "empty assertion set".to_owned(),
+                    executed: true,
+                }, options);
+            }
+            let results: Vec<AssertionResult> = assertions
+                .iter()
+                .map(|nested| eval_assertion_deterministic_with_metrics(nested, response_text, metrics))
+                .collect();
+            let weight_sum: f32 = results.len() as f32;
+            let score = results.iter().map(|result| result.score).sum::<f32>() / weight_sum;
+            let threshold = options.threshold.unwrap_or(1.0).clamp(0.0, 1.0);
+            let pass = score >= threshold;
+            let detail = format!("{}/{} nested assertions passed; threshold {threshold:.3}", results.iter().filter(|result| result.pass).count(), results.len());
+            return apply_assertion_options(AssertionResult {
+                kind: "assert_set".to_owned(),
+                pass,
+                score,
+                detail,
+                executed: results.iter().all(|result| result.executed),
+            }, options);
+        }
         Assertion::IsHtml { .. } => {
             let trimmed = response_text.trim();
-            let pass = Regex::new(r"(?is)<[a-z][^>]*>.*</[a-z][^>]*>")
-                .is_ok_and(|re| re.is_match(trimmed));
+            let pass = is_html_like(trimmed);
             let detail = if pass {
                 "HTML-like document"
             } else {
@@ -1175,8 +1570,7 @@ pub fn eval_assertion_deterministic(assertion: &Assertion, response_text: &str) 
         }
         Assertion::IsXml { .. } => {
             let trimmed = response_text.trim();
-            let pass = Regex::new(r"(?s)^<[A-Za-z_][\w:.-]*(?:\s[^>]*)?>.*</[A-Za-z_][\w:.-]*>$")
-                .is_ok_and(|re| re.is_match(trimmed));
+            let pass = is_xml_like(trimmed);
             let detail = if pass {
                 "XML-like document"
             } else {
@@ -1185,12 +1579,7 @@ pub fn eval_assertion_deterministic(assertion: &Assertion, response_text: &str) 
             ("is_xml", pass, detail.to_owned())
         }
         Assertion::IsSql { .. } => {
-            let upper = response_text.trim_start().to_uppercase();
-            let pass = [
-                "SELECT ", "INSERT ", "UPDATE ", "DELETE ", "WITH ", "CREATE ", "ALTER ", "DROP ",
-            ]
-            .iter()
-            .any(|prefix| upper.starts_with(prefix));
+            let pass = is_sql_like(response_text);
             let detail = if pass {
                 "SQL-like statement"
             } else {
@@ -1264,6 +1653,7 @@ pub fn eval_assertion_deterministic(assertion: &Assertion, response_text: &str) 
         }
         Assertion::LlmJudge { .. }
         | Assertion::LlmRubric { .. }
+        | Assertion::Similar { .. }
         | Assertion::Factuality { .. }
         | Assertion::ContextFaithfulness { .. }
         | Assertion::AnswerRelevance { .. } => {
@@ -1271,6 +1661,8 @@ pub fn eval_assertion_deterministic(assertion: &Assertion, response_text: &str) 
             // this defensive guard must never silently pass.
             let kind = if matches!(assertion, Assertion::LlmRubric { .. }) {
                 "llm_rubric"
+            } else if matches!(assertion, Assertion::Similar { .. }) {
+                "similar"
             } else if matches!(assertion, Assertion::Factuality { .. }) {
                 "factuality"
             } else if matches!(assertion, Assertion::ContextFaithfulness { .. }) {
@@ -1289,12 +1681,69 @@ pub fn eval_assertion_deterministic(assertion: &Assertion, response_text: &str) 
     };
 
     let score = if pass { 1.0 } else { 0.0 };
-    AssertionResult {
+    apply_assertion_options(AssertionResult {
         kind: kind.to_string(),
         pass,
         score,
         detail,
+        executed: !matches!(
+            assertion,
+            Assertion::Javascript { .. }
+                | Assertion::Python { .. }
+                | Assertion::Ruby { .. }
+                | Assertion::Webhook { .. }
+                | Assertion::LlmJudge { .. }
+                | Assertion::LlmRubric { .. }
+                | Assertion::Similar { .. }
+                | Assertion::Factuality { .. }
+                | Assertion::ContextFaithfulness { .. }
+                | Assertion::AnswerRelevance { .. }
+        ),
+    }, assertion_options(assertion))
+}
+
+fn is_html_like(value: &str) -> bool {
+    Regex::new(r"(?is)<[a-z][^>]*>.*</[a-z][^>]*>").is_ok_and(|regex| regex.is_match(value.trim()))
+}
+
+fn is_xml_like(value: &str) -> bool {
+    Regex::new(r"(?s)^<[A-Za-z_][\w:.-]*(?:\s[^>]*)?>.*</[A-Za-z_][\w:.-]*>$")
+        .is_ok_and(|regex| regex.is_match(value.trim()))
+}
+
+fn is_sql_like(value: &str) -> bool {
+    let upper = value.trim_start().to_uppercase();
+    [
+        "SELECT ", "INSERT ", "UPDATE ", "DELETE ", "WITH ", "CREATE ", "ALTER ", "DROP ",
+    ]
+    .iter()
+    .any(|prefix| upper.starts_with(prefix))
+}
+
+fn normalized_levenshtein(left: &str, right: &str) -> f32 {
+    let left: Vec<char> = left.chars().collect();
+    let right: Vec<char> = right.chars().collect();
+    if left.is_empty() && right.is_empty() {
+        return 1.0;
     }
+    if left.is_empty() || right.is_empty() {
+        return 0.0;
+    }
+    let mut previous: Vec<usize> = (0..=right.len()).collect();
+    for (left_index, left_char) in left.iter().enumerate() {
+        let mut current = vec![left_index + 1; right.len() + 1];
+        for (right_index, right_char) in right.iter().enumerate() {
+            current[right_index + 1] = if left_char == right_char {
+                previous[right_index]
+            } else {
+                1 + previous[right_index]
+                    .min(previous[right_index + 1])
+                    .min(current[right_index])
+            };
+        }
+        previous = current;
+    }
+    1.0 - previous[right.len()] as f32 / left.len().max(right.len()) as f32
 }
 
 fn comma_values(value: &str) -> Vec<&str> {
@@ -1306,6 +1755,9 @@ fn comma_values(value: &str) -> Vec<&str> {
 }
 /// Build the judge prompt embedding the rubric + the model output under test.
 pub fn build_judge_prompt(rubric: &str, output: &str) -> String {
+    const MAX_JUDGE_TEXT_CHARS: usize = 16_384;
+    let rubric = truncate_chars(rubric, MAX_JUDGE_TEXT_CHARS);
+    let output = truncate_chars(output, MAX_JUDGE_TEXT_CHARS);
     format!(
         "You are an evaluation judge. Rubric:\n{rubric}\n\nOutput under test:\n\"\"\"\n{output}\n\"\"\"\n\nReply on one line: VERDICT: PASS or FAIL, then SCORE: <0..1>. Example: 'VERDICT: PASS SCORE: 0.9'."
     )
@@ -1357,6 +1809,10 @@ pub fn aggregate_scores(cases: &[CaseScore]) -> EvalRunAggregate {
             policy_pass_rate: 0.0,
             mean_substring_match: None,
             total_cases: 0,
+            total_input_tokens: 0,
+            total_output_tokens: 0,
+            total_cost_micro_usd: Some(0),
+            assertion_pass_rate: 0.0,
             evaluators: std::collections::HashMap::new(),
         };
     }
@@ -1374,6 +1830,16 @@ pub fn aggregate_scores(cases: &[CaseScore]) -> EvalRunAggregate {
         Some(substring_cases.iter().sum::<f32>() / substring_cases.len() as f32)
     };
 
+    let total_input_tokens = cases.iter().map(|case| case.input_tokens).sum();
+    let total_output_tokens = cases.iter().map(|case| case.output_tokens).sum();
+    let priced_cases: Vec<u64> = cases.iter().filter_map(|case| case.cost_micro_usd).collect();
+    let total_cost_micro_usd = (priced_cases.len() == cases.len()).then(|| priced_cases.iter().sum());
+    let assertion_pass_rate = cases
+        .iter()
+        .filter(|case| case.assertions_pass)
+        .count() as f32
+        / nf;
+
     let evaluators = aggregate_evaluators(cases);
 
     EvalRunAggregate {
@@ -1383,6 +1849,10 @@ pub fn aggregate_scores(cases: &[CaseScore]) -> EvalRunAggregate {
         policy_pass_rate,
         mean_substring_match,
         total_cases: n,
+        total_input_tokens,
+        total_output_tokens,
+        total_cost_micro_usd,
+        assertion_pass_rate,
         evaluators,
     }
 }
@@ -1480,6 +1950,7 @@ pub fn builtin_dataset() -> Vec<EvalCase> {
             vars: std::collections::HashMap::new(),
             assertions: Vec::new(),
             evaluators: Vec::new(),
+            ..Default::default()
         },
         EvalCase {
             prompt: "What is 2 + 2? Answer with just the number.".to_string(),
@@ -1489,6 +1960,7 @@ pub fn builtin_dataset() -> Vec<EvalCase> {
             vars: std::collections::HashMap::new(),
             assertions: Vec::new(),
             evaluators: Vec::new(),
+            ..Default::default()
         },
         EvalCase {
             prompt: "Name one primary color.".to_string(),
@@ -1498,6 +1970,7 @@ pub fn builtin_dataset() -> Vec<EvalCase> {
             vars: std::collections::HashMap::new(),
             assertions: Vec::new(),
             evaluators: Vec::new(),
+            ..Default::default()
         },
     ]
 }
@@ -1612,6 +2085,7 @@ mod tests {
             vars: std::collections::HashMap::new(),
             assertions: Vec::new(),
             evaluators: Vec::new(),
+            ..Default::default()
         };
         let resp = make_response(10, 5, "pong");
         let score = score_case(&case, &resp, 500, true, 10_000);
@@ -1630,6 +2104,7 @@ mod tests {
             vars: std::collections::HashMap::new(),
             assertions: Vec::new(),
             evaluators: Vec::new(),
+            ..Default::default()
         };
         let resp = make_response(5, 3, "Hello there!");
         let score = score_case(&case, &resp, 200, true, 10_000);
@@ -1647,6 +2122,7 @@ mod tests {
             vars: std::collections::HashMap::new(),
             assertions: Vec::new(),
             evaluators: Vec::new(),
+            ..Default::default()
         };
         let resp = make_response(5, 3, "Goodbye!");
         let score = score_case(&case, &resp, 200, true, 10_000);
@@ -1654,7 +2130,7 @@ mod tests {
     }
 
     #[test]
-    fn aggregate_three_cases_produces_valid_summary() {
+	fn aggregate_three_cases_produces_valid_summary() {
         let cases = vec![
             EvalCase {
                 prompt: "Say hello".to_string(),
@@ -1664,6 +2140,7 @@ mod tests {
                 vars: std::collections::HashMap::new(),
                 assertions: Vec::new(),
                 evaluators: Vec::new(),
+                ..Default::default()
             },
             EvalCase {
                 prompt: "What is 2+2?".to_string(),
@@ -1673,6 +2150,7 @@ mod tests {
                 vars: std::collections::HashMap::new(),
                 assertions: Vec::new(),
                 evaluators: Vec::new(),
+                ..Default::default()
             },
             EvalCase {
                 prompt: "Name a color.".to_string(),
@@ -1682,6 +2160,7 @@ mod tests {
                 vars: std::collections::HashMap::new(),
                 assertions: Vec::new(),
                 evaluators: Vec::new(),
+                ..Default::default()
             },
         ];
         let responses = vec![
@@ -1703,7 +2182,98 @@ mod tests {
         assert!((agg.policy_pass_rate - 1.0).abs() < 1e-3);
         // Two cases had `expected`, so mean_substring_match should be Some.
         assert!(agg.mean_substring_match.is_some());
-    }
+	}
+
+	#[test]
+	fn extended_promptfoo_assertions_use_safe_metrics_and_nested_sets() {
+		let metrics = AssertionMetrics {
+			latency_ms: Some(120),
+			cost_micro_usd: Some(2500),
+		};
+		let html = Assertion::ContainsHtml {
+			value: "<p>hello</p>".to_owned(),
+			options: AssertionOptions::default(),
+		};
+		assert!(eval_assertion_deterministic_with_metrics(
+			&html,
+			"<main><p>hello</p></main>",
+			metrics
+		)
+		.pass);
+		let similarity = Assertion::Levenshtein {
+			value: "hello".to_owned(),
+			options: AssertionOptions {
+				threshold: Some(0.8),
+				..Default::default()
+			},
+		};
+		assert!(eval_assertion_deterministic(&similarity, "hello").pass);
+		let latency = Assertion::Latency {
+			value: "200".to_owned(),
+			options: AssertionOptions::default(),
+		};
+		assert!(eval_assertion_deterministic_with_metrics(
+			&latency, "ignored", metrics
+		)
+		.pass);
+		let cost = Assertion::Cost {
+			value: "0.003".to_owned(),
+			options: AssertionOptions::default(),
+		};
+		assert!(eval_assertion_deterministic_with_metrics(&cost, "ignored", metrics).pass);
+		let nested = Assertion::AssertSet {
+			assertions: vec![
+				Assertion::Contains {
+					value: "hello".to_owned(),
+					options: AssertionOptions::default(),
+				},
+				Assertion::NotContains {
+					value: "goodbye".to_owned(),
+					options: AssertionOptions::default(),
+				},
+			],
+			options: AssertionOptions::default(),
+		};
+		assert!(eval_assertion_deterministic(&nested, "hello").pass);
+		let negated = Assertion::Contains {
+			value: "hello".to_owned(),
+			options: AssertionOptions {
+				not: Some(true),
+				..Default::default()
+			},
+		};
+		let negated_result = eval_assertion_deterministic(&negated, "hello");
+		assert!(!negated_result.pass);
+		assert_eq!(negated_result.score, 0.0);
+		assert!(negated_result.executed);
+		let missing_latency = Assertion::Latency {
+			value: "200".to_owned(),
+			options: AssertionOptions::default(),
+		};
+		let missing_latency_result =
+			eval_assertion_deterministic(&missing_latency, "ignored");
+		assert!(!missing_latency_result.executed);
+	}
+
+	#[test]
+	fn oversized_levenshtein_inputs_are_skipped_before_quadratic_work() {
+		let assertion = Assertion::Levenshtein {
+			value: "x".repeat(2_049),
+			options: AssertionOptions::default(),
+		};
+		let result = eval_assertion_deterministic(&assertion, "x");
+		assert!(!result.executed);
+		assert!(result.detail.contains("limited to 2048"));
+	}
+
+	#[test]
+	fn judge_prompt_truncates_untrusted_text() {
+		let prompt = build_judge_prompt(&"r".repeat(20_000), &"o".repeat(20_000));
+		assert!(prompt.contains(&"r".repeat(16_384)));
+		assert!(!prompt.contains(&"r".repeat(16_385)));
+		assert!(prompt.contains(&"o".repeat(16_384)));
+		assert!(!prompt.contains(&"o".repeat(16_385)));
+	}
 
     #[test]
     fn aggregate_no_expected_cases_returns_none_substring() {
@@ -1715,6 +2285,7 @@ mod tests {
             vars: std::collections::HashMap::new(),
             assertions: Vec::new(),
             evaluators: Vec::new(),
+            ..Default::default()
         }];
         let responses = vec![make_response(5, 3, "pong")];
         let scored: Vec<CaseScore> = cases

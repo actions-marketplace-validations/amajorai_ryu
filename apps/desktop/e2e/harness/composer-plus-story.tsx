@@ -113,6 +113,16 @@ function Story() {
 							],
 						},
 					}}
+					workspaceBar={
+						<div
+							className="flex min-w-0 items-center gap-1 text-muted-foreground text-xs"
+							data-testid="workspace-bar"
+						>
+							<span className="font-medium text-foreground">ryu</span>
+							<span aria-hidden="true">›</span>
+							<span className="truncate">codex/simple-ui</span>
+						</div>
+					}
 				/>
 			</section>
 
@@ -233,7 +243,15 @@ function Story() {
 					onAttach={() => setAttachCount((n) => n + 1)}
 					onSend={noop}
 					onStop={noop}
+					placeholderSuggestion="Review the shared chat"
 					status="ready"
+					suggestions={[
+						{
+							id: "review-shared-chat",
+							label: "Review the shared chat",
+							value: "Review the shared chat",
+						},
+					]}
 				/>
 			</section>
 

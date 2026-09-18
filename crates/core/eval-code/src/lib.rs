@@ -102,6 +102,14 @@ pub struct CodeEvaluatorSpec {
     pub lang: String,
     /// The user function source.
     pub source: String,
+    /// Optional target case index used for Promptfoo inline code assertions.
+    /// Run-level custom evaluators leave this unset and score every case.
+    #[serde(default)]
+    pub case_index: Option<usize>,
+    /// Optional target assertion index used when this spec represents an inline
+    /// JavaScript/Python assertion rather than a run-level evaluator.
+    #[serde(default)]
+    pub assertion_index: Option<usize>,
 }
 
 /// Per-case data pulled from the request dataset to enrich the payload with
@@ -110,6 +118,7 @@ pub struct CodeEvaluatorSpec {
 #[derive(Debug, Clone, Default)]
 pub struct CaseInput {
     pub expected: Option<Value>,
+    pub context: Option<Value>,
     pub vars: Value,
 }
 
@@ -118,6 +127,7 @@ impl CaseInput {
     pub fn from_case(v: &Value) -> Self {
         Self {
             expected: v.get("expected").cloned().filter(|e| !e.is_null()),
+            context: v.get("context").cloned().filter(|e| !e.is_null()),
             vars: v.get("vars").cloned().unwrap_or_else(|| json!({})),
         }
     }
@@ -171,24 +181,54 @@ impl CodeEvalOutcome {
         }
     }
 
-    /// Parse the evaluator's returned `{score, pass?, detail?}` JSON.
+    /// Parse the evaluator's returned Promptfoo-compatible result.
+    ///
+    /// Promptfoo accepts a boolean, numeric score, or grading-result object;
+    /// accepting all three here keeps imported `javascript`/`python` assertions
+    /// executable instead of forcing users to rewrite the common
+    /// `output.includes(...)` form into a Ryu-specific object.
     fn from_return(v: &Value) -> Self {
-        let Some(obj) = v.as_object() else {
-            return Self::failed("evaluator did not return an object with a numeric 'score'");
+        let (score, pass, detail) = match v {
+            Value::Bool(pass) => {
+                let score = if *pass { 1.0 } else { 0.0 };
+                (score, *pass, String::new())
+            }
+            Value::Number(number) => match number.as_f64() {
+                Some(score) if score.is_finite() => {
+                    let score = (score as f32).clamp(0.0, 1.0);
+                    (score, score >= 0.5, String::new())
+                }
+                _ => {
+                    return Self::failed("evaluator return is not a finite numeric score")
+                }
+            },
+            Value::Object(obj) => {
+                let score = match obj.get("score").and_then(Value::as_f64) {
+                    Some(score) if score.is_finite() => (score as f32).clamp(0.0, 1.0),
+                    _ => {
+                        return Self::failed(
+                            "evaluator return is missing a finite numeric 'score'",
+                        )
+                    }
+                };
+                let pass = obj
+                    .get("pass")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(score >= 0.5);
+                let detail = obj
+                    .get("detail")
+                    .or_else(|| obj.get("reason"))
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_owned();
+                (score, pass, detail)
+            }
+            _ => {
+                return Self::failed(
+                    "evaluator must return a boolean, number, or object with a numeric 'score'",
+                )
+            }
         };
-        let score = match obj.get("score").and_then(Value::as_f64) {
-            Some(s) if s.is_finite() => (s as f32).clamp(0.0, 1.0),
-            _ => return Self::failed("evaluator return is missing a finite numeric 'score'"),
-        };
-        let pass = obj
-            .get("pass")
-            .and_then(Value::as_bool)
-            .unwrap_or(score >= 0.5);
-        let detail = obj
-            .get("detail")
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .to_owned();
         Self {
             score: Some(score),
             pass: Some(pass),
@@ -230,7 +270,8 @@ impl CodeEvalOutcome {
 }
 
 /// Run one code evaluator against one `payload` (`{input, output, expected,
-/// vars}`), bounded by `timeout`. Never panics; never hangs past `timeout`.
+/// vars, context}`), bounded by `timeout`. Never panics; never hangs past
+/// `timeout`.
 pub async fn run_code_evaluator(
     lang: CodeEvalLang,
     source: &str,
@@ -389,8 +430,9 @@ async fn run_python(source: &str, payload: &Value, timeout: Duration) -> CodeEva
 }
 
 /// Wrap the user python: read the payload JSON from stdin, bind `ctx` +
-/// `input`/`output`/`expected`/`vars`, then run the user source. Per the
-/// contract the user code `print(json.dumps({...}))` its `{score,pass?,detail?}`.
+/// `input`/`output`/`expected`/`vars`/`context`, then run the user source.
+/// Promptfoo-compatible sources may print a JSON boolean, number, or grading
+/// result object.
 fn build_python_script(user_source: &str) -> String {
     // The preamble is fixed and indentation-free; the user source runs at module
     // level (no added indentation, so pasted code keeps its own structure).
@@ -402,6 +444,8 @@ fn build_python_script(user_source: &str) -> String {
          output = _payload.get(\"output\")\n\
          expected = _payload.get(\"expected\")\n\
          vars = _payload.get(\"vars\") or {{}}\n\
+         context = _payload\n\
+         metadata = _payload.get(\"metadata\") or {{}}\n\
          # ---- user evaluator source ----\n\
          {user}\n",
         user = user_source
@@ -465,8 +509,9 @@ async fn run_python_subprocess(script: &str, payload: &[u8], timeout: Duration) 
     }
 }
 
-/// Parse python output: the LAST stdout line that JSON-parses to an object with a
-/// `score`. On none, fail with a stderr snippet so the reason is legible.
+/// Parse python output: the LAST stdout line that JSON-parses to a Promptfoo
+/// boolean, number, or grading-result object. On none, fail with a stderr
+/// snippet so the reason is legible.
 fn outcome_from_python(exit_code: i32, stdout: &[u8], stderr: &[u8]) -> CodeEvalOutcome {
     let stdout_s = String::from_utf8_lossy(stdout);
     for line in stdout_s.lines().rev() {
@@ -475,7 +520,7 @@ fn outcome_from_python(exit_code: i32, stdout: &[u8], stderr: &[u8]) -> CodeEval
             continue;
         }
         if let Ok(v) = serde_json::from_str::<Value>(t) {
-            if v.get("score").is_some() {
+            if v.is_boolean() || v.is_number() || v.get("score").is_some() {
                 return CodeEvalOutcome::from_return(&v);
             }
         }
@@ -568,6 +613,105 @@ pub async fn merge_code_evaluators(
     }
 }
 
+/// Execute Core-owned inline JavaScript/Python assertions and replace the
+/// Gateway's defensive `executed:false` assertion result in place. The same
+/// bounded runner and evaluator payload are used as run-level code evaluators;
+/// `case_index`/`assertion_index` keep a per-case assertion from being applied
+/// to unrelated cases.
+pub async fn merge_inline_code_assertions(
+    response: &mut Value,
+    dataset: &[CaseInput],
+    specs: &[CodeEvaluatorSpec],
+) {
+    if specs.is_empty() {
+        return;
+    }
+    merge_code_evaluators(response, dataset, specs).await;
+    patch_inline_assertions(response, specs);
+}
+
+fn patch_inline_assertions(response: &mut Value, specs: &[CodeEvaluatorSpec]) {
+    if let Some(cases) = response.get_mut("cases").and_then(Value::as_array_mut) {
+        patch_inline_block(cases, specs);
+    }
+    if let Some(models) = response.get_mut("models").and_then(Value::as_array_mut) {
+        for model in models {
+            if let Some(cases) = model.get_mut("cases").and_then(Value::as_array_mut) {
+                patch_inline_block(cases, specs);
+            }
+        }
+    }
+}
+
+fn patch_inline_block(cases: &mut [Value], specs: &[CodeEvaluatorSpec]) {
+    for (case_index, case) in cases.iter_mut().enumerate() {
+        let Some(evaluators) = case.get("evaluators").and_then(Value::as_array).cloned() else {
+            continue;
+        };
+        let mut patched_any = false;
+        {
+            let Some(assertions) = case.get_mut("assertions").and_then(Value::as_array_mut)
+            else {
+                continue;
+            };
+            for spec in specs {
+                if spec.case_index != Some(case_index) {
+                    continue;
+                }
+                let Some(assertion_index) = spec.assertion_index else {
+                    continue;
+                };
+                let Some(score) = evaluators.iter().find(|entry| {
+                    entry.get("id").and_then(Value::as_str) == Some(spec.id.as_str())
+                }) else {
+                    continue;
+                };
+                let Some(assertion) = assertions.get_mut(assertion_index) else {
+                    continue;
+                };
+                let Some(object) = assertion.as_object_mut() else {
+                    continue;
+                };
+                for field in ["detail", "executed", "pass", "score"] {
+                    if let Some(value) = score.get(field) {
+                        object.insert(field.to_owned(), value.clone());
+                    }
+                }
+                patched_any = true;
+            }
+        }
+        if !patched_any {
+            continue;
+        }
+        let Some(assertions) = case.get("assertions").and_then(Value::as_array) else {
+            continue;
+        };
+        if assertions.is_empty() {
+            continue;
+        }
+        let score = assertions
+            .iter()
+            .map(|assertion| {
+                assertion
+                    .get("score")
+                    .and_then(Value::as_f64)
+                    .unwrap_or(0.0)
+            })
+            .sum::<f64>()
+            / assertions.len() as f64;
+        let pass = assertions
+            .iter()
+            .all(|assertion| {
+                assertion.get("executed").and_then(Value::as_bool) == Some(true)
+                    && assertion.get("pass").and_then(Value::as_bool) == Some(true)
+            });
+        if let Some(object) = case.as_object_mut() {
+            object.insert("assertion_score".to_owned(), Value::from(score));
+            object.insert("assertions_pass".to_owned(), Value::Bool(pass));
+        }
+    }
+}
+
 /// Merge specs into one block that carries `cases` (array) + `aggregate` (object).
 async fn merge_block(
     block: &mut Value,
@@ -584,6 +728,9 @@ async fn merge_block(
         for (idx, case) in cases.iter_mut().enumerate() {
             let payload = build_payload(case, dataset.get(idx));
             for spec in specs {
+                if spec.case_index.is_some_and(|target| target != idx) {
+                    continue;
+                }
                 let outcome = if Instant::now() >= budget {
                     CodeEvalOutcome::skipped("code-eval total budget exhausted")
                 } else {
@@ -606,7 +753,7 @@ async fn merge_block(
     reaggregate(block, specs);
 }
 
-/// Build the `{input, output, expected, vars}` payload for one case. `input` +
+/// Build the `{input, output, expected, vars, context}` payload for one case. `input` +
 /// `output` come from the response case (always present); `expected` + `vars`
 /// from the matching request-dataset case when available.
 fn build_payload(response_case: &Value, request_case: Option<&CaseInput>) -> Value {
@@ -618,10 +765,13 @@ fn build_payload(response_case: &Value, request_case: Option<&CaseInput>) -> Val
     let expected = request_case
         .and_then(|c| c.expected.clone())
         .unwrap_or(Value::Null);
+    let context = request_case
+        .and_then(|c| c.context.clone())
+        .unwrap_or(Value::Null);
     let vars = request_case
         .map(|c| c.vars.clone())
         .unwrap_or_else(|| json!({}));
-    json!({ "input": input, "output": output, "expected": expected, "vars": vars })
+    json!({ "input": input, "output": output, "expected": expected, "vars": vars, "context": context })
 }
 
 /// Insert or replace the `EvaluatorScore` for `id` in `case.evaluators`,

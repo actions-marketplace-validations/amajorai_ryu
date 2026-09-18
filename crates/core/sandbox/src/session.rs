@@ -25,7 +25,7 @@
 //! heartbeat's `OnceLock<Mutex<HashMap<..>>>` idiom.
 
 use std::collections::HashMap;
-use std::sync::{Mutex, MutexGuard, OnceLock};
+use std::sync::{atomic::{AtomicUsize, Ordering}, Mutex, MutexGuard, OnceLock};
 use std::time::Instant;
 
 use super::box_backend;
@@ -38,6 +38,26 @@ use super::{build_command_backend, ExecSpec, SandboxBackend, SandboxCapabilities
 /// `RYU_SANDBOX_BACKEND` default is an ephemeral tool backend, so this separate
 /// knob cannot accidentally turn `wasmtime` into a persistent provider.
 pub const ENV_PERSISTENT_BACKEND: &str = "RYU_PERSISTENT_SANDBOX_BACKEND";
+const MAX_LIVE_SANDBOXES: usize = 16;
+static LIVE_COUNT: AtomicUsize = AtomicUsize::new(0);
+
+fn reserve_live_slot() -> anyhow::Result<()> {
+    let mut current = LIVE_COUNT.load(Ordering::Relaxed);
+    loop {
+        if current >= MAX_LIVE_SANDBOXES {
+            anyhow::bail!("persistent sandbox admission limit reached");
+        }
+        match LIVE_COUNT.compare_exchange_weak(
+            current,
+            current + 1,
+            Ordering::AcqRel,
+            Ordering::Relaxed,
+        ) {
+            Ok(_) => return Ok(()),
+            Err(next) => current = next,
+        }
+    }
+}
 
 /// One live, persistent remote workspace tracked by this manager.
 struct LiveSandbox {
@@ -64,6 +84,10 @@ struct LiveSandbox {
     /// Box subscription is already settled by its provider and must not be
     /// charged again from the Ryu wallet.
     metered: bool,
+    /// The agent/session that created the run. Persistent MCP operations must
+    /// present the same binding; HTTP owner-only routes use the legacy unbound
+    /// wrapper and never share that handle with the MCP plane.
+    owner: Option<SandboxOwner>,
 }
 
 fn live() -> &'static Mutex<HashMap<String, LiveSandbox>> {
@@ -86,6 +110,35 @@ pub struct CreatedSandbox {
     pub workspace_id: String,
     /// The remote backend that owns this workspace.
     pub backend: String,
+}
+
+/// Binding carried by the Core MCP dispatcher for one persistent sandbox.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SandboxOwner {
+    pub agent_id: Option<String>,
+    pub session_id: Option<String>,
+}
+
+impl SandboxOwner {
+    pub fn from_context(agent_id: Option<&str>, session_id: Option<&str>) -> anyhow::Result<Self> {
+        let agent_id = agent_id
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned);
+        let session_id = session_id
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned);
+        if agent_id.is_none() && session_id.is_none() {
+            anyhow::bail!(
+                "persistent sandbox operations require a bound agent or conversation session"
+            );
+        }
+        Ok(Self {
+            agent_id,
+            session_id,
+        })
+    }
 }
 
 /// The captured output of one exec against a persistent sandbox.
@@ -116,11 +169,31 @@ pub async fn create_sandbox(
     create_sandbox_with_backend(&backend, spec, budget_micro_usd).await
 }
 
+/// Create a persistent workspace bound to the agent/session that will operate
+/// it through the MCP plane.
+pub async fn create_sandbox_owned(
+    spec: Option<SandboxSpec>,
+    budget_micro_usd: Option<u64>,
+    owner: SandboxOwner,
+) -> anyhow::Result<CreatedSandbox> {
+    let backend = configured_persistent_backend().await?;
+    create_sandbox_with_backend_owned(&backend, spec, budget_micro_usd, Some(owner)).await
+}
+
 /// Create a persistent workspace on an explicit remote backend.
 pub async fn create_sandbox_with_backend(
     backend: &SandboxBackend,
     spec: Option<SandboxSpec>,
     budget_micro_usd: Option<u64>,
+) -> anyhow::Result<CreatedSandbox> {
+    create_sandbox_with_backend_owned(backend, spec, budget_micro_usd, None).await
+}
+
+async fn create_sandbox_with_backend_owned(
+    backend: &SandboxBackend,
+    spec: Option<SandboxSpec>,
+    budget_micro_usd: Option<u64>,
+    owner: Option<SandboxOwner>,
 ) -> anyhow::Result<CreatedSandbox> {
     if !matches!(backend, SandboxBackend::Box | SandboxBackend::Daytona) {
         anyhow::bail!(
@@ -132,11 +205,19 @@ pub async fn create_sandbox_with_backend(
     let subscription_unmetered = matches!(backend, SandboxBackend::Box)
         && box_backend::subscription_passthrough_active().await;
     let sandbox = build_command_backend(backend)?;
+    reserve_live_slot()?;
     // Deny-all caps (network=false) for v1; a token-missing / provider-down error
     // surfaces here as Err. The returned id is the real provider sandbox id.
-    let workspace = sandbox
+    let workspace = match sandbox
         .create_workspace(SandboxCapabilities::default())
-        .await?;
+        .await
+    {
+        Ok(workspace) => workspace,
+        Err(error) => {
+            LIVE_COUNT.fetch_sub(1, Ordering::AcqRel);
+            return Err(error);
+        }
+    };
     let run_id = uuid::Uuid::new_v4().to_string();
     let org_id = crate::host::registered_org_id();
     let budget = match budget_micro_usd {
@@ -168,6 +249,7 @@ pub async fn create_sandbox_with_backend(
             budget_micro_usd: budget,
             created_at: Instant::now(),
             metered,
+            owner,
         },
     );
 
@@ -228,14 +310,41 @@ pub async fn exec_in_sandbox(
     args: Vec<String>,
     timeout_secs: Option<u64>,
 ) -> anyhow::Result<SandboxExecResult> {
+    exec_in_sandbox_internal(run_id, command, args, timeout_secs, None).await
+}
+
+/// Execute a persistent sandbox command only for the creator binding.
+pub async fn exec_in_sandbox_owned(
+    run_id: &str,
+    command: String,
+    args: Vec<String>,
+    timeout_secs: Option<u64>,
+    owner: &SandboxOwner,
+) -> anyhow::Result<SandboxExecResult> {
+    exec_in_sandbox_internal(run_id, command, args, timeout_secs, Some(owner)).await
+}
+
+async fn exec_in_sandbox_internal(
+    run_id: &str,
+    command: String,
+    args: Vec<String>,
+    timeout_secs: Option<u64>,
+    owner: Option<&SandboxOwner>,
+) -> anyhow::Result<SandboxExecResult> {
     // Clone the workspace id out under the guard, then drop it before the I/O.
     let live = {
         lock_live()
             .get(run_id)
-            .map(|live| (live.workspace.clone(), live.backend.clone()))
+            .and_then(|live| {
+                if live.owner.as_ref() == owner {
+                    Some((live.workspace.clone(), live.backend.clone()))
+                } else {
+                    None
+                }
+            })
     };
     let Some((ws, backend)) = live else {
-        anyhow::bail!("no such sandbox run: {run_id}");
+        anyhow::bail!("sandbox run is unknown or owned by another agent/session: {run_id}");
     };
 
     let mut spec = ExecSpec::new(command, args);
@@ -259,13 +368,38 @@ pub async fn exec_in_sandbox(
 /// is always destroyed, but a billable final-debit failure is returned after the
 /// destroy so callers cannot mistake an unaccounted execution for success.
 pub async fn destroy_sandbox(run_id: &str) -> anyhow::Result<()> {
+    destroy_sandbox_internal(run_id, None).await
+}
+
+/// Destroy a persistent sandbox only for the creator binding.
+pub async fn destroy_sandbox_owned(
+    run_id: &str,
+    owner: &SandboxOwner,
+) -> anyhow::Result<()> {
+    destroy_sandbox_internal(run_id, Some(owner)).await
+}
+
+async fn destroy_sandbox_internal(
+    run_id: &str,
+    owner: Option<&SandboxOwner>,
+) -> anyhow::Result<()> {
     // Remove from the live registry first (idempotent).
-    let live = lock_live().remove(run_id);
+    let live = {
+        let mut registry = lock_live();
+        if registry
+            .get(run_id)
+            .is_some_and(|entry| entry.owner.as_ref() != owner)
+        {
+            anyhow::bail!("sandbox run is owned by another agent/session: {run_id}");
+        }
+        registry.remove(run_id)
+    };
     let Some(live) = live else {
         // Absent ⇒ already destroyed (e.g. a budget-kill removed the heartbeat
         // entry and tore down the workspace). Idempotent success.
         return Ok(());
     };
+    LIVE_COUNT.fetch_sub(1, Ordering::AcqRel);
 
     // Deregister for the residual tail. `None` ⇒ the ticker already removed it via
     // a kill verdict (already charged/killed), so there is no tail to bill.
@@ -333,8 +467,21 @@ mod tests {
             let err = exec_in_sandbox(&run_id, "echo".to_owned(), vec!["hi".to_owned()], None)
                 .await
                 .expect_err("unknown run must error");
-            assert!(err.to_string().contains("no such sandbox run"));
+            let message = err.to_string();
+            assert!(message.contains("sandbox run is unknown"), "{message}");
+            assert!(message.contains(&run_id), "{message}");
         });
+    }
+
+    #[test]
+    fn persistent_mcp_owner_requires_agent_or_session_binding() {
+        assert!(SandboxOwner::from_context(None, None).is_err());
+        let owner = SandboxOwner::from_context(Some("agent-a"), Some("session-1"))
+            .expect("bound owner");
+        assert_ne!(
+            owner,
+            SandboxOwner::from_context(Some("agent-b"), Some("session-1")).unwrap()
+        );
     }
 
     #[test]
@@ -352,6 +499,7 @@ mod tests {
                 budget_micro_usd: 0,
                 created_at: Instant::now(),
                 metered: true,
+                owner: None,
             },
         );
         assert!(lock_live().contains_key(&run_id));

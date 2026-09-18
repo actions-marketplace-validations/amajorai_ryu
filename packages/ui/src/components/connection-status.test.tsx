@@ -1,7 +1,22 @@
 import { describe, expect, test } from "bun:test";
 import { renderToStaticMarkup } from "react-dom/server";
 
-import { ConnectionStatusToast } from "./connection-status.tsx";
+import {
+	ConnectionStatusDot,
+	ConnectionStatusToast,
+} from "./connection-status.tsx";
+
+describe("ConnectionStatusDot", () => {
+	test("uses semantic states for online, offline, and checking", () => {
+		for (const state of ["online", "offline", "checking"] as const) {
+			const html = renderToStaticMarkup(
+				<ConnectionStatusDot label={`Node: ${state}`} state={state} />
+			);
+			expect(html).toContain(`data-connection-dot-state="${state}"`);
+			expect(html).toContain(`aria-label="Node: ${state}"`);
+		}
+	});
+});
 
 describe("ConnectionStatusToast", () => {
 	test("does not add shell chrome while online", () => {
@@ -36,7 +51,8 @@ describe("ConnectionStatusToast", () => {
 		);
 		expect(html).toContain("Node offline");
 		expect(html).toContain("Can’t reach Design node");
-		expect(html).toContain(">Retry<");
+		expect(html).toContain('data-slot="connection-status-retry"');
+		expect(html).toContain('aria-label="Retry"');
 	});
 
 	test("renders the brief restored confirmation", () => {

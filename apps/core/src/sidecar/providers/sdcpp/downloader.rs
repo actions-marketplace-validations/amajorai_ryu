@@ -1,7 +1,8 @@
 //! stable-diffusion.cpp downloader: fetches the prebuilt server binary (plus the
 //! `stable-diffusion.dll` it links against) and the default diffusion model(s)
-//! so image generation works right after install. The image default is SDXL
-//! base (multi-file: UNet GGUF + CLIP-L + CLIP-G + VAE); the video default is
+//! so image generation works right after install. The image default is a
+//! stable-diffusion.cpp-compatible SDXL base GGUF plus optional companion
+//! encoders/VAE; the video default is
 //! Wan2.1 T2V 1.3B (multi-file: transformer GGUF + umt5-xxl + VAE), fetched
 //! lazily on first use because it is ~5 GB and GPU-preferred.
 //!
@@ -40,22 +41,27 @@ pub const TARGET_VERSION: &str = "master-700-c2df4e1";
 /// the build-from-source path in [`StableDiffusionDownloader::ensure_binary`].
 #[cfg(target_os = "windows")]
 const PLATFORM_ASSET: &str = "sd-master-c2df4e1-bin-win-avx2-x64.zip";
+#[cfg(target_os = "windows")]
+const PLATFORM_SHA256: &str = "3ae74d9c8c067752ac693f7fa0575b5f650fc5743b762309a960fb8ae99098f9";
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 const PLATFORM_ASSET: &str = "sd-master-c2df4e1-bin-Darwin-macOS-15.7.7-arm64.zip";
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+const PLATFORM_SHA256: &str = "3b5ad55f84f562a7bea83cc06b27b37b717b01db5040fff5b785eff98f51441f";
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 const PLATFORM_ASSET: &str = "sd-master-c2df4e1-bin-Linux-Ubuntu-24.04-x86_64.zip";
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+const PLATFORM_SHA256: &str = "4258a153162d0e786f61bc1996ed1660c014954392bd05e73941538175786966";
 
-/// Default diffusion model: SDXL base, Q8_0-quantized UNet GGUF (~2.8 GB) plus
-/// its standalone CLIP-L / CLIP-G text encoders and VAE. SDXL is the quality
-/// bar Unsloth ships as a baseline and runs on the same engine. It is multi-file
-/// because the canonical single-file SDXL GGUF (second-state) is auth-gated on
-/// Hugging Face; this non-gated mirror publishes the UNet GGUF next to fp16
-/// CLIPs + VAE. `sd-server` loads it with `--clip_l --clip_g --vae`.
-/// A sensible default, not a lock — override with `RYU_SD_MODEL` or install
-/// another diffusion GGUF via the model catalog.
-const DEFAULT_MODEL_FILE: &str = "sdxl_base_1.0_Q8_0.gguf";
-const DEFAULT_MODEL_URL: &str =
-    "https://huggingface.co/HyperX-Sentience/SDXL-GGUF/resolve/main/sdxl_base_1.0_Q8_0.gguf";
+/// Default diffusion model: the Q4_K SDXL base GGUF converted in the
+/// stable-diffusion.cpp tensor layout (~2.8 GB). The previous HyperX artifact
+/// had bare Comfy tensor names that the pinned `sd-server` could not detect and
+/// could return a uniform gray PNG with HTTP 200. This full model is compatible
+/// with both the pinned server and the current upstream binary; the optional
+/// CLIP/VAE companions remain supported for operators who keep them installed.
+/// Override with `RYU_SD_MODEL` or install another diffusion GGUF via the model
+/// catalog.
+const DEFAULT_MODEL_FILE: &str = "sd_xl_base_1.0_0_Q4_K.gguf";
+const DEFAULT_MODEL_URL: &str = "https://huggingface.co/kostakoff/stable-diffusion-xl-base-1.0-GGUF/resolve/main/sd_xl_base_1.0_0_Q4_K.gguf";
 const DEFAULT_CLIP_L_FILE: &str = "sdxl_clip_l.safetensors";
 const DEFAULT_CLIP_L_URL: &str =
     "https://huggingface.co/HyperX-Sentience/SDXL-GGUF/resolve/main/clip/sdxl_clip_l.safetensors";
@@ -65,7 +71,7 @@ const DEFAULT_CLIP_G_URL: &str =
 const DEFAULT_VAE_FILE: &str = "sdxl_vae.safetensors";
 const DEFAULT_VAE_URL: &str =
     "https://huggingface.co/HyperX-Sentience/SDXL-GGUF/resolve/main/vae/sdxl_vae.safetensors";
-const MODEL_STORE_KEY: &str = "sd-model:sdxl-base-1.0-q8_0";
+const MODEL_STORE_KEY: &str = "sd-model:sdxl-base-1.0-q4-k";
 const CLIP_L_STORE_KEY: &str = "sd-model:sdxl-clip-l-fp16";
 const CLIP_G_STORE_KEY: &str = "sd-model:sdxl-clip-g-fp16";
 const VAE_STORE_KEY: &str = "sd-model:sdxl-vae-fp16";
@@ -93,7 +99,11 @@ const VIDEO_VAE_STORE_KEY: &str = "sd-video:wan2.1-vae";
 /// Local stems (GGUF filename minus `.gguf`) of the default image and video
 /// models. These are the values the `local-diffusion-model` preference stores,
 /// and what the spawn side matches against to attach companion files.
-pub const IMAGE_DEFAULT_STEM: &str = "sdxl_base_1.0_Q8_0";
+pub const IMAGE_DEFAULT_STEM: &str = "sd_xl_base_1.0_0_Q4_K";
+/// Preference stem used by the retired HyperX artifact. Existing nodes may
+/// still have it persisted; it is ignored so a corrupt model cannot remain the
+/// active default after the compatible artifact is selected.
+pub const LEGACY_IMAGE_DEFAULT_STEM: &str = "sdxl_base_1.0_Q8_0";
 pub const VIDEO_DEFAULT_STEM: &str = "wan2.1_t2v_1.3b-q8_0";
 
 fn server_binary_path() -> PathBuf {
@@ -206,7 +216,7 @@ impl StableDiffusionDownloader {
                 label: "stable-diffusion.cpp".to_string(),
                 url,
                 dest: archive_dest,
-                sha256: None,
+                sha256: Some(PLATFORM_SHA256.to_string()),
                 version_record: None,
             })
             .await
@@ -290,8 +300,9 @@ impl StableDiffusionDownloader {
         );
     }
 
-    /// Download the default image model into ~/.ryu/models if absent: the SDXL
-    /// UNet GGUF plus its CLIP-L / CLIP-G text encoders and VAE. Honors a
+    /// Download the default image model into ~/.ryu/models if absent: the
+    /// stable-diffusion.cpp-compatible SDXL GGUF plus optional CLIP-L / CLIP-G
+    /// text encoders and VAE. Honors a
     /// `RYU_SD_MODEL` override pointing at an existing file (companions are then
     /// unknown to the engine, so it is spawned with `-m` alone).
     async fn ensure_default_model(
@@ -314,7 +325,7 @@ impl StableDiffusionDownloader {
             downloads,
             crate::downloads::DownloadKind::Media,
             crate::downloads::DownloadRole::ImageModel,
-            "SDXL base (UNet Q8_0)",
+            "SDXL base (Q4_K)",
             DEFAULT_MODEL_URL,
             default_model_path(),
             MODEL_STORE_KEY,
@@ -454,5 +465,29 @@ impl StableDiffusionDownloader {
 impl Default for StableDiffusionDownloader {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[cfg(any(
+        target_os = "windows",
+        all(target_os = "macos", target_arch = "aarch64"),
+        all(target_os = "linux", target_arch = "x86_64")
+    ))]
+    #[test]
+    fn platform_archive_has_a_pinned_sha256() {
+        assert_eq!(super::PLATFORM_SHA256.len(), 64);
+        assert!(super::PLATFORM_SHA256
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn default_image_artifact_is_the_compatible_full_model() {
+        assert_eq!(super::DEFAULT_MODEL_FILE, "sd_xl_base_1.0_0_Q4_K.gguf");
+        assert!(super::DEFAULT_MODEL_URL.contains("kostakoff/stable-diffusion-xl-base-1.0-GGUF"));
+        assert_eq!(super::IMAGE_DEFAULT_STEM, "sd_xl_base_1.0_0_Q4_K");
+        assert_ne!(super::IMAGE_DEFAULT_STEM, super::LEGACY_IMAGE_DEFAULT_STEM);
     }
 }

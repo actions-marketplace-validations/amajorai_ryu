@@ -154,6 +154,8 @@ pub enum PendingAction {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         agent_id: Option<String>,
         conversation_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cwd: Option<String>,
         text: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         model: Option<String>,
@@ -951,6 +953,7 @@ pub async fn execute_app_send_turn(action: &PendingAction) -> anyhow::Result<()>
     let PendingAction::AppSendTurn {
         agent_id,
         conversation_id,
+        cwd,
         text,
         ..
     } = action
@@ -969,7 +972,7 @@ pub async fn execute_app_send_turn(action: &PendingAction) -> anyhow::Result<()>
             agent_id.clone(),
             conversation_id.clone(),
             text.clone(),
-            None,
+            cwd.clone(),
             false,
         )
         .await

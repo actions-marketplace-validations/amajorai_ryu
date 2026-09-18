@@ -315,6 +315,49 @@ export async function getPromptRun(
 	return toRun(json.run);
 }
 
+export async function renamePromptRun(
+	target: ApiTarget,
+	suiteId: string,
+	runId: string,
+	name: string
+): Promise<PromptRunMeta> {
+	const json = await request<{ run: PromptRunMetaWire }>(
+		target,
+		`/api/prompt-suites/${encodeURIComponent(suiteId)}/runs/${encodeURIComponent(runId)}`,
+		{ body: { name }, method: "PUT" }
+	);
+	return toRunMeta(json.run);
+}
+
+export async function deletePromptRun(
+	target: ApiTarget,
+	suiteId: string,
+	runId: string
+): Promise<void> {
+	await request(
+		target,
+		`/api/prompt-suites/${encodeURIComponent(suiteId)}/runs/${encodeURIComponent(runId)}`,
+		{ method: "DELETE" }
+	);
+}
+
+export async function duplicatePromptRun(
+	target: ApiTarget,
+	suiteId: string,
+	runId: string,
+	name?: string
+): Promise<PromptRunMeta> {
+	const json = await request<{ run: PromptRunMetaWire }>(
+		target,
+		`/api/prompt-suites/${encodeURIComponent(suiteId)}/runs/${encodeURIComponent(runId)}/duplicate`,
+		{
+			...(name?.trim() ? { body: { name: name.trim() } } : {}),
+			method: "POST",
+		}
+	);
+	return toRunMeta(json.run);
+}
+
 export async function listPromptReviews(
 	target: ApiTarget,
 	suiteId: string,
@@ -354,4 +397,35 @@ export async function savePromptReview(
 		}
 	);
 	return toReview(json.review);
+}
+
+/** Add a completed Core conversation to a durable Prompt Studio dataset. */
+export async function importPromptTrace(
+	target: ApiTarget,
+	suiteId: string,
+	runId: string
+): Promise<{
+	added: boolean;
+	case: Record<string, unknown>;
+	sourceRunId: string;
+	suite: PromptSuiteRecord;
+	version: PromptSuiteVersionMeta | null;
+}> {
+	const json = await request<{
+		added: boolean;
+		case: Record<string, unknown>;
+		source_run_id: string;
+		suite: PromptSuiteWire;
+		version?: PromptSuiteVersionWire | null;
+	}>(target, `/api/prompt-suites/${encodeURIComponent(suiteId)}/traces`, {
+		body: { run_id: runId },
+		method: "POST",
+	});
+	return {
+		added: json.added,
+		case: json.case,
+		sourceRunId: json.source_run_id,
+		suite: toSuite(json.suite),
+		version: json.version ? toVersion(json.version) : null,
+	};
 }

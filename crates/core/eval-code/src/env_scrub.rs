@@ -20,12 +20,16 @@ const SENSITIVE_MARKERS: [&str; 7] = [
     "CREDENTIAL",
     "AUTH",
 ];
+const SENSITIVE_EXACT: [&str; 1] = ["DATABASE_URL"];
 
 /// Whether an env KEY is secret-like (contains any [`SENSITIVE_MARKERS`] token,
 /// case-insensitive).
 fn is_sensitive_key(key: &str) -> bool {
     let upper = key.to_ascii_uppercase();
-    SENSITIVE_MARKERS.iter().any(|m| upper.contains(m))
+    SENSITIVE_EXACT
+        .iter()
+        .any(|name| upper == *name)
+        || SENSITIVE_MARKERS.iter().any(|m| upper.contains(m))
 }
 
 /// Deny-list scrub: drop every var whose KEY matches (case-insensitive) any of

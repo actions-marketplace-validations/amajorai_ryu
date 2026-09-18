@@ -41,11 +41,13 @@ import { AgentEvalsView } from "@/src/components/agents/AgentEvalsView.tsx";
 import { AgentExecutionPolicyPanel } from "@/src/components/agents/AgentExecutionPolicyPanel.tsx";
 import { AgentImageField } from "@/src/components/agents/AgentImageField.tsx";
 import { AgentLanyardCard } from "@/src/components/agents/AgentLanyardCard.tsx";
+import { AgentObservabilityView } from "@/src/components/agents/AgentObservabilityView.tsx";
 import { AgentPassportPanel } from "@/src/components/agents/AgentPassportPanel.tsx";
 import { AgentRoutinesPanel } from "@/src/components/agents/AgentRoutinesPanel.tsx";
 import { AgentRunHistoryView } from "@/src/components/agents/AgentRunHistoryView.tsx";
 import { AgentSetupComposer } from "@/src/components/agents/AgentSetupComposer.tsx";
 import { AgentSmartRouteOverride } from "@/src/components/agents/AgentSmartRouteOverride.tsx";
+import { AgentVersionHistoryPanel } from "@/src/components/agents/AgentVersionHistoryPanel.tsx";
 import { ClaudeGatewayConfig } from "@/src/components/agents/ClaudeGatewayConfig.tsx";
 import { CodexGatewayConfig } from "@/src/components/agents/CodexGatewayConfig.tsx";
 import { GatewayRoutingConfig } from "@/src/components/agents/GatewayRoutingConfig.tsx";
@@ -60,6 +62,7 @@ import {
 	SettingsCard,
 	SettingsSection,
 } from "@/src/components/settings/shared/settings-items.tsx";
+import type { VersionSource } from "@/src/components/versioning/VersionHistory.tsx";
 import { useEntitlementContext } from "@/src/contexts/entitlement-context.tsx";
 import { useTabSelector } from "@/src/contexts/TabsContext.tsx";
 import { useTitleBar } from "@/src/contexts/TitleBarContext.tsx";
@@ -98,8 +101,12 @@ import {
 	type AgentSafetyProfile,
 	type AgentTools,
 	bumpPatchVersion,
+	createAgentVersion,
 	fetchAgent,
 	fetchAgentTools,
+	getAgentVersionSource,
+	listAgentVersions,
+	restoreAgentVersion,
 	updateAgentPosture,
 } from "@/src/lib/api/agents.ts";
 import { runCatalogScan } from "@/src/lib/api/catalog-scan.ts";
@@ -1124,9 +1131,7 @@ export default function AgentEditPage({
 			if (targetId) {
 				const updated = await update(targetId, input);
 				savedId = updated.id;
-				setExisting((prev) =>
-					prev ? { ...prev, version: updated.version } : prev
-				);
+				setExisting(updated);
 			} else {
 				const created = await create(input);
 				savedId = created.id;
@@ -1362,6 +1367,53 @@ export default function AgentEditPage({
 		},
 		[target]
 	);
+
+	// Complete agent-definition history. Prompt Studio owns prompt-only snapshots;
+	// this source covers the persisted agent record so model, capabilities, safety,
+	// persona, and instructions can be compared and restored together.
+	const agentVersionSource = useMemo<VersionSource | null>(() => {
+		if (isNew || !agentId) {
+			return null;
+		}
+		return {
+			getValue: (versionId) =>
+				getAgentVersionSource(target, agentId, versionId),
+			list: async () =>
+				(await listAgentVersions(target, agentId)).map((version) => ({
+					createdAt: version.createdAt,
+					id: version.id,
+					label: version.label,
+					title: `${version.name} · v${version.version}`,
+				})),
+			restore: (versionId) => restoreAgentVersion(target, agentId, versionId),
+			snapshot: (label) => createAgentVersion(target, agentId, label),
+		};
+	}, [agentId, isNew, target]);
+
+	const handleAgentVersionRestored = useCallback(async () => {
+		if (!agentId) {
+			return;
+		}
+		try {
+			const restored = await fetchAgent(target, agentId);
+			setExisting(restored);
+			capabilitiesHydratedRef.current = false;
+			setHydrated(false);
+			setFormError(null);
+		} catch (error) {
+			setFormError(
+				error instanceof Error
+					? `Version restored, but the editor could not reload: ${error.message}`
+					: "Version restored, but the editor could not reload"
+			);
+		}
+	}, [agentId, target]);
+
+	const currentAgentVersionValue =
+		existing?.source ??
+		(existing
+			? JSON.stringify({ ...existing, source: undefined }, null, 2)
+			: "");
 
 	// Compact snapshot of the current config, fed to the builder's preamble.
 	const agentSnapshot = useMemo(
@@ -1806,6 +1858,18 @@ export default function AgentEditPage({
 					memorySpaceIds={memorySpaceIds}
 					memoryWriteEnabled={memoryWriteEnabled}
 					name={name}
+					observabilityPanel={
+						isNew || !agentId ? null : (
+							<AgentObservabilityView
+								agentId={agentId}
+								defaultModel={agentModel || chatModel || "gpt-4o-mini"}
+								onOpenRun={(conversationId) =>
+									openTab("/chat", { conversationId })
+								}
+								target={target}
+							/>
+						)
+					}
 					onAcpCommandChange={setAcpCommand}
 					onAddMoreAgentProviders={openAgentsCatalog}
 					onAddRule={() => setRules((prev) => [...prev, ""])}
@@ -1929,6 +1993,16 @@ export default function AgentEditPage({
 					triggerError={triggerError}
 					triggerSlug={triggerSlug}
 					triggerSubs={triggerSubs}
+					versionHistoryPanel={
+						agentVersionSource ? (
+							<AgentVersionHistoryPanel
+								currentValue={currentAgentVersionValue}
+								disabled={isLocked}
+								onRestored={handleAgentVersionRestored}
+								source={agentVersionSource}
+							/>
+						) : null
+					}
 					weeklyDay={weeklyDay}
 					weeklyTime={weeklyTime}
 				/>

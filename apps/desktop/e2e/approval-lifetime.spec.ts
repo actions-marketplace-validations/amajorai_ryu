@@ -1,0 +1,75 @@
+import path from "node:path";
+import { expect, type Route, test } from "@playwright/test";
+
+test("account replacement cancels pending snapshots and unmount closes the stream", async ({
+	page,
+}) => {
+	const pending: Route[] = [];
+	const streams: Route[] = [];
+	let failedReads = 0;
+	let failedStreams = 0;
+	page.on("requestfailed", (request) => {
+		if (request.url().endsWith("/pending")) {
+			failedReads += 1;
+		}
+		if (request.url().endsWith("/stream")) {
+			failedStreams += 1;
+		}
+	});
+	await page.route("**/api/login-approvals/pending", (route) => {
+		pending.push(route);
+	});
+	await page.route("**/api/login-approvals/stream", (route) => {
+		streams.push(route);
+	});
+	await page.goto("/approval-lifetime-proof.html");
+	await expect.poll(() => pending.length).toBe(1);
+	await page
+		.getByRole("button", { name: "Switch fixture account", exact: true })
+		.click();
+	await expect.poll(() => pending.length).toBe(2);
+	await expect.poll(() => failedReads).toBe(1);
+	expect(streams).toHaveLength(0);
+	await pending[1].fulfill({ json: { requests: [] } });
+	await expect.poll(() => streams.length).toBe(1);
+	await page
+		.getByRole("button", { name: "Unmount listener", exact: true })
+		.click();
+	await expect.poll(() => failedStreams).toBe(1);
+	await page
+		.getByRole("button", { name: "Mount listener", exact: true })
+		.click();
+	await expect.poll(() => pending.length).toBe(3);
+	await pending[2].fulfill({
+		json: {
+			requests: [
+				{
+					clientId: "ryu-desktop",
+					createdAt: "2026-09-13T00:00:00.000Z",
+					deviceLabel: "Performance fixture device",
+					expiresAt: "2099-01-01T00:00:00.000Z",
+					id: "fixture-approval",
+					ipAddress: null,
+					status: "pending",
+					surface: "desktop",
+					userAgent: "Performance test",
+					userCode: "ABCD2345",
+				},
+			],
+		},
+	});
+	await expect(page.getByRole("dialog")).toBeVisible();
+	await expect(
+		page.getByText("Performance fixture device", { exact: true })
+	).toBeVisible();
+	await expect.poll(() => streams.length).toBe(2);
+	await page.screenshot({
+		path: path.resolve(
+			import.meta.dirname,
+			"../../../docs/proof/performance-sweep/approval-lifetime-completed.png"
+		),
+		fullPage: true,
+		animations: "disabled",
+	});
+	expect(pending).toHaveLength(3);
+});

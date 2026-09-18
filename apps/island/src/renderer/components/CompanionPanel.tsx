@@ -11,7 +11,7 @@
 // bounds; switching back to chat hands height control back to the chat (which sizes
 // to its own history).
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import type { PluginView } from "../../shared/ipc.ts";
 import { usePluginContributions } from "../hooks/use-plugin-contributions.ts";
 import { IslandPluginHost } from "../host/IslandPluginHost.tsx";
@@ -32,11 +32,19 @@ function viewTabId(view: PluginView): string {
 export function CompanionPanel() {
 	const { companions, views } = usePluginContributions();
 	// Only companions that actually carry a runnable UI are tabbable.
-	const uiCompanions = companions.filter((c) => c.hasUi);
+	const uiCompanions = useMemo(
+		() => companions.filter((c) => c.hasUi),
+		[companions]
+	);
 	// Only views with a renderable spec and a known owning plugin (the tab key needs
 	// it) are tabbable — mirrors the desktop `usePluginContributionRoutes` filter.
-	const renderableViews = views.filter(
-		(v) => v.spec != null && typeof v.plugin === "string" && v.plugin.length > 0
+	const renderableViews = useMemo(
+		() =>
+			views.filter(
+				(v) =>
+					v.spec != null && typeof v.plugin === "string" && v.plugin.length > 0
+			),
+		[views]
 	);
 	const [active, setActive] = useState<string>(CHAT_TAB);
 	const setExpandedTall = useIslandState((store) => store.setExpandedTall);
@@ -103,7 +111,10 @@ export function CompanionPanel() {
 					// Fill the height-bounded expanded panel (like IslandChat does) so the
 					// host's `h-full` iframe has real bounds instead of collapsing to 0.
 					<div className="h-full w-full overflow-hidden rounded-lg border border-border">
-						<IslandPluginHost companion={activeCompanion} />
+						<IslandPluginHost
+							companion={activeCompanion}
+							key={`${activeCompanion.pluginId}:${activeCompanion.id}`}
+						/>
 					</div>
 				) : activeView ? (
 					// Host-rendered: the app returned DATA (a `ViewSpec`), the island owns

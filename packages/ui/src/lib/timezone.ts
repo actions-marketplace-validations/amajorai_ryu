@@ -27,6 +27,15 @@ import { useSyncExternalStore } from "react";
 /** localStorage key holding `"system"` or an IANA zone id. */
 export const TIMEZONE_KEY = "ryu:timezone";
 
+/** Host-projected effective IANA zone for null-origin Companion documents. */
+export const TIMEZONE_TOKEN = "--ryu-timezone";
+
+/** Host-projected locale used for the same date/time display conventions. */
+export const LOCALE_TOKEN = "--ryu-locale";
+
+/** Same-document signal used by preference writers that cannot rely on storage events. */
+export const TIMEZONE_CHANGE_EVENT = "ryu:timezone-change";
+
 /** Default: follow the machine's zone. */
 export const DEFAULT_TIMEZONE = "system";
 
@@ -37,16 +46,75 @@ const listeners = new Set<() => void>();
 
 let cached: string | null = null;
 
+function storedTimezone(): string | null {
+	try {
+		return localStorage.getItem(TIMEZONE_KEY);
+	} catch {
+		return null;
+	}
+}
+
+function documentToken(name: string): string | null {
+	if (typeof document === "undefined") {
+		return null;
+	}
+	try {
+		const value = getComputedStyle(document.documentElement)
+			.getPropertyValue(name)
+			.trim();
+		return value.length > 0 ? value : null;
+	} catch {
+		return null;
+	}
+}
+
+function hostedTimezone(): string | null {
+	const value = documentToken(TIMEZONE_TOKEN);
+	return value && value !== SYSTEM_TIMEZONE ? value : null;
+}
+
+function embeddedDocument(): boolean {
+	return typeof window !== "undefined" && window.parent !== window;
+}
+
+function effectiveTimezoneToken(preference: string): string {
+	if (preference !== SYSTEM_TIMEZONE) {
+		return preference;
+	}
+	return systemTimeZone();
+}
+
+/** Mirror the current effective zone onto the local root for bridge observers. */
+function syncDocumentTimezoneToken(preference?: string): void {
+	if (typeof document === "undefined") {
+		return;
+	}
+	const value = preference ?? storedTimezone() ?? DEFAULT_TIMEZONE;
+	try {
+		document.documentElement.style.setProperty(
+			TIMEZONE_TOKEN,
+			effectiveTimezoneToken(value)
+		);
+	} catch {
+		// DOM projection is best-effort; the local preference remains authoritative.
+	}
+}
+
 /** The stored preference: `"system"` or an IANA zone id. */
 export function getTimezonePreference(): string {
+	const stored = storedTimezone();
+	const host = hostedTimezone();
+	// Desktop keeps the user-facing `"system"` sentinel in its own localStorage,
+	// while Island and null-origin frames have no local preference store. Prefer
+	// the host projection in those isolated documents without changing Desktop's
+	// picker value from `"system"` to the machine's resolved IANA zone.
+	if (host && (embeddedDocument() || stored === null)) {
+		return host;
+	}
 	if (cached !== null) {
 		return cached;
 	}
-	try {
-		cached = localStorage.getItem(TIMEZONE_KEY) || DEFAULT_TIMEZONE;
-	} catch {
-		cached = DEFAULT_TIMEZONE;
-	}
+	cached = stored || DEFAULT_TIMEZONE;
 	return cached;
 }
 
@@ -76,17 +144,37 @@ export function effectiveTimeZone(): string {
 /** Subscribe to preference changes (including from a second desktop window). */
 export function subscribeTimezone(cb: () => void): () => void {
 	listeners.add(cb);
+	let last = getTimezonePreference();
+	const notifyIfChanged = () => {
+		const next = getTimezonePreference();
+		if (next === last) {
+			return;
+		}
+		last = next;
+		formatterCache.clear();
+		cb();
+	};
 	const onStorage = (e: StorageEvent) => {
 		if (e.key === TIMEZONE_KEY) {
 			cached = null;
-			formatterCache.clear();
-			cb();
+			syncDocumentTimezoneToken(storedTimezone() ?? DEFAULT_TIMEZONE);
+			notifyIfChanged();
+			window.dispatchEvent(new Event(TIMEZONE_CHANGE_EVENT));
 		}
 	};
 	window.addEventListener("storage", onStorage);
+	const observer =
+		typeof document !== "undefined" && typeof MutationObserver !== "undefined"
+			? new MutationObserver(notifyIfChanged)
+			: null;
+	observer?.observe(document.documentElement, {
+		attributes: true,
+		attributeFilter: ["style"],
+	});
 	return () => {
 		listeners.delete(cb);
 		window.removeEventListener("storage", onStorage);
+		observer?.disconnect();
 	};
 }
 
@@ -98,9 +186,13 @@ export function setTimezonePreference(value: string): void {
 	} catch {
 		// Non-fatal: persistence is best-effort.
 	}
+	syncDocumentTimezoneToken(value);
 	formatterCache.clear();
 	for (const cb of listeners) {
 		cb();
+	}
+	if (typeof window !== "undefined") {
+		window.dispatchEvent(new Event(TIMEZONE_CHANGE_EVENT));
 	}
 }
 
@@ -143,17 +235,22 @@ export type DateLike = Date | number | string;
 const formatterCache = new Map<string, Intl.DateTimeFormat>();
 
 function formatterFor(
-	options: Intl.DateTimeFormatOptions
+	options: Intl.DateTimeFormatOptions,
+	timeZone = resolveTimeZone()
 ): Intl.DateTimeFormat {
-	const timeZone = resolveTimeZone();
-	const key = `${timeZone ?? ""}|${JSON.stringify(options)}`;
+	const rawLocale = documentToken(LOCALE_TOKEN);
+	const locale = rawLocale && rawLocale !== "system" ? rawLocale : undefined;
+	const key = `${locale ?? ""}|${timeZone ?? ""}|${JSON.stringify(options)}`;
 	const hit = formatterCache.get(key);
 	if (hit) {
 		return hit;
 	}
 	// `undefined` locale = the user's locale, matching the `toLocale*String`
 	// calls this replaces.
-	const made = new Intl.DateTimeFormat(undefined, { ...options, timeZone });
+	const made = new Intl.DateTimeFormat(locale ?? undefined, {
+		...options,
+		timeZone,
+	});
 	formatterCache.set(key, made);
 	return made;
 }
@@ -163,18 +260,30 @@ function toDate(value: DateLike): Date | null {
 	return Number.isNaN(date.getTime()) ? null : date;
 }
 
-function format(value: DateLike, options: Intl.DateTimeFormatOptions): string {
+function formatInZone(
+	value: DateLike,
+	options: Intl.DateTimeFormatOptions,
+	timeZone: string | undefined
+): string {
 	const date = toDate(value);
 	if (!date) {
 		return "";
 	}
 	try {
-		return formatterFor(options).format(date);
+		return formatterFor(options, timeZone).format(date);
 	} catch {
 		// An unsupported zone id (stale preference, exotic runtime) must never
 		// blank a timestamp — fall back to the machine's zone.
-		return date.toLocaleString(undefined, options);
+		try {
+			return new Intl.DateTimeFormat(undefined, options).format(date);
+		} catch {
+			return new Intl.DateTimeFormat(undefined).format(date);
+		}
 	}
+}
+
+function format(value: DateLike, options: Intl.DateTimeFormatOptions): string {
+	return formatInZone(value, options, resolveTimeZone());
 }
 
 /** Date only, in the display zone. Drop-in for `toLocaleDateString`. */
@@ -182,6 +291,11 @@ export function formatDate(
 	value: DateLike,
 	options: Intl.DateTimeFormatOptions = { dateStyle: "medium" }
 ): string {
+	// Date-only fields are calendar values, not instants. Anchor them at noon UTC
+	// and format in UTC so a display zone cannot move `2026-01-15` to the prior day.
+	if (typeof value === "string" && /^\d{4}-\d{2}-\d{2}$/.test(value)) {
+		return formatInZone(`${value}T12:00:00.000Z`, options, "UTC");
+	}
 	return format(value, options);
 }
 
@@ -191,6 +305,15 @@ export function formatTime(
 	options: Intl.DateTimeFormatOptions = { timeStyle: "medium" }
 ): string {
 	return format(value, options);
+}
+
+/** Format a clock-hour label with the host locale's 12/24-hour convention. */
+export function formatHourLabel(
+	hour: number,
+	options: Intl.DateTimeFormatOptions = { hour: "numeric", minute: "2-digit" }
+): string {
+	const bounded = Math.max(0, Math.min(23, Math.trunc(hour)));
+	return formatInZone(new Date(Date.UTC(2000, 0, 1, bounded)), options, "UTC");
 }
 
 /** Date + time, in the display zone. Drop-in for `toLocaleString`. */

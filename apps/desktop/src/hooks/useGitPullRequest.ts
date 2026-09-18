@@ -9,6 +9,7 @@ import { queryClient } from "@/src/lib/query-client.ts";
 import { canonicalCwd } from "./useGitStatus.ts";
 
 const POLL_INTERVAL_MS = 30_000;
+const FRESH_MS = 10_000;
 
 function gitPullRequestKeyPrefix(
 	cwd: string | null,
@@ -40,8 +41,14 @@ export function useGitPullRequest(
 	state: GitPullRequestLookupState = "open"
 ): { data: GitPullRequest | null; isLoading: boolean } {
 	const normalizedBranch = branch?.trim() || null;
+	const observing = enabled && Boolean(cwd && normalizedBranch);
 	const { data, isLoading } = useQuery({
-		queryKey: gitPullRequestKey(cwd, normalizedBranch, state),
+		queryKey: [
+			...gitPullRequestKey(cwd, normalizedBranch, state),
+			target.url,
+			target.token ?? null,
+			target.userJwt ?? null,
+		],
 		queryFn: ({ signal }) =>
 			fetchPullRequestForBranch(
 				target,
@@ -50,12 +57,13 @@ export function useGitPullRequest(
 				signal,
 				state
 			).catch(() => null),
-		enabled: enabled && Boolean(cwd && normalizedBranch),
+		enabled: observing,
+		subscribed: observing,
 		gcTime: 60_000,
 		refetchInterval: POLL_INTERVAL_MS,
-		refetchOnMount: "always",
+		refetchOnMount: true,
 		refetchOnWindowFocus: true,
-		staleTime: 0,
+		staleTime: FRESH_MS,
 	});
 
 	return { data: data ?? null, isLoading };

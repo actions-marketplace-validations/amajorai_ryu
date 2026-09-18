@@ -18,6 +18,13 @@ test("marketplace Health card exposes the installed runtime doctor", async ({
 	await expect(
 		page.locator('[data-scorecard-runtime-doctor="true"]')
 	).toContainText("does not execute plugin code");
+	await expect(page.getByTestId("plugin-evals-card")).toContainText(
+		"Behavioral evals"
+	);
+	await expect(page.getByTestId("plugin-evals-card")).toContainText(
+		"Latest run 100/100"
+	);
+	await expect(page.getByTestId("plugin-evals-status")).toContainText("Ready");
 	await page.screenshot({
 		fullPage: true,
 		path: "/tmp/ryu-plugin-doctor-design-system-proof.png",

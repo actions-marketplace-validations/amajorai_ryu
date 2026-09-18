@@ -267,7 +267,7 @@ export function ScrollableTabsView() {
 	return (
 		<section
 			aria-label="Scrollable tabs"
-			className="flex h-full min-h-0 min-w-0 flex-col overflow-hidden bg-background pt-12"
+			className="flex h-full min-h-0 min-w-0 flex-col overflow-hidden bg-background pt-[var(--ryu-titlebar-inset,3rem)]"
 			data-tab-layout={tabLayout}
 			data-testid="scrollable-tabs-view"
 		>

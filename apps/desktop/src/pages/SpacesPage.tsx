@@ -13,6 +13,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { AppDisabledNotice } from "@/src/components/AppDisabledNotice.tsx";
 import { BackupSettings } from "@/src/components/settings/BackupSettings.tsx";
 import { SpaceImportsPanel } from "@/src/components/spaces/SpaceImportsPanel.tsx";
+import { SpaceUploadPanel } from "@/src/components/spaces/SpaceUploadPanel.tsx";
 import { useSpacesContext } from "@/src/contexts/SpacesContext.tsx";
 import { useTabSelector } from "@/src/contexts/TabsContext.tsx";
 import { useActiveNode } from "@/src/hooks/useActiveNode.ts";
@@ -58,7 +59,7 @@ export default function SpacesPage({
 		error,
 		reload,
 		listDocuments,
-		ingest,
+		getDocument,
 		search,
 		createPage,
 		createDatabase,
@@ -66,9 +67,8 @@ export default function SpacesPage({
 	} = useSpacesContext();
 	const openTab = useTabSelector((state) => state.openTab);
 	// Only the whiteboard create reaches the node directly (through the plugin host);
-	// documents, ingest and search all go through `useSpacesContext`, which owns the
-	// target. No `nodeUrl`/`nodeToken` split is needed here now that nothing in this
-	// page issues its own per-document request.
+	// documents, previews, ingest and search all go through `useSpacesContext`, which
+	// owns the target. No `nodeUrl`/`nodeToken` split is needed here.
 	const node = useActiveNode();
 
 	const [selectedId, setSelectedId] = useState<string | null>(
@@ -87,10 +87,13 @@ export default function SpacesPage({
 	// Selected-space detail state, hoisted out of the (now presentational) detail.
 	const [documents, setDocuments] = useState<SpaceDocument[]>([]);
 	const [docsError, setDocsError] = useState<string | null>(null);
-	const [ingestTitle, setIngestTitle] = useState("");
-	const [ingestContent, setIngestContent] = useState("");
-	const [ingestBusy, setIngestBusy] = useState(false);
-	const [ingestError, setIngestError] = useState<string | null>(null);
+	const [previewSources, setPreviewSources] = useState<Map<string, string>>(
+		() => new Map()
+	);
+	const [previewLoadingIds, setPreviewLoadingIds] = useState<Set<string>>(
+		() => new Set()
+	);
+	const previewSeq = useRef(0);
 	const [portableBusy, setPortableBusy] = useState(false);
 	const [portableError, setPortableError] = useState<string | null>(null);
 	const [portableNotice, setPortableNotice] = useState<string | null>(null);
@@ -172,14 +175,62 @@ export default function SpacesPage({
 		[listDocuments]
 	);
 
+	// The home screen shows a small paper preview for the three most recent native
+	// Markdown pages. Keep this read bounded: the list itself remains one request,
+	// while the preview fetches are the same existing `getDocument` path used by the
+	// editor and are never attempted for databases, files, boards, or app-owned docs.
+	useEffect(() => {
+		const pages = [...documents]
+			.filter(
+				(document) =>
+					document.kind === "page" &&
+					(document.rawKind === "" || document.rawKind === "page")
+			)
+			.sort((a, b) => b.updatedAt - a.updatedAt)
+			.slice(0, 3);
+		if (!selected || pages.length === 0) {
+			setPreviewSources(new Map());
+			setPreviewLoadingIds(new Set());
+			return;
+		}
+
+		const seq = ++previewSeq.current;
+		let cancelled = false;
+		setPreviewSources(new Map());
+		setPreviewLoadingIds(new Set(pages.map((page) => page.id)));
+
+		const loadPreviews = async () => {
+			const results = await Promise.allSettled(
+				pages.map(async (page) => ({
+					id: page.id,
+					source: (await getDocument(selected.id, page.id)).source,
+				}))
+			);
+			if (cancelled || seq !== previewSeq.current) {
+				return;
+			}
+			const sources = new Map<string, string>();
+			for (const result of results) {
+				if (result.status === "fulfilled") {
+					sources.set(result.value.id, result.value.source);
+				}
+			}
+			setPreviewSources(sources);
+			setPreviewLoadingIds(new Set());
+		};
+		void loadPreviews();
+
+		return () => {
+			cancelled = true;
+		};
+	}, [documents, getDocument, selected]);
+
 	// Reset detail state when switching spaces, then load its documents.
 	useEffect(() => {
+		setDocuments([]);
 		setSearchResults(null);
 		setSearchQuery("");
 		setSearchError(null);
-		setIngestTitle("");
-		setIngestContent("");
-		setIngestError(null);
 		setPortableError(null);
 		setPortableNotice(null);
 		// The retrieval notice describes ONE space's rebuild. Carrying it across a
@@ -192,31 +243,6 @@ export default function SpacesPage({
 			setDocuments([]);
 		}
 	}, [selected, loadDocuments]);
-
-	const handleIngest = async () => {
-		if (!(selected && ingestTitle.trim() && ingestContent.trim())) {
-			return;
-		}
-		setIngestBusy(true);
-		setIngestError(null);
-		try {
-			await ingest(selected.id, ingestTitle.trim(), ingestContent);
-			// Reload through `loadDocuments`, like the three sibling create handlers,
-			// so this page has one path that writes `documents` and one place the
-			// `loadSeq` guard has to hold. (The list `ingest` returns now carries index
-			// state too — Core joins it — so adopting it would no longer blank the
-			// badges; going through the same call is a consistency choice, not a
-			// workaround.)
-			await loadDocuments(selected.id);
-			setIngestTitle("");
-			setIngestContent("");
-		} catch (err) {
-			console.error("Failed to add space document", err);
-			setIngestError("We couldn't add that document. Please try again.");
-		} finally {
-			setIngestBusy(false);
-		}
-	};
 
 	const handleSearch = async () => {
 		if (!(selected && searchQuery.trim())) {
@@ -468,11 +494,25 @@ export default function SpacesPage({
 					// below. Dropping it here hides the control silently.
 					retrievalMode: selected.retrievalMode,
 				},
+				uploadPanel: (
+					<SpaceUploadPanel
+						onUploadComplete={() => {
+							loadDocuments(selected.id).catch(() => undefined);
+						}}
+						spaceId={selected.id}
+					/>
+				),
 				documents: documents.map((d) => ({
+					byteSize: d.byteSize,
 					id: d.id,
 					title: d.title,
 					chunkCount: d.chunkCount,
 					kind: d.kind,
+					mime: d.mime,
+					preview: previewSources.get(d.id),
+					previewLoading: previewLoadingIds.has(d.id),
+					rawKind: d.rawKind,
+					updatedAt: d.updatedAt,
 					// Passed straight through, never derived. `d.kind` could not answer
 					// this anyway (`toDocumentKind` coerces the wire's `'file'` to
 					// `'page'`), but the deeper reason is that "is this file's text
@@ -486,10 +526,6 @@ export default function SpacesPage({
 					indexWarnings: d.indexWarnings,
 				})),
 				documentsError: docsError,
-				ingestTitle,
-				ingestContent,
-				ingestBusy,
-				ingestError,
 				importPanel: (
 					<SpaceImportsPanel
 						onImportCompleted={handleImportCompleted}
@@ -510,11 +546,6 @@ export default function SpacesPage({
 				portableBusy,
 				portableError,
 				portableNotice,
-				onIngestTitleChange: setIngestTitle,
-				onIngestContentChange: setIngestContent,
-				onIngestSubmit: () => {
-					handleIngest().catch(() => undefined);
-				},
 				onNewPage: () => {
 					handleNewPage().catch(() => undefined);
 				},

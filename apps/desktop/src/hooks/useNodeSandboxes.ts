@@ -26,7 +26,12 @@ const TIMEOUT_MS = 6000;
 
 export function useNodeSandboxes(target: ApiTarget, enabled: boolean) {
 	return useQuery<SandboxRun[]>({
-		queryKey: ["node-sandboxes", target.url],
+		queryKey: [
+			"node-sandboxes",
+			target.url,
+			target.token ?? null,
+			target.userJwt ?? null,
+		],
 		queryFn: ({ signal }) => {
 			// Bound the request so an unreachable node can't leave it pending until the
 			// OS TCP timeout; abort whichever fires first (query teardown or timeout).

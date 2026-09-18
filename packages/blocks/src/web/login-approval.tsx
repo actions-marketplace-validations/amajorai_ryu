@@ -13,8 +13,13 @@ import {
 	DialogHeader,
 	DialogTitle,
 } from "@ryu/ui/components/dialog";
+import { QRCode } from "@ryu/ui/components/qr-code.tsx";
 import { Spinner } from "@ryu/ui/components/spinner";
-import { LaptopMinimalCheck, ShieldCheck } from "lucide-react";
+import {
+	LaptopMinimalCheck,
+	QrCode as QrCodeIcon,
+	ShieldCheck,
+} from "lucide-react";
 import type { ReactNode } from "react";
 
 export interface LoginApprovalPromptProps {
@@ -137,14 +142,38 @@ export function LoginApprovalWait({
 					</div>
 					<DialogTitle>Approve on another device</DialogTitle>
 					<DialogDescription>
-						Open Ryu on a device where you are already signed in and approve
-						this request.
+						Scan the QR with Ryu Mobile, or open Ryu on a device where you are
+						already signed in and approve this request.
 					</DialogDescription>
 				</DialogHeader>
 
 				<div className="rounded-2xl border border-border/60 bg-muted/25 p-5 text-center">
+					{verificationUriComplete ? (
+						<div
+							className="mb-5 flex flex-col items-center gap-3 border-border/60 border-b pb-5"
+							data-testid="login-approval-qr"
+						>
+							<div className="flex items-center gap-2 text-muted-foreground text-xs uppercase tracking-[0.16em]">
+								<QrCodeIcon className="size-4" />
+								Scan with Ryu Mobile
+							</div>
+							<div className="rounded-xl bg-white p-3">
+								<QRCode
+									aria-label="Scan this sign-in QR code with Ryu Mobile"
+									bgColor="#ffffff"
+									fgColor="#000000"
+									size={196}
+									value={verificationUriComplete}
+								/>
+							</div>
+							<p className="max-w-xs text-muted-foreground text-xs">
+								Open Ryu Mobile, choose <strong>Scan sign-in QR</strong>, then
+								review and approve this request.
+							</p>
+						</div>
+					) : null}
 					<p className="text-muted-foreground text-xs uppercase tracking-[0.16em]">
-						Sign-in code
+						Fallback sign-in code
 					</p>
 					<p className="mt-2 font-medium font-mono text-3xl tracking-[0.2em]">
 						{userCode ?? "••••••••"}

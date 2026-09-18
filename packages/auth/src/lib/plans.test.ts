@@ -53,26 +53,26 @@ function requireBinding(
 	return binding;
 }
 
-describe("depositFee (max of the plan rate or the $2.75 floor)", () => {
+describe("depositFee (max of the plan rate or the $5 floor)", () => {
 	it("charges the floor on a zero/negative amount", () => {
 		expect(depositFee(0)).toBe(DEPOSIT_FEE_FIXED_MICRO_USD);
 		expect(depositFee(-100)).toBe(DEPOSIT_FEE_FIXED_MICRO_USD);
 	});
 
-	it("charges the 17% percentage when it exceeds the floor", () => {
-		// $100 top-up: 17% = $17.00 (> $2.75 floor) → $17.00.
-		expect(depositFee(usdToMicro(100))).toBe(usdToMicro(17));
+	it("charges the 27% percentage when it exceeds the floor", () => {
+		// $100 top-up: 27% = $27.00 (> $5 floor) -> $27.00.
+		expect(depositFee(usdToMicro(100))).toBe(usdToMicro(27));
 	});
 
-	it("keeps the $2.75 floor at the $16 point below the 17% crossover", () => {
-		// $16 top-up: 17% = $2.72, so the $2.75 floor still applies.
-		expect(depositFee(usdToMicro(16))).toBe(usdToMicro(2.75));
+	it("keeps the $5 floor at the $18 point below the 27% crossover", () => {
+		// $18 top-up: 27% = $4.86, so the $5 floor still applies.
+		expect(depositFee(usdToMicro(18))).toBe(usdToMicro(5));
 	});
 
-	it("the $2.75 floor dominates below the crossover (nudges bigger top-ups)", () => {
-		// $5 pack: 17% = $0.85, but the floor is $2.75 (55% effective). The
+	it("the $5 floor dominates below the crossover (nudges bigger top-ups)", () => {
+		// $5 pack: 27% = $1.35, but the floor is $5 (100% effective). The
 		// floor keeps the conservative provider-cost curve profitable.
-		expect(depositFee(usdToMicro(5))).toBe(usdToMicro(2.75));
+		expect(depositFee(usdToMicro(5))).toBe(usdToMicro(5));
 		expect(depositFee(usdToMicro(1))).toBe(DEPOSIT_FEE_FIXED_MICRO_USD);
 	});
 });

@@ -101,6 +101,14 @@ import {
 } from "@/src/hooks/useThemePreset.ts";
 import { resetUsageBarPrefs } from "@/src/hooks/useUsageBarPrefs.ts";
 import {
+	DEFAULT_SIDEBAR_TRANSPARENCY,
+	DEFAULT_WINDOW_TRANSPARENCY,
+	SIDEBAR_TRANSPARENCY_KEY,
+	setSidebarTransparency,
+	setWindowTransparency,
+	WINDOW_TRANSPARENCY_KEY,
+} from "@/src/hooks/useWindowTransparency.ts";
+import {
 	DEFAULT_INTERFACE_LEVEL,
 	setInterfaceLevel,
 } from "@/src/lib/interface-level.ts";
@@ -138,6 +146,8 @@ export const APPEARANCE_KEYS = {
 	seasonalEffects: SEASONAL_EFFECTS_KEY,
 	nodeSelectorDetail: NODE_SELECTOR_DETAIL_KEY,
 	botTerminology: BOT_TERMINOLOGY_STORAGE_KEY,
+	sidebarTransparency: SIDEBAR_TRANSPARENCY_KEY,
+	windowTransparency: WINDOW_TRANSPARENCY_KEY,
 } as const;
 
 /** Defaults for Appearance toggles / presets (local UI sync after reset). */
@@ -208,6 +218,8 @@ export const APPEARANCE_DEFAULTS = {
 	seasonalEffects: DEFAULT_SEASONAL_EFFECTS,
 	seasonalTheme: DEFAULT_SEASONAL_THEME,
 	timezone: DEFAULT_TIMEZONE,
+	sidebarTransparency: DEFAULT_SIDEBAR_TRANSPARENCY,
+	windowTransparency: DEFAULT_WINDOW_TRANSPARENCY,
 } as const;
 
 type ThemeModeSetter = ((mode: string) => void) | null;
@@ -369,6 +381,21 @@ function registerAppearanceSettings(): void {
 		label: "Inverted backgrounds",
 		reset: () =>
 			setInvertedBackgrounds(APPEARANCE_DEFAULTS.invertedBackgrounds),
+	});
+
+	registerSetting({
+		id: "appearance.sidebar-transparency",
+		category: "appearance",
+		label: "Transparent sidebar",
+		reset: () =>
+			setSidebarTransparency(APPEARANCE_DEFAULTS.sidebarTransparency),
+	});
+
+	registerSetting({
+		id: "appearance.window-transparency",
+		category: "appearance",
+		label: "Transparent window",
+		reset: () => setWindowTransparency(APPEARANCE_DEFAULTS.windowTransparency),
 	});
 
 	registerSetting({

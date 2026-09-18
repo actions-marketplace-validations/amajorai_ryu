@@ -54,6 +54,7 @@ export interface CreditWalletView {
 	balanceBreakdownAvailable?: boolean;
 	balanceMicroUsd: number;
 	currency: string;
+	giftBalanceMicroUsd?: number | null;
 	providerAllocations?: CreditGrantPoolView[];
 	source?: "local" | "polar";
 	subscriptionBalanceMicroUsd: number | null;
@@ -338,6 +339,7 @@ export function CreditsView({
 				<CreditBalanceBreakdown
 					balanceBreakdownAvailable={wallet?.balanceBreakdownAvailable}
 					currency={currency}
+					giftCreditsMicroUsd={wallet?.giftBalanceMicroUsd ?? null}
 					onDemandCreditsMicroUsd={wallet?.topupBalanceMicroUsd ?? null}
 					planAllowanceMicroUsd={entitlement?.monthlyCreditPoolMicroUsd ?? null}
 					planCreditsMicroUsd={wallet?.subscriptionBalanceMicroUsd ?? null}
@@ -414,7 +416,7 @@ export function CreditsView({
 							</div>
 							<p className="text-muted-foreground text-xs">
 								You'll complete payment in your browser via Polar. The exact
-								plan percentage or $2.75 minimum deposit fee is shown before
+								plan percentage or $5 minimum deposit fee is shown before
 								payment; your wallet is credited the face value. Your balance
 								updates here once it clears.
 							</p>

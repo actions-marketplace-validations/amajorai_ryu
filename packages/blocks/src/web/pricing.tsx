@@ -1108,7 +1108,7 @@ export function ProPlanCard({
 					</li>
 					<li className="flex items-center">
 						<Coins className="mr-2 size-4" />
-						<span>16.5% deposit fee ($2.75 minimum)</span>
+						<span>26.5% deposit fee ($5 minimum)</span>
 					</li>
 					<li className="flex items-center">
 						<Server className="mr-2 size-4" />
@@ -1205,7 +1205,7 @@ export function PlusPlanCard({
 					</li>
 					<li className="flex items-center">
 						<Coins className="mr-2 size-4" />
-						<span>16.5% deposit fee ($2.75 minimum)</span>
+						<span>26.5% deposit fee ($5 minimum)</span>
 					</li>
 					<li className="flex items-center">
 						<Server className="mr-2 size-4" />
@@ -1287,7 +1287,7 @@ export function MaxPlanCard({
 					</li>
 					<li className="flex items-center">
 						<Coins className="mr-2 size-4" />
-						<span>16% deposit fee ($2.75 minimum)</span>
+						<span>26% deposit fee ($5 minimum)</span>
 					</li>
 					<li className="flex items-center">
 						<Bot className="mr-2 size-4" />
@@ -1404,7 +1404,7 @@ export function TeamsPlanCard({
 					</li>
 					<li className="flex items-center">
 						<Coins className="mr-2 size-4" />
-						<span>16% deposit fee ($2.75 minimum)</span>
+						<span>26% deposit fee ($5 minimum)</span>
 					</li>
 				</ul>
 				<CloudUpgradePanel
@@ -1610,7 +1610,7 @@ export function HostedAgentPlanCard({
 					{isOrganization ? (
 						<li className="flex items-center">
 							<Coins className="mr-2 size-4" />
-							<span>16% deposit fee ($2.75 minimum)</span>
+							<span>26% deposit fee ($5 minimum)</span>
 						</li>
 					) : null}
 				</ul>

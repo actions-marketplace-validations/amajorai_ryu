@@ -24,6 +24,7 @@ import {
 	LaptopIcon,
 	LinkSquare02Icon,
 	Mail01Icon,
+	MailReply01Icon,
 	MessageQuestionIcon,
 	MoreHorizontalIcon,
 	PencilEdit01Icon,
@@ -90,7 +91,13 @@ import {
 import { useTabsContext } from "@/src/contexts/TabsContext.tsx";
 import { useGitPullRequest } from "@/src/hooks/useGitPullRequest.ts";
 import { useInterfaceLevel } from "@/src/hooks/useInterfaceLevel.ts";
+import { useModifierClickHold } from "@/src/hooks/useModifierClickHold.ts";
 import { usePluginContributions } from "@/src/hooks/usePluginContributions.ts";
+import { useQuickPreviewModifier } from "@/src/hooks/useQuickPreviewModifier.ts";
+import {
+	quickReplyModifierMatches,
+	readQuickReplyModifier,
+} from "@/src/hooks/useQuickReplyModifier.ts";
 import { useSidebarChatPreview } from "@/src/hooks/useSidebarChatPreview.ts";
 import {
 	conversationParticipantIds,
@@ -176,6 +183,9 @@ export interface ChatRowHandlers {
 	onOpenInNewWindow: (id: string) => void;
 	/** Open an empty side chat composer for this conversation. */
 	onOpenNewSideChat: (conversationId: string) => void;
+	/** Open a read-only, non-selecting long-press conversation preview. */
+	onOpenQuickPreview?: (id: string) => void;
+	onOpenQuickReply: (id: string) => void;
 	/** Open a persisted side chat: select the thread + surface it in the overlay. */
 	onOpenSideChat: (conversationId: string, entry: BtwEntry) => void;
 	onRemoveFromProject: (id: string) => void;
@@ -499,9 +509,11 @@ export function ChatRow({
 		onJumpToMessage,
 		onMarkRead,
 		onMarkUnread,
+		onOpenQuickReply,
 		onOpenInNewTab,
 		onOpenInNewWindow,
 		onOpenNewSideChat,
+		onOpenQuickPreview,
 		onOpenSideChat,
 		onRenameConversation,
 		onRemoveFromProject,
@@ -521,6 +533,7 @@ export function ChatRow({
 	const isArchived = archivedIds.has(conv.id);
 	const runStatus = conversationRunStatusMeta(conv.runStatus);
 	const [showSidebarChatPreview] = useSidebarChatPreview();
+	const [quickPreviewModifier] = useQuickPreviewModifier();
 	const interfaceLevel = useInterfaceLevel();
 	const { animationsEnabled } = useChatDisplayPrefs();
 	const sidebarPreviewStates = buildSidebarConversationPreviewStates({
@@ -564,6 +577,14 @@ export function ChatRow({
 	const archiveLabel = isArchived ? "Unarchive" : "Archive";
 	const archiveIcon = isArchived ? ArchiveRestoreIcon : Archive01Icon;
 	const readLabel = isUnread ? "Mark as read" : "Mark as unread";
+	const handleOpenQuickPreview = useCallback(
+		() => onOpenQuickPreview?.(conv.id),
+		[conv.id, onOpenQuickPreview]
+	);
+	const quickPreviewHold = useModifierClickHold({
+		modifier: onOpenQuickPreview ? quickPreviewModifier : "none",
+		onTrigger: handleOpenQuickPreview,
+	});
 	const shared = resourceVisibilityGroup(conv.visibility) === "team";
 	const visibilityActionLabel = shared ? "Make private" : "Share with team";
 	const nextVisibility: ResourceVisibility = shared ? "private" : "org";
@@ -791,6 +812,7 @@ export function ChatRow({
 					{/* biome-ignore lint/a11y/useSemanticElements: sidebar row combines nested controls with drag/middle-click */}
 					<div
 						className={`group/row relative flex cursor-grab items-center gap-2 overflow-hidden rounded-md px-2 transition-colors hover:bg-muted active:cursor-grabbing ${showSidebarChatPreview ? "min-h-11 py-1" : "h-8"} ${isActive ? "bg-muted" : ""}`}
+						data-testid={`sidebar-chat-row-${conv.id}`}
 						draggable
 						onAuxClick={(e) => {
 							// Middle-click opens the chat in a new tab.
@@ -799,13 +821,27 @@ export function ChatRow({
 								onOpenInNewTab(conv.id);
 							}
 						}}
-						onClick={() => onSelectConversation(conv.id)}
+						onClick={(event) => {
+							if (quickPreviewHold.consumeTriggered()) {
+								event.preventDefault();
+								return;
+							}
+							if (quickReplyModifierMatches(event, readQuickReplyModifier())) {
+								event.preventDefault();
+								onOpenQuickReply(conv.id);
+								return;
+							}
+							onSelectConversation(conv.id);
+						}}
 						onDragStart={handleVisibilityDragStart}
 						onKeyDown={(e) => {
 							if (e.key === "Enter") {
 								onSelectConversation(conv.id);
 							}
 						}}
+						onPointerCancel={quickPreviewHold.onPointerCancel}
+						onPointerDown={quickPreviewHold.onPointerDown}
+						onPointerUp={quickPreviewHold.onPointerUp}
 						role="button"
 						tabIndex={0}
 					>
@@ -1105,6 +1141,19 @@ export function ChatRow({
 									/>
 									{archiveLabel} chat
 								</DropdownMenuItem>
+								<DropdownMenuItem
+									onClick={(e) => {
+										e.stopPropagation();
+										onOpenQuickReply(conv.id);
+									}}
+								>
+									<HugeiconsIcon
+										className="mr-2"
+										icon={MailReply01Icon}
+										size={12}
+									/>
+									Quick reply
+								</DropdownMenuItem>
 								<DropdownMenuSeparator />
 								{sideChatsEnabled ? (
 									<DropdownMenuItem
@@ -1368,6 +1417,10 @@ export function ChatRow({
 					<ContextMenuItem onClick={() => onToggleArchive(conv.id)}>
 						<HugeiconsIcon className="mr-2 size-4" icon={archiveIcon} />
 						{archiveLabel} chat
+					</ContextMenuItem>
+					<ContextMenuItem onClick={() => onOpenQuickReply(conv.id)}>
+						<HugeiconsIcon className="mr-2 size-4" icon={MailReply01Icon} />
+						Quick reply
 					</ContextMenuItem>
 					<ContextMenuSeparator />
 					{sideChatsEnabled ? (

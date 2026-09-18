@@ -19,6 +19,7 @@ export function ActivationOfferStep({
 	onContinue,
 	onSkip,
 	onStartCheckout,
+	individualPlansEnabled = true,
 	pending = false,
 	subscribed,
 }: {
@@ -29,16 +30,24 @@ export function ActivationOfferStep({
 	onContinue: () => void;
 	onSkip: () => void;
 	onStartCheckout: () => void;
+	individualPlansEnabled?: boolean;
 	pending?: boolean;
 	organizationPlan?: boolean;
 	subscribed: boolean;
 }) {
+	const individualCheckoutClosed = !(
+		organizationPlan || individualPlansEnabled
+	);
 	const offerDescription = organizationPlan
 		? "The first month is $50. From month two onward, the five-seat Teams floor is $250/month."
-		: "Ryu Pro is $49/month for one person. Choose Max later from Pricing if you need more capacity.";
+		: individualCheckoutClosed
+			? "Personal Pro checkout is temporarily unavailable. Continue with local setup, or choose an organization plan on the public pricing page."
+			: "Ryu Pro is $49/month for one person. Choose Max later from Pricing if you need more capacity.";
 	const checkoutLabel = organizationPlan
 		? "Start first month for $50"
-		: "Start Pro for $49/month";
+		: individualCheckoutClosed
+			? "Continue with local setup"
+			: "Start Pro for $49/month";
 	return (
 		<>
 			<ActivationStepShell
@@ -88,7 +97,13 @@ export function ActivationOfferStep({
 							<Button
 								disabled={pending}
 								loading={pending}
-								onClick={checkoutOpened ? onConfirmCheckout : onStartCheckout}
+								onClick={
+									individualCheckoutClosed
+										? onSkip
+										: checkoutOpened
+											? onConfirmCheckout
+											: onStartCheckout
+								}
 							>
 								{checkoutOpened ? "I finished checkout" : checkoutLabel}
 								<ArrowRight className="size-4" />

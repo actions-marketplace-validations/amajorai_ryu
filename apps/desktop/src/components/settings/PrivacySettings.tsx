@@ -4,8 +4,8 @@
 // surfaces the independent consent toggles from the §6 defaults table, each
 // defaulting per that table — closed-UI product analytics + crash reports are
 // opt-out (ON by default), while data-plane OTLP diagnostics export and local
-// Core support access are opt-in (OFF). A first-run disclosure notice is shown
-// even though analytics defaults ON, so consent is informed.
+// Core support access are opt-in (OFF). The first-run disclosure is completed
+// in onboarding; this tab remains the place to review or change it later.
 //
 // The canonical Core preferences are the source of truth. This tab also seeds
 // the live analytics and crash gates immediately, while Core/Gateway read the
@@ -70,9 +70,10 @@ import { setCrashReportingEnabled } from "@/src/lib/crash.ts";
 import { formatDateTime } from "@/src/lib/timezone.ts";
 import { AnalyticsInspector } from "./AnalyticsInspector.tsx";
 import {
-	DISCLOSURE_ACK_KEY,
+	acknowledgePrivacyDisclosure,
 	PRIVACY_DOCS_PATH as DOCS_PATH,
-} from "./privacy-disclosure.tsx";
+	isPrivacyDisclosureAcknowledged,
+} from "./privacy-disclosure-state.ts";
 import {
 	SettingsCard,
 	SettingsGroup,
@@ -124,11 +125,11 @@ export function PrivacySettings() {
 	);
 
 	const [disclosureAck, setDisclosureAck] = useState<boolean>(
-		() => localStorage.getItem(DISCLOSURE_ACK_KEY) === "true"
+		isPrivacyDisclosureAcknowledged
 	);
 	const acknowledgeDisclosure = useCallback(() => {
 		setDisclosureAck(true);
-		localStorage.setItem(DISCLOSURE_ACK_KEY, "true");
+		acknowledgePrivacyDisclosure();
 	}, []);
 
 	// Load the self-healing config independently (its own endpoint, not a pref).

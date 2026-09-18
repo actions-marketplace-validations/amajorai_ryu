@@ -324,152 +324,7 @@ fn classify_value(value: &Value, id: i64) -> FrameVerdict {
     FrameVerdict::Done(value.get("result").cloned().unwrap_or(Value::Null))
 }
 
-/// Split an SSE body into its `data:` payloads, in order. Pure.
-///
-/// Per the SSE grammar: `data:` lines accumulate (joined with `\n`) into one
-/// event, and a blank line dispatches it. Every other field (`event:`, `id:`,
-/// `retry:`, `:` comments) is ignored — an MCP frame is always the `data`
-/// payload, and MCP's own message id lives *inside* that JSON, not in the SSE
-/// `id:` field. A trailing event with no closing blank line is still emitted,
-/// because a server that closes the stream right after its last frame is common
-/// and dropping that frame would hang the caller until the RPC deadline.
-fn sse_data_frames(body: &str) -> Vec<String> {
-    let mut frames = Vec::new();
-    let mut current = String::new();
-    for line in body.lines() {
-        if let Some(rest) = line.strip_prefix("data:") {
-            if !current.is_empty() {
-                current.push('\n');
-            }
-            current.push_str(rest.strip_prefix(' ').unwrap_or(rest));
-        } else if line.trim().is_empty() && !current.is_empty() {
-            frames.push(std::mem::take(&mut current));
-        }
-    }
-    if !current.is_empty() {
-        frames.push(current);
-    }
-    frames
-}
-
-/// One parsed SSE event. Legacy MCP uses an `endpoint` event during connection
-/// setup and ordinary message events for JSON-RPC frames afterwards.
-#[derive(Debug, PartialEq, Eq)]
-struct SseEvent {
-    event: Option<String>,
-    data: String,
-}
-
-/// Incremental SSE reader for a response body that may remain open for the
-/// lifetime of a legacy MCP session. Keeping this parser separate from the
-/// buffered Streamable HTTP parser is important: a legacy POST usually returns
-/// `202 Accepted` while its result arrives later on this GET stream.
-struct SseReader {
-    response: reqwest::Response,
-    line_buffer: Vec<u8>,
-    event_name: Option<String>,
-    data_lines: Vec<String>,
-    event_bytes: usize,
-    stream_ended: bool,
-}
-
-impl SseReader {
-    fn new(response: reqwest::Response) -> Self {
-        Self {
-            response,
-            line_buffer: Vec::new(),
-            event_name: None,
-            data_lines: Vec::new(),
-            event_bytes: 0,
-            stream_ended: false,
-        }
-    }
-
-    fn take_line(&mut self) -> Option<Vec<u8>> {
-        let newline = self.line_buffer.iter().position(|byte| *byte == b'\n')?;
-        Some(self.line_buffer.drain(..=newline).collect())
-    }
-
-    fn flush_event(&mut self) -> Option<SseEvent> {
-        if self.data_lines.is_empty() {
-            self.event_name = None;
-            self.event_bytes = 0;
-            return None;
-        }
-        let data = self.data_lines.drain(..).collect::<Vec<_>>().join("\n");
-        self.event_bytes = 0;
-        Some(SseEvent {
-            event: self.event_name.take(),
-            data,
-        })
-    }
-
-    fn process_line(&mut self, raw_line: &[u8]) -> Result<Option<SseEvent>> {
-        let line = String::from_utf8_lossy(raw_line)
-            .trim_end_matches(['\n', '\r'])
-            .to_owned();
-        if line.is_empty() {
-            return Ok(self.flush_event());
-        }
-        if line.starts_with(':') {
-            return Ok(None);
-        }
-        if let Some(value) = line.strip_prefix("event:") {
-            self.event_name = Some(value.strip_prefix(' ').unwrap_or(value).to_owned());
-        } else if let Some(value) = line.strip_prefix("data:") {
-            let event_bytes = self
-                .event_bytes
-                .checked_add(line.len())
-                .ok_or_else(|| anyhow!("legacy MCP SSE event exceeded its byte cap"))?;
-            if event_bytes > MAX_MCP_HTTP_BODY_BYTES as usize {
-                return Err(anyhow!(
-                    "legacy MCP SSE event exceeded the {MAX_MCP_HTTP_BODY_BYTES}-byte cap"
-                ));
-            }
-            self.event_bytes = event_bytes;
-            self.data_lines
-                .push(value.strip_prefix(' ').unwrap_or(value).to_owned());
-        }
-        Ok(None)
-    }
-
-    async fn next_event(&mut self) -> Result<Option<SseEvent>> {
-        loop {
-            if let Some(line) = self.take_line() {
-                if let Some(event) = self.process_line(&line)? {
-                    return Ok(Some(event));
-                }
-                continue;
-            }
-
-            if self.stream_ended {
-                return Ok(self.flush_event());
-            }
-
-            match self.response.chunk().await? {
-                Some(chunk) => {
-                    if self.line_buffer.len() + chunk.len() > MAX_MCP_HTTP_BODY_BYTES as usize {
-                        return Err(anyhow!(
-                            "legacy MCP SSE line buffer exceeded the {MAX_MCP_HTTP_BODY_BYTES}-byte cap"
-                        ));
-                    }
-                    self.line_buffer.extend_from_slice(&chunk);
-                }
-                None => {
-                    self.stream_ended = true;
-                    // SSE permits a final event without a blank line. Process a
-                    // final partial line before flushing the event.
-                    if !self.line_buffer.is_empty() {
-                        let line = std::mem::take(&mut self.line_buffer);
-                        if let Some(event) = self.process_line(&line)? {
-                            return Ok(Some(event));
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
+use ryu_vault::mcp_sse::{data_frames as sse_data_frames, SseReader};
 
 /// The stdio half, reduced to write-one-line / read-one-line. Everything that
 /// used to live here that was *protocol* rather than *transport* now lives in
@@ -630,6 +485,14 @@ struct LegacySseTransport {
 
 impl LegacySseTransport {
     async fn connect(url: &str, headers: &BTreeMap<String, String>) -> Result<Self> {
+        // Include screening, response headers and error bodies in the setup
+        // deadline. The established SSE stream keeps its independent lifetime.
+        tokio::time::timeout(RPC_TIMEOUT, Self::connect_inner(url, headers))
+            .await
+            .map_err(|_| anyhow!("legacy MCP SSE connection timed out"))?
+    }
+
+    async fn connect_inner(url: &str, headers: &BTreeMap<String, String>) -> Result<Self> {
         let mut get_headers = configured_headers(headers, &["Accept"]);
         get_headers.push(("Accept".to_owned(), "text/event-stream".to_owned()));
         let response = crate::server::guarded_get_stream_with_headers(url, &get_headers).await?;
@@ -666,38 +529,34 @@ impl LegacySseTransport {
             )
         })?;
         let mut reader = SseReader::new(response);
-        let endpoint = tokio::time::timeout(RPC_TIMEOUT, async {
-            loop {
-                let Some(event) = reader.next_event().await? else {
-                    return Err(anyhow!(
-                        "legacy MCP SSE stream closed before its endpoint event"
-                    ));
-                };
-                let is_endpoint_event = event.event.as_deref() == Some("endpoint")
-                    || (event.event.is_none()
-                        && (event.data.starts_with('/')
-                            || event.data.starts_with("http://")
-                            || event.data.starts_with("https://")));
-                if !is_endpoint_event {
-                    continue;
-                }
-                let endpoint = event.data.trim();
-                if endpoint.is_empty() {
-                    return Err(anyhow!("legacy MCP SSE endpoint event was empty"));
-                }
-                let endpoint_url = base_url
-                    .join(endpoint)
-                    .context("resolving the legacy MCP SSE endpoint event")?;
-                if endpoint_url.username() != "" || endpoint_url.fragment().is_some() {
-                    return Err(anyhow!(
-                        "legacy MCP SSE endpoint event contained credentials or a fragment"
-                    ));
-                }
-                return Ok(endpoint_url.to_string());
+        let endpoint = loop {
+            let Some(event) = reader.next_event().await? else {
+                return Err(anyhow!(
+                    "legacy MCP SSE stream closed before its endpoint event"
+                ));
+            };
+            let is_endpoint_event = event.event.as_deref() == Some("endpoint")
+                || (event.event.is_none()
+                    && (event.data.starts_with('/')
+                        || event.data.starts_with("http://")
+                        || event.data.starts_with("https://")));
+            if !is_endpoint_event {
+                continue;
             }
-        })
-        .await
-        .map_err(|_| anyhow!("timed out waiting for the legacy MCP SSE endpoint event"))??;
+            let endpoint = event.data.trim();
+            if endpoint.is_empty() {
+                return Err(anyhow!("legacy MCP SSE endpoint event was empty"));
+            }
+            let endpoint_url = base_url
+                .join(endpoint)
+                .context("resolving the legacy MCP SSE endpoint event")?;
+            if endpoint_url.username() != "" || endpoint_url.fragment().is_some() {
+                return Err(anyhow!(
+                    "legacy MCP SSE endpoint event contained credentials or a fragment"
+                ));
+            }
+            break endpoint_url.to_string();
+        };
 
         Ok(Self {
             url: url.to_owned(),
@@ -839,7 +698,11 @@ impl Transport {
             // (MCP's `DELETE <url>` session teardown is deliberately not sent —
             // it is optional, servers may reject it, and a stateless per-call
             // connection has nothing to reclaim.)
-            Self::Http(_) => {}
+            Self::Http(t) => {
+                if t.url.starts_with("ryu-passport-mcp://") {
+                    crate::identity::passport::mcp_close(&t.url).await;
+                }
+            }
             // Dropping the response body closes the long-lived legacy SSE GET.
             Self::Sse(_) => {}
         }
@@ -894,13 +757,17 @@ impl HttpTransport {
             headers.push(("MCP-Protocol-Version".to_owned(), version.clone()));
         }
 
-        let (status, resp_headers, body) = crate::server::guarded_post_json(
-            &self.url,
-            &headers,
-            line.to_owned(),
-            MAX_MCP_HTTP_BODY_BYTES,
-        )
-        .await?;
+        let (status, resp_headers, body) = if self.url.starts_with("ryu-passport-mcp://") {
+            crate::identity::passport::mcp_post(&self.url, &headers, line).await?
+        } else {
+            crate::server::guarded_post_json(
+                &self.url,
+                &headers,
+                line.to_owned(),
+                MAX_MCP_HTTP_BODY_BYTES,
+            )
+            .await?
+        };
 
         if !self.modern {
             if let Some(session) = resp_headers
@@ -925,6 +792,17 @@ impl HttpTransport {
             self.pending.push_back(body);
         }
         Ok(())
+    }
+}
+
+impl Drop for HttpTransport {
+    fn drop(&mut self) {
+        if self.url.starts_with("ryu-passport-mcp://") {
+            if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+                let url = self.url.clone();
+                runtime.spawn(async move { crate::identity::passport::mcp_close(&url).await; });
+            }
+        }
     }
 }
 
@@ -953,6 +831,12 @@ impl McpConnection {
         };
         let transport = match target {
             McpTarget::Stdio(cmd) => Transport::Stdio(Self::spawn_stdio(cmd).await?),
+            McpTarget::Sse(ep) if ep.url.starts_with("ryu-passport-mcp://") => {
+                Transport::Http(HttpTransport {
+                    url: ep.url.clone(), headers: ep.headers.clone(), session_id: None,
+                    protocol_version: None, modern: false, pending: VecDeque::new(),
+                })
+            }
             McpTarget::Sse(ep) => {
                 Transport::Sse(LegacySseTransport::connect(&ep.url, &ep.headers).await?)
             }
@@ -1014,6 +898,12 @@ impl McpConnection {
                     let McpTarget::Http(endpoint) = target else {
                         unreachable!("guarded by the HTTP match")
                     };
+                    // Preserve the same sealed handle across protocol negotiation.
+                    if let Transport::Http(previous) = &mut conn.transport {
+                        if previous.url.starts_with("ryu-passport-mcp://") {
+                            previous.url.clear();
+                        }
+                    }
                     conn.transport = Transport::Http(HttpTransport {
                         url: endpoint.url.clone(),
                         headers: endpoint.headers.clone(),

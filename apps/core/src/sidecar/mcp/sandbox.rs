@@ -244,9 +244,9 @@ pub async fn dispatch_with_context(
 ) -> Result<Value> {
     match tool {
         "sandbox_exec" => run_sandbox_exec(arguments, agent_id, session_id).await,
-        "sandbox_create" => run_sandbox_create(arguments).await,
-        "sandbox_run" => run_sandbox_run(arguments).await,
-        "sandbox_destroy" => run_sandbox_destroy(arguments).await,
+        "sandbox_create" => run_sandbox_create(arguments, agent_id, session_id).await,
+        "sandbox_run" => run_sandbox_run(arguments, agent_id, session_id).await,
+        "sandbox_destroy" => run_sandbox_destroy(arguments, agent_id, session_id).await,
         other => Err(anyhow::anyhow!("unknown sandbox tool '{other}'")),
     }
 }
@@ -262,11 +262,16 @@ pub async fn dispatch_with_context(
 
 /// Create a persistent remote sandbox. No spec is taken from the tool call, so
 /// the billed/provisioned shape is the node's configured provider spec.
-async fn run_sandbox_create(arguments: Value) -> Result<Value> {
+async fn run_sandbox_create(
+    arguments: Value,
+    agent_id: Option<&str>,
+    session_id: Option<String>,
+) -> Result<Value> {
     use crate::sidecar::sandbox::session;
 
+    let owner = session::SandboxOwner::from_context(agent_id, session_id.as_deref())?;
     let budget = arguments.get("budget_micro_usd").and_then(Value::as_u64);
-    let created = session::create_sandbox(None, budget).await?;
+    let created = session::create_sandbox_owned(None, budget, owner).await?;
     Ok(json!({
         "run_id": created.run_id,
         "workspace_id": created.workspace_id,
@@ -275,9 +280,14 @@ async fn run_sandbox_create(arguments: Value) -> Result<Value> {
 }
 
 /// Run a command in an existing persistent remote sandbox.
-async fn run_sandbox_run(arguments: Value) -> Result<Value> {
+async fn run_sandbox_run(
+    arguments: Value,
+    agent_id: Option<&str>,
+    session_id: Option<String>,
+) -> Result<Value> {
     use crate::sidecar::sandbox::session;
 
+    let owner = session::SandboxOwner::from_context(agent_id, session_id.as_deref())?;
     let run_id = arguments
         .get("run_id")
         .and_then(Value::as_str)
@@ -293,7 +303,7 @@ async fn run_sandbox_run(arguments: Value) -> Result<Value> {
     let args = parse_str_array(&arguments, "args");
     let timeout_secs = arguments.get("timeout_secs").and_then(Value::as_u64);
 
-    let result = session::exec_in_sandbox(&run_id, command, args, timeout_secs).await?;
+    let result = session::exec_in_sandbox_owned(&run_id, command, args, timeout_secs, &owner).await?;
     Ok(json!({
         "exit_code": result.exit_code,
         "stdout": result.stdout,
@@ -302,9 +312,14 @@ async fn run_sandbox_run(arguments: Value) -> Result<Value> {
 }
 
 /// Destroy a persistent remote sandbox (idempotent).
-async fn run_sandbox_destroy(arguments: Value) -> Result<Value> {
+async fn run_sandbox_destroy(
+    arguments: Value,
+    agent_id: Option<&str>,
+    session_id: Option<String>,
+) -> Result<Value> {
     use crate::sidecar::sandbox::session;
 
+    let owner = session::SandboxOwner::from_context(agent_id, session_id.as_deref())?;
     let run_id = arguments
         .get("run_id")
         .and_then(Value::as_str)
@@ -312,7 +327,7 @@ async fn run_sandbox_destroy(arguments: Value) -> Result<Value> {
         .ok_or_else(|| anyhow::anyhow!("missing required argument 'run_id'"))?
         .to_owned();
 
-    session::destroy_sandbox(&run_id).await?;
+    session::destroy_sandbox_owned(&run_id, &owner).await?;
     Ok(json!({ "ok": true }))
 }
 

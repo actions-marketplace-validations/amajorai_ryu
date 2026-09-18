@@ -129,6 +129,44 @@ function errorContract(value: unknown): {
 }
 
 describe("dispatchRpc capability gate", () => {
+	it("Connect workflow mutation requires runstate and strips no caller identity overrides", async () => {
+		let calls = 0;
+		const svc: HostServices = {...services(),workflowsBindConnectTrigger: async input => { calls++; return input; }};
+		const input = {id:"workflow-a",connectTriggerId:"00000000-0000-4000-8000-000000000001"};
+		await expect(dispatchRpc("workflows.bindConnectTrigger",[input],new Set<Capability>(["workflows.catalogs"]),svc)).rejects.toThrow();
+		expect(calls).toBe(0);
+		await expect(dispatchRpc("workflows.bindConnectTrigger",[{...input,ownerUserId:"other"}],new Set<Capability>(["workflows.runstate"]),svc)).rejects.toThrow();
+		expect(calls).toBe(0);
+		await expect(dispatchRpc("workflows.bindConnectTrigger",[input],new Set<Capability>(["workflows.runstate"]),svc)).resolves.toEqual(input);
+		expect(calls).toBe(1);
+	});
+
+	it("Connect workflow reads and removals use distinct existing grants", async () => {
+		const svc: HostServices = {...services(),workflowsConnectBindings:async input => [input],workflowsRemoveConnectBinding:async()=>undefined};
+		await expect(dispatchRpc("workflows.connectBindings",[{id:"workflow-a"}],new Set<Capability>(["workflows.catalogs"]),svc)).resolves.toEqual([{id:"workflow-a"}]);
+		await expect(dispatchRpc("workflows.removeConnectBinding",[{id:"workflow-a",bindingId:"binding-a"}],new Set<Capability>(["workflows.catalogs"]),svc)).rejects.toThrow();
+		await expect(dispatchRpc("workflows.removeConnectBinding",[{id:"workflow-a",bindingId:"binding-a"}],new Set<Capability>(["workflows.runstate"]),svc)).resolves.toBeUndefined();
+	});
+
+	it("Connect workflow reads reject caller-supplied identity selectors", async () => {
+		let calls = 0;
+		const svc: HostServices = {
+			...services(),
+			workflowsConnectBindings: async () => {
+				calls++;
+				return [];
+			},
+		};
+		await expect(
+			dispatchRpc(
+				"workflows.connectBindings",
+				[{ id: "workflow-a", ownerUserId: "other" }],
+				new Set<Capability>(["workflows.catalogs"]),
+				svc
+			)
+		).rejects.toThrow();
+		expect(calls).toBe(0);
+	});
 	it("dispatches a granted method to its service", async () => {
 		const result = await dispatchRpc(
 			"core.listAgents",
@@ -188,6 +226,73 @@ describe("dispatchRpc capability gate", () => {
 			conversation_id: "conversation-1:Stop linting.",
 			status: "accepted",
 		});
+	});
+
+	it("dispatches Activity observability reads and gates provider-backed actions", async () => {
+		const readGrant = new Set<Capability>(["activity.read"]);
+		const runGrant = new Set<Capability>(["activity.run"]);
+		const readServices: HostServices = {
+			...services(),
+			activityAudit: async (input) => ({
+				entries: [],
+				filter: input,
+				reachable: true,
+			}),
+			activityTrace: async (input) => ({ spans: [], ...input }),
+		};
+		await expect(
+			dispatchRpc("activity.audit", [{ limit: 100 }], readGrant, readServices)
+		).resolves.toMatchObject({ reachable: true });
+		await expect(
+			dispatchRpc(
+				"activity.trace",
+				[{ run_id: "run-1" }],
+				readGrant,
+				readServices
+			)
+		).resolves.toMatchObject({ run_id: "run-1" });
+		const maintenanceServices: HostServices = {
+			...services(),
+			activityPrune: async () => ({ deleted_rows: 3 }),
+			activityScore: async (input) => ({ kind: "online_score", input }),
+		};
+		await expect(
+			dispatchRpc("activity.prune", [], runGrant, maintenanceServices)
+		).resolves.toEqual({ deleted_rows: 3 });
+		await expect(
+			dispatchRpc(
+				"activity.score",
+				[{ response: "completed" }],
+				runGrant,
+				maintenanceServices
+			)
+		).resolves.toMatchObject({ kind: "online_score" });
+
+		let called = false;
+		const runServices: HostServices = {
+			...services(),
+			activityRedteam: async (input) => {
+				called = true;
+				return input;
+			},
+		};
+		await expect(
+			dispatchRpc(
+				"activity.redteam",
+				[{ agent_id: "agent-1" }],
+				runGrant,
+				runServices
+			)
+		).resolves.toEqual({ agent_id: "agent-1" });
+		expect(called).toBe(true);
+		await expect(
+			dispatchRpc(
+				"activity.redteam",
+				[{ agent_id: "agent-1" }],
+				readGrant,
+				runServices
+			)
+		).rejects.toBeInstanceOf(CapabilityError);
 	});
 
 	it("REJECTS a known method whose capability was not granted", async () => {

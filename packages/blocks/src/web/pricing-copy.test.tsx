@@ -70,7 +70,7 @@ test("the public business shelf omits the seat-sizing explainer", () => {
 	expect(html).not.toContain("Ryu Plus");
 	expect(html).not.toContain("people can share");
 	expect(html).not.toContain("Your organization gets");
-	expect(html).toContain("16% deposit fee ($2.75 minimum)");
+	expect(html).toContain("26% deposit fee ($5 minimum)");
 	expect(html).not.toContain("This price covers");
 	expect(html).toContain("border-border/70 border-b pb-3");
 	expect(html).not.toContain("border-border/70 border-y py-3");

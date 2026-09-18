@@ -67,6 +67,9 @@ export const env = createEnv({
 		// reachable from the internet in production). Optional: falls back to
 		// BETTER_AUTH_URL, then SERVER_URL, then http://localhost:3000.
 		RYU_PUBLIC_URL: z.string().optional(),
+		// Stable secret for deriving gift claim links. Set a dedicated value in
+		// production so auth-secret rotation does not invalidate existing gifts.
+		RYU_GIFT_CLAIM_SECRET: z.string().min(32).optional(),
 		// Marketing web origin for server-side billing/email redirects when the
 		// API router builds a profile URL. Optional: defaults to
 		// http://localhost:3001 (same as FRONTEND_URL in dev).
@@ -175,6 +178,9 @@ export const env = createEnv({
 		POLAR_PRODUCT_CLOUD_INSTANCE: z.string().optional(),
 		// Pay-what-you-want product credit top-ups check out against (Unit B2).
 		POLAR_PRODUCT_CREDITS: z.string().optional(),
+		// One-time custom-price product for Ryu gift cards, credit gifts, and
+		// non-renewing subscription gifts.
+		POLAR_PRODUCT_GIFTS: z.string().optional(),
 		// FIXED-price product auto top-up charges off-session (its price must equal
 		// the configured pack `amountCents`). Optional: absent ⇒ auto-topup cannot
 		// charge and is effectively off. Requires the Polar org to have the
@@ -238,6 +244,7 @@ export const env = createEnv({
 		// Optional shared secret appended to the inbound webhook URL as `?token=`
 		// for defence-in-depth on top of SNS signature verification.
 		RYU_MAIL_INBOUND_SECRET: z.string().optional(),
+		RYU_MAIL_SNS_TOPIC_ARN: z.string().optional(),
 		// Hosted Box control-plane bridge. The URL is server-only and the token map
 		// is keyed by Better Auth organization id; plaintext tokens never reach the
 		// browser or the organization API response.

@@ -96,6 +96,7 @@ pub fn classify_tool(tool_id: &str) -> ToolEffect {
                     | "configure"
                     | "approve"
                     | "delegate"
+                    | "react"
                     | "resume"
             )
             .then_some(index)
@@ -254,6 +255,11 @@ pub async fn ensure_foreground_run_allowed(
     let Some(agent_id) = agent_id else {
         return Ok(());
     };
+    if !crate::fleet::is_agent_available(agent_id) {
+        return Err(anyhow!(
+            "agent '{agent_id}' is unavailable under the node's organization policy"
+        ));
+    }
     let Some(record) = store.get(agent_id).await? else {
         return Err(anyhow!("agent '{agent_id}' not found"));
     };
@@ -275,6 +281,11 @@ pub async fn ensure_noninteractive_run_allowed(
     let Some(agent_id) = agent_id else {
         return Ok(());
     };
+    if !crate::fleet::is_agent_available(agent_id) {
+        return Err(anyhow!(
+            "agent '{agent_id}' is unavailable under the node's organization policy"
+        ));
+    }
     let Some(record) = store.get(agent_id).await? else {
         return Err(anyhow!("agent '{agent_id}' not found"));
     };
@@ -339,6 +350,7 @@ mod tests {
         assert_eq!(classify_tool("github.preview_delete"), ToolEffect::Preview);
         assert_eq!(classify_tool("github.delete_issue"), ToolEffect::Mutate);
         assert_eq!(classify_tool("gmail.send_email"), ToolEffect::External);
+        assert_eq!(classify_tool("agents.react"), ToolEffect::Mutate);
         assert_eq!(classify_tool("vendor.mystery"), ToolEffect::Unknown);
     }
 

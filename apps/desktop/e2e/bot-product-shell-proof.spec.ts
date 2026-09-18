@@ -1,7 +1,7 @@
 import { expect, test } from "@playwright/test";
 
 const PROOF_SCREENSHOT =
-	"/Users/jiawei/.codex/visualizations/2026/08/25/01a03916-ee8c-7552-ab02-c72fe2dd4a39/ryu-bot-product-proof.png";
+	"/Users/jiawei/.codex/visualizations/2026/09/14/01a09ed9-24cf-7870-83a0-66a77c4968eb/ryu-bot-product-proof.png";
 
 test.describe.configure({ timeout: 90_000 });
 
@@ -21,6 +21,9 @@ test("proves the managed Bot desktop shell keeps Build controls hidden", async (
 	await expect(page.getByTestId("bot-connection-status")).toContainText(
 		"Connected"
 	);
+	await expect(page.getByTestId("bot-chat-header")).toContainText("Ryu");
+	await expect(page.getByTestId("bot-chat-header-avatar")).toBeVisible();
+	await expect(page.getByTestId("bot-chat-header-name")).toContainText("Ryu");
 	await expect(page.getByTestId("bot-managed-default")).toHaveText(
 		"Ryu-managed models"
 	);
