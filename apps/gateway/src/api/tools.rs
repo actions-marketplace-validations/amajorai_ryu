@@ -1,11 +1,15 @@
-use axum::{extract::State, http::{HeaderMap, StatusCode}, Json};
+use axum::{
+    extract::State,
+    http::{HeaderMap, StatusCode},
+    Json,
+};
 use serde_json::{json, Value};
 
+use crate::state::SharedState;
 use crate::{
     error::GatewayError,
     pipeline::{authenticate, AuthInputs},
 };
-use crate::state::SharedState;
 
 /// GET /v1/tools/composio
 ///
@@ -62,11 +66,7 @@ mod tests {
     #[tokio::test]
     async fn empty_list_when_composio_disabled_requires_gateway_auth() {
         let mut state = AppState::new_for_test_default();
-        state
-            .auth
-            .write()
-            .expect("test auth lock")
-            .require_auth = false;
+        state.auth.write().expect("test auth lock").require_auth = false;
         let state = Arc::new(state);
         let (status, Json(body)) = list_composio_tools(State(state), HeaderMap::new())
             .await

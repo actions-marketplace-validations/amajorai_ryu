@@ -930,7 +930,10 @@ mod tests {
 
     #[test]
     fn conversation_reactions_grant_is_reviewed() {
-        let d = validate_grants_for(Some("@ryu/agent-comms"), &scopes(&["conversation:reactions"]));
+        let d = validate_grants_for(
+            Some("@ryu/agent-comms"),
+            &scopes(&["conversation:reactions"]),
+        );
         assert!(d.all_approved(), "denied: {:?}", d.denied);
         assert_eq!(d.approved, vec!["conversation:reactions".to_owned()]);
     }
@@ -940,8 +943,9 @@ mod tests {
         let grants = scopes(&["timeline:speech", "media:record"]);
         assert!(validate_grants_for(Some("@ryu/life-recorder"), &grants).all_approved());
         assert!(!validate_grants_for(Some("com.evil.life-recorder"), &grants).all_approved());
-        assert!(!validate_grants_for(Some("com.evil.media"), &scopes(&["media:record"]))
-            .all_approved());
+        assert!(
+            !validate_grants_for(Some("com.evil.media"), &scopes(&["media:record"])).all_approved()
+        );
     }
 
     #[test]

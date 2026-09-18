@@ -356,7 +356,12 @@ impl ryu_composio::consumer::EventHandler for CoreEventHandler {
         // cannot choose arbitrary targets: these rows were bound by the owner.
         for target in &targets {
             if target.target_kind == "agent"
-                && !self.state.agent_store.get(&target.agent_id).await?.is_some()
+                && !self
+                    .state
+                    .agent_store
+                    .get(&target.agent_id)
+                    .await?
+                    .is_some()
                 && self.state.agents.find_exact(&target.agent_id).is_none()
             {
                 bail!("Connect target agent does not exist");

@@ -300,9 +300,10 @@ impl PromptEvalStore {
                 .ok_or_else(|| anyhow::anyhow!("prompt suite tests must be an array"))?;
 
             if let Some(case_id) = case.get("id").and_then(Value::as_str) {
-                if cases.iter().any(|existing| {
-                    existing.get("id").and_then(Value::as_str) == Some(case_id)
-                }) {
+                if cases
+                    .iter()
+                    .any(|existing| existing.get("id").and_then(Value::as_str) == Some(case_id))
+                {
                     return Ok(Some((suite, false)));
                 }
             }
@@ -554,7 +555,7 @@ impl PromptEvalStore {
             },
         )
         .optional()
-            .map_err(Into::into)
+        .map_err(Into::into)
     }
 
     pub async fn rename_run(
@@ -590,7 +591,10 @@ impl PromptEvalStore {
                 params![run_id, suite_id],
             )?;
             if changed > 0 {
-                conn.execute("DELETE FROM prompt_reviews WHERE run_id = ?1", params![run_id])?;
+                conn.execute(
+                    "DELETE FROM prompt_reviews WHERE run_id = ?1",
+                    params![run_id],
+                )?;
             }
             Ok(changed > 0)
         })();
@@ -803,7 +807,10 @@ mod tests {
         );
         let (first, first_added) = first.unwrap().unwrap();
         let (second, second_added) = second.unwrap().unwrap();
-        assert_ne!(first_added, second_added, "exactly one concurrent import adds");
+        assert_ne!(
+            first_added, second_added,
+            "exactly one concurrent import adds"
+        );
         assert_eq!(
             first.config["tests"].as_array().unwrap().len(),
             second.config["tests"].as_array().unwrap().len()

@@ -603,21 +603,44 @@ pub async fn authenticate(
         // Scoped inference remains non-admin and non-forwarder: it cannot alter
         // routing policy, reattribute spend, or invoke privileged control routes.
         if key.starts_with("gws1.") {
-            let scope = auth.api_keys.iter()
+            let scope = auth
+                .api_keys
+                .iter()
                 .filter(|entry| entry.name == "local-core" && entry.trusted_forwarder)
                 .find_map(|entry| ryu_gw_credentials::InferenceScope::verify(key, &entry.key).ok());
             let Some(scope) = scope else {
-                return StaticOutcome::Reject(GatewayError::Unauthorized("Invalid scoped inference credential".to_owned()));
+                return StaticOutcome::Reject(GatewayError::Unauthorized(
+                    "Invalid scoped inference credential".to_owned(),
+                ));
             };
             if agent_id.as_deref().is_some_and(|id| id != scope.agent_id)
-                || user_id.as_deref().is_some_and(|id| Some(id) != scope.user_id.as_deref())
-                || session_id.as_deref().is_some_and(|id| Some(id) != scope.session_id.as_deref()) {
-                return StaticOutcome::Reject(GatewayError::Unauthorized("Inference identity does not match the issued scope".to_owned()));
+                || user_id
+                    .as_deref()
+                    .is_some_and(|id| Some(id) != scope.user_id.as_deref())
+                || session_id
+                    .as_deref()
+                    .is_some_and(|id| Some(id) != scope.session_id.as_deref())
+            {
+                return StaticOutcome::Reject(GatewayError::Unauthorized(
+                    "Inference identity does not match the issued scope".to_owned(),
+                ));
             }
-            let mut context = build_ctx(false, key.to_owned(), None, None, None,
-                Some(format!("agent:{}", scope.agent_id)), scope.user_id,
-                Some(scope.agent_id), None, false, None, None,
-                std::collections::HashMap::new(), None);
+            let mut context = build_ctx(
+                false,
+                key.to_owned(),
+                None,
+                None,
+                None,
+                Some(format!("agent:{}", scope.agent_id)),
+                scope.user_id,
+                Some(scope.agent_id),
+                None,
+                false,
+                None,
+                None,
+                std::collections::HashMap::new(),
+                None,
+            );
             context.session_id = scope.session_id;
             return StaticOutcome::Matched(context);
         }
@@ -807,7 +830,8 @@ async fn apply_smart_routing(
         return Ok(false);
     }
 
-    let inference = auxiliary::GovernedInference::new(Arc::clone(state), ctx.clone(), "smart-routing");
+    let inference =
+        auxiliary::GovernedInference::new(Arc::clone(state), ctx.clone(), "smart-routing");
     let chosen = router
         .resolve(&body["messages"], ctx.session_id.as_deref(), &inference)
         .await?;
@@ -1370,10 +1394,15 @@ enum InlineFlag {
     /// honest, logged no-op (formerly `None`).
     Skip,
     /// The evaluator ran: `(flagged, reason)` feeds the normal action map.
-    Ran { flagged: bool, reason: String },
+    Ran {
+        flagged: bool,
+        reason: String,
+    },
     /// A security policy failed closed (trap / OOM / timeout / invalid output with
     /// `fail_open = false`): block the turn directly, bypassing the action map.
-    ForceBlock { reason: String },
+    ForceBlock {
+        reason: String,
+    },
 }
 
 /// Evaluate ONE enabled inline binding against `text`. Returns [`InlineFlag`]:
@@ -2088,11 +2117,9 @@ pub async fn run(
     let prompt_cache_outcome = apply_prompt_cache(&state, &ctx, &decision.model, &mut body);
 
     for provider_kind in &fallback_chain {
-        if let Err(error) = inference_governance::authorize_provider_region(
-            &state,
-            &ctx,
-            provider_kind,
-        ) {
+        if let Err(error) =
+            inference_governance::authorize_provider_region(&state, &ctx, provider_kind)
+        {
             last_err = Some(error);
             if Some(provider_kind) == primary_provider.as_ref() {
                 primary_skipped = true;
@@ -2174,10 +2201,10 @@ pub async fn run(
         //   c) else a plain completion.
         // The Restrict budget action strips `tools`; we inject the search tool
         // only when tools were NOT stripped (B-12).
-	let tools_restricted = matches!(
+        let tools_restricted = matches!(
             budget.as_ref().map(|b| b.action),
             Some(crate::config::BudgetAction::Restrict)
-	);
+        );
         let completion_result = match loop_kind {
             ToolLoopKind::Unified => {
                 let catalog = state
@@ -2281,26 +2308,44 @@ pub async fn run(
                     state.metrics.add_cache_write_tokens(cache_write_tokens);
                 }
 
-                let mut settlement=inference_governance::settle_completion(&state,&ctx,&response,inference_governance::CompletionReceipt {
-                    provider:provider.name().to_owned(),model:decision.model.clone(),reason:"gateway_usage",audit_provider:provider.name().into(),backend:None,start,
-                    admitted_tokens:0,estimated_input:estimate_prompt_tokens(&body),budget:budget.clone(),reservations:credit_reservation.take().into_iter().collect(),zero_cost:false,
-                });
+                let mut settlement = inference_governance::settle_completion(
+                    &state,
+                    &ctx,
+                    &response,
+                    inference_governance::CompletionReceipt {
+                        provider: provider.name().to_owned(),
+                        model: decision.model.clone(),
+                        reason: "gateway_usage",
+                        audit_provider: provider.name().into(),
+                        backend: None,
+                        start,
+                        admitted_tokens: 0,
+                        estimated_input: estimate_prompt_tokens(&body),
+                        budget: budget.clone(),
+                        reservations: credit_reservation.take().into_iter().collect(),
+                        zero_cost: false,
+                    },
+                );
                 // Tools have already executed too; output rejection must not erase their bill.
-                spawn_tool_call_debit(&state,&ctx,billable_tool_calls);
+                spawn_tool_call_debit(&state, &ctx, billable_tool_calls);
                 // 9. Outbound firewall
-                let policy_pass = apply_outbound_json_dlp(&state, &ctx, &mut response).map_err(
-                    |error| {
+                let policy_pass =
+                    apply_outbound_json_dlp(&state, &ctx, &mut response).map_err(|error| {
                         settlement.fail(&error);
                         error
-                    },
-                )?;
+                    })?;
 
                 // 9b. Unified-evaluator inline guardrails — OUTPUT target (P3).
                 // Runs the resolved per-agent policy's enabled output evaluators
                 // (pii_leakage regex, toxicity/bias LLM-judge) over the response,
                 // reusing the firewall block/sanitize machinery. No-op when no
                 // binding is enabled.
-                apply_inline_output_evaluators(&state, &ctx, &mut response).await.map_err(|error|{settlement.fail(&error);error})?;
+                apply_inline_output_evaluators(&state, &ctx, &mut response)
+                    .await
+                    .map_err(|error| {
+                        settlement.fail(&error);
+                        error
+                    })?;
 
                 if settlement.overrun {
                     state.metrics.inc_rate_limited();
@@ -2332,8 +2377,8 @@ pub async fn run(
                     sc.insert(ctx.org_id.clone(), emb, response.clone());
                 }
 
-                settlement.record_mut().eval_score=eval_score;
-                settlement.record_mut().latency_ms=latency_ms;
+                settlement.record_mut().eval_score = eval_score;
+                settlement.record_mut().latency_ms = latency_ms;
 
                 // 14b. Experimental OTel GenAI span (#540, P1): reuse the same
                 // tokens/model/provider/latency. No-op unless OTEL_SEMCONV_STABILITY_OPT_IN
@@ -2710,11 +2755,9 @@ pub async fn run_stream(
     let prompt_cache_outcome = apply_prompt_cache(&state, &ctx, &decision.model, &mut body);
 
     for provider_kind in &fallback_chain {
-        if let Err(error) = inference_governance::authorize_provider_region(
-            &state,
-            &ctx,
-            provider_kind,
-        ) {
+        if let Err(error) =
+            inference_governance::authorize_provider_region(&state, &ctx, provider_kind)
+        {
             last_err = Some(error);
             if Some(provider_kind) == primary_provider_stream.as_ref() {
                 primary_skipped_stream = true;
@@ -2968,17 +3011,13 @@ pub async fn run_multimodal(
 
     let requested_model = body["model"].as_str().unwrap_or("unknown").to_string();
 
-    let input_alert = inference_governance::inspect_multimodal_input(
-        &state,
-        &ctx,
-        &mut body,
-        &modality,
-    )
-    .map_err(|e| {
-        state.metrics.inc_errors();
-        audit_failure(&state, &ctx, &requested_model, &e, start);
-        e
-    })?;
+    let input_alert =
+        inference_governance::inspect_multimodal_input(&state, &ctx, &mut body, &modality)
+            .map_err(|e| {
+                state.metrics.inc_errors();
+                audit_failure(&state, &ctx, &requested_model, &e, start);
+                e
+            })?;
 
     // Image-target inline evaluators (explicit_content / sensitive_imagery) are
     // NOT enforced this phase: judging an image needs a vision-capable judge that
@@ -3078,11 +3117,9 @@ pub async fn run_multimodal(
     let mut primary_skipped_mm = false;
 
     for provider_kind in &fallback_chain {
-        if let Err(error) = inference_governance::authorize_provider_region(
-            &state,
-            &ctx,
-            provider_kind,
-        ) {
+        if let Err(error) =
+            inference_governance::authorize_provider_region(&state, &ctx, provider_kind)
+        {
             last_err = Some(error);
             if Some(provider_kind) == primary_provider_mm.as_ref() {
                 primary_skipped_mm = true;
@@ -3421,7 +3458,7 @@ pub async fn run_embedding(
         return Err(error);
     }
 
-    let original_max_tokens=body.get("max_tokens").cloned();
+    let original_max_tokens = body.get("max_tokens").cloned();
     let BudgetOutcome {
         decision: budget,
         alert: policy_alert,
@@ -3452,8 +3489,17 @@ pub async fn run_embedding(
     )?;
     body["model"] = json!(decision.model);
     // Restrict is a text-generation budget action; do not add a chat-only field to this wire shape.
-    if let Some(max_tokens)=original_max_tokens {body["max_tokens"]=max_tokens;} else if let Some(object)=body.as_object_mut(){object.remove("max_tokens");}
-    let mut input_reservation=inference_governance::reserve_input_credit(&state,&ctx,&decision,estimated_input).map_err(|error|{audit_failure(&state,&ctx,&decision.model,&error,start);error})?;
+    if let Some(max_tokens) = original_max_tokens {
+        body["max_tokens"] = max_tokens;
+    } else if let Some(object) = body.as_object_mut() {
+        object.remove("max_tokens");
+    }
+    let mut input_reservation =
+        inference_governance::reserve_input_credit(&state, &ctx, &decision, estimated_input)
+            .map_err(|error| {
+                audit_failure(&state, &ctx, &decision.model, &error, start);
+                error
+            })?;
     let policy_alert = merge_alert(input_alert, policy_alert);
     let fallback_chain = clamped_fallback_chain(&state, &ctx, &decision);
     let primary_provider = fallback_chain.first().cloned();
@@ -3461,11 +3507,9 @@ pub async fn run_embedding(
     let mut last_error: Option<GatewayError> = None;
 
     for provider_kind in &fallback_chain {
-        if let Err(error) = inference_governance::authorize_provider_region(
-            &state,
-            &ctx,
-            provider_kind,
-        ) {
+        if let Err(error) =
+            inference_governance::authorize_provider_region(&state, &ctx, provider_kind)
+        {
             last_error = Some(error);
             if Some(provider_kind) == primary_provider.as_ref() {
                 primary_skipped = true;
@@ -3518,7 +3562,10 @@ pub async fn run_embedding(
                         admitted_tokens: estimated_input,
                         estimated_input,
                         budget: budget.clone(),
-                        reservations: [credit_reservation.take(),input_reservation.take()].into_iter().flatten().collect(),
+                        reservations: [credit_reservation.take(), input_reservation.take()]
+                            .into_iter()
+                            .flatten()
+                            .collect(),
                         zero_cost: false,
                     },
                 );
@@ -3603,17 +3650,13 @@ pub async fn submit_video_job(
     state.metrics.inc_requests();
     let requested_model = body["model"].as_str().unwrap_or("unknown").to_string();
 
-    let _input_alert = inference_governance::inspect_multimodal_input(
-        &state,
-        &ctx,
-        &mut body,
-        &Modality::Video,
-    )
-    .map_err(|e| {
-        state.metrics.inc_errors();
-        audit_failure(&state, &ctx, &requested_model, &e, start);
-        e
-    })?;
+    let _input_alert =
+        inference_governance::inspect_multimodal_input(&state, &ctx, &mut body, &Modality::Video)
+            .map_err(|e| {
+            state.metrics.inc_errors();
+            audit_failure(&state, &ctx, &requested_model, &e, start);
+            e
+        })?;
 
     // Rate limit + burst.
     if !state
@@ -3858,11 +3901,7 @@ pub async fn poll_video_job(
     // credentials in an organization, so require both the independent tenant
     // binding and the stable per-bearer owner binding. Return the same not-found
     // shape as an unknown id so ownership cannot be probed.
-    if !job.belongs_to(
-        ctx.org_id.as_deref(),
-        &ctx.api_key,
-        &ctx.owner_binding,
-    ) {
+    if !job.belongs_to(ctx.org_id.as_deref(), &ctx.api_key, &ctx.owner_binding) {
         return Err(GatewayError::BadRequest(format!(
             "no such video job: {job_id}"
         )));
@@ -5464,72 +5503,70 @@ struct StreamObserverState {
     /// Managed policy-alert tier (item 4) carried to the stream-end debit so the
     /// control plane can email owners. `None` unless a budget cap with tier >=
     /// Warn matched this (streaming) request.
-	budget_alert_tier: Option<AlertTier>,
+    budget_alert_tier: Option<AlertTier>,
 }
 
 impl Drop for StreamObserverState {
-	fn drop(&mut self) {
-		if self.done {
-			return;
-		}
-		self.done = true;
-		let (raw_input, raw_output) = sse_parse_usage(&self.accumulated);
-		let input_tokens = if raw_input > 0 {
-			raw_input
-		} else {
-			self.estimated_input_tokens
-		};
-		let output_tokens = if raw_output > 0 {
-			raw_output
-		} else {
-			(self.accumulated.chars().count() as u64).div_ceil(4)
-		};
-		let latency_ms = self.start.elapsed().as_millis() as u64;
-		let total_tokens = input_tokens.saturating_add(output_tokens);
-		self.state
-			.audit
-			.add_tokens(&self.ctx.api_key, total_tokens);
-		self.state.metrics.add_tokens(input_tokens, output_tokens);
-		self.state.rate_limiter.record_tokens_for_key(
-			&self.ctx.api_key,
-			total_tokens.saturating_sub(self.estimated_input_tokens),
-			self.ctx.key_config.as_ref(),
-		);
-		let error = if self.accumulated.len() >= 8 * 1024 * 1024 {
-			"response stream exceeded the 8 MiB scan limit"
-		} else {
-			"stream disconnected before completion; usage estimated"
-		};
-		self.state.log_audit(AuditRecord {
-			request_id: self.ctx.request_id.clone(),
-			api_key: self.ctx.api_key.clone(),
-			user_name: self.ctx.user_name.clone(),
-			org_id: self.ctx.org_id.clone(),
-			team_id: self.ctx.team_id.clone(),
-			project_id: None,
-			provider: self.provider_name.clone(),
-			model: self.model.clone(),
-			input_tokens,
-			output_tokens,
-			cache_hit: false,
-			latency_ms,
-			eval_score: None,
-			error: Some(error.to_owned()),
-			skill_ids: self.ctx.skill_ids.clone(),
-			session_id: self.ctx.session_id.clone(),
-			user_id: self.ctx.user_id.clone(),
-			agent_id: self.ctx.agent_id.clone(),
-			feature: self.ctx.feature.clone(),
-			managed_inference: self.ctx.managed_inference,
-			provider_cost_micro_usd: None,
-			event_type: crate::audit::EventType::ModelCall,
-			backend: None,
-			command: None,
-			duration_ms: None,
-			exit_code: None,
-			widget_instance_id: None,
-		});
-	}
+    fn drop(&mut self) {
+        if self.done {
+            return;
+        }
+        self.done = true;
+        let (raw_input, raw_output) = sse_parse_usage(&self.accumulated);
+        let input_tokens = if raw_input > 0 {
+            raw_input
+        } else {
+            self.estimated_input_tokens
+        };
+        let output_tokens = if raw_output > 0 {
+            raw_output
+        } else {
+            (self.accumulated.chars().count() as u64).div_ceil(4)
+        };
+        let latency_ms = self.start.elapsed().as_millis() as u64;
+        let total_tokens = input_tokens.saturating_add(output_tokens);
+        self.state.audit.add_tokens(&self.ctx.api_key, total_tokens);
+        self.state.metrics.add_tokens(input_tokens, output_tokens);
+        self.state.rate_limiter.record_tokens_for_key(
+            &self.ctx.api_key,
+            total_tokens.saturating_sub(self.estimated_input_tokens),
+            self.ctx.key_config.as_ref(),
+        );
+        let error = if self.accumulated.len() >= 8 * 1024 * 1024 {
+            "response stream exceeded the 8 MiB scan limit"
+        } else {
+            "stream disconnected before completion; usage estimated"
+        };
+        self.state.log_audit(AuditRecord {
+            request_id: self.ctx.request_id.clone(),
+            api_key: self.ctx.api_key.clone(),
+            user_name: self.ctx.user_name.clone(),
+            org_id: self.ctx.org_id.clone(),
+            team_id: self.ctx.team_id.clone(),
+            project_id: None,
+            provider: self.provider_name.clone(),
+            model: self.model.clone(),
+            input_tokens,
+            output_tokens,
+            cache_hit: false,
+            latency_ms,
+            eval_score: None,
+            error: Some(error.to_owned()),
+            skill_ids: self.ctx.skill_ids.clone(),
+            session_id: self.ctx.session_id.clone(),
+            user_id: self.ctx.user_id.clone(),
+            agent_id: self.ctx.agent_id.clone(),
+            feature: self.ctx.feature.clone(),
+            managed_inference: self.ctx.managed_inference,
+            provider_cost_micro_usd: None,
+            event_type: crate::audit::EventType::ModelCall,
+            backend: None,
+            command: None,
+            duration_ms: None,
+            exit_code: None,
+            widget_instance_id: None,
+        });
+    }
 }
 
 /// Wrap `body` with a stream observer that fires at stream end to:
@@ -6063,12 +6100,9 @@ fn rewrite_sse_for_dlp(
         collect_json_strings_compact(&payload, &mut text);
         text
     };
-    let violation = scanner.scan_outbound(&original_text).map(|match_| {
-        (
-            match_.pattern_name.clone(),
-            format!("{:?}", match_.kind),
-        )
-    });
+    let violation = scanner
+        .scan_outbound(&original_text)
+        .map(|match_| (match_.pattern_name.clone(), format!("{:?}", match_.kind)));
     redact_json_strings(&mut payload, scanner);
     let mut assembled = {
         let mut text = String::new();
@@ -6272,9 +6306,9 @@ fn sse_content_frames(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::{routing::post, Router};
     use crate::config::FirewallConfig;
     use crate::firewall::FirewallScanner;
+    use axum::{routing::post, Router};
 
     /// Minimal `RequestContext` for signal-gate tests.
     fn signal_ctx(
@@ -6740,10 +6774,7 @@ mod tests {
         let server = tokio::spawn(async move {
             axum::serve(
                 listener,
-                Router::new().route(
-                    "/api/credits/debit",
-                    post(|| async { "this is not JSON" }),
-                ),
+                Router::new().route("/api/credits/debit", post(|| async { "this is not JSON" })),
             )
             .await
             .expect("serve debit fixture");
@@ -8498,12 +8529,9 @@ mod tests {
         });
         let raw = format!("data: {frame}\n\ndata: [DONE]\n\n");
         let scanner = FirewallScanner::new_scoped(FirewallConfig::default());
-        let (rewritten, assembled, _) = rewrite_sse_for_dlp(
-            &raw,
-            &scanner,
-            &FirewallPolicy::WarnAndContinue,
-        )
-        .expect("valid SSE JSON should be rebuilt");
+        let (rewritten, assembled, _) =
+            rewrite_sse_for_dlp(&raw, &scanner, &FirewallPolicy::WarnAndContinue)
+                .expect("valid SSE JSON should be rebuilt");
         assert!(!rewritten.contains(secret));
         assert!(!assembled.contains(secret));
         assert!(rewritten.contains("[REDACTED:gh_pat]"));
@@ -10123,39 +10151,68 @@ mod fallback_tests {
     async fn scoped_inference_auth_binds_identity_and_enforces_agent_budget() {
         use crate::config::{BudgetAction, BudgetRule};
         let (state, calls) = agent_budget_state(BudgetRule {
-            limit: 1_000_000, action: BudgetAction::Stop, downgrade_to: None,
-            restrict_max_tokens: 256, alert: crate::config::AlertTier::Silent,
+            limit: 1_000_000,
+            action: BudgetAction::Stop,
+            downgrade_to: None,
+            restrict_max_tokens: 256,
+            alert: crate::config::AlertTier::Silent,
             include: crate::config::BudgetChargeInclusion::default(),
         });
         let signer = "gwcore_0123456789abcdef0123456789abcdef";
         state.update_auth_config(vec![serde_json::from_value(serde_json::json!({
             "key": signer, "name":"local-core", "trusted_forwarder":true,
-        })).unwrap()]);
+        }))
+        .unwrap()]);
         let token = ryu_gw_credentials::InferenceScope {
-            agent_id:"agent-a".into(), user_id:Some("user-a".into()), session_id:Some("session-a".into()),
-            expires_at: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() + 3600,
-        }.sign(signer).unwrap();
+            agent_id: "agent-a".into(),
+            user_id: Some("user-a".into()),
+            session_id: Some("session-a".into()),
+            expires_at: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs()
+                + 3600,
+        }
+        .sign(signer)
+        .unwrap();
         let bearer = format!("Bearer {token}");
-        let context = super::authenticate(&state, super::AuthInputs::with_key(Some(&bearer))).await.unwrap();
+        let context = super::authenticate(&state, super::AuthInputs::with_key(Some(&bearer)))
+            .await
+            .unwrap();
         assert_eq!(context.agent_id.as_deref(), Some("agent-a"));
         assert_eq!(context.user_id.as_deref(), Some("user-a"));
         assert_eq!(context.session_id.as_deref(), Some("session-a"));
         assert!(!context.is_master_key);
-        assert!(!context.key_config.as_ref().is_some_and(|key| key.trusted_forwarder));
+        assert!(!context
+            .key_config
+            .as_ref()
+            .is_some_and(|key| key.trusted_forwarder));
         for (agent_id, user_id, session_id) in [
-            (Some("agent-b"), None, None), (None, Some("user-b"), None), (None, None, Some("session-b")),
+            (Some("agent-b"), None, None),
+            (None, Some("user-b"), None),
+            (None, None, Some("session-b")),
         ] {
             let mut input = super::AuthInputs::with_key(Some(&bearer));
             input.agent_id = agent_id.map(str::to_owned);
             input.user_id = user_id.map(str::to_owned);
             input.session_id = session_id.map(str::to_owned);
-            assert!(matches!(super::authenticate(&state, input).await, Err(GatewayError::Unauthorized(_))));
+            assert!(matches!(
+                super::authenticate(&state, input).await,
+                Err(GatewayError::Unauthorized(_))
+            ));
         }
         let tampered = format!("{token}0");
-        assert!(matches!(super::authenticate(&state, super::AuthInputs::with_key(Some(&tampered))).await, Err(GatewayError::Unauthorized(_))));
+        assert!(matches!(
+            super::authenticate(&state, super::AuthInputs::with_key(Some(&tampered))).await,
+            Err(GatewayError::Unauthorized(_))
+        ));
         let result = run(Arc::clone(&state), context, ping_body()).await;
         assert!(matches!(result, Err(GatewayError::BudgetExceeded(_))));
-        assert_eq!(calls.load(Ordering::SeqCst), 0, "scoped agent budget must stop before provider dispatch");
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            0,
+            "scoped agent budget must stop before provider dispatch"
+        );
     }
 
     fn agent_a_ctx() -> RequestContext {

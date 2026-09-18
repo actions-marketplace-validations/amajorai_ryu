@@ -531,16 +531,16 @@ struct RawTeam {
 /// signature, `exp`, `iss` (== BASE_URL) and `aud` (== BASE_URL). On success the
 /// `orgs` membership array is returned for org narrowing.
 pub async fn verify_jwt(token: &str) -> Result<VerifiedClaims, AuthError> {
-    verify_jwt_with_expiry(token).await.map(|(claims, _)| claims)
+    verify_jwt_with_expiry(token)
+        .await
+        .map(|(claims, _)| claims)
 }
 
 /// Verify a Better Auth JWT and retain its validated expiration timestamp for
 /// transports that outlive the request that authenticated them (WebSockets).
 /// The returned timestamp is taken from the same signature- and claim-validated
 /// decode as [`verify_jwt`], never from an untrusted payload parse.
-pub async fn verify_jwt_with_expiry(
-    token: &str,
-) -> Result<(VerifiedClaims, i64), AuthError> {
+pub async fn verify_jwt_with_expiry(token: &str) -> Result<(VerifiedClaims, i64), AuthError> {
     let header = decode_header(token).map_err(|_| AuthError::Malformed)?;
     // Defense in depth: explicit alg check rejects `none`/confusion before we
     // ever touch a key; `Validation::new(EdDSA)` rejects them again at decode.

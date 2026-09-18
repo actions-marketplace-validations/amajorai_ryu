@@ -92,15 +92,18 @@ pub async fn voice_ws(
         }
     };
     let caller = ticket.caller.clone();
-	if ticket
-		.jwt_expires_at
-		.is_some_and(|expires_at| expires_at <= chrono::Utc::now().timestamp())
-	{
-		return (StatusCode::UNAUTHORIZED, "WebSocket ticket user identity expired")
-			.into_response();
-	}
-	let token_generation = ticket.node_generation;
-	ws.on_upgrade(move |socket| handle_socket(socket, state, caller, token_generation, ticket))
+    if ticket
+        .jwt_expires_at
+        .is_some_and(|expires_at| expires_at <= chrono::Utc::now().timestamp())
+    {
+        return (
+            StatusCode::UNAUTHORIZED,
+            "WebSocket ticket user identity expired",
+        )
+            .into_response();
+    }
+    let token_generation = ticket.node_generation;
+    ws.on_upgrade(move |socket| handle_socket(socket, state, caller, token_generation, ticket))
 }
 
 /// Build the in-process seam bundle a session drives (same handles `ServerState`
@@ -276,54 +279,54 @@ async fn handle_socket(
     // audio + barge-in while the model + TTS run). At most one at a time.
     let mut turn_handle: Option<tokio::task::JoinHandle<()>> = None;
 
-	// ── Receive loop ─────────────────────────────────────────────────────────
-	let mut token_updates = crate::node_token::subscribe_generation();
-	if *token_updates.borrow() != token_generation {
-		let _ = out_tx
-			.send(VoiceOutput::Control(VoiceServerMsg::Error {
-				code: "node_token_rotated".to_string(),
-				message: "node token rotated; reconnect required".to_string(),
-			}))
-			.await;
-		drop(out_tx);
-		let _ = send_task.await;
-		return;
-	}
-	loop {
-		let frame = tokio::select! {
-			_ = &mut jwt_expiry => {
-				let _ = out_tx
-					.send(VoiceOutput::Control(VoiceServerMsg::Error {
-						code: "user_identity_expired".to_string(),
-						message: "user identity expired; reconnect required".to_string(),
-					}))
-					.await;
-				break;
-			}
-			changed = token_updates.changed() => {
-				if changed.is_ok() && *token_updates.borrow() != token_generation {
-					let _ = out_tx
-						.send(VoiceOutput::Control(VoiceServerMsg::Error {
-							code: "node_token_rotated".to_string(),
-							message: "node token rotated; reconnect required".to_string(),
-						}))
-						.await;
-				}
-				break;
-			}
-			frame = ws_rx.next() => frame,
-		};
-		let Some(frame) = frame else { break };
-		if crate::node_token::active_generation() != token_generation {
-			let _ = out_tx
-				.send(VoiceOutput::Control(VoiceServerMsg::Error {
-					code: "node_token_rotated".to_string(),
-					message: "node token rotated; reconnect required".to_string(),
-				}))
-				.await;
-			break;
-		}
-		let frame = match frame {
+    // ── Receive loop ─────────────────────────────────────────────────────────
+    let mut token_updates = crate::node_token::subscribe_generation();
+    if *token_updates.borrow() != token_generation {
+        let _ = out_tx
+            .send(VoiceOutput::Control(VoiceServerMsg::Error {
+                code: "node_token_rotated".to_string(),
+                message: "node token rotated; reconnect required".to_string(),
+            }))
+            .await;
+        drop(out_tx);
+        let _ = send_task.await;
+        return;
+    }
+    loop {
+        let frame = tokio::select! {
+            _ = &mut jwt_expiry => {
+                let _ = out_tx
+                    .send(VoiceOutput::Control(VoiceServerMsg::Error {
+                        code: "user_identity_expired".to_string(),
+                        message: "user identity expired; reconnect required".to_string(),
+                    }))
+                    .await;
+                break;
+            }
+            changed = token_updates.changed() => {
+                if changed.is_ok() && *token_updates.borrow() != token_generation {
+                    let _ = out_tx
+                        .send(VoiceOutput::Control(VoiceServerMsg::Error {
+                            code: "node_token_rotated".to_string(),
+                            message: "node token rotated; reconnect required".to_string(),
+                        }))
+                        .await;
+                }
+                break;
+            }
+            frame = ws_rx.next() => frame,
+        };
+        let Some(frame) = frame else { break };
+        if crate::node_token::active_generation() != token_generation {
+            let _ = out_tx
+                .send(VoiceOutput::Control(VoiceServerMsg::Error {
+                    code: "node_token_rotated".to_string(),
+                    message: "node token rotated; reconnect required".to_string(),
+                }))
+                .await;
+            break;
+        }
+        let frame = match frame {
             Ok(f) => f,
             Err(_) => break,
         };
@@ -332,7 +335,7 @@ async fn handle_socket(
                 let pcm = pcm_from_bytes(&bytes);
                 if pcm.is_empty() {
                     continue;
-	}
+                }
                 for ev in session.on_audio(&pcm) {
                     match ev {
                         VoiceEvent::SpeechStart => {
@@ -481,10 +484,9 @@ mod tests {
         let query: VoiceQuery =
             serde_json::from_value(serde_json::json!({ "ticket": "opaque-ticket" })).unwrap();
         assert_eq!(query.ticket.as_deref(), Some("opaque-ticket"));
-        assert!(serde_json::from_value::<VoiceQuery>(
-            serde_json::json!({ "jwt": "legacy" })
-        )
-        .is_err());
+        assert!(
+            serde_json::from_value::<VoiceQuery>(serde_json::json!({ "jwt": "legacy" })).is_err()
+        );
     }
 
     /// The error frame is a tagged-union TEXT message the client can route by

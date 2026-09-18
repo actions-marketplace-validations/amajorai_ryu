@@ -55,8 +55,7 @@ pub mod live {
         revoked: watch::Sender<bool>,
     }
 
-    static REGISTRY: OnceLock<Mutex<HashMap<String, LiveConnection>>> =
-        OnceLock::new();
+    static REGISTRY: OnceLock<Mutex<HashMap<String, LiveConnection>>> = OnceLock::new();
     static NEXT_GENERATION: AtomicU64 = AtomicU64::new(0);
 
     fn registry() -> &'static Mutex<HashMap<String, LiveConnection>> {
@@ -359,7 +358,10 @@ mod tests {
 
         assert!(!*revoked.borrow());
         assert!(live::revoke(&device_id).await);
-        revoked.changed().await.expect("revocation watch remains live");
+        revoked
+            .changed()
+            .await
+            .expect("revocation watch remains live");
         assert!(*revoked.borrow());
 
         live::unregister(&device_id, generation).await;

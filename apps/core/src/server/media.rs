@@ -70,7 +70,9 @@ pub(crate) async fn enforce_host_media_permission(
     let expected = match app_id {
         "@ryu/canvas" => "canvas.generate",
         "@ryu/slides" => "slides.generate",
-        _ => return Err((StatusCode::FORBIDDEN, "unsupported app media permission").into_response()),
+        _ => {
+            return Err((StatusCode::FORBIDDEN, "unsupported app media permission").into_response())
+        }
     };
     if permission != expected
         || state
@@ -368,10 +370,7 @@ pub async fn serve_media(
             StatusCode::OK,
             [
                 (header::CONTENT_TYPE, content_type),
-                (
-                    header::CACHE_CONTROL,
-                    "private, no-store".to_owned(),
-                ),
+                (header::CACHE_CONTROL, "private, no-store".to_owned()),
             ],
             bytes,
         )

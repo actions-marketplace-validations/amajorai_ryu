@@ -554,7 +554,10 @@ impl AuditLogger {
         let retention = audit_retention_policy();
         let pruned = prune_database(&conn, retention)?;
         if pruned.deleted_rows > 0 {
-            info!(deleted_rows = pruned.deleted_rows, "audit retention pass removed old rows");
+            info!(
+                deleted_rows = pruned.deleted_rows,
+                "audit retention pass removed old rows"
+            );
         }
 
         // Load existing per-key token totals so budget enforcement survives restarts.
@@ -1289,22 +1292,18 @@ fn prune_database(
     let mut deleted_rows = 0_u64;
     if let Some(days) = policy.retention_days {
         let modifier = format!("-{days} days");
-        deleted_rows = deleted_rows.saturating_add(
-            conn.execute(
-                "DELETE FROM audit_log WHERE timestamp < datetime('now', ?1)",
-                params![modifier],
-            )? as u64,
-        );
+        deleted_rows = deleted_rows.saturating_add(conn.execute(
+            "DELETE FROM audit_log WHERE timestamp < datetime('now', ?1)",
+            params![modifier],
+        )? as u64);
     }
     if let Some(max_rows) = policy.max_rows {
         let max_rows = max_rows.min(i64::MAX as u64) as i64;
-        deleted_rows = deleted_rows.saturating_add(
-            conn.execute(
-                "DELETE FROM audit_log
+        deleted_rows = deleted_rows.saturating_add(conn.execute(
+            "DELETE FROM audit_log
                  WHERE id NOT IN (SELECT id FROM audit_log ORDER BY id DESC LIMIT ?1)",
-                params![max_rows],
-            )? as u64,
-        );
+            params![max_rows],
+        )? as u64);
     }
     conn.execute_batch(
         "UPDATE audit_summary SET
@@ -1359,12 +1358,12 @@ pub trait AuditBackend: Send + Sync {
     /// Aggregate summary over the whole store.
     fn summary(&self) -> anyhow::Result<AuditSummary>;
     /// Canonical 15-minute usage buckets for analytics surfaces.
-	fn usage_rollup(&self, query: &AuditUsageQuery) -> anyhow::Result<Vec<AuditUsageEvent>>;
-	/// Apply the backend's local retention policy. Non-persistent backends may
-	/// return a zero-deletion summary.
-	fn prune(&self) -> anyhow::Result<AuditPruneSummary> {
-		Ok(AuditPruneSummary::default())
-	}
+    fn usage_rollup(&self, query: &AuditUsageQuery) -> anyhow::Result<Vec<AuditUsageEvent>>;
+    /// Apply the backend's local retention policy. Non-persistent backends may
+    /// return a zero-deletion summary.
+    fn prune(&self) -> anyhow::Result<AuditPruneSummary> {
+        Ok(AuditPruneSummary::default())
+    }
 }
 
 impl AuditBackend for AuditLogger {
@@ -1386,12 +1385,12 @@ impl AuditBackend for AuditLogger {
     fn summary(&self) -> anyhow::Result<AuditSummary> {
         AuditLogger::summary(self)
     }
-	fn usage_rollup(&self, query: &AuditUsageQuery) -> anyhow::Result<Vec<AuditUsageEvent>> {
-		AuditLogger::usage_rollup(self, query)
-	}
-	fn prune(&self) -> anyhow::Result<AuditPruneSummary> {
-		AuditLogger::prune(self)
-	}
+    fn usage_rollup(&self, query: &AuditUsageQuery) -> anyhow::Result<Vec<AuditUsageEvent>> {
+        AuditLogger::usage_rollup(self, query)
+    }
+    fn prune(&self) -> anyhow::Result<AuditPruneSummary> {
+        AuditLogger::prune(self)
+    }
 }
 
 /// Id-keyed registry over [`AuditBackend`] implementations. The built-in
@@ -1497,14 +1496,14 @@ impl AuditRegistry {
     }
 
     /// See [`AuditBackend::usage_rollup`].
-	pub fn usage_rollup(&self, query: &AuditUsageQuery) -> anyhow::Result<Vec<AuditUsageEvent>> {
-		self.active.usage_rollup(query)
-	}
+    pub fn usage_rollup(&self, query: &AuditUsageQuery) -> anyhow::Result<Vec<AuditUsageEvent>> {
+        self.active.usage_rollup(query)
+    }
 
-	/// Apply the active backend's retention policy immediately.
-	pub fn prune(&self) -> anyhow::Result<AuditPruneSummary> {
-		self.active.prune()
-	}
+    /// Apply the active backend's retention policy immediately.
+    pub fn prune(&self) -> anyhow::Result<AuditPruneSummary> {
+        self.active.prune()
+    }
 }
 
 #[cfg(test)]

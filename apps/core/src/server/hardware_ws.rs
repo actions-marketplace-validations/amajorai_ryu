@@ -165,35 +165,43 @@ async fn handle_socket(socket: WebSocket, state: ServerState, bearer: Option<Str
         let remaining = handshake_deadline.saturating_duration_since(tokio::time::Instant::now());
         if remaining.is_zero() {
             let _ = ws_tx
-                .send(error_frame("hello_timeout", "hello frame was not received in time"))
+                .send(error_frame(
+                    "hello_timeout",
+                    "hello frame was not received in time",
+                ))
                 .await;
             return;
         }
         match tokio::time::timeout(remaining, ws_rx.next()).await {
             Ok(frame) => match frame {
-            Some(Ok(Message::Text(text))) => match serde_json::from_str::<RhpClientMsg>(&text) {
-                Ok(msg @ RhpClientMsg::Hello { .. }) => break msg,
-                Ok(_) => {
-                    let _ = ws_tx
-                        .send(error_frame("expected_hello", "first frame must be `hello`"))
-                        .await;
-                    return;
+                Some(Ok(Message::Text(text))) => {
+                    match serde_json::from_str::<RhpClientMsg>(&text) {
+                        Ok(msg @ RhpClientMsg::Hello { .. }) => break msg,
+                        Ok(_) => {
+                            let _ = ws_tx
+                                .send(error_frame("expected_hello", "first frame must be `hello`"))
+                                .await;
+                            return;
+                        }
+                        Err(e) => {
+                            let _ = ws_tx
+                                .send(error_frame("bad_json", &format!("malformed hello: {e}")))
+                                .await;
+                            return;
+                        }
+                    }
                 }
-                Err(e) => {
-                    let _ = ws_tx
-                        .send(error_frame("bad_json", &format!("malformed hello: {e}")))
-                        .await;
-                    return;
-                }
-            },
-            Some(Ok(Message::Close(_))) | None => return,
-            // Ignore pings/binary before hello.
-            Some(Ok(_)) => continue,
-            Some(Err(_)) => return,
+                Some(Ok(Message::Close(_))) | None => return,
+                // Ignore pings/binary before hello.
+                Some(Ok(_)) => continue,
+                Some(Err(_)) => return,
             },
             Err(_) => {
                 let _ = ws_tx
-                    .send(error_frame("hello_timeout", "hello frame was not received in time"))
+                    .send(error_frame(
+                        "hello_timeout",
+                        "hello frame was not received in time",
+                    ))
                     .await;
                 return;
             }
@@ -288,8 +296,7 @@ async fn handle_socket(socket: WebSocket, state: ServerState, bearer: Option<Str
     // Register this device's outbound sender so out-of-band producers (the
     // dashboard nudge loop, the ambient rolling-summary) can push a `display`
     // re-poll signal to it without holding the socket (review gap #4).
-    let (connection_generation, mut revoked) =
-        live::register(&device_id, out_tx.clone()).await;
+    let (connection_generation, mut revoked) = live::register(&device_id, out_tx.clone()).await;
     // Shared barge-in flag: set by the recv side on `abort`, read by the send
     // side to drop queued TTS audio mid-stream.
     let abort = Arc::new(AtomicBool::new(false));

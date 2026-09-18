@@ -2826,15 +2826,10 @@ mod tests {
         assert!(matrix_error
             .to_string()
             .contains("not runnable model weights"));
-        let err = install_from_descriptor(
-            "acme/desc-repo",
-            &url,
-            None,
-            &format!("{stem}.gguf"),
-            &dc,
-        )
-        .await
-        .expect_err("the shared egress guard must refuse a loopback fixture");
+        let err =
+            install_from_descriptor("acme/desc-repo", &url, None, &format!("{stem}.gguf"), &dc)
+                .await
+                .expect_err("the shared egress guard must refuse a loopback fixture");
         let message = format!("{err:#}");
         assert!(
             message.contains("private/loopback host is not allowed"),
@@ -2900,7 +2895,6 @@ mod tests {
         assert!(matrix_error
             .to_string()
             .contains("not runnable model weights"));
-
     }
 
     #[tokio::test]
@@ -2949,6 +2943,5 @@ mod tests {
                 .await
                 .is_err()
         );
-
     }
 }

@@ -232,10 +232,8 @@ pub async fn issue(
         claims.caller = Some(caller);
         claims.jwt_expires_at = Some(expires_at);
     }
-    claims.peer_is_loopback = super::is_trusted_local_peer(
-        peer.ip(),
-        crate::sidecar::tailcat::proxy_is_active(),
-    );
+    claims.peer_is_loopback =
+        super::is_trusted_local_peer(peer.ip(), crate::sidecar::tailcat::proxy_is_active());
     claims.node_generation = crate::node_token::active_generation();
 
     let token = uuid::Uuid::new_v4().simple().to_string();
@@ -281,7 +279,9 @@ pub fn consume(
         return None;
     }
     if let Some(expected_path) = expected_path {
-        let expected_path = normalize_path(Some(expected_path.to_owned())).ok().flatten()?;
+        let expected_path = normalize_path(Some(expected_path.to_owned()))
+            .ok()
+            .flatten()?;
         if stored.claims.path.as_deref() != Some(expected_path.as_str()) {
             return None;
         }
@@ -305,8 +305,7 @@ pub async fn wait_for_jwt_expiry(expires_at: Option<i64>) {
 }
 
 fn authorized_http_request(headers: &HeaderMap, peer: SocketAddr) -> bool {
-    let expected = crate::node_token::active_token()
-        .filter(|token| !token.trim().is_empty());
+    let expected = crate::node_token::active_token().filter(|token| !token.trim().is_empty());
     if let Some(expected) = expected {
         let provided = headers
             .get("authorization")
@@ -334,7 +333,10 @@ mod tests {
         })
         .unwrap();
         assert_eq!(route, WsTicketRoute::Extension);
-        assert_eq!(claims.path.as_deref(), Some("/api/ext/ws/@ryu/desktop/bots/acp:pi/ws"));
+        assert_eq!(
+            claims.path.as_deref(),
+            Some("/api/ext/ws/@ryu/desktop/bots/acp:pi/ws")
+        );
         assert!(normalize_path(Some("/api/ext/ws/../secret".to_owned())).is_err());
     }
 

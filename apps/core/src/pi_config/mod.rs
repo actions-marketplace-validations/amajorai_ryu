@@ -396,9 +396,7 @@ fn chatgpt_provider_patch(model: Option<&str>) -> Map<String, Value> {
     let mut headers = Map::new();
     headers.insert(
         "x-ryu-node-token".to_owned(),
-        Value::String(
-            crate::node_token::active_token().unwrap_or_else(|| "ryu-local".to_owned()),
-        ),
+        Value::String(crate::node_token::active_token().unwrap_or_else(|| "ryu-local".to_owned())),
     );
     patch.insert("headers".to_owned(), Value::Object(headers));
 
@@ -3605,7 +3603,10 @@ enum DiscoveryAuth {
     Bearer(String),
     /// ChatGPT/Codex model discovery requires the bearer plus the account id
     /// that the Login with ChatGPT session is bound to.
-    ChatGpt { access: String, account_id: String },
+    ChatGpt {
+        access: String,
+        account_id: String,
+    },
     /// Anthropic uses `x-api-key` + `anthropic-version` rather than a bearer token.
     Anthropic(String),
     None,
@@ -3785,8 +3786,7 @@ fn resolve_provider_discovery(
     if id == GATEWAY_PROVIDER_ID || id == MANAGED_OPENROUTER_ID {
         let base = crate::sidecar::gateway::gateway_url();
         let url = format!("{}/v1/models", base.trim_end_matches('/'));
-        let token =
-            crate::sidecar::gateway::gateway_token().unwrap_or_default();
+        let token = crate::sidecar::gateway::gateway_token().unwrap_or_default();
         return Some((url, DiscoveryAuth::Bearer(token)));
     }
 
@@ -3892,18 +3892,14 @@ async fn fetch_models(
         .content_length()
         .is_some_and(|length| length > MAX_MODEL_DISCOVERY_RESPONSE_BYTES as u64)
     {
-        anyhow::bail!(
-            "discovery response exceeds {MAX_MODEL_DISCOVERY_RESPONSE_BYTES} bytes"
-        );
+        anyhow::bail!("discovery response exceeds {MAX_MODEL_DISCOVERY_RESPONSE_BYTES} bytes");
     }
     let mut stream = resp.bytes_stream();
     let mut raw = Vec::new();
     while let Some(chunk) = stream.next().await {
         let chunk = chunk.context("read discovery response")?;
         if raw.len().saturating_add(chunk.len()) > MAX_MODEL_DISCOVERY_RESPONSE_BYTES {
-            anyhow::bail!(
-                "discovery response exceeds {MAX_MODEL_DISCOVERY_RESPONSE_BYTES} bytes"
-            );
+            anyhow::bail!("discovery response exceeds {MAX_MODEL_DISCOVERY_RESPONSE_BYTES} bytes");
         }
         raw.extend_from_slice(&chunk);
     }
@@ -4733,7 +4729,11 @@ mod tests {
 
                 // BYOK keeps the local gateway even while managed is configured.
                 let local = gateway_openai_patch_for(Some("gpt-4o"), false);
-                assert_eq!(local.get("apiKey").and_then(Value::as_str), Some("${OPENAI_API_KEY}"), "shared Pi configuration must preserve the process-scoped bearer");
+                assert_eq!(
+                    local.get("apiKey").and_then(Value::as_str),
+                    Some("${OPENAI_API_KEY}"),
+                    "shared Pi configuration must preserve the process-scoped bearer"
+                );
                 let base = local.get("baseUrl").and_then(Value::as_str).unwrap();
                 assert!(
                     base.contains("127.0.0.1"),
@@ -4837,16 +4837,21 @@ mod tests {
             assert_eq!(entry["apiKey"], CHATGPT_PROXY_API_KEY);
             assert!(entry["headers"]["x-ryu-node-token"].is_string());
             assert_eq!(entry["models"][0]["id"], "gpt-5.5");
-            assert!(entry["models"].as_array().unwrap().iter().any(|model| {
-                model.get("id").and_then(Value::as_str) == Some("gpt-5.4")
-            }));
+            assert!(entry["models"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|model| { model.get("id").and_then(Value::as_str) == Some("gpt-5.4") }));
             assert!(
                 entry["baseUrl"]
                     .as_str()
                     .is_some_and(|url| url.ends_with("/api/pi-config/chatgpt")),
                 "native provider must point at Core's credential-resolving proxy"
             );
-            assert_eq!(read_settings().default_provider.as_deref(), Some(CHATGPT_PROVIDER_ID));
+            assert_eq!(
+                read_settings().default_provider.as_deref(),
+                Some(CHATGPT_PROVIDER_ID)
+            );
         });
     }
 

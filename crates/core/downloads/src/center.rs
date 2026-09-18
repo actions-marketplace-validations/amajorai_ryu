@@ -1197,7 +1197,8 @@ async fn stream_once(
             .ok_or_else(|| {
                 StreamErr::Network(format!(
                     "HTTP {} for {} without a Location header",
-                    response.status(), current_url
+                    response.status(),
+                    current_url
                 ))
             })?;
         current_url = url::Url::parse(&current_url)
@@ -1514,13 +1515,11 @@ mod tests {
         s.role = DownloadRole::Engine;
 
         let center = DownloadCenter::with_default_client();
-        let error = tokio::time::timeout(
-            Duration::from_secs(2),
-            center.download_blocking(s.clone()),
-        )
-        .await
-        .expect("a failed download must resolve its blocking waiter")
-        .expect_err("an engine without integrity metadata must fail");
+        let error =
+            tokio::time::timeout(Duration::from_secs(2), center.download_blocking(s.clone()))
+                .await
+                .expect("a failed download must resolve its blocking waiter")
+                .expect_err("an engine without integrity metadata must fail");
         assert!(error.to_string().contains("requires a SHA-256 checksum"));
 
         let id = derive_id(&s.dest);
@@ -1531,7 +1530,10 @@ mod tests {
             .find(|task| task.id == id)
             .expect("failed task remains visible for retry");
         assert_eq!(task.state, DownloadState::Failed);
-        assert!(!task.retryable, "missing integrity metadata is not retryable");
+        assert!(
+            !task.retryable,
+            "missing integrity metadata is not retryable"
+        );
 
         let _ = tokio::fs::remove_dir_all(&dir).await;
     }

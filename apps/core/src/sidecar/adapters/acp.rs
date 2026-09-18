@@ -676,163 +676,168 @@ async fn terminal_create(
 
     #[allow(unreachable_code)]
     {
-    use std::process::Stdio;
+        use std::process::Stdio;
 
-    if registry.lock().await.len() >= MAX_TERMINALS_PER_INSTANCE {
-        anyhow::bail!("terminal process limit reached for this ACP session");
-    }
-
-    let line = if req.args.is_empty() {
-        req.command.clone()
-    } else {
-        format!("{} {}", req.command, req.args.join(" "))
-    };
-    match check_exec_scan("acp", &line, None, Some(scan_agent)).await {
-        ExecScanOutcome::Allow => {}
-        ExecScanOutcome::Deny(reason) => {
-            return Err(anyhow::anyhow!(
-                "terminal command denied by gateway policy: {reason}"
-            ))
+        if registry.lock().await.len() >= MAX_TERMINALS_PER_INSTANCE {
+            anyhow::bail!("terminal process limit reached for this ACP session");
         }
-        ExecScanOutcome::ApprovalRequired(reason) => {
-            return Err(anyhow::anyhow!(
+
+        let line = if req.args.is_empty() {
+            req.command.clone()
+        } else {
+            format!("{} {}", req.command, req.args.join(" "))
+        };
+        match check_exec_scan("acp", &line, None, Some(scan_agent)).await {
+            ExecScanOutcome::Allow => {}
+            ExecScanOutcome::Deny(reason) => {
+                return Err(anyhow::anyhow!(
+                    "terminal command denied by gateway policy: {reason}"
+                ))
+            }
+            ExecScanOutcome::ApprovalRequired(reason) => {
+                return Err(anyhow::anyhow!(
             "terminal command requires approval and terminal/create has no prompt seam: {reason}"
         ))
-        }
-    }
-
-    let terminal_cwd = req
-        .cwd
-        .as_deref()
-        .map(|path| {
-            let cwd = scoped_existing_path(session_roots, std::path::Path::new(path))
-                .ok_or_else(|| anyhow::anyhow!("terminal cwd is outside the session workspaces"))?;
-            if !cwd.is_dir() {
-                return Err(anyhow::anyhow!("terminal cwd is not a directory"));
             }
-            Ok(cwd)
-        })
-        .transpose()?
-        .unwrap_or_else(|| session_roots[0].clone());
-    let mut cmd = tokio::process::Command::new(&req.command);
-    cmd.args(&req.args);
-    // A terminal child is agent-controlled code. Start from a scrubbed,
-    // env-cleared environment so it cannot inherit RYU_TOKEN, user JWTs,
-    // provider keys, or Core/Gateway secrets from the ACP parent. Request env
-    // entries are explicit inputs to this terminal only and are applied after
-    // the inherited environment is scrubbed.
-    cmd.env_clear().envs(terminal_child_env(std::env::vars()));
-    for env in &req.env {
-        cmd.env(&env.name, &env.value);
-    }
-    cmd.current_dir(terminal_cwd);
-    cmd.stdin(Stdio::null());
-    cmd.stdout(Stdio::piped());
-    cmd.stderr(Stdio::piped());
-    cmd.no_window();
+        }
 
-    let mut child = cmd
-        .spawn()
-        .with_context_msg(|| format!("spawn terminal command '{}'", req.command))?;
-
-    let output = Arc::new(Mutex::new(String::new()));
-    let truncated = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let exit = Arc::new(tokio::sync::Mutex::new(None));
-    let exit_notify = Arc::new(tokio::sync::Notify::new());
-    let (kill_tx, mut kill_rx) = tokio::sync::mpsc::channel::<()>(1);
-    let limit = Some(req.output_byte_limit.unwrap_or(DEFAULT_TERMINAL_OUTPUT_BYTES));
-
-    // Merge stdout + stderr into the one buffer as they arrive. They are distinct
-    // reader types, so pump each with its own task via a small generic helper.
-    async fn pump<R: tokio::io::AsyncRead + Unpin + Send + 'static>(
-        mut reader: R,
-        buf: Arc<Mutex<String>>,
-        trunc: Arc<std::sync::atomic::AtomicBool>,
-        limit: Option<u64>,
-    ) {
-        use tokio::io::AsyncReadExt as _;
-        let mut chunk = [0u8; 4096];
-        loop {
-            match reader.read(&mut chunk).await {
-                Ok(0) | Err(_) => break,
-                Ok(n) => {
-                    let text = String::from_utf8_lossy(&chunk[..n]);
-                    append_capped(&buf, &trunc, &text, limit);
+        let terminal_cwd = req
+            .cwd
+            .as_deref()
+            .map(|path| {
+                let cwd = scoped_existing_path(session_roots, std::path::Path::new(path))
+                    .ok_or_else(|| {
+                        anyhow::anyhow!("terminal cwd is outside the session workspaces")
+                    })?;
+                if !cwd.is_dir() {
+                    return Err(anyhow::anyhow!("terminal cwd is not a directory"));
                 }
-            }
+                Ok(cwd)
+            })
+            .transpose()?
+            .unwrap_or_else(|| session_roots[0].clone());
+        let mut cmd = tokio::process::Command::new(&req.command);
+        cmd.args(&req.args);
+        // A terminal child is agent-controlled code. Start from a scrubbed,
+        // env-cleared environment so it cannot inherit RYU_TOKEN, user JWTs,
+        // provider keys, or Core/Gateway secrets from the ACP parent. Request env
+        // entries are explicit inputs to this terminal only and are applied after
+        // the inherited environment is scrubbed.
+        cmd.env_clear().envs(terminal_child_env(std::env::vars()));
+        for env in &req.env {
+            cmd.env(&env.name, &env.value);
         }
-    }
-    if let Some(out_pipe) = child.stdout.take() {
-        tokio::spawn(pump(
-            out_pipe,
-            Arc::clone(&output),
-            Arc::clone(&truncated),
-            limit,
-        ));
-    }
-    if let Some(err_pipe) = child.stderr.take() {
-        tokio::spawn(pump(
-            err_pipe,
-            Arc::clone(&output),
-            Arc::clone(&truncated),
-            limit,
-        ));
-    }
+        cmd.current_dir(terminal_cwd);
+        cmd.stdin(Stdio::null());
+        cmd.stdout(Stdio::piped());
+        cmd.stderr(Stdio::piped());
+        cmd.no_window();
 
-    // Owner task: race the process's own exit against a kill request so `kill`
-    // never deadlocks against a `wait_for_exit` holding a lock.
-    let exit_owner = Arc::clone(&exit);
-    let notify_owner = Arc::clone(&exit_notify);
-    tokio::spawn(async move {
-        let status = tokio::select! {
-            s = tokio::time::timeout(MAX_TERMINAL_LIFETIME, child.wait()) => {
-                match s {
-                    Ok(status) => status,
-                    Err(_) => {
-                        let _ = child.start_kill();
-                        child.wait().await
+        let mut child = cmd
+            .spawn()
+            .with_context_msg(|| format!("spawn terminal command '{}'", req.command))?;
+
+        let output = Arc::new(Mutex::new(String::new()));
+        let truncated = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let exit = Arc::new(tokio::sync::Mutex::new(None));
+        let exit_notify = Arc::new(tokio::sync::Notify::new());
+        let (kill_tx, mut kill_rx) = tokio::sync::mpsc::channel::<()>(1);
+        let limit = Some(
+            req.output_byte_limit
+                .unwrap_or(DEFAULT_TERMINAL_OUTPUT_BYTES),
+        );
+
+        // Merge stdout + stderr into the one buffer as they arrive. They are distinct
+        // reader types, so pump each with its own task via a small generic helper.
+        async fn pump<R: tokio::io::AsyncRead + Unpin + Send + 'static>(
+            mut reader: R,
+            buf: Arc<Mutex<String>>,
+            trunc: Arc<std::sync::atomic::AtomicBool>,
+            limit: Option<u64>,
+        ) {
+            use tokio::io::AsyncReadExt as _;
+            let mut chunk = [0u8; 4096];
+            loop {
+                match reader.read(&mut chunk).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => {
+                        let text = String::from_utf8_lossy(&chunk[..n]);
+                        append_capped(&buf, &trunc, &text, limit);
                     }
                 }
-            },
-            _ = kill_rx.recv() => {
-                let _ = child.start_kill();
-                child.wait().await
             }
-        };
-        let (code, signal) = match status {
-            Ok(st) => {
-                #[cfg(unix)]
-                let signal = {
-                    use std::os::unix::process::ExitStatusExt as _;
-                    st.signal().map(|s| s.to_string())
-                };
-                #[cfg(not(unix))]
-                let signal = None;
-                (st.code().map(|c| c as u32), signal)
-            }
-            Err(_) => (None, None),
-        };
-        if let Ok(mut slot) = exit_owner.try_lock() {
-            *slot = Some((code, signal));
-        } else {
-            *exit_owner.lock().await = Some((code, signal));
         }
-        notify_owner.notify_waiters();
-    });
+        if let Some(out_pipe) = child.stdout.take() {
+            tokio::spawn(pump(
+                out_pipe,
+                Arc::clone(&output),
+                Arc::clone(&truncated),
+                limit,
+            ));
+        }
+        if let Some(err_pipe) = child.stderr.take() {
+            tokio::spawn(pump(
+                err_pipe,
+                Arc::clone(&output),
+                Arc::clone(&truncated),
+                limit,
+            ));
+        }
 
-    // Terminal ids are unique within an instance; a monotonic counter suffices.
-    let id = next_terminal_id();
-    registry.lock().await.insert(
-        id.clone(),
-        TerminalEntry {
-            output,
-            truncated,
-            exit,
-            exit_notify,
-            kill_tx,
-        },
-    );
-    Ok(id)
+        // Owner task: race the process's own exit against a kill request so `kill`
+        // never deadlocks against a `wait_for_exit` holding a lock.
+        let exit_owner = Arc::clone(&exit);
+        let notify_owner = Arc::clone(&exit_notify);
+        tokio::spawn(async move {
+            let status = tokio::select! {
+                s = tokio::time::timeout(MAX_TERMINAL_LIFETIME, child.wait()) => {
+                    match s {
+                        Ok(status) => status,
+                        Err(_) => {
+                            let _ = child.start_kill();
+                            child.wait().await
+                        }
+                    }
+                },
+                _ = kill_rx.recv() => {
+                    let _ = child.start_kill();
+                    child.wait().await
+                }
+            };
+            let (code, signal) = match status {
+                Ok(st) => {
+                    #[cfg(unix)]
+                    let signal = {
+                        use std::os::unix::process::ExitStatusExt as _;
+                        st.signal().map(|s| s.to_string())
+                    };
+                    #[cfg(not(unix))]
+                    let signal = None;
+                    (st.code().map(|c| c as u32), signal)
+                }
+                Err(_) => (None, None),
+            };
+            if let Ok(mut slot) = exit_owner.try_lock() {
+                *slot = Some((code, signal));
+            } else {
+                *exit_owner.lock().await = Some((code, signal));
+            }
+            notify_owner.notify_waiters();
+        });
+
+        // Terminal ids are unique within an instance; a monotonic counter suffices.
+        let id = next_terminal_id();
+        registry.lock().await.insert(
+            id.clone(),
+            TerminalEntry {
+                output,
+                truncated,
+                exit,
+                exit_notify,
+                kill_tx,
+            },
+        );
+        Ok(id)
     }
 }
 
@@ -2479,10 +2484,7 @@ pub fn spawn_acp_task(
 
     let mut pending = Some(acp_turn);
     if let Some(entry) = pool.get_mut(&key) {
-        let authority_is_current = match (
-            entry.capability_session_id,
-            tool_authority.as_ref(),
-        ) {
+        let authority_is_current = match (entry.capability_session_id, tool_authority.as_ref()) {
             (Some(session_id), Some(authority)) => {
                 crate::server::acp_tool_broker::renew_session(session_id, authority)
             }
@@ -2490,10 +2492,7 @@ pub fn spawn_acp_task(
             _ => false,
         };
         if authority_is_current {
-            match entry
-                .turns
-                .send(pending.take().expect("turn present"))
-            {
+            match entry.turns.send(pending.take().expect("turn present")) {
                 Ok(()) => return events_rx,        // reused this chat's live instance
                 Err(err) => pending = Some(err.0), // raced with teardown; respawn below
             }
@@ -2637,9 +2636,7 @@ struct AcpPoolEntry {
 }
 
 fn acp_pool() -> &'static Mutex<std::collections::HashMap<String, AcpPoolEntry>> {
-    static POOL: OnceLock<
-        Mutex<std::collections::HashMap<String, AcpPoolEntry>>,
-    > = OnceLock::new();
+    static POOL: OnceLock<Mutex<std::collections::HashMap<String, AcpPoolEntry>>> = OnceLock::new();
     POOL.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
 }
 
@@ -7851,10 +7848,12 @@ mod tests {
             panic!("expected stdio ACP config")
         };
         assert!(stdio.env.iter().any(|entry| {
-            entry.name == "RYU_MCP_SESSION_CAPABILITY"
-                && entry.value == "opaque-session-capability"
+            entry.name == "RYU_MCP_SESSION_CAPABILITY" && entry.value == "opaque-session-capability"
         }));
-        assert!(stdio.args.iter().all(|arg| !arg.contains("opaque-session-capability")));
+        assert!(stdio
+            .args
+            .iter()
+            .all(|arg| !arg.contains("opaque-session-capability")));
         let extension = include_str!("../../../../core/assets/pi-extensions/ryu-mcp.ts");
         assert!(extension.contains("getSessionId"));
         assert!(extension.contains("x-ryu-acp-native-session-id"));

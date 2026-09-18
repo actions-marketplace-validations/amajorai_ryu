@@ -737,7 +737,9 @@ impl RyuMcpHandler {
         // model could invoke PTC even when the agent excludes it.
         if matches!(tool_id, "execute" | "resume")
             && self.allowlist.as_ref().is_some_and(|allowlist| {
-                !allowlist.iter().any(|entry| entry == "*" || entry == tool_id)
+                !allowlist
+                    .iter()
+                    .any(|entry| entry == "*" || entry == tool_id)
             })
         {
             return Err(McpError::new(

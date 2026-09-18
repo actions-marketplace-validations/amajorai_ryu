@@ -965,10 +965,12 @@ pub fn score_case(
         context: case.context.clone(),
         input_tokens: response["usage"]["prompt_tokens"].as_u64().unwrap_or(0),
         output_tokens: response["usage"]["completion_tokens"].as_u64().unwrap_or(0),
-        total_tokens: response["usage"]["total_tokens"].as_u64().unwrap_or_else(|| {
-            response["usage"]["prompt_tokens"].as_u64().unwrap_or(0)
-                + response["usage"]["completion_tokens"].as_u64().unwrap_or(0)
-        }),
+        total_tokens: response["usage"]["total_tokens"]
+            .as_u64()
+            .unwrap_or_else(|| {
+                response["usage"]["prompt_tokens"].as_u64().unwrap_or(0)
+                    + response["usage"]["completion_tokens"].as_u64().unwrap_or(0)
+            }),
         cost_micro_usd: response["usage"]["cost_micro_usd"].as_u64(),
         latency_ms,
         cache_hit: false,
@@ -1445,7 +1447,8 @@ pub fn eval_assertion_deterministic_with_metrics(
             ("contains_xml", pass, detail.to_owned())
         }
         Assertion::ContainsSql { value, .. } => {
-            let pass = is_sql_like(response_text) && response_text.to_lowercase().contains(&value.to_lowercase());
+            let pass = is_sql_like(response_text)
+                && response_text.to_lowercase().contains(&value.to_lowercase());
             let detail = if pass {
                 "found the expected SQL fragment"
             } else {
@@ -1478,85 +1481,119 @@ pub fn eval_assertion_deterministic_with_metrics(
             let threshold = options.threshold.unwrap_or(0.8).clamp(0.0, 1.0);
             let pass = score >= threshold;
             let detail = format!("similarity {score:.3}; threshold {threshold:.3}");
-            return apply_assertion_options(AssertionResult {
-                kind: "levenshtein".to_owned(),
-                pass,
-                score,
-                detail,
-                executed: true,
-            }, options);
+            return apply_assertion_options(
+                AssertionResult {
+                    kind: "levenshtein".to_owned(),
+                    pass,
+                    score,
+                    detail,
+                    executed: true,
+                },
+                options,
+            );
         }
         Assertion::Latency { value, options } => {
             let expected = value.trim().parse::<u64>().ok();
-            let pass = expected.zip(metrics.latency_ms).is_some_and(|(limit, actual)| actual <= limit);
+            let pass = expected
+                .zip(metrics.latency_ms)
+                .is_some_and(|(limit, actual)| actual <= limit);
             let detail = match (expected, metrics.latency_ms) {
                 (Some(limit), Some(actual)) => format!("latency {actual}ms; limit {limit}ms"),
                 (None, _) => format!("invalid latency limit: {value}"),
                 (_, None) => "latency measurement unavailable".to_owned(),
             };
             let score = match (expected, metrics.latency_ms) {
-                (Some(limit), Some(actual)) if limit > 0 => (1.0 - actual as f32 / limit as f32).clamp(0.0, 1.0),
+                (Some(limit), Some(actual)) if limit > 0 => {
+                    (1.0 - actual as f32 / limit as f32).clamp(0.0, 1.0)
+                }
                 (Some(_), Some(_)) => f32::from(pass),
                 _ => 0.0,
             };
             let _ = options;
-            return apply_assertion_options(AssertionResult {
-                kind: "latency".to_owned(),
-                pass,
-                score,
-                detail,
-                executed: expected.is_some() && metrics.latency_ms.is_some(),
-            }, options);
+            return apply_assertion_options(
+                AssertionResult {
+                    kind: "latency".to_owned(),
+                    pass,
+                    score,
+                    detail,
+                    executed: expected.is_some() && metrics.latency_ms.is_some(),
+                },
+                options,
+            );
         }
         Assertion::Cost { value, options } => {
             let expected = value.trim().parse::<f64>().ok();
-            let actual = metrics.cost_micro_usd.map(|micro| micro as f64 / 1_000_000.0);
-            let pass = expected.zip(actual).is_some_and(|(limit, observed)| observed <= limit);
+            let actual = metrics
+                .cost_micro_usd
+                .map(|micro| micro as f64 / 1_000_000.0);
+            let pass = expected
+                .zip(actual)
+                .is_some_and(|(limit, observed)| observed <= limit);
             let detail = match (expected, actual) {
                 (Some(limit), Some(observed)) => format!("cost ${observed:.6}; limit ${limit:.6}"),
                 (None, _) => format!("invalid cost limit: {value}"),
                 (_, None) => "cost measurement unavailable".to_owned(),
             };
             let score = match (expected, actual) {
-                (Some(limit), Some(observed)) if limit > 0.0 => (1.0 - observed as f32 / limit as f32).clamp(0.0, 1.0),
+                (Some(limit), Some(observed)) if limit > 0.0 => {
+                    (1.0 - observed as f32 / limit as f32).clamp(0.0, 1.0)
+                }
                 (Some(_), Some(_)) => f32::from(pass),
                 _ => 0.0,
             };
             let _ = options;
-            return apply_assertion_options(AssertionResult {
-                kind: "cost".to_owned(),
-                pass,
-                score,
-                detail,
-                executed: expected.is_some() && metrics.cost_micro_usd.is_some(),
-            }, options);
+            return apply_assertion_options(
+                AssertionResult {
+                    kind: "cost".to_owned(),
+                    pass,
+                    score,
+                    detail,
+                    executed: expected.is_some() && metrics.cost_micro_usd.is_some(),
+                },
+                options,
+            );
         }
-        Assertion::AssertSet { assertions, options } => {
+        Assertion::AssertSet {
+            assertions,
+            options,
+        } => {
             if assertions.is_empty() {
-                return apply_assertion_options(AssertionResult {
-                    kind: "assert_set".to_owned(),
-                    pass: true,
-                    score: 1.0,
-                    detail: "empty assertion set".to_owned(),
-                    executed: true,
-                }, options);
+                return apply_assertion_options(
+                    AssertionResult {
+                        kind: "assert_set".to_owned(),
+                        pass: true,
+                        score: 1.0,
+                        detail: "empty assertion set".to_owned(),
+                        executed: true,
+                    },
+                    options,
+                );
             }
             let results: Vec<AssertionResult> = assertions
                 .iter()
-                .map(|nested| eval_assertion_deterministic_with_metrics(nested, response_text, metrics))
+                .map(|nested| {
+                    eval_assertion_deterministic_with_metrics(nested, response_text, metrics)
+                })
                 .collect();
             let weight_sum: f32 = results.len() as f32;
             let score = results.iter().map(|result| result.score).sum::<f32>() / weight_sum;
             let threshold = options.threshold.unwrap_or(1.0).clamp(0.0, 1.0);
             let pass = score >= threshold;
-            let detail = format!("{}/{} nested assertions passed; threshold {threshold:.3}", results.iter().filter(|result| result.pass).count(), results.len());
-            return apply_assertion_options(AssertionResult {
-                kind: "assert_set".to_owned(),
-                pass,
-                score,
-                detail,
-                executed: results.iter().all(|result| result.executed),
-            }, options);
+            let detail = format!(
+                "{}/{} nested assertions passed; threshold {threshold:.3}",
+                results.iter().filter(|result| result.pass).count(),
+                results.len()
+            );
+            return apply_assertion_options(
+                AssertionResult {
+                    kind: "assert_set".to_owned(),
+                    pass,
+                    score,
+                    detail,
+                    executed: results.iter().all(|result| result.executed),
+                },
+                options,
+            );
         }
         Assertion::IsHtml { .. } => {
             let trimmed = response_text.trim();
@@ -1681,25 +1718,28 @@ pub fn eval_assertion_deterministic_with_metrics(
     };
 
     let score = if pass { 1.0 } else { 0.0 };
-    apply_assertion_options(AssertionResult {
-        kind: kind.to_string(),
-        pass,
-        score,
-        detail,
-        executed: !matches!(
-            assertion,
-            Assertion::Javascript { .. }
-                | Assertion::Python { .. }
-                | Assertion::Ruby { .. }
-                | Assertion::Webhook { .. }
-                | Assertion::LlmJudge { .. }
-                | Assertion::LlmRubric { .. }
-                | Assertion::Similar { .. }
-                | Assertion::Factuality { .. }
-                | Assertion::ContextFaithfulness { .. }
-                | Assertion::AnswerRelevance { .. }
-        ),
-    }, assertion_options(assertion))
+    apply_assertion_options(
+        AssertionResult {
+            kind: kind.to_string(),
+            pass,
+            score,
+            detail,
+            executed: !matches!(
+                assertion,
+                Assertion::Javascript { .. }
+                    | Assertion::Python { .. }
+                    | Assertion::Ruby { .. }
+                    | Assertion::Webhook { .. }
+                    | Assertion::LlmJudge { .. }
+                    | Assertion::LlmRubric { .. }
+                    | Assertion::Similar { .. }
+                    | Assertion::Factuality { .. }
+                    | Assertion::ContextFaithfulness { .. }
+                    | Assertion::AnswerRelevance { .. }
+            ),
+        },
+        assertion_options(assertion),
+    )
 }
 
 fn is_html_like(value: &str) -> bool {
@@ -1832,13 +1872,13 @@ pub fn aggregate_scores(cases: &[CaseScore]) -> EvalRunAggregate {
 
     let total_input_tokens = cases.iter().map(|case| case.input_tokens).sum();
     let total_output_tokens = cases.iter().map(|case| case.output_tokens).sum();
-    let priced_cases: Vec<u64> = cases.iter().filter_map(|case| case.cost_micro_usd).collect();
-    let total_cost_micro_usd = (priced_cases.len() == cases.len()).then(|| priced_cases.iter().sum());
-    let assertion_pass_rate = cases
+    let priced_cases: Vec<u64> = cases
         .iter()
-        .filter(|case| case.assertions_pass)
-        .count() as f32
-        / nf;
+        .filter_map(|case| case.cost_micro_usd)
+        .collect();
+    let total_cost_micro_usd =
+        (priced_cases.len() == cases.len()).then(|| priced_cases.iter().sum());
+    let assertion_pass_rate = cases.iter().filter(|case| case.assertions_pass).count() as f32 / nf;
 
     let evaluators = aggregate_evaluators(cases);
 
@@ -2130,7 +2170,7 @@ mod tests {
     }
 
     #[test]
-	fn aggregate_three_cases_produces_valid_summary() {
+    fn aggregate_three_cases_produces_valid_summary() {
         let cases = vec![
             EvalCase {
                 prompt: "Say hello".to_string(),
@@ -2182,98 +2222,92 @@ mod tests {
         assert!((agg.policy_pass_rate - 1.0).abs() < 1e-3);
         // Two cases had `expected`, so mean_substring_match should be Some.
         assert!(agg.mean_substring_match.is_some());
-	}
+    }
 
-	#[test]
-	fn extended_promptfoo_assertions_use_safe_metrics_and_nested_sets() {
-		let metrics = AssertionMetrics {
-			latency_ms: Some(120),
-			cost_micro_usd: Some(2500),
-		};
-		let html = Assertion::ContainsHtml {
-			value: "<p>hello</p>".to_owned(),
-			options: AssertionOptions::default(),
-		};
-		assert!(eval_assertion_deterministic_with_metrics(
-			&html,
-			"<main><p>hello</p></main>",
-			metrics
-		)
-		.pass);
-		let similarity = Assertion::Levenshtein {
-			value: "hello".to_owned(),
-			options: AssertionOptions {
-				threshold: Some(0.8),
-				..Default::default()
-			},
-		};
-		assert!(eval_assertion_deterministic(&similarity, "hello").pass);
-		let latency = Assertion::Latency {
-			value: "200".to_owned(),
-			options: AssertionOptions::default(),
-		};
-		assert!(eval_assertion_deterministic_with_metrics(
-			&latency, "ignored", metrics
-		)
-		.pass);
-		let cost = Assertion::Cost {
-			value: "0.003".to_owned(),
-			options: AssertionOptions::default(),
-		};
-		assert!(eval_assertion_deterministic_with_metrics(&cost, "ignored", metrics).pass);
-		let nested = Assertion::AssertSet {
-			assertions: vec![
-				Assertion::Contains {
-					value: "hello".to_owned(),
-					options: AssertionOptions::default(),
-				},
-				Assertion::NotContains {
-					value: "goodbye".to_owned(),
-					options: AssertionOptions::default(),
-				},
-			],
-			options: AssertionOptions::default(),
-		};
-		assert!(eval_assertion_deterministic(&nested, "hello").pass);
-		let negated = Assertion::Contains {
-			value: "hello".to_owned(),
-			options: AssertionOptions {
-				not: Some(true),
-				..Default::default()
-			},
-		};
-		let negated_result = eval_assertion_deterministic(&negated, "hello");
-		assert!(!negated_result.pass);
-		assert_eq!(negated_result.score, 0.0);
-		assert!(negated_result.executed);
-		let missing_latency = Assertion::Latency {
-			value: "200".to_owned(),
-			options: AssertionOptions::default(),
-		};
-		let missing_latency_result =
-			eval_assertion_deterministic(&missing_latency, "ignored");
-		assert!(!missing_latency_result.executed);
-	}
+    #[test]
+    fn extended_promptfoo_assertions_use_safe_metrics_and_nested_sets() {
+        let metrics = AssertionMetrics {
+            latency_ms: Some(120),
+            cost_micro_usd: Some(2500),
+        };
+        let html = Assertion::ContainsHtml {
+            value: "<p>hello</p>".to_owned(),
+            options: AssertionOptions::default(),
+        };
+        assert!(
+            eval_assertion_deterministic_with_metrics(&html, "<main><p>hello</p></main>", metrics)
+                .pass
+        );
+        let similarity = Assertion::Levenshtein {
+            value: "hello".to_owned(),
+            options: AssertionOptions {
+                threshold: Some(0.8),
+                ..Default::default()
+            },
+        };
+        assert!(eval_assertion_deterministic(&similarity, "hello").pass);
+        let latency = Assertion::Latency {
+            value: "200".to_owned(),
+            options: AssertionOptions::default(),
+        };
+        assert!(eval_assertion_deterministic_with_metrics(&latency, "ignored", metrics).pass);
+        let cost = Assertion::Cost {
+            value: "0.003".to_owned(),
+            options: AssertionOptions::default(),
+        };
+        assert!(eval_assertion_deterministic_with_metrics(&cost, "ignored", metrics).pass);
+        let nested = Assertion::AssertSet {
+            assertions: vec![
+                Assertion::Contains {
+                    value: "hello".to_owned(),
+                    options: AssertionOptions::default(),
+                },
+                Assertion::NotContains {
+                    value: "goodbye".to_owned(),
+                    options: AssertionOptions::default(),
+                },
+            ],
+            options: AssertionOptions::default(),
+        };
+        assert!(eval_assertion_deterministic(&nested, "hello").pass);
+        let negated = Assertion::Contains {
+            value: "hello".to_owned(),
+            options: AssertionOptions {
+                not: Some(true),
+                ..Default::default()
+            },
+        };
+        let negated_result = eval_assertion_deterministic(&negated, "hello");
+        assert!(!negated_result.pass);
+        assert_eq!(negated_result.score, 0.0);
+        assert!(negated_result.executed);
+        let missing_latency = Assertion::Latency {
+            value: "200".to_owned(),
+            options: AssertionOptions::default(),
+        };
+        let missing_latency_result = eval_assertion_deterministic(&missing_latency, "ignored");
+        assert!(!missing_latency_result.executed);
+    }
 
-	#[test]
-	fn oversized_levenshtein_inputs_are_skipped_before_quadratic_work() {
-		let assertion = Assertion::Levenshtein {
-			value: "x".repeat(2_049),
-			options: AssertionOptions::default(),
-		};
-		let result = eval_assertion_deterministic(&assertion, "x");
-		assert!(!result.executed);
-		assert!(result.detail.contains("limited to 2048"));
-	}
+    #[test]
+    fn oversized_levenshtein_inputs_are_skipped_before_quadratic_work() {
+        let assertion = Assertion::Levenshtein {
+            value: "x".repeat(2_049),
+            options: AssertionOptions::default(),
+        };
+        let result = eval_assertion_deterministic(&assertion, "x");
+        assert!(!result.executed);
+        assert!(result.detail.contains("limited to 2048"));
+    }
 
-	#[test]
-	fn judge_prompt_truncates_untrusted_text() {
-		let prompt = build_judge_prompt(&"r".repeat(20_000), &"o".repeat(20_000));
-		assert!(prompt.contains(&"r".repeat(16_384)));
-		assert!(!prompt.contains(&"r".repeat(16_385)));
-		assert!(prompt.contains(&"o".repeat(16_384)));
-		assert!(!prompt.contains(&"o".repeat(16_385)));
-	}
+    #[test]
+    fn judge_prompt_truncates_untrusted_text() {
+        let prompt = build_judge_prompt(&"r".repeat(20_000), &"o".repeat(20_000));
+        assert!(prompt.contains(&"r".repeat(16_384)));
+        assert!(!prompt.contains(&"r".repeat(16_385)));
+        assert!(prompt.contains(&"o".repeat(16_384)));
+        assert!(!prompt.contains(&"o".repeat(16_385)));
+    }
 
     #[test]
     fn aggregate_no_expected_cases_returns_none_substring() {

@@ -104,9 +104,7 @@ pub const MCP_SAFE_ALLOWLIST: &[&str] = &[
 /// case-insensitive).
 fn is_sensitive_key(key: &str) -> bool {
     let upper = key.to_ascii_uppercase();
-    SENSITIVE_EXACT
-        .iter()
-        .any(|name| upper == *name)
+    SENSITIVE_EXACT.iter().any(|name| upper == *name)
         || SENSITIVE_MARKERS.iter().any(|m| upper.contains(m))
 }
 

@@ -321,16 +321,21 @@ fn rewrite_sse_event_text(format: WireFormat, raw: &str, replacement: &str) -> S
         };
         let is_text = match format {
             WireFormat::Anthropic => json.get("delta").and_then(|d| d.get("text")).is_some(),
-            WireFormat::OpenAiResponses => json
-                .get("type")
-                .and_then(Value::as_str)
-                .is_some_and(|kind| kind.ends_with("output_text.delta"))
-                && json.get("delta").and_then(Value::as_str).is_some(),
+            WireFormat::OpenAiResponses => {
+                json.get("type")
+                    .and_then(Value::as_str)
+                    .is_some_and(|kind| kind.ends_with("output_text.delta"))
+                    && json.get("delta").and_then(Value::as_str).is_some()
+            }
         };
         if !replaced && is_text {
             match format {
-                WireFormat::Anthropic => json["delta"]["text"] = Value::String(replacement.to_owned()),
-                WireFormat::OpenAiResponses => json["delta"] = Value::String(replacement.to_owned()),
+                WireFormat::Anthropic => {
+                    json["delta"]["text"] = Value::String(replacement.to_owned())
+                }
+                WireFormat::OpenAiResponses => {
+                    json["delta"] = Value::String(replacement.to_owned())
+                }
             }
             replaced = true;
             let lead_ws = &data[..data.len() - data.trim_start().len()];

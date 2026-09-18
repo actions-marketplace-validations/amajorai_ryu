@@ -290,9 +290,7 @@ async fn fetch_tarball(_client: &reqwest::Client, url: &str, dest: &Path) -> Res
             break resp;
         }
         if redirects >= MAX_REDIRECT_HOPS {
-            anyhow::bail!(
-                "skill source followed more than {MAX_REDIRECT_HOPS} redirects"
-            );
+            anyhow::bail!("skill source followed more than {MAX_REDIRECT_HOPS} redirects");
         }
         let location = resp
             .headers()
@@ -639,9 +637,7 @@ pub(crate) async fn install_from_source_named(
         let mut resp = resp;
         while let Some(chunk) = resp.chunk().await.context("reading SKILL.md body")? {
             if bytes.len().saturating_add(chunk.len()) > MAX_DIRECT_SKILL_MD_BYTES {
-                anyhow::bail!(
-                    "SKILL.md response exceeds the {MAX_DIRECT_SKILL_MD_BYTES}-byte cap"
-                );
+                anyhow::bail!("SKILL.md response exceeds the {MAX_DIRECT_SKILL_MD_BYTES}-byte cap");
             }
             bytes.extend_from_slice(&chunk);
         }

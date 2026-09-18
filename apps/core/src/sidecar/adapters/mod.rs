@@ -1,7 +1,7 @@
 mod messages;
-pub use messages::{ImagePart, UiContent, UiMessage};
 pub(crate) use messages::{append_last_user_text, set_last_user_text, ui_message_text};
 use messages::{document_context_block, last_user_images, last_user_message, message_image_parts};
+pub use messages::{ImagePart, UiContent, UiMessage};
 
 pub mod acp;
 pub mod acp_probe_cache;
@@ -849,10 +849,7 @@ fn reserved_environment_key(key: &str) -> bool {
     let upper = key.to_ascii_uppercase();
     matches!(
         upper.as_str(),
-        "RYU_TOKEN"
-            | "RYU_PROJECT_PATH"
-            | "RYU_WORKTREE_PATH"
-            | "PI_CODING_AGENT_DIR"
+        "RYU_TOKEN" | "RYU_PROJECT_PATH" | "RYU_WORKTREE_PATH" | "PI_CODING_AGENT_DIR"
     ) || upper.starts_with("RYU_MCP_")
         || upper.starts_with("OPENAI_")
         || upper.starts_with("ANTHROPIC_")
@@ -2142,7 +2139,11 @@ fn ryu_agent_route_with_user_jwt(
             // fallback Pi rather than present it. Only resolved when gateway routing
             // is on (otherwise the token is unused and Pi talks straight to provider).
             let token = if gateway {
-                match crate::sidecar::gateway::gateway_bearer_for_agent(Some("ryu"), None, host_conversation_id) {
+                match crate::sidecar::gateway::gateway_bearer_for_agent(
+                    Some("ryu"),
+                    None,
+                    host_conversation_id,
+                ) {
                     Ok(t) => t,
                     Err(e) => {
                         tracing::error!(error = %e, "ryu fallback: no gateway bearer, refusing to route fallback Pi through the gateway");
@@ -12778,7 +12779,10 @@ mod tests {
                 panic!("expected stdio ACP config")
             };
             assert!(stdio.args.iter().all(|arg| !arg.contains("whoami")));
-            assert!(stdio.env.iter().any(|entry| entry.name == "RYU_MCP_CORE_URL"));
+            assert!(stdio
+                .env
+                .iter()
+                .any(|entry| entry.name == "RYU_MCP_CORE_URL"));
         }
         let extension = include_str!("../../../../core/assets/pi-extensions/ryu-mcp.ts");
         assert!(extension.contains("/api/acp/tools"));
@@ -12913,8 +12917,8 @@ mod tests {
         .expect("acp-exec route");
         match on {
             AgentRoute::Acp { ref spawn_cmd } => {
-                let value: serde_json::Value =
-                    serde_json::from_str(spawn_cmd).expect("gateway ACP command is structured JSON");
+                let value: serde_json::Value = serde_json::from_str(spawn_cmd)
+                    .expect("gateway ACP command is structured JSON");
                 let env = value["env"].as_array().expect("structured env array");
                 let base_url = env
                     .iter()

@@ -446,7 +446,9 @@ pub async fn speak(
     headers: HeaderMap,
     Json(req): Json<SpeakRequest>,
 ) -> impl IntoResponse {
-    if let Err(response) = super::media::enforce_host_media_permission(&state, &caller, &headers).await {
+    if let Err(response) =
+        super::media::enforce_host_media_permission(&state, &caller, &headers).await
+    {
         return response;
     }
     let mut req = req;

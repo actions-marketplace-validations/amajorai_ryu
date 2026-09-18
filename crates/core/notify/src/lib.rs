@@ -28,25 +28,22 @@ const EXPO_PUSH_URL: &str = "https://exp.host/--/api/v2/push/send";
 const MAX_WEBHOOK_RESPONSE_BYTES: u64 = 2 * 1024 * 1024;
 
 async fn guarded_webhook_post(url: &str, body: Vec<u8>) -> Result<u16, String> {
-	let response = ryu_egress::guarded_request(
-		ryu_egress::GuardedRequest {
-			method: "POST".to_owned(),
-			url: url.to_owned(),
-			headers: vec![(
-				"content-type".to_owned(),
-				"application/json".to_owned(),
-			)],
-			body: Some(body),
-		},
-		ryu_egress::GuardedFetchPolicy {
-			allow_http: false,
-			max_body_bytes: MAX_WEBHOOK_RESPONSE_BYTES,
-			max_redirect_hops: 0,
-			timeout: std::time::Duration::from_secs(15),
-		},
-	)
-	.await?;
-	Ok(response.status)
+    let response = ryu_egress::guarded_request(
+        ryu_egress::GuardedRequest {
+            method: "POST".to_owned(),
+            url: url.to_owned(),
+            headers: vec![("content-type".to_owned(), "application/json".to_owned())],
+            body: Some(body),
+        },
+        ryu_egress::GuardedFetchPolicy {
+            allow_http: false,
+            max_body_bytes: MAX_WEBHOOK_RESPONSE_BYTES,
+            max_redirect_hops: 0,
+            timeout: std::time::Duration::from_secs(15),
+        },
+    )
+    .await?;
+    Ok(response.status)
 }
 
 /// A notification destination (per-monitor or node-level policy-alert channel).
@@ -86,7 +83,7 @@ pub struct AlertDeliveryTargets {
 /// both `text` (Slack) and `content` (Discord) so one URL fits either service.
 /// Returns `Ok(())` only on a 2xx response.
 pub async fn send_webhook_text(
-	_http: &reqwest::Client,
+    _http: &reqwest::Client,
     url: &str,
     text: &str,
 ) -> Result<(), String> {
@@ -131,7 +128,7 @@ pub async fn send_telegram_text(
 /// framing and the structured payload ride one URL. `alert` is the full JSON
 /// carrier (embedded under `"alert"`).
 pub async fn send_webhook_alert(
-	_http: &reqwest::Client,
+    _http: &reqwest::Client,
     url: &str,
     title: &str,
     message: &str,
@@ -372,7 +369,10 @@ mod tests {
         assert!(out.is_err(), "local webhook destinations must be denied");
 
         let rec = recorded.lock().unwrap();
-        assert!(rec.is_empty(), "denied destinations must not receive a request");
+        assert!(
+            rec.is_empty(),
+            "denied destinations must not receive a request"
+        );
     }
 
     #[tokio::test]
@@ -381,7 +381,10 @@ mod tests {
         let http = reqwest::Client::new();
         let url = format!("http://{addr}/hook");
         let err = send_webhook_text(&http, &url, "x").await.unwrap_err();
-        assert!(err.contains("webhook send failed"), "unexpected error: {err}");
+        assert!(
+            err.contains("webhook send failed"),
+            "unexpected error: {err}"
+        );
     }
 
     #[tokio::test]
@@ -427,7 +430,10 @@ mod tests {
 
         let rec = recorded.lock().unwrap();
         assert_eq!(rec.len(), 0);
-        assert!(rec.is_empty(), "denied destinations must not receive a request");
+        assert!(
+            rec.is_empty(),
+            "denied destinations must not receive a request"
+        );
     }
 
     #[tokio::test]

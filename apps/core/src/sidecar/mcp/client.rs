@@ -800,7 +800,9 @@ impl Drop for HttpTransport {
         if self.url.starts_with("ryu-passport-mcp://") {
             if let Ok(runtime) = tokio::runtime::Handle::try_current() {
                 let url = self.url.clone();
-                runtime.spawn(async move { crate::identity::passport::mcp_close(&url).await; });
+                runtime.spawn(async move {
+                    crate::identity::passport::mcp_close(&url).await;
+                });
             }
         }
     }
@@ -833,8 +835,12 @@ impl McpConnection {
             McpTarget::Stdio(cmd) => Transport::Stdio(Self::spawn_stdio(cmd).await?),
             McpTarget::Sse(ep) if ep.url.starts_with("ryu-passport-mcp://") => {
                 Transport::Http(HttpTransport {
-                    url: ep.url.clone(), headers: ep.headers.clone(), session_id: None,
-                    protocol_version: None, modern: false, pending: VecDeque::new(),
+                    url: ep.url.clone(),
+                    headers: ep.headers.clone(),
+                    session_id: None,
+                    protocol_version: None,
+                    modern: false,
+                    pending: VecDeque::new(),
                 })
             }
             McpTarget::Sse(ep) => {

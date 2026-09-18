@@ -464,5 +464,4 @@ mod tests {
         let m = user_with_parts("just a question", vec![]);
         assert!(document_context_block(&m).is_none());
     }
-
 }

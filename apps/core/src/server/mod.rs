@@ -16,11 +16,12 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use tower_http::cors::CorsLayer;
 
+pub mod acp_tool_broker;
 pub mod activity_api;
 pub mod agent_sync;
-pub mod acp_tool_broker;
 pub mod approvals_api;
 pub mod auto_title;
+mod backups;
 pub mod canvas_migrate;
 pub mod catalog_scan;
 pub mod chat_suggestions;
@@ -30,7 +31,6 @@ pub mod continuity;
 pub mod conversations;
 pub mod data_admin;
 mod data_path_api;
-mod backups;
 pub mod encryption;
 pub mod gifs;
 pub mod git;
@@ -56,8 +56,8 @@ pub mod model_stream;
 // in-process `healing_api` module or `healing_routes` fn.
 pub mod agent_ui_templates;
 pub mod identity_api;
-pub mod improvement_api;
 pub mod images;
+pub mod improvement_api;
 pub mod language_packs;
 pub mod learning;
 pub mod managed_bot_api;
@@ -102,8 +102,8 @@ pub mod usage_review;
 pub mod vault_api;
 pub mod voice;
 pub mod voice_ws;
-pub mod ws_ticket;
 pub mod widgets;
+pub mod ws_ticket;
 
 // The git/worktree engine moved to the `ryu-workspace` crate; alias it so the
 // in-file `worktree::…` references (WorktreeRun's diff/guard, the apply handler)
@@ -120,9 +120,7 @@ use crate::sidecar::adapters::{
 use crate::sidecar::mcp::McpRegistry;
 use crate::sidecar::onboarding::SetupManager;
 use crate::sidecar::{install_state::InstallStatusStore, SidecarManager};
-use conversations::{
-    ChannelTurnClaim, ChannelTurnReplay, ConversationStore, SessionStatus,
-};
+use conversations::{ChannelTurnClaim, ChannelTurnReplay, ConversationStore, SessionStatus};
 use memory::MemoryStore;
 use preferences::PreferencesStore;
 use retrieval::{ChunkSource, RetrievalStore};
@@ -553,7 +551,10 @@ fn route_policy(method: &Method, path: &str) -> crate::authorization::RoutePolic
             Capability::WorkflowsManage
         }]);
     }
-    if path == "/api/mcp/tools/call" || path == "/api/composio/events/consume" || path == "/api/composio/targets" {
+    if path == "/api/mcp/tools/call"
+        || path == "/api/composio/events/consume"
+        || path == "/api/composio/targets"
+    {
         return RoutePolicy::requires([Capability::ToolsExec]);
     }
     if path == "/api/sandboxes" {
@@ -3121,16 +3122,48 @@ mod resource_acl_tests {
     async fn app_documents_keep_caller_acl_despite_matching_app_namespace() {
         let store = super::spaces::SpaceStore::open_in_memory().unwrap();
         let owner = super::spaces::DocOwner::owned(Some("alice"), Some("org1"));
-        let space = store.create_space("Private footage", None, &owner).await.unwrap();
-        let doc = store.app_create_doc("@test/editor", &space, "Transcript", &owner).await.unwrap();
+        let space = store
+            .create_space("Private footage", None, &owner)
+            .await
+            .unwrap();
+        let doc = store
+            .app_create_doc("@test/editor", &space, "Transcript", &owner)
+            .await
+            .unwrap();
         // Namespace ownership alone admits both callers. The shared row gate must
         // retain Alice's private ownership for all apps using the host bridge.
-        assert!(store.app_get_doc("@test/editor", &doc).await.unwrap().is_some());
+        assert!(store
+            .app_get_doc("@test/editor", &doc)
+            .await
+            .unwrap()
+            .is_some());
         let bob = caller("bob", Some("org1"), OrgRole::Member);
         let alice = caller("alice", Some("org1"), OrgRole::Member);
-        assert_eq!(status(require_resource_read_at(super::spaces::doc_access_meta(&store, &doc).await, Some(&bob), BOUND, "nf")), Some(StatusCode::FORBIDDEN));
-        assert_eq!(status(require_resource_write_at(super::spaces::doc_access_meta(&store, &doc).await, Some(&bob), BOUND, "nf")), Some(StatusCode::FORBIDDEN));
-        assert!(require_resource_write_at(super::spaces::doc_access_meta(&store, &doc).await, Some(&alice), BOUND, "nf").is_ok());
+        assert_eq!(
+            status(require_resource_read_at(
+                super::spaces::doc_access_meta(&store, &doc).await,
+                Some(&bob),
+                BOUND,
+                "nf"
+            )),
+            Some(StatusCode::FORBIDDEN)
+        );
+        assert_eq!(
+            status(require_resource_write_at(
+                super::spaces::doc_access_meta(&store, &doc).await,
+                Some(&bob),
+                BOUND,
+                "nf"
+            )),
+            Some(StatusCode::FORBIDDEN)
+        );
+        assert!(require_resource_write_at(
+            super::spaces::doc_access_meta(&store, &doc).await,
+            Some(&alice),
+            BOUND,
+            "nf"
+        )
+        .is_ok());
     }
 
     /// A resource owned by `owner`, scoped to `org`, at `visibility`.
@@ -4105,7 +4138,10 @@ pub fn create_router(
             get(composio_connection_status),
         )
         // Composio event-trigger subscriptions (fire an agent on a Composio event).
-        .route("/api/composio/events/consume", post(connect_events::consume))
+        .route(
+            "/api/composio/events/consume",
+            post(connect_events::consume),
+        )
         .route("/api/composio/targets", post(connect_events::bind_target))
         .route(
             "/api/composio/triggers/subscribe",
@@ -4314,10 +4350,7 @@ pub fn create_router(
             "/api/prompt-suites/:id/versions/:version_id/restore",
             post(restore_prompt_suite_version),
         )
-        .route(
-            "/api/prompt-suites/:id/traces",
-            post(import_prompt_trace),
-        )
+        .route("/api/prompt-suites/:id/traces", post(import_prompt_trace))
         .route(
             "/api/prompt-suites/:id/runs",
             get(list_prompt_runs).post(save_prompt_run),
@@ -5188,8 +5221,14 @@ pub fn create_router(
         // reset to default, export a backup zip. Copy-migrate + import run offline as
         // the `ryu-core data-path` subcommand.
         .route("/api/data-path", get(data_path_api::get_data_path))
-        .route("/api/data-path/validate", post(data_path_api::validate_data_path))
-        .route("/api/data-path/switch", post(data_path_api::switch_data_path))
+        .route(
+            "/api/data-path/validate",
+            post(data_path_api::validate_data_path),
+        )
+        .route(
+            "/api/data-path/switch",
+            post(data_path_api::switch_data_path),
+        )
         .route("/api/data-path/reset", post(data_path_api::reset_data_path))
         .route(
             "/api/data-path/export",
@@ -5506,7 +5545,9 @@ fn skills_routes(state: &ServerState) -> Router<ServerState> {
             ),
             require_app_enabled,
         ))
-        .route_layer(middleware::from_fn(require_managed_skill_authoring_boundary))
+        .route_layer(middleware::from_fn(
+            require_managed_skill_authoring_boundary,
+        ))
 }
 
 async fn require_managed_skill_authoring_boundary(
@@ -5518,8 +5559,7 @@ async fn require_managed_skill_authoring_boundary(
     {
         return json_error(
             StatusCode::FORBIDDEN,
-            "skill access requires a verified user/resource binding on managed nodes"
-                .to_owned(),
+            "skill access requires a verified user/resource binding on managed nodes".to_owned(),
         );
     }
     next.run(req).await
@@ -12409,9 +12449,11 @@ async fn channel_run(
             "channel team fan-out requires a verified team/member binding; the channel ingress does not yet carry that proof".to_owned(),
         );
     }
-    if node_bound && req.agent_id.as_deref().is_some_and(|agent_id| {
-        agent_id.trim() != crate::registry::ProviderRegistry::load().default_agent_id
-    }) {
+    if node_bound
+        && req.agent_id.as_deref().is_some_and(|agent_id| {
+            agent_id.trim() != crate::registry::ProviderRegistry::load().default_agent_id
+        })
+    {
         return json_error(
             StatusCode::FORBIDDEN,
             "channel agent selection requires a verified agent binding; explicit agent selection is disabled on managed nodes".to_owned(),
@@ -14455,11 +14497,7 @@ fn plugin_artifact_kind(app: &serde_json::Value) -> &'static str {
     if app
         .get("kinds")
         .and_then(serde_json::Value::as_array)
-        .is_some_and(|kinds| {
-            kinds
-                .iter()
-                .any(|kind| kind.as_str() == Some("companion"))
-        })
+        .is_some_and(|kinds| kinds.iter().any(|kind| kind.as_str() == Some("companion")))
     {
         "app"
     } else {
@@ -14472,10 +14510,7 @@ fn installed_plugin_root(plugin_id: &str) -> std::path::PathBuf {
         .join(crate::plugin_manifest::plugin_dir_name(plugin_id))
 }
 
-fn inspect_plugin_evals(
-    plugin_id: &str,
-    artifact_kind: &str,
-) -> crate::plugin_evals::ParsedSuite {
+fn inspect_plugin_evals(plugin_id: &str, artifact_kind: &str) -> crate::plugin_evals::ParsedSuite {
     crate::plugin_evals::inspect_package(
         &installed_plugin_root(plugin_id),
         plugin_id,
@@ -15056,7 +15091,10 @@ async fn plugin_evals(
                 .is_some_and(|candidate| candidate == id)
                 && app_is_installed(app)
         }) else {
-            return json_error(StatusCode::NOT_FOUND, format!("plugin or app '{id}' is not installed"));
+            return json_error(
+                StatusCode::NOT_FOUND,
+                format!("plugin or app '{id}' is not installed"),
+            );
         };
         let overview = inspect_plugin_evals(id, plugin_artifact_kind(app)).overview;
         return Json(overview).into_response();
@@ -15209,7 +15247,8 @@ async fn grade_plugin_eval_grader(
             let names = span_tool_names(spans);
             let before_index = names.iter().position(|name| name == before);
             let after_index = names.iter().position(|name| name == after);
-            let pass = before_index.is_some_and(|left| after_index.is_some_and(|right| left < right));
+            let pass =
+                before_index.is_some_and(|left| after_index.is_some_and(|right| left < right));
             eval_grader_result(
                 grader,
                 if pass { "pass" } else { "fail" },
@@ -15299,7 +15338,10 @@ async fn grade_plugin_eval_grader(
                 .get("executed")
                 .and_then(Value::as_bool)
                 .unwrap_or(false);
-            let score = assertion.get("score").and_then(Value::as_f64).map(|value| value as f32);
+            let score = assertion
+                .get("score")
+                .and_then(Value::as_f64)
+                .map(|value| value as f32);
             let pass = assertion
                 .get("pass")
                 .and_then(Value::as_bool)
@@ -15311,7 +15353,13 @@ async fn grade_plugin_eval_grader(
                 .to_owned();
             eval_grader_result(
                 grader,
-                if executed && pass { "pass" } else if executed { "fail" } else { "skipped" },
+                if executed && pass {
+                    "pass"
+                } else if executed {
+                    "fail"
+                } else {
+                    "skipped"
+                },
                 score,
                 executed,
                 detail,
@@ -15329,8 +15377,14 @@ fn eval_target_agent(
 ) -> Result<String, String> {
     if let Some(requested) = requested.map(str::trim).filter(|value| !value.is_empty()) {
         let requested_id = requested.strip_prefix("app__").unwrap_or(requested);
-        let Some(runnable) = manifest.runnables.iter().find(|entry| entry.id == requested_id) else {
-            return Err(format!("runnable '{requested}' is not declared by this plugin"));
+        let Some(runnable) = manifest
+            .runnables
+            .iter()
+            .find(|entry| entry.id == requested_id)
+        else {
+            return Err(format!(
+                "runnable '{requested}' is not declared by this plugin"
+            ));
         };
         if runnable.kind == crate::runnable::RunnableKind::Agent {
             return Ok(format!("app__{}", runnable.id));
@@ -15358,7 +15412,10 @@ fn eval_target_agent(
     }) {
         return Ok("ryu".to_owned());
     }
-    Err("the plugin has no agent, tool, skill, or workflow runnable to drive a prompt case".to_owned())
+    Err(
+        "the plugin has no agent, tool, skill, or workflow runnable to drive a prompt case"
+            .to_owned(),
+    )
 }
 
 /// `POST /api/plugins/evals/run` — run package eval cases through the enabled
@@ -15510,7 +15567,10 @@ async fn plugin_evals_run(
     let mut case_results = Vec::with_capacity(selected_cases.len());
 
     for case in selected_cases {
-        let run_count = request.runs.unwrap_or(case.summary.runs).clamp(1, crate::plugin_evals::MAX_RUNS);
+        let run_count = request
+            .runs
+            .unwrap_or(case.summary.runs)
+            .clamp(1, crate::plugin_evals::MAX_RUNS);
         let agent_id = match eval_target_agent(&manifest, case.summary.runnable.as_deref()) {
             Ok(agent_id) => Some(agent_id),
             Err(error) => {
@@ -15598,25 +15658,27 @@ async fn plugin_evals_run(
                     case.summary.timeout_seconds
                 )),
             };
-            let spans = state.traces.get_spans(&conversation_id).await.unwrap_or_default();
+            let spans = state
+                .traces
+                .get_spans(&conversation_id)
+                .await
+                .unwrap_or_default();
             // The conversation is only a temporary eval harness. Trace spans are
             // retained as privacy-safe execution evidence; conversation content
             // and any durable assistant messages are removed after grading.
-            let _ = state.conversations.delete_conversation(&conversation_id).await;
+            let _ = state
+                .conversations
+                .delete_conversation(&conversation_id)
+                .await;
             let duration_ms = attempt_started.elapsed().as_millis() as u64;
             let (status, score, response_preview, graders, error) = match outcome {
                 Ok(reply_result) => {
                     let reply = reply_result.reply;
-                    let graders = futures_util::future::join_all(case.graders.iter().map(|grader| {
-                        grade_plugin_eval_grader(
-                            &state,
-                            grader,
-                            &case.prompt,
-                            &reply,
-                            &spans,
-                        )
-                    }))
-                    .await;
+                    let graders =
+                        futures_util::future::join_all(case.graders.iter().map(|grader| {
+                            grade_plugin_eval_grader(&state, grader, &case.prompt, &reply, &spans)
+                        }))
+                        .await;
                     let executed: Vec<&PluginEvalGraderResult> = graders
                         .iter()
                         .filter(|grader| grader.executed && grader.score.is_some())
@@ -15633,7 +15695,13 @@ async fn plugin_evals_run(
                         Some(_) => "failed",
                         None => "unavailable",
                     };
-                    (status.to_owned(), score, Some(short_eval_text(&reply, 800)), graders, None)
+                    (
+                        status.to_owned(),
+                        score,
+                        Some(short_eval_text(&reply, 800)),
+                        graders,
+                        None,
+                    )
                 }
                 Err(error) => (
                     "error".to_owned(),
@@ -15666,9 +15734,15 @@ async fn plugin_evals_run(
                 error,
             });
         }
-        let scored: Vec<f32> = attempts.iter().filter_map(|attempt| attempt.score).collect();
+        let scored: Vec<f32> = attempts
+            .iter()
+            .filter_map(|attempt| attempt.score)
+            .collect();
         let score = (!scored.is_empty()).then(|| scored.iter().sum::<f32>() / scored.len() as f32);
-        let passed = attempts.iter().filter(|attempt| attempt.status == "passed").count();
+        let passed = attempts
+            .iter()
+            .filter(|attempt| attempt.status == "passed")
+            .count();
         let failed = attempts
             .iter()
             .filter(|attempt| matches!(attempt.status.as_str(), "failed" | "error"))
@@ -15695,11 +15769,16 @@ async fn plugin_evals_run(
     }
 
     let scores: Vec<f32> = case_results.iter().filter_map(|case| case.score).collect();
-    let suite_score = (!scores.is_empty()).then(|| scores.iter().sum::<f32>() / scores.len() as f32);
+    let suite_score =
+        (!scores.is_empty()).then(|| scores.iter().sum::<f32>() / scores.len() as f32);
     let status = if case_results.iter().any(|case| case.status == "failed") {
         "failed"
     } else if case_results.iter().any(|case| case.status == "unavailable") {
-        if suite_score.is_some() { "partial" } else { "unavailable" }
+        if suite_score.is_some() {
+            "partial"
+        } else {
+            "unavailable"
+        }
     } else if suite_score.is_some_and(|score| score >= threshold) {
         "passed"
     } else {
@@ -23526,7 +23605,9 @@ async fn update_app_handler(
 
     // 4. Resolve + install any NEW dependencies the new version declares.
     let installed_dependencies =
-        match install_new_dependencies_for_update(&state, &manifest, buyer_token, body.dry_run).await {
+        match install_new_dependencies_for_update(&state, &manifest, buyer_token, body.dry_run)
+            .await
+        {
             Ok(deps) => deps,
             Err((status, msg)) => return json_error(status, msg),
         };
@@ -27170,8 +27251,9 @@ async fn published_agent_install(
 /// endpoint so they all report the same per-engine reality.
 fn binary_installed_on_disk(name: &str) -> bool {
     if name == "ryutts" {
-        return crate::sidecar::external_runtime::venv_exists(&crate::sidecar::providers::ryutts::sidecar_dir())
-            && crate::sidecar::providers::ryutts::kokoro::is_model_present();
+        return crate::sidecar::external_runtime::venv_exists(
+            &crate::sidecar::providers::ryutts::sidecar_dir(),
+        ) && crate::sidecar::providers::ryutts::kokoro::is_model_present();
     }
     // Sidecars without a file-based binary: trust the store.
     if matches!(name, "openclaw" | "vllm") {
@@ -28036,30 +28118,29 @@ async fn get_conversation_feedback_handler(
 /// visible viewport normally sends only a handful; the cap keeps a malformed
 /// client from turning this idempotent endpoint into an unbounded write batch.
 const MAX_READ_MESSAGE_IDS: usize = 100;
-const READ_RECEIPT_ROSTER_TIMEOUT: std::time::Duration =
-	std::time::Duration::from_secs(2);
+const READ_RECEIPT_ROSTER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// `POST /api/conversations/:id/read` body. The user identity is always taken
 /// from the verified JWT, never from this payload.
 #[derive(Debug, serde::Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 struct MarkConversationReadBody {
-	#[serde(alias = "message_ids")]
-	message_ids: Vec<String>,
+    #[serde(alias = "message_ids")]
+    message_ids: Vec<String>,
 }
 
 #[derive(Debug, serde::Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 struct ConversationReadReceiptsResponse {
-	receipts: Vec<conversations::MessageReadReceipt>,
-	users: Vec<conversations::MessageReadReceiptUser>,
+    receipts: Vec<conversations::MessageReadReceipt>,
+    users: Vec<conversations::MessageReadReceiptUser>,
 }
 
 #[derive(Debug, serde::Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 struct MarkConversationReadResponse {
-	ok: bool,
-	receipts: Vec<conversations::MessageReadReceipt>,
+    ok: bool,
+    receipts: Vec<conversations::MessageReadReceipt>,
 }
 
 /// `POST /api/conversations/:id/read` — persist the caller's read markers for
@@ -28122,19 +28203,10 @@ async fn mark_conversation_messages_read_handler(
     };
     match state
         .conversations
-        .mark_messages_read(
-            &id,
-            &message_ids,
-            &caller.user_id,
-            caller.email.as_deref(),
-        )
+        .mark_messages_read(&id, &message_ids, &caller.user_id, caller.email.as_deref())
         .await
     {
-        Ok(receipts) => Json(MarkConversationReadResponse {
-            ok: true,
-            receipts,
-        })
-        .into_response(),
+        Ok(receipts) => Json(MarkConversationReadResponse { ok: true, receipts }).into_response(),
         Err(e) => json_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     }
 }
@@ -28181,14 +28253,14 @@ async fn get_conversation_read_receipts_handler(
                 .ok()
                 .and_then(Result::ok)
                 .unwrap_or_default()
-                    .into_iter()
-                    .filter(|user| receipt_user_ids.contains(user.user_id.as_str()))
-                    .map(|user| conversations::MessageReadReceiptUser {
-                        id: user.user_id.clone(),
-                        name: user.name.unwrap_or_else(|| user.user_id.clone()),
-                        avatar: user.image,
-                    })
-                    .collect()
+                .into_iter()
+                .filter(|user| receipt_user_ids.contains(user.user_id.as_str()))
+                .map(|user| conversations::MessageReadReceiptUser {
+                    id: user.user_id.clone(),
+                    name: user.name.unwrap_or_else(|| user.user_id.clone()),
+                    avatar: user.image,
+                })
+                .collect()
             } else {
                 Vec::new()
             };
@@ -30120,11 +30192,9 @@ async fn get_run_trace_handler(
     // Per-resource ACL: spans carry the run's prompts and tool arguments.
     match state.conversations.get_access_meta(&run_id).await {
         Ok(Some(tenancy)) => {
-            if let Err(resp) = require_resource_read(
-                Ok(Some(tenancy)),
-                caller.as_ref(),
-                "run not found",
-            ) {
+            if let Err(resp) =
+                require_resource_read(Ok(Some(tenancy)), caller.as_ref(), "run not found")
+            {
                 return resp;
             }
         }
@@ -31689,21 +31759,51 @@ async fn oauth_discovery_identity(
     caller: &Option<crate::identity_verify::VerifiedCaller>,
     agent: Option<&str>,
 ) -> Result<Option<crate::sidecar::mcp::catalog::AgentDiscovery>, axum::response::Response> {
-    if !crate::mcp_oauth::remote_configured() { return Ok(None); }
-    let Some(agent) = agent else { return Ok(None); };
-    enforce_permission_on(state, caller, crate::identity_verify::permissions::AGENT_VIEW, crate::acl::KIND_AGENT, agent)
-        .await.map_err(|status| json_error(status, "agent discovery is not permitted".to_owned()))?;
+    if !crate::mcp_oauth::remote_configured() {
+        return Ok(None);
+    }
+    let Some(agent) = agent else {
+        return Ok(None);
+    };
+    enforce_permission_on(
+        state,
+        caller,
+        crate::identity_verify::permissions::AGENT_VIEW,
+        crate::acl::KIND_AGENT,
+        agent,
+    )
+    .await
+    .map_err(|status| json_error(status, "agent discovery is not permitted".to_owned()))?;
     let owner = crate::mcp_oauth::owner_for_caller(caller.as_ref())
         .map_err(|_| json_error(StatusCode::FORBIDDEN, "verified user required".to_owned()))?;
-    let record = state.agent_store.get(agent).await
-        .map_err(|_| json_error(StatusCode::SERVICE_UNAVAILABLE, "agent lookup unavailable".to_owned()))?;
-    if !mcp_principal_resolves(agent, record.is_some(), state.agents.entries.iter().map(|entry| entry.id.as_str())) {
-        return Err(json_error(StatusCode::NOT_FOUND, "unknown agent".to_owned()));
+    let record = state.agent_store.get(agent).await.map_err(|_| {
+        json_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "agent lookup unavailable".to_owned(),
+        )
+    })?;
+    if !mcp_principal_resolves(
+        agent,
+        record.is_some(),
+        state.agents.entries.iter().map(|entry| entry.id.as_str()),
+    ) {
+        return Err(json_error(
+            StatusCode::NOT_FOUND,
+            "unknown agent".to_owned(),
+        ));
     }
-    let allowlist = state.agents.allowlist_for(agent).or_else(|| record.as_ref().and_then(|record| record.mcp_tool_allowlist()));
+    let allowlist = state.agents.allowlist_for(agent).or_else(|| {
+        record
+            .as_ref()
+            .and_then(|record| record.mcp_tool_allowlist())
+    });
     Ok(Some(crate::sidecar::mcp::catalog::AgentDiscovery {
-        owner_user_id: owner, agent_id: agent.to_owned(),
-        profile_ids: record.map(|record| record.identity_profile_ids).unwrap_or_default(), allowlist,
+        owner_user_id: owner,
+        agent_id: agent.to_owned(),
+        profile_ids: record
+            .map(|record| record.identity_profile_ids)
+            .unwrap_or_default(),
+        allowlist,
     }))
 }
 
@@ -33509,8 +33609,7 @@ pub(super) async fn list_mcp_tools_for(
             } else {
                 None
             };
-            let allowlist = snapshot_allowlist
-                .unwrap_or_else(|| resolved_allowlist.as_deref());
+            let allowlist = snapshot_allowlist.unwrap_or_else(|| resolved_allowlist.as_deref());
             state.mcp.tools_for_agent(allowlist.as_deref()).await
         }
         None => state.mcp.list_all_tools().await,
@@ -33630,16 +33729,14 @@ async fn call_acp_tool(
     let native_session_id = headers
         .get("x-ryu-acp-native-session-id")
         .and_then(|value| value.to_str().ok());
-    let Some(authorization) = token
-        .and_then(|token| {
-            acp_tool_broker::authorize_call(
-                token,
-                session_id,
-                native_session_id,
-                require_native_session,
-            )
-        })
-    else {
+    let Some(authorization) = token.and_then(|token| {
+        acp_tool_broker::authorize_call(
+            token,
+            session_id,
+            native_session_id,
+            require_native_session,
+        )
+    }) else {
         return json_error(
             StatusCode::UNAUTHORIZED,
             "invalid or expired ACP tool session".to_owned(),
@@ -33679,12 +33776,7 @@ async fn call_acp_tool(
         identity_profile_ids: Some(authorization.identity_profile_ids),
         mcp_policy_snapshot: true,
     };
-    call_mcp_tool(
-        State(state),
-        Extension(authorization.caller),
-        Json(call),
-    )
-    .await
+    call_mcp_tool(State(state), Extension(authorization.caller), Json(call)).await
 }
 
 #[derive(serde::Deserialize)]
@@ -33840,7 +33932,7 @@ async fn call_mcp_tool(
             StatusCode::BAD_REQUEST,
             Json(json!({ "ok": false, "error": "agent_id is required to call a tool" })),
         )
-        .into_response();
+            .into_response();
     };
     if let Err(response) = enforce_agent_resource_permission(
         &state,
@@ -35025,7 +35117,8 @@ async fn tools_search(
     // Over-fetch first so allowed tools ranked below the top-`limit` are not
     // hidden by truncation, then narrow, then truncate to `limit`.
     let agent = params.get("agent").filter(|s| !s.is_empty());
-    let identity = match oauth_discovery_identity(&state, &caller, agent.map(String::as_str)).await {
+    let identity = match oauth_discovery_identity(&state, &caller, agent.map(String::as_str)).await
+    {
         Ok(identity) => identity,
         Err(response) => return response,
     };
@@ -35092,10 +35185,13 @@ async fn tools_describe(
         )
             .into_response();
     };
-    let identity = match oauth_discovery_identity(&state, &caller, params.get("agent").map(String::as_str)).await {
-        Ok(identity) => identity,
-        Err(response) => return response,
-    };
+    let identity =
+        match oauth_discovery_identity(&state, &caller, params.get("agent").map(String::as_str))
+            .await
+        {
+            Ok(identity) => identity,
+            Err(response) => return response,
+        };
     match state
         .mcp
         .describe_scoped_for_identity(
@@ -39374,10 +39470,8 @@ async fn composio_toolkits(
     State(state): State<ServerState>,
     axum::Extension(caller): axum::Extension<Option<crate::identity_verify::VerifiedCaller>>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    if let Some(result) = ryu_composio::service::toolkits(
-        caller.as_ref().map(|caller| caller.user_id.as_str()),
-    )
-    .await
+    if let Some(result) =
+        ryu_composio::service::toolkits(caller.as_ref().map(|caller| caller.user_id.as_str())).await
     {
         return match result {
             Ok(value) => (StatusCode::OK, Json(value)),
@@ -39801,11 +39895,10 @@ async fn composio_actions(
         .get("limit")
         .and_then(|s| s.parse::<usize>().ok())
         .unwrap_or(50);
-    let tag_values: Vec<String> = url::form_urlencoded::parse(
-        raw_query.as_deref().unwrap_or("").as_bytes(),
-    )
-    .filter_map(|(key, value)| (key == "tags").then(|| value.into_owned()))
-    .collect();
+    let tag_values: Vec<String> =
+        url::form_urlencoded::parse(raw_query.as_deref().unwrap_or("").as_bytes())
+            .filter_map(|(key, value)| (key == "tags").then(|| value.into_owned()))
+            .collect();
     let tags: Vec<&str> = tag_values.iter().map(String::as_str).collect();
     if let Some(result) = ryu_composio::service::actions(
         toolkit,
@@ -40314,7 +40407,9 @@ async fn composio_webhook(
     if ryu_composio::service::is_configured() {
         return (
             StatusCode::GONE,
-            Json(json!({"code":"connect_owns_ingress","error":"Deliver Composio webhooks to the configured Connect service"})),
+            Json(
+                json!({"code":"connect_owns_ingress","error":"Deliver Composio webhooks to the configured Connect service"}),
+            ),
         );
     }
     // Authenticate the raw bytes BEFORE parsing — verify over exactly what was
@@ -44197,8 +44292,8 @@ async fn skills_system_status(State(state): State<ServerState>) -> Json<serde_js
 )]
 async fn skills_system_sync(State(state): State<ServerState>) -> Json<serde_json::Value> {
     use crate::skills_catalog::system_skills::{
-        read_selection, sync_selected_bundled_with_preferences, selection_bundle_version,
-        SYNC_ENABLED_PREF, SYNCED_VERSION_PREF,
+        read_selection, selection_bundle_version, sync_selected_bundled_with_preferences,
+        SYNCED_VERSION_PREF, SYNC_ENABLED_PREF,
     };
     let selection = read_selection(&state.preferences).await;
     if !selection.configured {
@@ -44239,10 +44334,7 @@ async fn skills_system_sync(State(state): State<ServerState>) -> Json<serde_json
     .await;
     if report.complete {
         let version = selection_bundle_version(&selection.pack_ids);
-        let _ = state
-            .preferences
-            .set(SYNCED_VERSION_PREF, &version)
-            .await;
+        let _ = state.preferences.set(SYNCED_VERSION_PREF, &version).await;
     }
     state.skills.reload();
     Json(json!({
@@ -44680,17 +44772,28 @@ async fn install_sidecar(
                     .install()
                     .await
             }
-            "ryutts" => {
-                match crate::sidecar::providers::ryutts::ensure_kokoro_runtime().await {
-                    Ok(true) => match crate::sidecar::providers::ryutts::kokoro::KokoroDownloader::new()
-                        .ensure_installed(&downloads).await {
-                        Ok(version) => crate::sidecar::download_manager::VersionStore::record_persisted("ryutts", &version, "installed").map(|()| version),
+            "ryutts" => match crate::sidecar::providers::ryutts::ensure_kokoro_runtime().await {
+                Ok(true) => {
+                    match crate::sidecar::providers::ryutts::kokoro::KokoroDownloader::new()
+                        .ensure_installed(&downloads)
+                        .await
+                    {
+                        Ok(version) => {
+                            crate::sidecar::download_manager::VersionStore::record_persisted(
+                                "ryutts",
+                                &version,
+                                "installed",
+                            )
+                            .map(|()| version)
+                        }
                         Err(error) => Err(error),
-                    },
-                    Ok(false) => Err(anyhow::anyhow!("A compatible Python runtime is required for Kokoro speech")),
-                    Err(error) => Err(error),
+                    }
                 }
-            }
+                Ok(false) => Err(anyhow::anyhow!(
+                    "A compatible Python runtime is required for Kokoro speech"
+                )),
+                Err(error) => Err(error),
+            },
             // Docker Model Runner is adopt-only: there is nothing to download.
             // "Installing" means verifying DMR is enabled + reachable on :12434,
             // then recording a version-store marker so the engine survives a Core
@@ -47671,10 +47774,7 @@ async fn gateway_run_evals(
             // error, and never 500 on a shape we don't recognise.
             if status.is_success() && !code_specs.is_empty() && response_body.get("cases").is_some()
             {
-                if code_specs
-                    .iter()
-                    .any(|spec| spec.assertion_index.is_some())
-                {
+                if code_specs.iter().any(|spec| spec.assertion_index.is_some()) {
                     ryu_eval_code::merge_inline_code_assertions(
                         &mut response_body,
                         &case_inputs,
@@ -47696,16 +47796,13 @@ async fn gateway_run_evals(
     }
 }
 
-fn inline_code_evaluator_specs(
-    body: &serde_json::Value,
-) -> Vec<ryu_eval_code::CodeEvaluatorSpec> {
+fn inline_code_evaluator_specs(body: &serde_json::Value) -> Vec<ryu_eval_code::CodeEvaluatorSpec> {
     let Some(dataset) = body.get("dataset").and_then(serde_json::Value::as_array) else {
         return Vec::new();
     };
     let mut specs = Vec::new();
     for (case_index, case) in dataset.iter().enumerate() {
-        let Some(assertions) = case.get("assertions").and_then(serde_json::Value::as_array)
-        else {
+        let Some(assertions) = case.get("assertions").and_then(serde_json::Value::as_array) else {
             continue;
         };
         for (assertion_index, assertion) in assertions.iter().enumerate() {
@@ -47717,8 +47814,7 @@ fn inline_code_evaluator_specs(
                 "python" => "python",
                 _ => continue,
             };
-            let Some(source) = assertion.get("value").and_then(serde_json::Value::as_str)
-            else {
+            let Some(source) = assertion.get("value").and_then(serde_json::Value::as_str) else {
                 continue;
             };
             if source.trim().is_empty() {
@@ -47902,8 +47998,7 @@ fn selected_red_team_specs(requested: &[String]) -> Result<Vec<&'static RedTeamS
     let selected: Vec<&'static RedTeamSpec> = if requested.is_empty() {
         RED_TEAM_STRATEGIES.iter().collect()
     } else {
-        let mut selected: Vec<&'static RedTeamSpec> =
-            Vec::with_capacity(requested.len());
+        let mut selected: Vec<&'static RedTeamSpec> = Vec::with_capacity(requested.len());
         for value in requested {
             let key = value.trim();
             let Some(spec) = RED_TEAM_STRATEGIES.iter().find(|spec| spec.0 == key) else {
@@ -48021,12 +48116,8 @@ async fn gateway_redteam_run(
         "model": model,
         "dataset": cases,
     });
-    let (status, Json(result)) = gateway_run_evals(
-        State(state),
-        req_headers,
-        Json(eval_body),
-    )
-    .await;
+    let (status, Json(result)) =
+        gateway_run_evals(State(state), req_headers, Json(eval_body)).await;
     if !status.is_success() {
         return (
             status,
@@ -48094,10 +48185,10 @@ mod red_team_campaign_tests {
             "prompt_injection".to_owned(),
         ])
         .expect("known strategies");
-        assert_eq!(requested.iter().map(|spec| spec.0).collect::<Vec<_>>(), [
-            "tool_misuse",
-            "prompt_injection",
-        ]);
+        assert_eq!(
+            requested.iter().map(|spec| spec.0).collect::<Vec<_>>(),
+            ["tool_misuse", "prompt_injection",]
+        );
         let cases = red_team_cases(&requested);
         assert_eq!(cases[0]["id"], "red-team-tool_misuse");
         assert_eq!(cases[1]["id"], "red-team-prompt_injection");
@@ -48149,17 +48240,17 @@ mod red_team_campaign_tests {
 
 #[derive(serde::Deserialize, Debug)]
 struct AuditQueryParams {
-	session_id: Option<String>,
-	agent_id: Option<String>,
-	event_type: Option<String>,
-	#[serde(default)]
-	errors_only: bool,
+    session_id: Option<String>,
+    agent_id: Option<String>,
+    event_type: Option<String>,
+    #[serde(default)]
+    errors_only: bool,
     limit: Option<u32>,
     from: Option<String>,
     until: Option<String>,
-	provider: Option<String>,
-	model: Option<String>,
-	widget_instance_id: Option<String>,
+    provider: Option<String>,
+    model: Option<String>,
+    widget_instance_id: Option<String>,
 }
 
 #[utoipa::path(
@@ -48202,18 +48293,18 @@ async fn gateway_audit(
     if let Some(provider) = &params.provider {
         query_parts.push(format!("provider={}", urlencoding_simple(provider)));
     }
-	if let Some(model) = &params.model {
-		query_parts.push(format!("model={}", urlencoding_simple(model)));
-	}
-	if let Some(event_type) = &params.event_type {
-		query_parts.push(format!("event_type={}", urlencoding_simple(event_type)));
-	}
-	if let Some(widget_instance_id) = &params.widget_instance_id {
-		query_parts.push(format!(
-			"widget_instance_id={}",
-			urlencoding_simple(widget_instance_id)
-		));
-	}
+    if let Some(model) = &params.model {
+        query_parts.push(format!("model={}", urlencoding_simple(model)));
+    }
+    if let Some(event_type) = &params.event_type {
+        query_parts.push(format!("event_type={}", urlencoding_simple(event_type)));
+    }
+    if let Some(widget_instance_id) = &params.widget_instance_id {
+        query_parts.push(format!(
+            "widget_instance_id={}",
+            urlencoding_simple(widget_instance_id)
+        ));
+    }
 
     let qs = if query_parts.is_empty() {
         String::new()
@@ -50814,14 +50905,13 @@ mod remote_auth_tests {
     #[test]
     fn non_loopback_bind_accepts_a_self_minted_token() {
         for source in [TokenSource::File, TokenSource::Minted] {
-            let token =
-                enforce_remote_auth(
-                    Some("ryu_deadbeef_0123456789abcdef0123456789abcdef".to_string()),
-                    Some(source),
-                    false,
-                    true,
-                )
-                    .expect("a minted token is a real secret; a plain remote bind may use it");
+            let token = enforce_remote_auth(
+                Some("ryu_deadbeef_0123456789abcdef0123456789abcdef".to_string()),
+                Some(source),
+                false,
+                true,
+            )
+            .expect("a minted token is a real secret; a plain remote bind may use it");
             assert_eq!(
                 token.as_deref(),
                 Some("ryu_deadbeef_0123456789abcdef0123456789abcdef")
@@ -50841,14 +50931,13 @@ mod remote_auth_tests {
     fn mesh_accepts_any_strong_non_placeholder_token() {
         // A strong token — minted, file-persisted, or env-provisioned — is accepted.
         for source in [TokenSource::File, TokenSource::Minted, TokenSource::Env] {
-            let token =
-                enforce_remote_auth(
-                    Some("ryu_deadbeef_0123456789abcdef0123456789abcdef".to_string()),
-                    Some(source),
-                    true,
-                    false,
-                )
-                    .expect("mesh accepts a strong non-placeholder token whatever its provenance");
+            let token = enforce_remote_auth(
+                Some("ryu_deadbeef_0123456789abcdef0123456789abcdef".to_string()),
+                Some(source),
+                true,
+                false,
+            )
+            .expect("mesh accepts a strong non-placeholder token whatever its provenance");
             assert_eq!(
                 token.as_deref(),
                 Some("ryu_deadbeef_0123456789abcdef0123456789abcdef")

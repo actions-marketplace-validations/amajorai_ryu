@@ -540,10 +540,7 @@ fn peer_url(peer: &MeshPeer, port: u16) -> String {
 /// `require_auth` compares equal against.
 pub fn resolve_mesh_bearer(node_token: Option<&str>) -> Option<String> {
     let token = node_token?.trim();
-    if token.is_empty()
-        || is_insecure_auth_token_placeholder(token)
-        || is_weak_auth_token(token)
-    {
+    if token.is_empty() || is_insecure_auth_token_placeholder(token) || is_weak_auth_token(token) {
         return None;
     }
     Some(token.to_owned())
@@ -886,7 +883,9 @@ mod tests {
         assert!(is_insecure_auth_token_placeholder("CHANGE_ME"));
         assert!(is_insecure_auth_token_placeholder("  changeme  "));
         assert!(is_insecure_auth_token_placeholder("PASSWORD"));
-        assert!(!is_insecure_auth_token_placeholder("ryu_strong_random_0123456789abcdef"));
+        assert!(!is_insecure_auth_token_placeholder(
+            "ryu_strong_random_0123456789abcdef"
+        ));
         assert!(is_weak_auth_token("ryu_strong_random"));
         assert!(!is_insecure_auth_token_placeholder(""));
     }

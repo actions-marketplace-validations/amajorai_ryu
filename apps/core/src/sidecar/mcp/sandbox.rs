@@ -303,7 +303,8 @@ async fn run_sandbox_run(
     let args = parse_str_array(&arguments, "args");
     let timeout_secs = arguments.get("timeout_secs").and_then(Value::as_u64);
 
-    let result = session::exec_in_sandbox_owned(&run_id, command, args, timeout_secs, &owner).await?;
+    let result =
+        session::exec_in_sandbox_owned(&run_id, command, args, timeout_secs, &owner).await?;
     Ok(json!({
         "exit_code": result.exit_code,
         "stdout": result.stdout,

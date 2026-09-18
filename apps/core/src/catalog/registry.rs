@@ -642,12 +642,19 @@ mod tests {
     #[test]
     fn freetoken_platform_matrix_enforces_supported_operating_systems_and_architecture() {
         for (os, arch, expected) in [
-            ("linux", "x86_64", true), ("windows", "x86_64", true),
-            ("macos", "aarch64", false), ("macos", "x86_64", false),
-            ("linux", "aarch64", false), ("windows", "aarch64", false),
+            ("linux", "x86_64", true),
+            ("windows", "x86_64", true),
+            ("macos", "aarch64", false),
+            ("macos", "x86_64", false),
+            ("linux", "aarch64", false),
+            ("windows", "aarch64", false),
             ("freebsd", "x86_64", false),
         ] {
-            assert_eq!(freetoken_platform_supported(os, arch), expected, "{os}/{arch}");
+            assert_eq!(
+                freetoken_platform_supported(os, arch),
+                expected,
+                "{os}/{arch}"
+            );
         }
     }
 

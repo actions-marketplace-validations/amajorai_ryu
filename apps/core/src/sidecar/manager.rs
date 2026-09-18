@@ -1645,9 +1645,15 @@ mod tests {
         } else {
             "freetoken"
         };
-        let error = manager.set_active_local_engine(unsupported).await.unwrap_err();
+        let error = manager
+            .set_active_local_engine(unsupported)
+            .await
+            .unwrap_err();
         assert!(error.to_string().contains("not supported on this node"));
-        assert_eq!(manager.active_engine.lock().await.as_deref(), Some("llamacpp"));
+        assert_eq!(
+            manager.active_engine.lock().await.as_deref(),
+            Some("llamacpp")
+        );
     }
 
     #[tokio::test]

@@ -71,7 +71,10 @@ pub async fn get_approval(
     Extension(caller): Extension<Option<crate::identity_verify::VerifiedCaller>>,
 ) -> (axum::http::StatusCode, Json<serde_json::Value>) {
     if let Err(status) = require_permission(&state, &caller, "approvals.view").await {
-        return (status, Json(json!({ "success": false, "error": "forbidden" })));
+        return (
+            status,
+            Json(json!({ "success": false, "error": "forbidden" })),
+        );
     }
     match state.approvals.store.get(&id).await {
         Ok(Some(req)) => (axum::http::StatusCode::OK, Json(json!({ "approval": req }))),
@@ -129,7 +132,10 @@ pub async fn approve_approval(
     body: Option<Json<DecideBody>>,
 ) -> (axum::http::StatusCode, Json<serde_json::Value>) {
     if let Err(status) = require_permission(&state, &caller, "approvals.decide").await {
-        return (status, Json(json!({ "success": false, "error": "forbidden" })));
+        return (
+            status,
+            Json(json!({ "success": false, "error": "forbidden" })),
+        );
     }
     let note = body.and_then(|b| b.0.note);
     decide(&state, &id, true, note).await
@@ -152,7 +158,10 @@ pub async fn reject_approval(
     body: Option<Json<DecideBody>>,
 ) -> (axum::http::StatusCode, Json<serde_json::Value>) {
     if let Err(status) = require_permission(&state, &caller, "approvals.decide").await {
-        return (status, Json(json!({ "success": false, "error": "forbidden" })));
+        return (
+            status,
+            Json(json!({ "success": false, "error": "forbidden" })),
+        );
     }
     let note = body.and_then(|b| b.0.note);
     decide(&state, &id, false, note).await
@@ -199,7 +208,10 @@ pub async fn set_mode(
     Json(body): Json<SetModeBody>,
 ) -> (axum::http::StatusCode, Json<serde_json::Value>) {
     if let Err(status) = require_permission(&state, &caller, "approvals.decide").await {
-        return (status, Json(json!({ "success": false, "error": "forbidden" })));
+        return (
+            status,
+            Json(json!({ "success": false, "error": "forbidden" })),
+        );
     }
     // Normalize through the enum so only a valid mode is ever stored.
     let mode = crate::approvals::policy::ApprovalMode::from_pref(&body.mode);
@@ -256,7 +268,9 @@ pub async fn approval_events(
             }
         }
     });
-    Sse::new(stream).keep_alive(KeepAlive::default()).into_response()
+    Sse::new(stream)
+        .keep_alive(KeepAlive::default())
+        .into_response()
 }
 
 async fn require_permission(

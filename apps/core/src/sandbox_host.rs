@@ -20,7 +20,9 @@
 /// single-source with their Core homes. Idempotent (first write wins).
 pub fn install_sandbox_host() {
     ryu_sandbox::host::install_host(ryu_sandbox::host::SandboxHost {
-        gateway_bearer: || crate::sidecar::gateway::required_gateway_core_token().map_err(|e| format!("{e:#}")),
+        gateway_bearer: || {
+            crate::sidecar::gateway::required_gateway_core_token().map_err(|e| format!("{e:#}"))
+        },
         gateway_url: crate::sidecar::gateway::gateway_url,
         ryu_dir: crate::paths::ryu_dir,
         registered_org_id: || crate::sidecar::control_plane::registered_org().map(|o| o.id),

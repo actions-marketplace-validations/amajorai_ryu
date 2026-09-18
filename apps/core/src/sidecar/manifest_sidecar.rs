@@ -1041,7 +1041,10 @@ fn inject_ext_env(
 /// deliberately for sidecars that need direct Shadow access; it is never
 /// obtained through ambient environment inheritance.
 fn inject_shadow_env(env: &mut BTreeMap<String, String>, plugin_id: &str) {
-    if !matches!(plugin_id, "@ryu/clips" | "clips" | "@ryu/meetings" | "meetings") {
+    if !matches!(
+        plugin_id,
+        "@ryu/clips" | "clips" | "@ryu/meetings" | "meetings"
+    ) {
         return;
     }
     if env.contains_key("SHADOW_API_TOKEN") {

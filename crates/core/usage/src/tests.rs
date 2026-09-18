@@ -75,10 +75,7 @@ fn engine_maps_ryu_subscription_provider_ids() {
         engine_for_agent("github-copilot"),
         Some(Engine::Copilot)
     ));
-    assert!(matches!(
-        engine_for_agent("chatgpt"),
-        Some(Engine::ChatGpt)
-    ));
+    assert!(matches!(engine_for_agent("chatgpt"), Some(Engine::ChatGpt)));
 }
 
 #[test]

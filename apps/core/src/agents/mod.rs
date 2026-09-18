@@ -493,9 +493,7 @@ impl AgentRecord {
         if self.tools.iter().any(|tool| tool == ALL_MCP_TOOLS) {
             return None;
         }
-        if self.tools.is_empty()
-            || self.tools.iter().any(|tool| tool == NO_AGENT_CAPABILITIES)
-        {
+        if self.tools.is_empty() || self.tools.iter().any(|tool| tool == NO_AGENT_CAPABILITIES) {
             return Some(Vec::new());
         }
         Some(self.tools.clone())

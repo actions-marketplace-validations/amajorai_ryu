@@ -79,9 +79,7 @@ const AGENT_LANE_PROOF_DOMAIN: &str = "ryu-agent-lane-v1";
 type AgentLaneMac = Hmac<Sha256>;
 
 fn agent_lane_payload(agent_id: &str, method: &str, path_and_query: &str) -> String {
-    format!(
-        "{AGENT_LANE_PROOF_DOMAIN}\n{method}\n{path_and_query}\n{agent_id}"
-    )
+    format!("{AGENT_LANE_PROOF_DOMAIN}\n{method}\n{path_and_query}\n{agent_id}")
 }
 
 /// Stamp a Core-generated agent-lane request. The proof is tied to the active
@@ -98,12 +96,7 @@ pub(crate) fn sign_agent_lane(
     Some(hex::encode(mac.finalize().into_bytes()))
 }
 
-fn verify_agent_lane(
-    agent_id: &str,
-    method: &str,
-    path_and_query: &str,
-    proof: &str,
-) -> bool {
+fn verify_agent_lane(agent_id: &str, method: &str, path_and_query: &str, proof: &str) -> bool {
     let Some(token) = crate::node_token::active_token() else {
         return false;
     };
@@ -354,17 +347,8 @@ fn verified_agent_lane(req: &Request, plugin_id: &str) -> Result<Option<String>,
         .path_and_query()
         .map(|value| value.as_str())
         .unwrap_or_else(|| req.uri().path());
-    if !verify_agent_lane(
-        agent_id,
-        req.method().as_str(),
-        path_and_query,
-        proof,
-    ) {
-        return Err((
-            StatusCode::FORBIDDEN,
-            "browser agent lane proof is invalid",
-        )
-            .into_response());
+    if !verify_agent_lane(agent_id, req.method().as_str(), path_and_query, proof) {
+        return Err((StatusCode::FORBIDDEN, "browser agent lane proof is invalid").into_response());
     }
     Ok(Some(agent_id.clone()))
 }
@@ -1205,15 +1189,7 @@ async fn ext_ws_root_proxy(
     Query(query): Query<HashMap<String, String>>,
     ws: WebSocketUpgrade,
 ) -> Response {
-    ext_ws_tunnel(
-        &state,
-        &plugin_id,
-        "/",
-        expected_node_token,
-        &query,
-        ws,
-    )
-    .await
+    ext_ws_tunnel(&state, &plugin_id, "/", expected_node_token, &query, ws).await
 }
 
 /// Shared core of the two WS handlers: enabled-gate → route-allowlist → node-token →
@@ -1278,9 +1254,7 @@ async fn ext_ws_tunnel(
     // permission must be checked before waking the sidecar or accepting the
     // upgrade; otherwise a view-only caller could reach the control stream.
     if let Some((permission, resource_id)) = required {
-        let caller = ticket
-            .as_ref()
-            .and_then(|ticket| ticket.caller.clone());
+        let caller = ticket.as_ref().and_then(|ticket| ticket.caller.clone());
         if let Err(status) = crate::server::enforce_permission_on(
             state,
             &caller,
@@ -1497,7 +1471,12 @@ pub fn host_routes() -> Router<ServerState> {
             "/api/host/model/stream",
             post(crate::server::model_stream::host_model_stream),
         )
-        .route("/api/host/rpc", post(host_rpc).layer(axum::extract::DefaultBodyLimit::max(crate::backups::MAX_APP_BYTES + 64 * 1024)))
+        .route(
+            "/api/host/rpc",
+            post(host_rpc).layer(axum::extract::DefaultBodyLimit::max(
+                crate::backups::MAX_APP_BYTES + 64 * 1024,
+            )),
+        )
         .route("/api/host/capability/:cap", post(host_capability))
 }
 
@@ -1663,7 +1642,9 @@ async fn host_rpc(
     };
 
     let caller = crate::server::verified_caller_from_headers(&headers).await;
-    let bridge = crate::plugin_host::PluginHookBridge::new_for_request(plugin_id, grants, state, caller, None);
+    let bridge = crate::plugin_host::PluginHookBridge::new_for_request(
+        plugin_id, grants, state, caller, None,
+    );
     use crate::tool_exec::{InvokeOutcome, SandboxBridge};
     match bridge.handle(bridge_path.to_owned(), body.args).await {
         InvokeOutcome::Result(r) if r.is_error => {

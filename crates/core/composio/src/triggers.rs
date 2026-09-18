@@ -635,7 +635,9 @@ impl ComposioTriggerStore {
         config: Value,
     ) -> Result<TriggerSubscription> {
         if crate::service::is_configured() {
-            return Err(anyhow!("Connect owns provider triggers; use its management API and bind the Core target"));
+            return Err(anyhow!(
+                "Connect owns provider triggers; use its management API and bind the Core target"
+            ));
         }
         let key = crate::auth::key()
             .ok_or_else(|| anyhow!("Composio API key not set (Settings → Integrations)"))?;
@@ -1096,14 +1098,41 @@ mod tests {
         let (store, _dir) = temp_store().await;
         let payload = json!({"type":"composio.trigger.message","metadata":{"trigger_id":"ti_a","trigger_slug":"SLACK_MSG","connected_account_id":"ca_a","user_id":"provider-a","auth_config_id":"ac_a"},"data":{}});
         let identity = connect_event_identity(&payload).unwrap();
-        let binding = store.bind_connect_target("owner-a", &identity, "slack", ConnectTarget::Workflow("workflow-a")).await.unwrap();
+        let binding = store
+            .bind_connect_target(
+                "owner-a",
+                &identity,
+                "slack",
+                ConnectTarget::Workflow("workflow-a"),
+            )
+            .await
+            .unwrap();
         store.conn.lock().await.execute("INSERT INTO subscriptions(id,agent_id,toolkit,trigger_slug,connected_account_id,target_kind,workflow_id,created_at) VALUES('legacy-workflow','','slack','SLACK_MSG','ca_a','workflow','workflow-a','original')", []).unwrap();
-        assert_eq!(store.delete_embedded_for_workflow("workflow-a").await.unwrap(), 1);
-        assert_eq!(store.connect_targets("owner-a", &payload).await.unwrap()[0].id, binding.id);
-        assert!(!store.connect_event_was_unbound("owner-a", &payload).await.unwrap());
+        assert_eq!(
+            store
+                .delete_embedded_for_workflow("workflow-a")
+                .await
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            store.connect_targets("owner-a", &payload).await.unwrap()[0].id,
+            binding.id
+        );
+        assert!(!store
+            .connect_event_was_unbound("owner-a", &payload)
+            .await
+            .unwrap());
         assert_eq!(store.delete_for_workflow("workflow-a").await.unwrap(), 1);
-        assert!(store.connect_targets("owner-a", &payload).await.unwrap().is_empty());
-        assert!(store.connect_event_was_unbound("owner-a", &payload).await.unwrap());
+        assert!(store
+            .connect_targets("owner-a", &payload)
+            .await
+            .unwrap()
+            .is_empty());
+        assert!(store
+            .connect_event_was_unbound("owner-a", &payload)
+            .await
+            .unwrap());
     }
 
     #[test]

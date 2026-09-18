@@ -61,7 +61,11 @@ fn bridge_path_for(method: &str) -> Option<&'static str> {
         "agent.run" => Some("host.runAgent"),
         "agent.runFanout" => Some("host.runFanout"),
         "storage.get" => Some("host.storage_get"),
-        "backups.destinations" | "backups.create" | "backups.list" | "backups.get" | "backups.restore" => crate::plugin_host::dispatch_path_for(method),
+        "backups.destinations"
+        | "backups.create"
+        | "backups.list"
+        | "backups.get"
+        | "backups.restore" => crate::plugin_host::dispatch_path_for(method),
         "storage.set" => Some("host.storage_set"),
         "storage.delete" => Some("host.storage_delete"),
         "storage.keys" => Some("host.storage_keys"),
@@ -412,13 +416,9 @@ pub async fn plugin_bridge_stream(
                 "capability 'finetune:runs' not granted to this app".to_owned(),
             );
         }
-        if crate::server::enforce_permission(
-            &state,
-            &caller,
-            "finetune.view",
-        )
-        .await
-        .is_err()
+        if crate::server::enforce_permission(&state, &caller, "finetune.view")
+            .await
+            .is_err()
         {
             return err_response(
                 StatusCode::FORBIDDEN,
@@ -676,10 +676,7 @@ mod tests {
             bridge_path_for("gateway.budgetSpend"),
             Some("host.gatewayBudgetSpend")
         );
-        assert_eq!(
-            bridge_path_for("gateway.audit"),
-            Some("host.gatewayAudit")
-        );
+        assert_eq!(bridge_path_for("gateway.audit"), Some("host.gatewayAudit"));
         // `finetune.stream` is a STREAMING method — it has a required grant but no
         // unary bridge path (it's handled by the stream endpoint, not dispatch).
         assert_eq!(bridge_path_for("finetune.stream"), None);

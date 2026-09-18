@@ -82,39 +82,27 @@ fn archive_sha256(variant: LlamaVariant) -> Result<&'static str> {
 
 fn archive_sha256_for_platform(platform: &str) -> Option<&'static str> {
     match platform {
-        "macos-arm64" => Some(
-            "f3e87f1664c09183a861f16758c55a5adc925672705cd3a47e3dc4444504c914",
-        ),
-        "macos-x64" => Some(
-            "3cfdcb4c0a2071b470577cf26e182baf9a51edff09a8c89d9252d2d5c7d4b849",
-        ),
-        "ubuntu-arm64" => Some(
-            "9692bd7147325654b69c62fb7780118c0a2579945a014dda53ca909b3bc7829e",
-        ),
-        "ubuntu-x64" => Some(
-            "78ec7a1964710918030e85c132a0995b10b07e4f43001bdf54fe0fd48d1eb85b",
-        ),
-        "ubuntu-vulkan-arm64" => Some(
-            "608cc42c4718db8faba5b16b15f70b0d52c0a04512c6a6e39f05518b734e1cec",
-        ),
-        "ubuntu-vulkan-x64" => Some(
-            "ea12376a18e1c0cb39e32ada5ad797ec7e49f3b8a8583b9f81627a0b63e9c454",
-        ),
-        "win-cpu-arm64" => Some(
-            "8407f05d4cc6e614eb8391de4c39af549428a6341603f1023355f5bd326611ba",
-        ),
-        "win-cpu-x64" => Some(
-            "678d67405b12abd8ea3541ec6f501c10c9c15ba3cd0767bf090f79eb51168a17",
-        ),
-        "win-cuda-12.4-x64" => Some(
-            "28b08668627672d9f91ff716c32cd08e1d8d14b2e65427627951e5fc29d802a1",
-        ),
-        "win-cuda-13.3-x64" => Some(
-            "c275a6a5923e1d665d0b1d2b32ae266241a83936e9a5c2f0453b99d21877c88f",
-        ),
-        "win-vulkan-x64" => Some(
-            "5196ca655a6126ce368ee589c24604eaa491e5057c1edf2890c888f43764663d",
-        ),
+        "macos-arm64" => Some("f3e87f1664c09183a861f16758c55a5adc925672705cd3a47e3dc4444504c914"),
+        "macos-x64" => Some("3cfdcb4c0a2071b470577cf26e182baf9a51edff09a8c89d9252d2d5c7d4b849"),
+        "ubuntu-arm64" => Some("9692bd7147325654b69c62fb7780118c0a2579945a014dda53ca909b3bc7829e"),
+        "ubuntu-x64" => Some("78ec7a1964710918030e85c132a0995b10b07e4f43001bdf54fe0fd48d1eb85b"),
+        "ubuntu-vulkan-arm64" => {
+            Some("608cc42c4718db8faba5b16b15f70b0d52c0a04512c6a6e39f05518b734e1cec")
+        }
+        "ubuntu-vulkan-x64" => {
+            Some("ea12376a18e1c0cb39e32ada5ad797ec7e49f3b8a8583b9f81627a0b63e9c454")
+        }
+        "win-cpu-arm64" => Some("8407f05d4cc6e614eb8391de4c39af549428a6341603f1023355f5bd326611ba"),
+        "win-cpu-x64" => Some("678d67405b12abd8ea3541ec6f501c10c9c15ba3cd0767bf090f79eb51168a17"),
+        "win-cuda-12.4-x64" => {
+            Some("28b08668627672d9f91ff716c32cd08e1d8d14b2e65427627951e5fc29d802a1")
+        }
+        "win-cuda-13.3-x64" => {
+            Some("c275a6a5923e1d665d0b1d2b32ae266241a83936e9a5c2f0453b99d21877c88f")
+        }
+        "win-vulkan-x64" => {
+            Some("5196ca655a6126ce368ee589c24604eaa491e5057c1edf2890c888f43764663d")
+        }
         _ => None,
     }
 }
@@ -395,7 +383,9 @@ impl LlamaCppDownloader {
                 dest,
                 sha256: Some(
                     cudart_sha256(variant)
-                        .ok_or_else(|| anyhow::anyhow!("no pinned SHA-256 digest for CUDA runtime"))?
+                        .ok_or_else(|| {
+                            anyhow::anyhow!("no pinned SHA-256 digest for CUDA runtime")
+                        })?
                         .to_owned(),
                 ),
                 version_record: None,

@@ -892,7 +892,10 @@ async fn disable_app_inner(
     let mut disabled: Vec<PluginRecord> = Vec::new();
     for plugin_id in &order {
         let record = if dry_run {
-            records.iter().find(|record| record.id == *plugin_id).cloned()
+            records
+                .iter()
+                .find(|record| record.id == *plugin_id)
+                .cloned()
         } else {
             store
                 .set_disabled(plugin_id)
@@ -1050,7 +1053,8 @@ async fn uninstall_app_inner(
     // dependents refusal, cascade order, and idempotent teardown of the bits.
     // `force = false`: any load-bearing plugin is pre-installed and already refused at
     // step 2, so this can never be a forced disable of a core subsystem.
-    let disabled = match disable_app_inner(store, id, all_manifests, cascade, false, dry_run).await {
+    let disabled = match disable_app_inner(store, id, all_manifests, cascade, false, dry_run).await
+    {
         Ok(outcome) => outcome.disabled,
         Err(DisableError::NotInstalled { id }) => return Err(UninstallError::NotInstalled { id }),
         Err(DisableError::Dependency(e)) => return Err(UninstallError::Dependency(e)),
@@ -1224,7 +1228,12 @@ pub async fn update_app(
     let reconciled_grants: Vec<String> = record
         .approved_grants
         .iter()
-        .filter(|grant| manifest.permission_grants.iter().any(|declared| declared == *grant))
+        .filter(|grant| {
+            manifest
+                .permission_grants
+                .iter()
+                .any(|declared| declared == *grant)
+        })
         .cloned()
         .collect();
     if reconciled_grants.len() != record.approved_grants.len() {
@@ -1405,8 +1414,7 @@ fn parse_grant_validation_response(
         .and_then(serde_json::Value::as_bool)
         .ok_or_else(|| "all_approved must be a boolean".to_owned())?;
 
-    let requested: std::collections::HashSet<&str> =
-        requested.iter().map(String::as_str).collect();
+    let requested: std::collections::HashSet<&str> = requested.iter().map(String::as_str).collect();
     let mut seen = std::collections::HashSet::new();
     for grant in approved.iter().chain(denied.iter()) {
         if !requested.contains(grant.as_str()) || !seen.insert(grant.as_str()) {
@@ -1781,7 +1789,12 @@ mod tests {
         .unwrap();
         assert!(enable.target.enabled);
         assert_eq!(
-            store.get("com.test.preview").await.unwrap().unwrap().enabled,
+            store
+                .get("com.test.preview")
+                .await
+                .unwrap()
+                .unwrap()
+                .enabled,
             false,
             "an enable plan must not flip the store bit"
         );
@@ -1807,18 +1820,19 @@ mod tests {
         .unwrap();
         assert_eq!(disable.target().id, manifest.id);
         assert!(
-            store.get("com.test.preview").await.unwrap().unwrap().enabled,
+            store
+                .get("com.test.preview")
+                .await
+                .unwrap()
+                .unwrap()
+                .enabled,
             "a disable plan must not clear the live enabled bit"
         );
 
-        let uninstall = plan_uninstall_app(
-            &store,
-            &manifest.id,
-            std::slice::from_ref(&manifest),
-            false,
-        )
-        .await
-        .unwrap();
+        let uninstall =
+            plan_uninstall_app(&store, &manifest.id, std::slice::from_ref(&manifest), false)
+                .await
+                .unwrap();
         assert_eq!(uninstall.removed, manifest.id);
         assert!(
             store.get("com.test.preview").await.unwrap().is_some(),

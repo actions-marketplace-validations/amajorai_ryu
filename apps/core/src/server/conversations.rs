@@ -3568,8 +3568,8 @@ impl ConversationStore {
                     .map(|sealed| self.cipher.open(&sealed))
                     .transpose()?
                     .unwrap_or_default();
-                let assistant_message_ids = serde_json::from_str(&assistant_message_ids)
-                    .unwrap_or_default();
+                let assistant_message_ids =
+                    serde_json::from_str(&assistant_message_ids).unwrap_or_default();
                 return Ok(ChannelTurnClaim::Completed(ChannelTurnReplay {
                     reply,
                     assistant_message_id,
@@ -5722,9 +5722,7 @@ impl ConversationStore {
             params![owner_user_id],
         )?;
         conn.execute(
-            &format!(
-                "DELETE FROM message_read_receipts WHERE conversation_id IN ({owned})"
-            ),
+            &format!("DELETE FROM message_read_receipts WHERE conversation_id IN ({owned})"),
             params![owner_user_id],
         )?;
         conn.execute(
@@ -8004,7 +8002,14 @@ mod tests {
     async fn message_reactions_allow_a_peer_agent_authored_message() {
         let store = ConversationStore::open_in_memory().unwrap();
         store
-            .append_message("conv-agents-reactions", "user", "review this", None, None, None)
+            .append_message(
+                "conv-agents-reactions",
+                "user",
+                "review this",
+                None,
+                None,
+                None,
+            )
             .await
             .unwrap();
         let alpha_message = store
@@ -8058,14 +8063,10 @@ mod tests {
             .unwrap();
         assert_eq!(reactions.len(), 2);
         assert!(reactions.iter().any(|reaction| {
-            reaction.message_id == alpha_message
-                && reaction.emoji == "✅"
-                && reaction.reacted_by_me
+            reaction.message_id == alpha_message && reaction.emoji == "✅" && reaction.reacted_by_me
         }));
         assert!(reactions.iter().any(|reaction| {
-            reaction.message_id == beta_message
-                && reaction.emoji == "👀"
-                && reaction.reacted_by_me
+            reaction.message_id == beta_message && reaction.emoji == "👀" && reaction.reacted_by_me
         }));
     }
 
@@ -8132,12 +8133,7 @@ mod tests {
 
         // Retrying the same batch produces no second event/row.
         assert!(store
-            .mark_messages_read(
-                "conv-read",
-                &[first.clone(), second.clone()],
-                "bob",
-                None,
-            )
+            .mark_messages_read("conv-read", &[first.clone(), second.clone()], "bob", None,)
             .await
             .unwrap()
             .is_empty());
@@ -8146,36 +8142,30 @@ mod tests {
         // conversation cannot attach to these message ids.
         assert_eq!(
             store
-                .mark_messages_read(
-                    "conv-read",
-                    std::slice::from_ref(&first),
-                    "carol",
-                    None,
-                )
+                .mark_messages_read("conv-read", std::slice::from_ref(&first), "carol", None,)
                 .await
                 .unwrap()
                 .len(),
             1
         );
         assert!(store
-            .mark_messages_read(
-                "conv-other",
-                std::slice::from_ref(&first),
-                "dave",
-                None,
-            )
+            .mark_messages_read("conv-other", std::slice::from_ref(&first), "dave", None,)
             .await
             .unwrap()
             .is_empty());
 
         let listed = store.list_read_receipts("conv-read").await.unwrap();
         assert_eq!(listed.len(), 3);
-        assert!(listed.iter().any(|receipt| {
-            receipt.message_id == first && receipt.user_id == "carol"
-        }));
+        assert!(listed
+            .iter()
+            .any(|receipt| { receipt.message_id == first && receipt.user_id == "carol" }));
 
         assert!(store.delete_conversation("conv-read").await.unwrap());
-        assert!(store.list_read_receipts("conv-read").await.unwrap().is_empty());
+        assert!(store
+            .list_read_receipts("conv-read")
+            .await
+            .unwrap()
+            .is_empty());
     }
 
     #[tokio::test]
@@ -8227,12 +8217,11 @@ mod tests {
             .await
             .unwrap()
             .is_empty());
-        assert!(tokio::time::timeout(
-            std::time::Duration::from_millis(20),
-            receiver.recv()
-        )
-        .await
-        .is_err());
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(20), receiver.recv())
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]

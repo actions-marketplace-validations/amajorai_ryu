@@ -30,8 +30,8 @@
 //! "the shared fleet secret" ask for [`shared_fleet_token`], not just any token.
 
 use std::sync::{
-	atomic::{AtomicU64, Ordering},
-	OnceLock, RwLock,
+    atomic::{AtomicU64, Ordering},
+    OnceLock, RwLock,
 };
 
 use tokio::sync::watch;
@@ -61,7 +61,7 @@ static GENERATION: AtomicU64 = AtomicU64::new(0);
 static GENERATION_WATCH: OnceLock<watch::Sender<u64>> = OnceLock::new();
 
 fn generation_sender() -> &'static watch::Sender<u64> {
-	GENERATION_WATCH.get_or_init(|| watch::channel(GENERATION.load(Ordering::SeqCst)).0)
+    GENERATION_WATCH.get_or_init(|| watch::channel(GENERATION.load(Ordering::SeqCst)).0)
 }
 
 fn resolved_state() -> &'static RwLock<Option<ResolvedToken>> {
@@ -216,21 +216,21 @@ fn write_token_file(path: &std::path::Path, token: &str) -> std::io::Result<()> 
 /// The active token, whatever its provenance. This is what `require_auth`
 /// compares against.
 pub fn active_token() -> Option<String> {
-	active_from(resolved_state())
+    active_from(resolved_state())
 }
 
 /// Monotonic generation for the live node bearer. WebSocket handlers capture
 /// this at authentication time and terminate established sessions when token
 /// rotation advances it.
 pub fn active_generation() -> u64 {
-	GENERATION.load(Ordering::SeqCst)
+    GENERATION.load(Ordering::SeqCst)
 }
 
 /// Subscribe to node-token rotations. The receiver is initialized with the
 /// current generation, so a caller can compare it with the generation captured
 /// during authentication before entering a long-lived session.
 pub fn subscribe_generation() -> watch::Receiver<u64> {
-	generation_sender().subscribe()
+    generation_sender().subscribe()
 }
 
 fn active_from(state: &RwLock<Option<ResolvedToken>>) -> Option<String> {
@@ -287,13 +287,13 @@ fn rotate_at(
     }
     let token = mint_token();
     write_token_file(path, &token)?;
-	*active = Some(ResolvedToken {
-		token: token.clone(),
-		source: TokenSource::File,
-	});
-	let generation = GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
-	let _ = generation_sender().send(generation);
-	Ok(token)
+    *active = Some(ResolvedToken {
+        token: token.clone(),
+        source: TokenSource::File,
+    });
+    let generation = GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
+    let _ = generation_sender().send(generation);
+    Ok(token)
 }
 
 #[cfg(test)]

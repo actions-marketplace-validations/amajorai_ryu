@@ -309,7 +309,7 @@ pub(crate) async fn host_spider_crawl(
             StatusCode::FORBIDDEN,
             Json(json!({ "error": "not the monitors app" })),
         )
-        .into_response();
+            .into_response();
     }
 
     if !grants.contains("tools.invoke") {

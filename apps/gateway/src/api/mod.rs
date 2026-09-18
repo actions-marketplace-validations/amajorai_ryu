@@ -207,7 +207,10 @@ pub fn router(state: SharedState) -> Router {
         )
         // Health / meta
         .route("/health", get(health::health))
-        .route("/.well-known/security.txt", get(security_contact::security_txt))
+        .route(
+            "/.well-known/security.txt",
+            get(security_contact::security_txt),
+        )
         .route("/v1/health", get(health::health))
         .route("/v1/auth/status", get(health::auth_status))
         .route("/v1/auth/readiness", get(health::readiness))

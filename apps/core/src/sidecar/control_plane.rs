@@ -11,8 +11,8 @@
 //! this module just fetches the resolved set, then narrows the local config-
 //! driven MCP registry (U13) down to the entries the org has granted.
 
-use std::time::Duration;
 use std::sync::{OnceLock, RwLock};
+use std::time::Duration;
 
 use anyhow::{anyhow, Result};
 use base64::Engine as _;

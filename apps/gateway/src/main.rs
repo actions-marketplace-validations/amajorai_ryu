@@ -30,9 +30,9 @@ mod rate_limit;
 mod reporter;
 mod router;
 mod ryu_analytics;
+mod security_contact;
 mod semantic_cache;
 mod skills;
-mod security_contact;
 mod state;
 mod telemetry;
 mod tools;
@@ -191,9 +191,7 @@ async fn main() -> anyhow::Result<()> {
     // verified policy instead of serving an empty policy.
     if let Some(source) = policy::PolicySource::from_env() {
         let policy = source.fetch(&state.http).await.map_err(|error| {
-            anyhow::anyhow!(
-                "refusing to start: initial control-plane policy fetch failed: {error}"
-            )
+            anyhow::anyhow!("refusing to start: initial control-plane policy fetch failed: {error}")
         })?;
         tracing::info!(
             approved_models = policy.approved_models.len(),
@@ -334,9 +332,17 @@ mod tests {
 
     #[test]
     fn fleet_mode_rejects_auth_disabled_even_on_loopback() {
-        assert!(auth_disabled_startup_rejected("127.0.0.1:8981", true, false));
+        assert!(auth_disabled_startup_rejected(
+            "127.0.0.1:8981",
+            true,
+            false
+        ));
         assert!(auth_disabled_startup_rejected("0.0.0.0:8981", false, false));
-        assert!(!auth_disabled_startup_rejected("127.0.0.1:8981", false, false));
+        assert!(!auth_disabled_startup_rejected(
+            "127.0.0.1:8981",
+            false,
+            false
+        ));
         assert!(!auth_disabled_startup_rejected("0.0.0.0:8981", true, true));
     }
 }

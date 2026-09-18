@@ -548,7 +548,9 @@ fn safe_archive_command(raw: &str) -> Option<String> {
     }
     let normalized = trimmed.trim_start_matches("./").replace('\\', "/");
     if normalized.is_empty()
-        || normalized.split('/').any(|segment| segment.is_empty() || segment == "..")
+        || normalized
+            .split('/')
+            .any(|segment| segment.is_empty() || segment == "..")
     {
         return None;
     }

@@ -25,7 +25,10 @@
 //! heartbeat's `OnceLock<Mutex<HashMap<..>>>` idiom.
 
 use std::collections::HashMap;
-use std::sync::{atomic::{AtomicUsize, Ordering}, Mutex, MutexGuard, OnceLock};
+use std::sync::{
+    atomic::{AtomicUsize, Ordering},
+    Mutex, MutexGuard, OnceLock,
+};
 use std::time::Instant;
 
 use super::box_backend;
@@ -333,15 +336,13 @@ async fn exec_in_sandbox_internal(
 ) -> anyhow::Result<SandboxExecResult> {
     // Clone the workspace id out under the guard, then drop it before the I/O.
     let live = {
-        lock_live()
-            .get(run_id)
-            .and_then(|live| {
-                if live.owner.as_ref() == owner {
-                    Some((live.workspace.clone(), live.backend.clone()))
-                } else {
-                    None
-                }
-            })
+        lock_live().get(run_id).and_then(|live| {
+            if live.owner.as_ref() == owner {
+                Some((live.workspace.clone(), live.backend.clone()))
+            } else {
+                None
+            }
+        })
     };
     let Some((ws, backend)) = live else {
         anyhow::bail!("sandbox run is unknown or owned by another agent/session: {run_id}");
@@ -372,10 +373,7 @@ pub async fn destroy_sandbox(run_id: &str) -> anyhow::Result<()> {
 }
 
 /// Destroy a persistent sandbox only for the creator binding.
-pub async fn destroy_sandbox_owned(
-    run_id: &str,
-    owner: &SandboxOwner,
-) -> anyhow::Result<()> {
+pub async fn destroy_sandbox_owned(run_id: &str, owner: &SandboxOwner) -> anyhow::Result<()> {
     destroy_sandbox_internal(run_id, Some(owner)).await
 }
 
@@ -476,8 +474,8 @@ mod tests {
     #[test]
     fn persistent_mcp_owner_requires_agent_or_session_binding() {
         assert!(SandboxOwner::from_context(None, None).is_err());
-        let owner = SandboxOwner::from_context(Some("agent-a"), Some("session-1"))
-            .expect("bound owner");
+        let owner =
+            SandboxOwner::from_context(Some("agent-a"), Some("session-1")).expect("bound owner");
         assert_ne!(
             owner,
             SandboxOwner::from_context(Some("agent-b"), Some("session-1")).unwrap()

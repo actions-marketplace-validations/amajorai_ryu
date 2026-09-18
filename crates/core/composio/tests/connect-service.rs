@@ -78,9 +78,13 @@ async fn rust_dispatch_reaches_native_connect_and_preserves_authorization() {
     assert!(rejected
         .to_string()
         .contains("Connect owns provider triggers"));
-    let rejected = legacy_store.reconcile_webhook_subscription("https://core.example/webhook")
-        .await.unwrap_err();
-    assert!(rejected.to_string().contains("Connect owns provider webhook subscriptions"));
+    let rejected = legacy_store
+        .reconcile_webhook_subscription("https://core.example/webhook")
+        .await
+        .unwrap_err();
+    assert!(rejected
+        .to_string()
+        .contains("Connect owns provider webhook subscriptions"));
     assert!(legacy_store.list().await.unwrap().is_empty());
     let proof: Value = client
         .get(format!("{base}proof"))

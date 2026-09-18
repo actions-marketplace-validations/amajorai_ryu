@@ -168,23 +168,26 @@ pub async fn realtime_ws(
         .jwt_expires_at
         .is_some_and(|expires_at| expires_at <= chrono::Utc::now().timestamp())
     {
-        return (StatusCode::UNAUTHORIZED, "WebSocket ticket user identity expired")
+        return (
+            StatusCode::UNAUTHORIZED,
+            "WebSocket ticket user identity expired",
+        )
             .into_response();
     }
     let caller = ticket.caller.clone();
     let peer_is_loopback = ticket.peer_is_loopback;
-	let token_generation = ticket.node_generation;
+    let token_generation = ticket.node_generation;
 
-	ws.on_upgrade(move |socket| {
-		handle_socket(
-			socket,
-			state,
-			caller,
-			peer_is_loopback,
-			token_generation,
-			ticket,
-		)
-	})
+    ws.on_upgrade(move |socket| {
+        handle_socket(
+            socket,
+            state,
+            caller,
+            peer_is_loopback,
+            token_generation,
+            ticket,
+        )
+    })
 }
 
 /// The outcome of the per-room access decision.
@@ -283,12 +286,12 @@ fn decide_access(
 /// Per-connection driver: read the `join` frame, enforce access, then bridge the
 /// room broadcast to the socket and the socket's frames into the room.
 async fn handle_socket(
-	socket: WebSocket,
-	state: ServerState,
-	caller: Option<VerifiedCaller>,
-	peer_is_loopback: bool,
-	token_generation: u64,
-	ticket: crate::server::ws_ticket::WsTicketClaims,
+    socket: WebSocket,
+    state: ServerState,
+    caller: Option<VerifiedCaller>,
+    peer_is_loopback: bool,
+    token_generation: u64,
+    ticket: crate::server::ws_ticket::WsTicketClaims,
 ) {
     use futures_util::{SinkExt, StreamExt};
 
@@ -557,10 +560,10 @@ async fn handle_socket(
 
     // Prime the interval so the first server ping is one full cadence after the
     // join acknowledgement, then require a pong before the bounded timeout.
-	let mut keepalive = tokio::time::interval(KEEPALIVE_INTERVAL);
-	keepalive.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-	keepalive.tick().await;
-	let mut last_pong = Instant::now();
+    let mut keepalive = tokio::time::interval(KEEPALIVE_INTERVAL);
+    keepalive.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    keepalive.tick().await;
+    let mut last_pong = Instant::now();
 
     // ── Document rooms: drive the authoritative CRDT engine ──────────────────
     // Rehydrate the doc (this resolves/creates the in-memory `yrs` replica) and
@@ -607,36 +610,36 @@ async fn handle_socket(
         None
     };
 
-	let mut token_updates = crate::node_token::subscribe_generation();
-	if *token_updates.borrow() != token_generation {
-		let _ = out_tx
-			.send(close(CLOSE_POLICY, "node token rotated".into()))
-			.await;
-		drop(quiesce_tx);
-		drop(out_tx);
-		forward_task.abort();
-		let _ = send_task.await;
-		return;
-	}
+    let mut token_updates = crate::node_token::subscribe_generation();
+    if *token_updates.borrow() != token_generation {
+        let _ = out_tx
+            .send(close(CLOSE_POLICY, "node token rotated".into()))
+            .await;
+        drop(quiesce_tx);
+        drop(out_tx);
+        forward_task.abort();
+        let _ = send_task.await;
+        return;
+    }
 
-	// ── Receive loop: client frames -> room ──────────────────────────────────
-	loop {
-		tokio::select! {
-			_ = &mut jwt_expiry => {
-				let _ = out_tx
-					.send(close(CLOSE_POLICY, "user identity expired".into()))
-					.await;
-				break;
-			}
-			changed = token_updates.changed() => {
-				if changed.is_ok() && *token_updates.borrow() != token_generation {
-					let _ = out_tx
-						.send(close(CLOSE_POLICY, "node token rotated".into()))
-						.await;
-					break;
-				}
-			}
-			_ = keepalive.tick() => {
+    // ── Receive loop: client frames -> room ──────────────────────────────────
+    loop {
+        tokio::select! {
+            _ = &mut jwt_expiry => {
+                let _ = out_tx
+                    .send(close(CLOSE_POLICY, "user identity expired".into()))
+                    .await;
+                break;
+            }
+            changed = token_updates.changed() => {
+                if changed.is_ok() && *token_updates.borrow() != token_generation {
+                    let _ = out_tx
+                        .send(close(CLOSE_POLICY, "node token rotated".into()))
+                        .await;
+                    break;
+                }
+            }
+            _ = keepalive.tick() => {
                 if last_pong.elapsed() >= KEEPALIVE_TIMEOUT {
                     tracing::debug!(room_id, "realtime: keepalive timeout");
                     break;
@@ -649,14 +652,14 @@ async fn handle_socket(
                     break;
                 }
             }
-			frame = ws_rx.next() => {
-				if crate::node_token::active_generation() != token_generation {
-					let _ = out_tx
-						.send(close(CLOSE_POLICY, "node token rotated".into()))
-						.await;
-					break;
-				}
-				let Some(frame) = frame else {
+            frame = ws_rx.next() => {
+                if crate::node_token::active_generation() != token_generation {
+                    let _ = out_tx
+                        .send(close(CLOSE_POLICY, "node token rotated".into()))
+                        .await;
+                    break;
+                }
+                let Some(frame) = frame else {
                     break;
                 };
                 let frame = match frame {
@@ -1007,7 +1010,11 @@ mod tests {
             Access::Write
         ));
         assert_eq!(
-            deny_reason(&decide_access(Ok(Some(scoped(None, None, "private"))), None, false)),
+            deny_reason(&decide_access(
+                Ok(Some(scoped(None, None, "private"))),
+                None,
+                false
+            )),
             Some("legacy-resource-requires-local-peer")
         );
     }

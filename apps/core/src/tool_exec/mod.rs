@@ -650,10 +650,10 @@ fn plugin_env_prefix(plugin_id: &str) -> String {
     for byte in plugin_id.trim().as_bytes() {
         if byte.is_ascii_alphanumeric() {
             out.push((*byte as char).to_ascii_uppercase());
-       } else {
+        } else {
             out.push_str(&format!("_X{byte:02X}_"));
-       }
-   }
+        }
+    }
     out.push('_');
     out
 }
@@ -1027,7 +1027,11 @@ fn node_token_target_is_local_core(url: &str) -> bool {
     let is_loopback = host
         .parse::<std::net::IpAddr>()
         .is_ok_and(|address| address.is_loopback());
-    is_loopback && parsed.port_or_known_default() == Some(core_port_from_bind(std::env::var("RYU_BIND").ok().as_deref()))
+    is_loopback
+        && parsed.port_or_known_default()
+            == Some(core_port_from_bind(
+                std::env::var("RYU_BIND").ok().as_deref(),
+            ))
 }
 
 fn core_request_path_and_query(url: &str) -> Option<String> {
@@ -1162,9 +1166,7 @@ pub async fn run_http_tool_with_secret_context(
             .scheme()
             .to_owned();
         if scheme != "https" {
-            return Err(
-                "http tool: secret headers require an HTTPS destination".to_owned()
-            );
+            return Err("http tool: secret headers require an HTTPS destination".to_owned());
         }
     }
     // Secret headers are deliberately omitted from this first lowering pass. The
@@ -1431,12 +1433,8 @@ pub async fn run_http_tool_with_secret_context(
         })
         .and_then(|agent_id| {
             core_request_path_and_query(&final_url).and_then(|path_and_query| {
-                crate::sidecar::ext_proxy::sign_agent_lane(
-                    agent_id,
-                    &method_upper,
-                    &path_and_query,
-                )
-                .map(|proof| (agent_id, proof))
+                crate::sidecar::ext_proxy::sign_agent_lane(agent_id, &method_upper, &path_and_query)
+                    .map(|proof| (agent_id, proof))
             })
         });
 
@@ -3072,7 +3070,10 @@ mod tests {
         let err = crawl_url("http://93.184.216.34/")
             .await
             .expect_err("URL-fetching command tools must fail closed");
-        assert!(!err.contains("allowlist"), "network child must be refused at the boundary");
+        assert!(
+            !err.contains("allowlist"),
+            "network child must be refused at the boundary"
+        );
     }
 
     #[tokio::test]
@@ -4451,10 +4452,10 @@ mod tests {
         assert!(may_read_env_secret("@ryu/exa", "RYU_EXA_API_KEY"));
         // Every punctuation byte is escaped, so scoped and flat ids cannot
         // collide even when their punctuation would previously fold together.
-       assert_eq!(
-           plugin_env_prefix("com.acme.my-app"),
+        assert_eq!(
+            plugin_env_prefix("com.acme.my-app"),
             "RYU_PLUGIN_COM_X2E_ACME_X2E_MY_X2D_APP_"
-       );
+        );
         assert_ne!(plugin_env_prefix("@a/b"), plugin_env_prefix("a-b"));
         // And the rule is a real fence: the shared loopback token fits no prefix.
         assert!(!may_read_env_secret("com.acme.weather", "RYU_TOKEN"));
@@ -4568,7 +4569,12 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(
-            resolve_env_secret_from(evil, "RYU_PLUGIN_COM_X2E_EVIL_X2E_PLUGIN_API_KEY", Some(&store)).await,
+            resolve_env_secret_from(
+                evil,
+                "RYU_PLUGIN_COM_X2E_EVIL_X2E_PLUGIN_API_KEY",
+                Some(&store)
+            )
+            .await,
             SecretToken::Value("mine".to_string())
         );
     }
@@ -4795,7 +4801,9 @@ mod tests {
             core_port_from_bind(None)
         )));
         assert!(!node_token_target_is_local_core("https://example.test/api"));
-        assert!(!node_token_target_is_local_core("http://127.0.0.1:9999/api"));
+        assert!(!node_token_target_is_local_core(
+            "http://127.0.0.1:9999/api"
+        ));
     }
 
     /// Every shipped manifest that addresses Core must use `core:`, or it silently

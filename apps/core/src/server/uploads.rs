@@ -417,11 +417,7 @@ pub async fn upload_file(
                 StatusCode::INTERNAL_SERVER_ERROR
             };
             tracing::error!("upload_file: create_file: {e:#}");
-            (
-                status,
-                Json(json!({ "error": message })),
-            )
-                .into_response()
+            (status, Json(json!({ "error": message }))).into_response()
         }
     }
 }

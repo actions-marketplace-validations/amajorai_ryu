@@ -340,33 +340,50 @@ impl PluginHookBridge {
                     Some(text) if text.len() <= 2_000_000 => text,
                     _ => return err("security.check requires text up to 2 MB".to_owned()),
                 };
-                let client = match reqwest::Client::builder().redirect(reqwest::redirect::Policy::none()).timeout(std::time::Duration::from_secs(15)).build() {
+                let client = match reqwest::Client::builder()
+                    .redirect(reqwest::redirect::Policy::none())
+                    .timeout(std::time::Duration::from_secs(15))
+                    .build()
+                {
                     Ok(client) => client,
                     Err(_) => return err("Security scanner unavailable".to_owned()),
                 };
-                let endpoint = format!("{}/v1/firewall/check", crate::sidecar::gateway::gateway_url().trim_end_matches('/'));
-                let mut request = client.post(endpoint).json(&json!({ "text": text, "checks": ["secret"] }));
-                if let Some(token) = crate::sidecar::gateway::gateway_token() { request = request.bearer_auth(token); }
+                let endpoint = format!(
+                    "{}/v1/firewall/check",
+                    crate::sidecar::gateway::gateway_url().trim_end_matches('/')
+                );
+                let mut request = client
+                    .post(endpoint)
+                    .json(&json!({ "text": text, "checks": ["secret"] }));
+                if let Some(token) = crate::sidecar::gateway::gateway_token() {
+                    request = request.bearer_auth(token);
+                }
                 let response = match request.send().await {
                     Ok(response) if response.status().is_success() => response,
                     _ => return err("Security scanner unavailable; operation refused".to_owned()),
                 };
                 match response.json::<Value>().await {
-                    Ok(value) if value.get("allowed").is_some_and(Value::is_boolean) => ok(json!({"allowed": value["allowed"], "reason": value.get("reason").cloned().unwrap_or(Value::Null)})),
+                    Ok(value) if value.get("allowed").is_some_and(Value::is_boolean) => ok(
+                        json!({"allowed": value["allowed"], "reason": value.get("reason").cloned().unwrap_or(Value::Null)}),
+                    ),
                     _ => err("Invalid security scanner response".to_owned()),
                 }
-            },
+            }
             "identity_current" => {
                 if !self.grants.contains("identity:read") {
                     return err("identity:read is not granted".to_owned());
                 }
-                let principal = self.verified_caller.as_ref().map(|caller| json!({
-                    "id": caller.user_id,
-                    "email": caller.email.as_deref().unwrap_or_default(),
-                    "workspaceIds": caller.org_id.iter().collect::<Vec<_>>(),
-                }));
-                ok(json!({ "principal": principal, "requiresIdentity": crate::sidecar::control_plane::registered_org().is_some() }))
-            },
+                let principal = self.verified_caller.as_ref().map(|caller| {
+                    json!({
+                        "id": caller.user_id,
+                        "email": caller.email.as_deref().unwrap_or_default(),
+                        "workspaceIds": caller.org_id.iter().collect::<Vec<_>>(),
+                    })
+                });
+                ok(
+                    json!({ "principal": principal, "requiresIdentity": crate::sidecar::control_plane::registered_org().is_some() }),
+                )
+            }
             "catalogSnapshot" => self.catalog_snapshot(args).await,
             "catalogModels" => self.catalog_models(args).await,
             "sideModel" => self.side_model(args).await,
@@ -843,7 +860,10 @@ impl PluginHookBridge {
         if agent_id.chars().any(char::is_control) {
             return err("host.addMessageReaction received an invalid calling agent".to_owned());
         }
-        if let Err(error) = self.require_bound_conversation(conversation_id, false).await {
+        if let Err(error) = self
+            .require_bound_conversation(conversation_id, false)
+            .await
+        {
             return err(error);
         }
 
@@ -859,8 +879,7 @@ impl PluginHookBridge {
             .is_unresolved()
         {
             return err(
-                "host.addMessageReaction: the current conversation is not authorized"
-                    .to_owned(),
+                "host.addMessageReaction: the current conversation is not authorized".to_owned(),
             );
         }
 
@@ -980,7 +999,9 @@ impl PluginHookBridge {
             return err("host.usageSnapshot requires a non-empty 'agent_id'".to_string());
         }
         if !crate::fleet::is_agent_available(agent_id) {
-            return err("host.usageSnapshot agent is unavailable under organization policy".to_owned());
+            return err(
+                "host.usageSnapshot agent is unavailable under organization policy".to_owned(),
+            );
         }
         if let Err(response) = crate::server::enforce_agent_resource_permission(
             &self.state,
@@ -1158,7 +1179,10 @@ impl PluginHookBridge {
         if conversation_id.is_empty() {
             return err("host.recordFeedback requires a non-empty 'conversation_id'".to_string());
         }
-        if let Err(error) = self.require_bound_conversation(conversation_id, false).await {
+        if let Err(error) = self
+            .require_bound_conversation(conversation_id, false)
+            .await
+        {
             return err(error);
         }
         let message_id = args
@@ -1335,10 +1359,7 @@ impl PluginHookBridge {
             ));
         };
 
-        let key = format!(
-            "{}:{}:{}",
-            self.plugin_id, caller.user_id, conversation_id
-        );
+        let key = format!("{}:{}:{}", self.plugin_id, caller.user_id, conversation_id);
         if !manual_run_begin(&key) {
             return err(format!("hook '{hook_id}' is already running"));
         }
@@ -1488,7 +1509,9 @@ impl PluginHookBridge {
                 }
             }
             if !crate::fleet::is_agent_available(agent_id) {
-                return err("host.runAgent agent is unavailable under organization policy".to_owned());
+                return err(
+                    "host.runAgent agent is unavailable under organization policy".to_owned(),
+                );
             }
             if let Err(response) = crate::server::enforce_agent_resource_permission(
                 &self.state,
@@ -2055,10 +2078,15 @@ impl PluginHookBridge {
                 axum::extract::Path(space_id),
                 axum::Json(crate::server::SearchBody {
                     query,
-                    limit: args.get("limit").and_then(Value::as_u64).unwrap_or(8).clamp(1, 50) as usize,
+                    limit: args
+                        .get("limit")
+                        .and_then(Value::as_u64)
+                        .unwrap_or(8)
+                        .clamp(1, 50) as usize,
                     link_expansion: None,
                 }),
-            ).await;
+            )
+            .await;
             let status = response.status();
             if !status.is_success() {
                 return err(format!("Space retrieval denied or unavailable ({status})"));
@@ -2096,24 +2124,62 @@ impl PluginHookBridge {
         use crate::identity_verify::permissions::{SPACE_READ, SPACE_WRITE};
         let caller = &self.verified_caller;
         if method == "spaces_ensure_space" {
-            if crate::server::enforce_permission(&self.state, caller, SPACE_WRITE).await.is_err() {
+            if crate::server::enforce_permission(&self.state, caller, SPACE_WRITE)
+                .await
+                .is_err()
+            {
                 return err("Space creation is not permitted for this caller".to_owned());
             }
-        } else if matches!(method, "spaces_create_doc" | "spaces_list_docs") && !space_id.is_empty() {
+        } else if matches!(method, "spaces_create_doc" | "spaces_list_docs") && !space_id.is_empty()
+        {
             let write = method == "spaces_create_doc";
-            if crate::server::enforce_permission_on(&self.state, caller, if write { SPACE_WRITE } else { SPACE_READ }, crate::acl::KIND_SPACE, space_id).await.is_err() {
+            if crate::server::enforce_permission_on(
+                &self.state,
+                caller,
+                if write { SPACE_WRITE } else { SPACE_READ },
+                crate::acl::KIND_SPACE,
+                space_id,
+            )
+            .await
+            .is_err()
+            {
                 return err("Space access is not permitted for this caller".to_owned());
             }
-            if write && crate::server::require_space_content_write(&self.state, caller, space_id, "space not found").await.is_err() {
+            if write
+                && crate::server::require_space_content_write(
+                    &self.state,
+                    caller,
+                    space_id,
+                    "space not found",
+                )
+                .await
+                .is_err()
+            {
                 return err("Space is unavailable or not writable".to_owned());
             }
-        } else if matches!(method, "spaces_get_doc" | "spaces_update_doc" | "spaces_delete_doc") && !doc_id.is_empty() {
+        } else if matches!(
+            method,
+            "spaces_get_doc" | "spaces_update_doc" | "spaces_delete_doc"
+        ) && !doc_id.is_empty()
+        {
             let write = method != "spaces_get_doc";
-            let Some(parent) = crate::server::document_parent_space(&self.state, doc_id).await else {
-                if !write { return ok(Value::Null); }
+            let Some(parent) = crate::server::document_parent_space(&self.state, doc_id).await
+            else {
+                if !write {
+                    return ok(Value::Null);
+                }
                 return err("Document is unavailable".to_owned());
             };
-            if crate::server::enforce_permission_on(&self.state, caller, if write { SPACE_WRITE } else { SPACE_READ }, crate::acl::KIND_SPACE, &parent).await.is_err() {
+            if crate::server::enforce_permission_on(
+                &self.state,
+                caller,
+                if write { SPACE_WRITE } else { SPACE_READ },
+                crate::acl::KIND_SPACE,
+                &parent,
+            )
+            .await
+            .is_err()
+            {
                 return err("Document access is not permitted for this caller".to_owned());
             }
             let meta = crate::server::spaces::doc_access_meta(store, doc_id).await;
@@ -2122,7 +2188,9 @@ impl PluginHookBridge {
             } else {
                 crate::server::require_resource_read(meta, caller.as_ref(), "document not found")
             };
-            if allowed.is_err() { return err("Document is unavailable or access was denied".to_owned()); }
+            if allowed.is_err() {
+                return err("Document is unavailable or access was denied".to_owned());
+            }
         }
 
         match method {
@@ -2210,7 +2278,10 @@ impl PluginHookBridge {
                 if space_id.is_empty() {
                     return err("host.spaces.listDocs requires a non-empty 'space_id'".to_string());
                 }
-                match store.list_documents(space_id, crate::server::caller_doc_filter(caller)).await {
+                match store
+                    .list_documents(space_id, crate::server::caller_doc_filter(caller))
+                    .await
+                {
                     Ok(docs) => {
                         let kind = format!("app:{}", self.plugin_id);
                         let visible: Vec<Value> = docs.into_iter().filter(|doc| doc.kind == kind).map(|doc| json!({"id":doc.id,"title":doc.title,"updated_at":doc.updated_at})).collect();
@@ -2243,10 +2314,9 @@ impl PluginHookBridge {
     /// separately over the plugin-host streaming endpoint (`finetune.stream`), not here.
     async fn require_finetune_permission(&self, method: &str) -> Result<(), String> {
         let permission = match method {
-            "finetune_capability"
-            | "finetune_adapters"
-            | "finetune_list"
-            | "finetune_get" => "finetune.view",
+            "finetune_capability" | "finetune_adapters" | "finetune_list" | "finetune_get" => {
+                "finetune.view"
+            }
             "finetune_start" | "finetune_merge" | "finetune_cancel" => "finetune.run",
             _ => return Ok(()),
         };
@@ -2449,7 +2519,9 @@ mod tests {
         assert!(crate::server::preferences::is_secret_preference_key(
             "node-onboarding-state"
         ));
-        assert!(!crate::server::preferences::is_secret_preference_key("theme"));
+        assert!(!crate::server::preferences::is_secret_preference_key(
+            "theme"
+        ));
     }
 
     #[test]

@@ -56,32 +56,32 @@ pub struct Span {
 /// SQLite-backed trace store.  Cheap to clone — wraps an `Arc<Mutex<Connection>>`.
 #[derive(Clone)]
 pub struct TraceStore {
-	conn: Arc<Mutex<Connection>>,
-	path: Option<PathBuf>,
+    conn: Arc<Mutex<Connection>>,
+    path: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Copy, Default, Serialize)]
 pub struct TracePruneSummary {
-	pub deleted_rows: u64,
-	pub retention_days: Option<u64>,
-	pub max_rows: Option<u64>,
+    pub deleted_rows: u64,
+    pub retention_days: Option<u64>,
+    pub max_rows: Option<u64>,
 }
 
 const DEFAULT_TRACE_RETENTION_DAYS: u64 = 90;
 const DEFAULT_TRACE_MAX_ROWS: u64 = 1_000_000;
 
 fn trace_retention_policy() -> (Option<u64>, Option<u64>) {
-	let parse = |name: &str, fallback: u64| {
-		std::env::var(name)
-			.ok()
-			.and_then(|value| value.trim().parse::<u64>().ok())
-			.map(|value| if value == 0 { None } else { Some(value) })
-			.unwrap_or(Some(fallback))
-	};
-	(
-		parse("RYU_TRACE_RETENTION_DAYS", DEFAULT_TRACE_RETENTION_DAYS),
-		parse("RYU_TRACE_MAX_ROWS", DEFAULT_TRACE_MAX_ROWS),
-	)
+    let parse = |name: &str, fallback: u64| {
+        std::env::var(name)
+            .ok()
+            .and_then(|value| value.trim().parse::<u64>().ok())
+            .map(|value| if value == 0 { None } else { Some(value) })
+            .unwrap_or(Some(fallback))
+    };
+    (
+        parse("RYU_TRACE_RETENTION_DAYS", DEFAULT_TRACE_RETENTION_DAYS),
+        parse("RYU_TRACE_MAX_ROWS", DEFAULT_TRACE_MAX_ROWS),
+    )
 }
 
 fn now_millis() -> i64 {
@@ -122,14 +122,17 @@ impl TraceStore {
         let conn = Connection::open(&path)
             .with_context(|| format!("opening trace db {}", path.display()))?;
         Self::init_schema(&conn)?;
-		let (retention_days, max_rows) = trace_retention_policy();
-		let summary = prune_connection(&conn, retention_days, max_rows)?;
-		if summary.deleted_rows > 0 {
-			tracing::info!(deleted_rows = summary.deleted_rows, "trace retention pass removed old spans");
-		}
+        let (retention_days, max_rows) = trace_retention_policy();
+        let summary = prune_connection(&conn, retention_days, max_rows)?;
+        if summary.deleted_rows > 0 {
+            tracing::info!(
+                deleted_rows = summary.deleted_rows,
+                "trace retention pass removed old spans"
+            );
+        }
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
-			path: Some(path),
+            path: Some(path),
         })
     }
 
@@ -139,7 +142,7 @@ impl TraceStore {
         Self::init_schema(&conn)?;
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
-			path: None,
+            path: None,
         })
     }
 
@@ -260,49 +263,47 @@ impl TraceStore {
         )? as u64)
     }
 
-	/// Apply the configured trace retention policy immediately. In-memory stores
-	/// are intentionally no-ops; persistent stores use the same bounded policy
-	/// that runs at startup.
-	pub async fn prune(&self) -> Result<TracePruneSummary> {
-		let Some(_path) = &self.path else {
-			return Ok(TracePruneSummary::default());
-		};
-		let (retention_days, max_rows) = trace_retention_policy();
-		let conn = self.conn.lock().await;
-		prune_connection(&conn, retention_days, max_rows)
-	}
+    /// Apply the configured trace retention policy immediately. In-memory stores
+    /// are intentionally no-ops; persistent stores use the same bounded policy
+    /// that runs at startup.
+    pub async fn prune(&self) -> Result<TracePruneSummary> {
+        let Some(_path) = &self.path else {
+            return Ok(TracePruneSummary::default());
+        };
+        let (retention_days, max_rows) = trace_retention_policy();
+        let conn = self.conn.lock().await;
+        prune_connection(&conn, retention_days, max_rows)
+    }
 }
 
 fn prune_connection(
-	conn: &Connection,
-	retention_days: Option<u64>,
-	max_rows: Option<u64>,
+    conn: &Connection,
+    retention_days: Option<u64>,
+    max_rows: Option<u64>,
 ) -> Result<TracePruneSummary> {
-	let mut deleted_rows = 0_u64;
-	if let Some(days) = retention_days {
-		let cutoff = chrono::Utc::now()
-			.checked_sub_signed(chrono::Duration::days(days.min(i64::MAX as u64) as i64))
-			.map(|value| value.timestamp_millis())
-			.unwrap_or(i64::MIN);
-		deleted_rows = deleted_rows.saturating_add(
-			conn.execute("DELETE FROM spans WHERE started_at < ?1", params![cutoff])? as u64,
-		);
-	}
-	if let Some(max_rows) = max_rows {
-		let max_rows = max_rows.min(i64::MAX as u64) as i64;
-		deleted_rows = deleted_rows.saturating_add(
-			conn.execute(
-				"DELETE FROM spans
+    let mut deleted_rows = 0_u64;
+    if let Some(days) = retention_days {
+        let cutoff = chrono::Utc::now()
+            .checked_sub_signed(chrono::Duration::days(days.min(i64::MAX as u64) as i64))
+            .map(|value| value.timestamp_millis())
+            .unwrap_or(i64::MIN);
+        deleted_rows = deleted_rows.saturating_add(
+            conn.execute("DELETE FROM spans WHERE started_at < ?1", params![cutoff])? as u64,
+        );
+    }
+    if let Some(max_rows) = max_rows {
+        let max_rows = max_rows.min(i64::MAX as u64) as i64;
+        deleted_rows = deleted_rows.saturating_add(conn.execute(
+            "DELETE FROM spans
 				 WHERE seq NOT IN (SELECT seq FROM spans ORDER BY seq DESC LIMIT ?1)",
-				params![max_rows],
-			)? as u64,
-		);
-	}
-	Ok(TracePruneSummary {
-		deleted_rows,
-		retention_days,
-		max_rows,
-	})
+            params![max_rows],
+        )? as u64);
+    }
+    Ok(TracePruneSummary {
+        deleted_rows,
+        retention_days,
+        max_rows,
+    })
 }
 
 #[cfg(test)]
@@ -346,11 +347,7 @@ mod tests {
             .unwrap();
         store.close_span(&span_id, None).await.unwrap();
         assert_eq!(store.delete_spans("temporary-eval").await.unwrap(), 1);
-        assert!(store
-            .get_spans("temporary-eval")
-            .await
-            .unwrap()
-            .is_empty());
+        assert!(store.get_spans("temporary-eval").await.unwrap().is_empty());
     }
 
     #[tokio::test]

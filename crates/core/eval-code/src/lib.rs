@@ -198,17 +198,13 @@ impl CodeEvalOutcome {
                     let score = (score as f32).clamp(0.0, 1.0);
                     (score, score >= 0.5, String::new())
                 }
-                _ => {
-                    return Self::failed("evaluator return is not a finite numeric score")
-                }
+                _ => return Self::failed("evaluator return is not a finite numeric score"),
             },
             Value::Object(obj) => {
                 let score = match obj.get("score").and_then(Value::as_f64) {
                     Some(score) if score.is_finite() => (score as f32).clamp(0.0, 1.0),
                     _ => {
-                        return Self::failed(
-                            "evaluator return is missing a finite numeric 'score'",
-                        )
+                        return Self::failed("evaluator return is missing a finite numeric 'score'")
                     }
                 };
                 let pass = obj
@@ -650,8 +646,7 @@ fn patch_inline_block(cases: &mut [Value], specs: &[CodeEvaluatorSpec]) {
         };
         let mut patched_any = false;
         {
-            let Some(assertions) = case.get_mut("assertions").and_then(Value::as_array_mut)
-            else {
+            let Some(assertions) = case.get_mut("assertions").and_then(Value::as_array_mut) else {
                 continue;
             };
             for spec in specs {
@@ -699,12 +694,10 @@ fn patch_inline_block(cases: &mut [Value], specs: &[CodeEvaluatorSpec]) {
             })
             .sum::<f64>()
             / assertions.len() as f64;
-        let pass = assertions
-            .iter()
-            .all(|assertion| {
-                assertion.get("executed").and_then(Value::as_bool) == Some(true)
-                    && assertion.get("pass").and_then(Value::as_bool) == Some(true)
-            });
+        let pass = assertions.iter().all(|assertion| {
+            assertion.get("executed").and_then(Value::as_bool) == Some(true)
+                && assertion.get("pass").and_then(Value::as_bool) == Some(true)
+        });
         if let Some(object) = case.as_object_mut() {
             object.insert("assertion_score".to_owned(), Value::from(score));
             object.insert("assertions_pass".to_owned(), Value::Bool(pass));

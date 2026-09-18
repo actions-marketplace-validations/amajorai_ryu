@@ -20,8 +20,8 @@ use crate::{
         build_judge_prompt, builtin_dataset, eval_assertion_deterministic,
         eval_assertion_deterministic_with_metrics, judge_pass, parse_judge_verdict,
         render_template, resolve_judge_model, score_case, truncate_chars, Assertion,
-        AssertionMetrics, AssertionOptions, AssertionResult, CaseScore, EvalCase,
-        EvalRunAggregate, EvaluatorScore,
+        AssertionMetrics, AssertionOptions, AssertionResult, CaseScore, EvalCase, EvalRunAggregate,
+        EvaluatorScore,
     },
     evaluators::{EvaluatorImpl, EvaluatorRegistry, EvaluatorTarget},
     pipeline,
@@ -214,7 +214,10 @@ fn validate_assertion_tree(
     Ok(())
 }
 
-fn validate_eval_request(req: &RunEvalsRequest, registry: &EvaluatorRegistry) -> Result<(), String> {
+fn validate_eval_request(
+    req: &RunEvalsRequest,
+    registry: &EvaluatorRegistry,
+) -> Result<(), String> {
     if req.dataset.len() > MAX_EVAL_CASES {
         return Err(format!("eval dataset is limited to {MAX_EVAL_CASES} cases"));
     }
@@ -225,7 +228,9 @@ fn validate_eval_request(req: &RunEvalsRequest, registry: &EvaluatorRegistry) ->
         ));
     }
     if req.models.len() > MAX_EVAL_MODELS {
-        return Err(format!("at most {MAX_EVAL_MODELS} models may be evaluated per request"));
+        return Err(format!(
+            "at most {MAX_EVAL_MODELS} models may be evaluated per request"
+        ));
     }
     if req.evaluators.len() > MAX_EVAL_EVALUATORS_PER_CASE {
         return Err(format!(
@@ -238,12 +243,20 @@ fn validate_eval_request(req: &RunEvalsRequest, registry: &EvaluatorRegistry) ->
         ));
     }
     if req.tags.len() > MAX_EVAL_MAP_ENTRIES {
-        return Err(format!("at most {MAX_EVAL_MAP_ENTRIES} run tags are allowed"));
+        return Err(format!(
+            "at most {MAX_EVAL_MAP_ENTRIES} run tags are allowed"
+        ));
     }
     for (label, value) in [
         ("model", req.model.as_str()),
-        ("judge_model", req.judge_model.as_deref().unwrap_or_default()),
-        ("system_prompt", req.system_prompt.as_deref().unwrap_or_default()),
+        (
+            "judge_model",
+            req.judge_model.as_deref().unwrap_or_default(),
+        ),
+        (
+            "system_prompt",
+            req.system_prompt.as_deref().unwrap_or_default(),
+        ),
         ("prefix", req.prefix.as_deref().unwrap_or_default()),
         ("suffix", req.suffix.as_deref().unwrap_or_default()),
     ] {
@@ -383,7 +396,10 @@ fn validate_eval_request(req: &RunEvalsRequest, registry: &EvaluatorRegistry) ->
     let model_count = if req.models.is_empty() {
         1
     } else {
-        req.models.iter().filter(|model| !model.trim().is_empty()).count()
+        req.models
+            .iter()
+            .filter(|model| !model.trim().is_empty())
+            .count()
     };
     if model_count == 0 {
         return Err("at least one non-empty model is required".to_owned());
@@ -414,8 +430,7 @@ fn validate_eval_request(req: &RunEvalsRequest, registry: &EvaluatorRegistry) ->
         .max(1);
     let total_calls = calls_per_dataset
         .saturating_mul(repeat)
-        .saturating_mul(model_count)
-        ;
+        .saturating_mul(model_count);
     if total_calls > MAX_EVAL_PROVIDER_CALLS {
         return Err(format!(
             "evaluation request may execute at most {MAX_EVAL_PROVIDER_CALLS} provider calls (requested upper bound: {total_calls})"
@@ -426,10 +441,9 @@ fn validate_eval_request(req: &RunEvalsRequest, registry: &EvaluatorRegistry) ->
 
 fn model_graded_assertion_count(assertion: &Assertion) -> usize {
     match assertion {
-        Assertion::AssertSet { assertions, .. } => assertions
-            .iter()
-            .map(model_graded_assertion_count)
-            .sum(),
+        Assertion::AssertSet { assertions, .. } => {
+            assertions.iter().map(model_graded_assertion_count).sum()
+        }
         assertion if is_model_graded_assertion(assertion) => 1,
         _ => 0,
     }
@@ -462,7 +476,12 @@ fn precomputed_response(value: &Value) -> Value {
     let output = value
         .as_str()
         .map(str::to_owned)
-        .or_else(|| value.get("output").and_then(Value::as_str).map(str::to_owned))
+        .or_else(|| {
+            value
+                .get("output")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        })
         .unwrap_or_else(|| value.to_string());
     json!({
         "choices": [{"message": {"content": output}}],
@@ -481,7 +500,10 @@ fn response_cost_micro_usd(response: &Value) -> Option<u64> {
         .map(|value| (value * 1_000_000.0).round() as u64)
 }
 
-fn apply_builtin_output_transform(response: &mut Value, transform: Option<&str>) -> Result<(), String> {
+fn apply_builtin_output_transform(
+    response: &mut Value,
+    transform: Option<&str>,
+) -> Result<(), String> {
     let Some(transform) = transform.map(str::trim).filter(|value| !value.is_empty()) else {
         return Ok(());
     };
@@ -503,25 +525,25 @@ fn apply_builtin_output_transform(response: &mut Value, transform: Option<&str>)
 }
 
 fn apply_builtin_vars_transform(
-	vars: &mut HashMap<String, Value>,
-	transform: Option<&str>,
+    vars: &mut HashMap<String, Value>,
+    transform: Option<&str>,
 ) -> Result<(), String> {
-	let Some(transform) = transform.map(str::trim).filter(|value| !value.is_empty()) else {
-		return Ok(());
-	};
-	match transform {
-		"identity" => Ok(()),
-		"json" => {
-			for value in vars.values_mut() {
-				if let Value::String(text) = value {
-					*value = serde_json::from_str(text)
-						.map_err(|error| format!("json variable transform failed: {error}"))?;
-				}
-			}
-			Ok(())
-		}
-		other => Err(format!("unsupported variable transform '{other}'")),
-	}
+    let Some(transform) = transform.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(());
+    };
+    match transform {
+        "identity" => Ok(()),
+        "json" => {
+            for value in vars.values_mut() {
+                if let Value::String(text) = value {
+                    *value = serde_json::from_str(text)
+                        .map_err(|error| format!("json variable transform failed: {error}"))?;
+                }
+            }
+            Ok(())
+        }
+        other => Err(format!("unsupported variable transform '{other}'")),
+    }
 }
 
 fn render_case_prompt(
@@ -548,7 +570,12 @@ fn render_case_prompt(
 fn case_model(case: &EvalCase, fallback: &str) -> String {
     case.provider
         .as_deref()
-        .or_else(|| case.providers.iter().map(String::as_str).find(|value| !value.trim().is_empty()))
+        .or_else(|| {
+            case.providers
+                .iter()
+                .map(String::as_str)
+                .find(|value| !value.trim().is_empty())
+        })
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .unwrap_or(fallback)
@@ -562,10 +589,10 @@ struct EvalExecutionOptions {
     suffix: Option<String>,
     system_messages: Vec<crate::evals::EvalMessage>,
     system_prompt: Option<String>,
-	timeout_ms: Option<u64>,
-	prompt_id: Option<String>,
-	provided_cost_micro_usd: Option<u64>,
-	provided_latency_ms: Option<u64>,
+    timeout_ms: Option<u64>,
+    prompt_id: Option<String>,
+    provided_cost_micro_usd: Option<u64>,
+    provided_latency_ms: Option<u64>,
 }
 
 /// One model's full result block (multi-model breakdown entry).
@@ -616,11 +643,7 @@ pub async fn run_evals(
     }
     let registry = EvaluatorRegistry::from_config(&state.config);
     if let Err(error) = validate_eval_request(&req, &registry) {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(json!({ "error": error })),
-        )
-            .into_response();
+        return (StatusCode::BAD_REQUEST, Json(json!({ "error": error }))).into_response();
     }
     let dataset = expanded_dataset(&req.dataset, req.repeat);
     if dataset.len() > MAX_EVAL_CASES {
@@ -719,10 +742,7 @@ pub async fn run_evals(
     // Cache is explicitly a single-run de-duplication contract. Serializing a
     // cache-enabled run prevents two identical cases from racing through the
     // miss check and both charging a provider before either stores its result.
-    let cache_requested = req.cache
-        || dataset
-            .iter()
-            .any(|case| case.options.cache == Some(true));
+    let cache_requested = req.cache || dataset.iter().any(|case| case.options.cache == Some(true));
     let concurrency = if cache_requested {
         1
     } else {
@@ -858,17 +878,16 @@ pub async fn score_online(
         || req.vars.len() > MAX_EVAL_MAP_ENTRIES
         || req.metadata.len() > MAX_EVAL_MAP_ENTRIES
         || req.prompt.chars().count() > MAX_EVAL_TEXT_CHARS
-        || req.expected
+        || req
+            .expected
             .as_deref()
             .is_some_and(|value| value.chars().count() > MAX_EVAL_TEXT_CHARS)
-        || req.description
+        || req
+            .description
             .as_deref()
             .is_some_and(|value| value.chars().count() > MAX_EVAL_TEXT_CHARS)
         || req.model.chars().count() > 256
-        || req
-            .id
-            .as_deref()
-            .is_some_and(|id| id.chars().count() > 256)
+        || req.id.as_deref().is_some_and(|id| id.chars().count() > 256)
         || req
             .agent_id
             .as_deref()
@@ -880,12 +899,7 @@ pub async fn score_online(
         )
             .into_response();
     }
-    if req.model.trim().is_empty()
-        || req
-            .evaluators
-            .iter()
-            .any(|id| id.chars().count() > 256)
-    {
+    if req.model.trim().is_empty() || req.evaluators.iter().any(|id| id.chars().count() > 256) {
         return (
             StatusCode::BAD_REQUEST,
             Json(json!({ "error": "online score model/evaluator ids are invalid" })),
@@ -894,11 +908,7 @@ pub async fn score_online(
     }
     let mut assertion_nodes = 0;
     if let Err(error) = validate_assertion_tree(&req.assertions, 0, &mut assertion_nodes) {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(json!({ "error": error })),
-        )
-            .into_response();
+        return (StatusCode::BAD_REQUEST, Json(json!({ "error": error }))).into_response();
     }
     let raw_key = headers
         .get("authorization")
@@ -985,7 +995,7 @@ pub async fn score_online(
 async fn run_eval_case(
     state: SharedState,
     ctx: pipeline::RequestContext,
-	case: EvalCase,
+    case: EvalCase,
     index: usize,
     model: String,
     judge_model: String,
@@ -995,15 +1005,12 @@ async fn run_eval_case(
     response_cache: Arc<tokio::sync::Mutex<HashMap<String, Value>>>,
     max_latency_ms: u64,
 ) -> (usize, CaseScore) {
-	let mut case = case;
-	let var_transform_error =
-		apply_builtin_vars_transform(&mut case.vars, case.options.transform_vars.as_deref()).err();
-	let selected_model = case_model(&case, &model);
-    let rendered_prompt = render_case_prompt(
-        &case,
-        options.prefix.as_deref(),
-        options.suffix.as_deref(),
-    );
+    let mut case = case;
+    let var_transform_error =
+        apply_builtin_vars_transform(&mut case.vars, case.options.transform_vars.as_deref()).err();
+    let selected_model = case_model(&case, &model);
+    let rendered_prompt =
+        render_case_prompt(&case, options.prefix.as_deref(), options.suffix.as_deref());
     let mut messages: Vec<Value> = Vec::with_capacity(case.messages.len() + 2);
     if let Some(system_prompt) = &options.system_prompt {
         messages.push(json!({
@@ -1050,7 +1057,7 @@ async fn run_eval_case(
     let mut cache_hit = false;
     let mut provider_used = None;
     let mut model_used = selected_model;
-	let mut output_error = var_transform_error;
+    let mut output_error = var_transform_error;
     let mut response = if let Some(fixture) = case.provider_output.as_ref() {
         provider_used = Some("precomputed".to_owned());
         precomputed_response(fixture)
@@ -1093,23 +1100,34 @@ async fn run_eval_case(
             }
         }
     };
-	let latency_ms = options
-		.provided_latency_ms
-		.unwrap_or_else(|| start.elapsed().as_millis() as u64);
+    let latency_ms = options
+        .provided_latency_ms
+        .unwrap_or_else(|| start.elapsed().as_millis() as u64);
 
     if use_cache && !cache_hit && output_error.is_none() {
-        response_cache.lock().await.insert(cache_key, response.clone());
+        response_cache
+            .lock()
+            .await
+            .insert(cache_key, response.clone());
     }
-	if let Err(error) = apply_builtin_output_transform(&mut response, case.options.transform.as_deref()) {
-		output_error = Some(error);
-	}
-	if let Some(cost_micro_usd) = options.provided_cost_micro_usd {
-		response["usage"]["cost_micro_usd"] = Value::from(cost_micro_usd);
-	}
+    if let Err(error) =
+        apply_builtin_output_transform(&mut response, case.options.transform.as_deref())
+    {
+        output_error = Some(error);
+    }
+    if let Some(cost_micro_usd) = options.provided_cost_micro_usd {
+        response["usage"]["cost_micro_usd"] = Value::from(cost_micro_usd);
+    }
     if let Some(cost_micro_usd) = response_cost_micro_usd(&response) {
         response["usage"]["cost_micro_usd"] = Value::from(cost_micro_usd);
     }
-    let mut score = score_case(&case, &response, latency_ms, output_error.is_none(), max_latency_ms);
+    let mut score = score_case(
+        &case,
+        &response,
+        latency_ms,
+        output_error.is_none(),
+        max_latency_ms,
+    );
     score.prompt_id = options.prompt_id;
     score.model = Some(model_used);
     score.provider = provider_used;
@@ -1560,7 +1578,7 @@ fn score_heuristic(
                 .assertions
                 .iter()
                 .filter(|a| {
-            !matches!(
+                    !matches!(
                         a,
                         Assertion::LlmJudge { .. }
                             | Assertion::LlmRubric { .. }
@@ -1887,7 +1905,10 @@ fn render_assertion_vars(
             value: render_template(value, vars),
             options: options.clone(),
         },
-        Assertion::AssertSet { assertions, options } => Assertion::AssertSet {
+        Assertion::AssertSet {
+            assertions,
+            options,
+        } => Assertion::AssertSet {
             assertions: assertions
                 .iter()
                 .map(|nested| render_assertion_vars(nested, vars))
@@ -1961,8 +1982,8 @@ fn render_assertion_vars(
 
 #[cfg(test)]
 mod tests {
-	use std::collections::HashMap;
-	use std::sync::Arc;
+    use std::collections::HashMap;
+    use std::sync::Arc;
 
     use serde_json::Value;
 

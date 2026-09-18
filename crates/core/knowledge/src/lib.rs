@@ -40,7 +40,6 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_yml::Value as YamlValue;
 
-
 /// The OKF specification version this module targets.
 pub const OKF_VERSION: &str = "0.1";
 

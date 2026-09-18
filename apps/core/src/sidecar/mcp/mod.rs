@@ -683,13 +683,28 @@ async fn oauth_profile_for(
         let mut connected = Vec::new();
         for profile in &candidates {
             let binding = ryu_vault::mcp_oauth::McpBinding {
-                owner_user_id: owner_user_id.to_owned(), profile_id: (*profile).to_owned(),
-                plugin_id: plugin_id.to_owned(), server_name: server_name.to_owned(),
-                resource_url: cfg.url.clone().context("OAuth MCP server has no resource URL")?,
-                client_id: cfg.auth.as_ref().and_then(crate::plugin_manifest::McpServerAuthDecl::client_id).map(str::to_owned),
+                owner_user_id: owner_user_id.to_owned(),
+                profile_id: (*profile).to_owned(),
+                plugin_id: plugin_id.to_owned(),
+                server_name: server_name.to_owned(),
+                resource_url: cfg
+                    .url
+                    .clone()
+                    .context("OAuth MCP server has no resource URL")?,
+                client_id: cfg
+                    .auth
+                    .as_ref()
+                    .and_then(crate::plugin_manifest::McpServerAuthDecl::client_id)
+                    .map(str::to_owned),
             };
-            if crate::identity::passport::mcp_metadata_configured(agent, &binding, &oauth_configuration(cfg)?).await?
-                .is_some_and(|value| value["status"] == "connected") {
+            if crate::identity::passport::mcp_metadata_configured(
+                agent,
+                &binding,
+                &oauth_configuration(cfg)?,
+            )
+            .await?
+            .is_some_and(|value| value["status"] == "connected")
+            {
                 connected.push((*profile).to_owned());
             }
         }
@@ -753,13 +768,24 @@ async fn oauth_target(
         return crate::identity::passport::mcp_target_configured(
             agent_id.context("Passport MCP requires an explicit calling agent")?,
             ryu_vault::mcp_oauth::McpBinding {
-                owner_user_id: owner_user_id.to_owned(), profile_id: profile_id.to_owned(),
-                plugin_id: plugin_id.to_owned(), server_name: server_name.to_owned(),
+                owner_user_id: owner_user_id.to_owned(),
+                profile_id: profile_id.to_owned(),
+                plugin_id: plugin_id.to_owned(),
+                server_name: server_name.to_owned(),
                 resource_url: resource.to_owned(),
-                client_id: cfg.auth.as_ref().and_then(crate::plugin_manifest::McpServerAuthDecl::client_id).map(str::to_owned),
+                client_id: cfg
+                    .auth
+                    .as_ref()
+                    .and_then(crate::plugin_manifest::McpServerAuthDecl::client_id)
+                    .map(str::to_owned),
             },
-            action, risk_approved, force_refresh, session_id, &oauth_configuration(cfg)?,
-        ).await;
+            action,
+            risk_approved,
+            force_refresh,
+            session_id,
+            &oauth_configuration(cfg)?,
+        )
+        .await;
     }
     let token = crate::mcp_oauth::global()
         .access_token(
@@ -785,14 +811,19 @@ async fn oauth_target(
     Ok(target)
 }
 
-fn oauth_configuration(cfg: &McpServerConfig) -> Result<ryu_vault::mcp_transport::McpConfiguration> {
+fn oauth_configuration(
+    cfg: &McpServerConfig,
+) -> Result<ryu_vault::mcp_transport::McpConfiguration> {
     use ryu_vault::mcp_transport::{McpConfiguration, TransportMode};
     let (transport, endpoint) = match cfg.to_target()? {
         McpTarget::Http(endpoint) => (TransportMode::StreamableHttp, endpoint),
         McpTarget::Sse(endpoint) => (TransportMode::Sse, endpoint),
         _ => bail!("MCP OAuth requires an HTTP transport"),
     };
-    Ok(McpConfiguration { transport, static_headers: endpoint.headers })
+    Ok(McpConfiguration {
+        transport,
+        static_headers: endpoint.headers,
+    })
 }
 
 async fn oauth_elicitation(
@@ -802,32 +833,43 @@ async fn oauth_elicitation(
     challenge: Option<String>,
 ) -> Result<Value> {
     let access_level = if crate::mcp_oauth::remote_configured() {
-        let plugin = cfg.owner_plugin_id.as_deref().context("OAuth MCP server has no owning plugin")?;
-        let server = cfg.owner_server_name.as_deref().context("OAuth MCP server has no owning manifest key")?;
-        crate::mcp_oauth::connections(owner_user_id, plugin).await?
-            .iter().find(|record|record["profile_id"] == profile_id && record["server_name"] == server)
-            .and_then(|record|record["access_level"].as_str())
-            .map(crate::identity::ConnectionAccessLevel::from_str).unwrap_or_default()
-    } else { match crate::identity::global() {
-        Some(store) => {
-            store
-                .get_connection_access_level(
-                    owner_user_id,
-                    crate::connection_policy::MCP_PROVIDER,
-                    &crate::connection_policy::mcp_connection_key(
-                        profile_id,
-                        cfg.owner_plugin_id
-                            .as_deref()
-                            .context("OAuth MCP server has no owning plugin")?,
-                        cfg.owner_server_name
-                            .as_deref()
-                            .context("OAuth MCP server has no owning manifest key")?,
-                    ),
-                )
-                .await?
+        let plugin = cfg
+            .owner_plugin_id
+            .as_deref()
+            .context("OAuth MCP server has no owning plugin")?;
+        let server = cfg
+            .owner_server_name
+            .as_deref()
+            .context("OAuth MCP server has no owning manifest key")?;
+        crate::mcp_oauth::connections(owner_user_id, plugin)
+            .await?
+            .iter()
+            .find(|record| record["profile_id"] == profile_id && record["server_name"] == server)
+            .and_then(|record| record["access_level"].as_str())
+            .map(crate::identity::ConnectionAccessLevel::from_str)
+            .unwrap_or_default()
+    } else {
+        match crate::identity::global() {
+            Some(store) => {
+                store
+                    .get_connection_access_level(
+                        owner_user_id,
+                        crate::connection_policy::MCP_PROVIDER,
+                        &crate::connection_policy::mcp_connection_key(
+                            profile_id,
+                            cfg.owner_plugin_id
+                                .as_deref()
+                                .context("OAuth MCP server has no owning plugin")?,
+                            cfg.owner_server_name
+                                .as_deref()
+                                .context("OAuth MCP server has no owning manifest key")?,
+                        ),
+                    )
+                    .await?
+            }
+            None => crate::identity::ConnectionAccessLevel::default(),
         }
-        None => crate::identity::ConnectionAccessLevel::default(),
-    }};
+    };
     let started = crate::mcp_oauth::global()
         .start_connect(crate::mcp_oauth::ConnectSpec {
             owner_user_id: owner_user_id.to_owned(),
@@ -3543,7 +3585,8 @@ impl McpRegistry {
         agent_id: &str,
         profile_ids: &[String],
     ) -> Result<Vec<RegistryTool>> {
-        self.tools_for_server_bound(name, Some((owner_user_id, agent_id, profile_ids))).await
+        self.tools_for_server_bound(name, Some((owner_user_id, agent_id, profile_ids)))
+            .await
     }
 
     async fn tools_for_server_bound(
@@ -4093,13 +4136,14 @@ impl McpRegistry {
         // Core-owned typed plan boundary. These tools are the only direct tool
         // surface exposed to agents using the `verified_plan_only` posture.
         all.extend(crate::safe_actions::tools());
-        for (name, result) in discovery::collect(names, |name| {
-            let lookup = name.clone();
-            async move {
-                discover_mcp_server_with_timeout(name, self.tools_for_server(&lookup)).await
-            }
-        })
-        .await
+        for (name, result) in
+            discovery::collect(names, |name| {
+                let lookup = name.clone();
+                async move {
+                    discover_mcp_server_with_timeout(name, self.tools_for_server(&lookup)).await
+                }
+            })
+            .await
         {
             match result {
                 Ok(tools) => all.extend(tools),
@@ -4153,71 +4197,144 @@ impl McpRegistry {
 
     /// The exact owner/profile resolver shared by effect gating and execution.
     async fn oauth_dispatch_identity(
-        &self, cfg: &McpServerConfig, agent_id: Option<&str>, profile_ids: &[String],
+        &self,
+        cfg: &McpServerConfig,
+        agent_id: Option<&str>,
+        profile_ids: &[String],
         host_conversation_id: Option<&str>,
-    ) -> Result<(String,String)> {
+    ) -> Result<(String, String)> {
         let saved_profiles;
-        let profiles=if crate::mcp_oauth::remote_configured() {
-            let agent=agent_id.context("Passport MCP requires an explicit calling agent")?;
-            let store=self.agent_store.as_ref().context("agent store unavailable for Passport MCP")?;
-            let record=store.get(agent).await?.context("calling Passport MCP agent is not installed")?;
-            saved_profiles=crate::identity::passport::bound_mcp_profiles(&record.identity_profile_ids,profile_ids)?;
+        let profiles = if crate::mcp_oauth::remote_configured() {
+            let agent = agent_id.context("Passport MCP requires an explicit calling agent")?;
+            let store = self
+                .agent_store
+                .as_ref()
+                .context("agent store unavailable for Passport MCP")?;
+            let record = store
+                .get(agent)
+                .await?
+                .context("calling Passport MCP agent is not installed")?;
+            saved_profiles = crate::identity::passport::bound_mcp_profiles(
+                &record.identity_profile_ids,
+                profile_ids,
+            )?;
             saved_profiles.as_slice()
-        } else { profile_ids };
-        let principal=match self.conversations.as_ref() {
-            Some(store)=>ToolPrincipal::resolve(store,host_conversation_id).await,
-            None if crate::sidecar::control_plane::registered_org().is_none()=>ToolPrincipal::Unrestricted,
-            None=>ToolPrincipal::Unresolved,
+        } else {
+            profile_ids
         };
-        let owner=oauth_owner_from_principal(&principal)?;
-        let profile=oauth_profile_for(&owner,cfg,profiles,agent_id).await?;
-        Ok((owner,profile))
+        let principal = match self.conversations.as_ref() {
+            Some(store) => ToolPrincipal::resolve(store, host_conversation_id).await,
+            None if crate::sidecar::control_plane::registered_org().is_none() => {
+                ToolPrincipal::Unrestricted
+            }
+            None => ToolPrincipal::Unresolved,
+        };
+        let owner = oauth_owner_from_principal(&principal)?;
+        let profile = oauth_profile_for(&owner, cfg, profiles, agent_id).await?;
+        Ok((owner, profile))
     }
 
     /// Remote OAuth effects come only from the runtime grant's pinned action.
     /// This path never reads or populates the node-wide tool discovery cache.
     async fn remote_oauth_tool_effect(
-        &self, tool_id: &str, agent_id: Option<&str>, profile_ids: &[String],
+        &self,
+        tool_id: &str,
+        agent_id: Option<&str>,
+        profile_ids: &[String],
         host_conversation_id: Option<&str>,
     ) -> Result<Option<crate::identity::passport::McpToolEffect>> {
-        if !crate::mcp_oauth::remote_configured() { return Ok(None); }
-        let (lookup,_) = self.approval_target_for_tool(tool_id).await;
-        let Some((server,tool))=self.split_registered_tool_id(&lookup) else { return Ok(None); };
-        let cfg={
-            let servers=self.servers.read().expect("mcp servers RwLock poisoned");
-            servers.get(server).filter(|cfg|cfg.auth.is_some()).cloned()
+        if !crate::mcp_oauth::remote_configured() {
+            return Ok(None);
+        }
+        let (lookup, _) = self.approval_target_for_tool(tool_id).await;
+        let Some((server, tool)) = self.split_registered_tool_id(&lookup) else {
+            return Ok(None);
         };
-        let Some(cfg)=cfg else { return Ok(None); };
-        if !cfg.enabled || crate::fleet::is_artifact_blocked(server) { bail!("OAuth MCP server is unavailable"); }
-        let mut ids=vec![server.to_owned()];
-        if let Some(plugin)=cfg.owner_plugin_id.clone() {ids.push(plugin);}
-        let context=self.secret_resolution_context(host_conversation_id,ids).await;
-        let cfg=self.resolve_mcp_secret_config(&cfg,&context).await?;
-        let (owner,profile)=self.oauth_dispatch_identity(&cfg,agent_id,profile_ids,host_conversation_id).await?;
-        let binding=ryu_vault::mcp_oauth::McpBinding {
-            owner_user_id:owner, profile_id:profile,
-            plugin_id:cfg.owner_plugin_id.clone().context("OAuth MCP server has no owning plugin")?,
-            server_name:cfg.owner_server_name.clone().context("OAuth MCP server has no owning manifest key")?,
-            resource_url:cfg.url.clone().context("OAuth MCP server has no resource URL")?,
-            client_id:cfg.auth.as_ref().and_then(crate::plugin_manifest::McpServerAuthDecl::client_id).map(str::to_owned),
+        let cfg = {
+            let servers = self.servers.read().expect("mcp servers RwLock poisoned");
+            servers
+                .get(server)
+                .filter(|cfg| cfg.auth.is_some())
+                .cloned()
         };
-        Ok(Some(crate::identity::passport::mcp_tool_effect(
-            agent_id.context("Passport MCP requires an explicit calling agent")?,&binding,&oauth_configuration(&cfg)?,tool,
-        ).await?))
+        let Some(cfg) = cfg else {
+            return Ok(None);
+        };
+        if !cfg.enabled || crate::fleet::is_artifact_blocked(server) {
+            bail!("OAuth MCP server is unavailable");
+        }
+        let mut ids = vec![server.to_owned()];
+        if let Some(plugin) = cfg.owner_plugin_id.clone() {
+            ids.push(plugin);
+        }
+        let context = self
+            .secret_resolution_context(host_conversation_id, ids)
+            .await;
+        let cfg = self.resolve_mcp_secret_config(&cfg, &context).await?;
+        let (owner, profile) = self
+            .oauth_dispatch_identity(&cfg, agent_id, profile_ids, host_conversation_id)
+            .await?;
+        let binding = ryu_vault::mcp_oauth::McpBinding {
+            owner_user_id: owner,
+            profile_id: profile,
+            plugin_id: cfg
+                .owner_plugin_id
+                .clone()
+                .context("OAuth MCP server has no owning plugin")?,
+            server_name: cfg
+                .owner_server_name
+                .clone()
+                .context("OAuth MCP server has no owning manifest key")?,
+            resource_url: cfg
+                .url
+                .clone()
+                .context("OAuth MCP server has no resource URL")?,
+            client_id: cfg
+                .auth
+                .as_ref()
+                .and_then(crate::plugin_manifest::McpServerAuthDecl::client_id)
+                .map(str::to_owned),
+        };
+        Ok(Some(
+            crate::identity::passport::mcp_tool_effect(
+                agent_id.context("Passport MCP requires an explicit calling agent")?,
+                &binding,
+                &oauth_configuration(&cfg)?,
+                tool,
+            )
+            .await?,
+        ))
     }
 
     async fn tool_effect_metadata_scoped(
-        &self, tool_id: &str, agent_id: Option<&str>, profile_ids: &[String],
+        &self,
+        tool_id: &str,
+        agent_id: Option<&str>,
+        profile_ids: &[String],
         host_conversation_id: Option<&str>,
-    ) -> Result<(Option<Value>,Option<String>,crate::identity::ConnectionAction)> {
-        if let Some(effect)=self.remote_oauth_tool_effect(tool_id,agent_id,profile_ids,host_conversation_id).await? {
-            return Ok((Some(effect.annotations),Some(effect.http_method),effect.action));
+    ) -> Result<(
+        Option<Value>,
+        Option<String>,
+        crate::identity::ConnectionAction,
+    )> {
+        if let Some(effect) = self
+            .remote_oauth_tool_effect(tool_id, agent_id, profile_ids, host_conversation_id)
+            .await?
+        {
+            return Ok((
+                Some(effect.annotations),
+                Some(effect.http_method),
+                effect.action,
+            ));
         }
-        let (annotations,method)=self.tool_effect_metadata(tool_id).await;
-        let action=crate::connection_policy::action_for_tool(tool_id,annotations.as_ref(),method.as_deref());
-        Ok((annotations,method,action))
+        let (annotations, method) = self.tool_effect_metadata(tool_id).await;
+        let action = crate::connection_policy::action_for_tool(
+            tool_id,
+            annotations.as_ref(),
+            method.as_deref(),
+        );
+        Ok((annotations, method, action))
     }
-
 
     pub(crate) async fn tool_effect_metadata(
         &self,
@@ -4634,9 +4751,9 @@ impl McpRegistry {
         // a risky call past `smart`. Native app-tool ids must use the same path:
         // their manifest metadata is just as authoritative as an `app.` id's.
         let (gate_id, action_needs_approval) = self.approval_target_for_tool(tool_id).await;
-        let (annotations, http_method, connection_action) = self.tool_effect_metadata_scoped(
-            &gate_id, agent_id, profile_ids, host_conversation_id,
-        ).await?;
+        let (annotations, http_method, connection_action) = self
+            .tool_effect_metadata_scoped(&gate_id, agent_id, profile_ids, host_conversation_id)
+            .await?;
         let effect = agent_record
             .as_ref()
             .map(|record| {
@@ -4942,9 +5059,9 @@ impl McpRegistry {
                 .collect::<Vec<_>>()
         });
         let allowlist = normalized_allowlist.as_deref();
-        let (tool_annotations, tool_http_method, connection_action) = self.tool_effect_metadata_scoped(
-            tool_id, agent_id, profile_ids, host_conversation_id,
-        ).await?;
+        let (tool_annotations, tool_http_method, connection_action) = self
+            .tool_effect_metadata_scoped(tool_id, agent_id, profile_ids, host_conversation_id)
+            .await?;
 
         // A filesystem-shaped delete tool is a second way for an agent to
         // remove a path without producing a shell command. Keep this check in
@@ -4997,7 +5114,14 @@ impl McpRegistry {
                     }
                 }
                 let agent = agent_id.ok_or_else(|| anyhow!("Passport requires a calling agent"))?;
-                return crate::identity::passport::fetch(&base, agent, profile_ids, &arguments, session_id.clone()).await;
+                return crate::identity::passport::fetch(
+                    &base,
+                    agent,
+                    profile_ids,
+                    &arguments,
+                    session_id.clone(),
+                )
+                .await;
             }
         }
 
@@ -6180,9 +6304,9 @@ impl McpRegistry {
             };
         }
 
-        let (owner_user_id, profile_id) = self.oauth_dispatch_identity(
-            &cfg, agent_id, profile_ids, host_conversation_id,
-        ).await?;
+        let (owner_user_id, profile_id) = self
+            .oauth_dispatch_identity(&cfg, agent_id, profile_ids, host_conversation_id)
+            .await?;
         let cmd = match oauth_target(
             &cfg,
             &owner_user_id,
@@ -7305,8 +7429,8 @@ mod tests {
 
     #[tokio::test]
     async fn legacy_sse_discovery_bounds_each_setup_stage() {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
         use std::io::ErrorKind;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
         let _env_lock = lock_mcp_env();
         for response_prefix in [

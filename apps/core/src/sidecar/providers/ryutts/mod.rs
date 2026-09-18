@@ -404,7 +404,10 @@ impl Sidecar for RyuTtsManager {
                 // Make `ryu_tts` importable without depending on the cwd.
                 ("PYTHONPATH".into(), dir.to_string_lossy().to_string()),
                 ("RYU_TTS_HOST".into(), "127.0.0.1".into()),
-                ("RYU_TTS_PORT".into(), crate::profile::port(TTS_PORT).to_string()),
+                (
+                    "RYU_TTS_PORT".into(),
+                    crate::profile::port(TTS_PORT).to_string(),
+                ),
                 // Shared-secret the sidecar fail-closed-checks on every non-/health
                 // route; Core presents the same value via `bearer()`.
                 (crate::sidecar::ext_proxy::ENV_EXT_TOKEN.into(), bearer()),

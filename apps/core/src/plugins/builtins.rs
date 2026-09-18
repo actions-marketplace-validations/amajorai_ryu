@@ -766,7 +766,6 @@ pub const CORE_PLUGINS: &[&str] = &[
     // spawn the reviewed first-party process without adding an app-specific Core
     // route, transport, or credential boundary.
     "@ryu/security",
-
     // Video Studio is a compiled-in first-party sidecar app. It remains opt-in
     // (absent from CORE_PREINSTALLED), but Core tier is required for its managed
     // process to pass the reserved `sidecar:process` gate.
