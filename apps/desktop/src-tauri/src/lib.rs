@@ -706,14 +706,43 @@ async fn import_data_folder(
 #[tauri::command]
 async fn open_external(app: tauri::AppHandle, url: String) -> Result<(), String> {
     use tauri_plugin_shell::ShellExt;
-    let parsed = tauri::Url::parse(&url).map_err(|e| format!("Invalid URL: {e}"))?;
+    let mut parsed = tauri::Url::parse(&url).map_err(|e| format!("Invalid URL: {e}"))?;
     if !matches!(parsed.scheme(), "http" | "https" | "mailto") {
         return Err(format!(
             "Refusing to open URL with disallowed scheme '{}'.",
             parsed.scheme()
         ));
     }
-    app.shell().open(&url, None).map_err(|e| e.to_string())
+
+    // A local desktop must never send device authorization to the hosted site.
+    // The auth server can return a public verification origin when its
+    // FRONTEND_URL has stale deployment defaults; keep the debug app on its
+    // loopback Web server at the final OS-browser boundary as well.
+    #[cfg(debug_assertions)]
+    {
+        let hosted_auth_host = matches!(
+            parsed.host_str(),
+            Some("ryuhq.com" | "www.ryuhq.com" | "app.ryuhq.com")
+        );
+        let is_device_flow = parsed.path() == "/device"
+            || (parsed.path() == "/login"
+                && parsed.query().is_some_and(|query| query.contains("device")));
+        if hosted_auth_host && is_device_flow {
+            parsed
+                .set_scheme("http")
+                .map_err(|_| "Could not localize device verification scheme".to_string())?;
+            parsed
+                .set_host(Some("localhost"))
+                .map_err(|_| "Could not localize device verification host".to_string())?;
+            parsed
+                .set_port(Some(3001))
+                .map_err(|_| "Could not localize device verification port".to_string())?;
+        }
+    }
+
+    app.shell()
+        .open(parsed.as_str(), None)
+        .map_err(|e| e.to_string())
 }
 
 #[derive(serde::Serialize)]

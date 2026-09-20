@@ -21,7 +21,10 @@ import {
 	switchAccount,
 } from "@/lib/auth-client.ts";
 import { openExternal } from "@/lib/tauri-bridge.ts";
-import { addAccountViaDeviceAuth } from "../../../lib/oauth.ts";
+import {
+	addAccountViaDeviceAuth,
+	localizeVerificationUrl,
+} from "../../../lib/oauth.ts";
 import {
 	readStartupSelectionPreferences,
 	setStartupDefaultAccountId,
@@ -145,7 +148,9 @@ export function DesktopStartupChooser() {
 		setAdding(true);
 		cancelAddAccount.current = addAccountViaDeviceAuth(BACKEND_URL, {
 			onCode: (info) => {
-				openExternal(info.verificationUriComplete).catch(() => undefined);
+				openExternal(
+					localizeVerificationUrl(info.verificationUriComplete)
+				).catch(() => undefined);
 				toast.show({
 					title: "Finish signing in",
 					description: `Approve in your browser${

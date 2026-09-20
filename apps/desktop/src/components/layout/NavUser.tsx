@@ -90,7 +90,10 @@ import { formatDate as formatDateInZone } from "@/src/lib/timezone.ts";
 import { useSettingsDialog } from "@/src/store/useSettingsDialog.ts";
 // Keep the shared desktop OAuth implementation on the extension build path;
 // the extension swaps only its auth-client module, not this device-flow API.
-import { addAccountViaDeviceAuth } from "../../../lib/oauth.ts";
+import {
+	addAccountViaDeviceAuth,
+	localizeVerificationUrl,
+} from "../../../lib/oauth.ts";
 import { useAppStore } from "../../store/useAppStore.ts";
 import { DownloadCenter } from "../downloads/DownloadCenter.tsx";
 import { InboxCenter } from "../inbox/InboxCenter.tsx";
@@ -350,7 +353,9 @@ export function AccountList({
 		setAdding(true);
 		addAccountViaDeviceAuth(BACKEND_URL, {
 			onCode: (info) => {
-				openExternal(info.verificationUriComplete).catch(() => undefined);
+				openExternal(
+					localizeVerificationUrl(info.verificationUriComplete)
+				).catch(() => undefined);
 				toast.show({
 					title: "Finish signing in",
 					description: `Approve in your browser${
