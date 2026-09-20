@@ -15,6 +15,23 @@ const OAUTH_SCOPES = "openid profile email";
 const SLOW_DOWN_BACKOFF_SECS = 5;
 const DEFAULT_INTERVAL_SECS = 5;
 const DEFAULT_EXPIRES_SECS = 900;
+const LOCAL_FRONTEND_CONFIGURED =
+	FRONTEND_URL.includes("localhost") ||
+	FRONTEND_URL.includes("127.0.0.1") ||
+	FRONTEND_URL.includes("[::1]");
+
+/**
+ * Normalize a device-auth URL at the final browser-open boundary as well as
+ * when parsing the server response. This protects alternate account-startup
+ * callers from a hosted URL returned by a server with stale public defaults.
+ */
+export function localizeVerificationUrl(rawUrl: string): string {
+	return localizeDevVerificationUrl(
+		rawUrl,
+		FRONTEND_URL,
+		import.meta.env.DEV || LOCAL_FRONTEND_CONFIGURED
+	);
+}
 
 export interface DeviceAuthInfo {
 	backendUrl: string;
@@ -64,19 +81,15 @@ export async function startDeviceAuth(
 		throw new Error("Malformed device code response");
 	}
 
-	const verificationUri = localizeDevVerificationUrl(
+	const verificationUri = localizeVerificationUrl(
 		typeof data.verification_uri === "string"
 			? data.verification_uri
-			: `${base}/device`,
-		FRONTEND_URL,
-		import.meta.env.DEV
+			: `${base}/device`
 	);
-	let verificationUriComplete = localizeDevVerificationUrl(
+	let verificationUriComplete = localizeVerificationUrl(
 		typeof data.verification_uri_complete === "string"
 			? data.verification_uri_complete
-			: verificationUri,
-		FRONTEND_URL,
-		import.meta.env.DEV
+			: verificationUri
 	);
 	if (returnTo) {
 		const sep = verificationUriComplete.includes("?") ? "&" : "?";

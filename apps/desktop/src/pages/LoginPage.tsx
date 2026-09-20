@@ -24,7 +24,11 @@ import { openExternal } from "@/lib/tauri-bridge.ts";
 import { reportError } from "@/src/lib/crash.ts";
 // Keep device auth on the shared desktop implementation; the extension
 // supplies its own auth-client module through the host adapter.
-import { pollAuthStatus, startDeviceAuth } from "../../lib/oauth.ts";
+import {
+	localizeVerificationUrl,
+	pollAuthStatus,
+	startDeviceAuth,
+} from "../../lib/oauth.ts";
 import { useAppStore } from "../store/useAppStore.ts";
 
 const IS_WEBAPP = import.meta.env.VITE_RYU_SURFACE === "webapp";
@@ -135,10 +139,13 @@ export default function LoginPage() {
 			const returnTo = IS_WEBAPP ? window.location.origin : undefined;
 			const info = await startDeviceAuth(BACKEND_URL, returnTo);
 			setUserCode(info.userCode);
-			setVerificationUri(info.verificationUriComplete);
+			const verificationUrl = localizeVerificationUrl(
+				info.verificationUriComplete
+			);
+			setVerificationUri(verificationUrl);
 			// Device auth succeeded — opening the browser is best-effort; a failure
 			// here must not look like sign-in failed (NavUser already .catch()es).
-			await openExternal(info.verificationUriComplete).catch(() => undefined);
+			await openExternal(verificationUrl).catch(() => undefined);
 			setPolling(true);
 
 			cancelPoll.current = pollAuthStatus(
