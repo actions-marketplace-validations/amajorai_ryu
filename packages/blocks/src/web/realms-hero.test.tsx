@@ -42,7 +42,7 @@ test("homepage leads with the compact headline and 3D logo", () => {
 	expect(html).not.toContain("bg-muted/30 text-foreground");
 	expect(html).toContain("max-w-7xl");
 	expect(html).toContain(
-		"bg-gradient-to-t from-card via-card/95 to-transparent"
+		"bg-gradient-to-t from-background via-background/95 to-transparent"
 	);
 	expect(html).toContain("showcase-loop");
 	expect(html).toContain("animate-glow-breathe");

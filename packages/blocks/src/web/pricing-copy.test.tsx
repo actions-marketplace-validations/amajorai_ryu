@@ -77,6 +77,21 @@ test("the public business shelf omits the seat-sizing explainer", () => {
 	expect(html).not.toMatch(/\.\s*<\/(?:span|p)>/);
 });
 
+test("the public business shelf exposes the shared seat selector when wired", () => {
+	const html = renderToStaticMarkup(
+		<PricingPlanGrid
+			audience="business"
+			onSeatsChange={() => undefined}
+			seats={10}
+		/>
+	);
+
+	expect(html).toContain("data-pricing-seat-selector");
+	expect(html).toContain('aria-label="Organization seats"');
+	expect(html).toContain(">10 seats<");
+	expect(html).toContain("10 seats included");
+});
+
 test("the private Plus offer keeps its lower usage contract", () => {
 	const html = renderToStaticMarkup(<PlusPlanCard isYearly />);
 

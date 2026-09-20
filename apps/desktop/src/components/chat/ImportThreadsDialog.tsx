@@ -29,7 +29,7 @@ import {
 	SelectValue,
 } from "@ryu/ui/components/select";
 import { Spinner } from "@ryu/ui/components/spinner";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { AgentAvatar, engineForAgent } from "@/src/lib/agent-logos.tsx";
 import {
 	importAgentThread,
@@ -63,6 +63,11 @@ export function ImportThreadsDialog({
 	/** Called with the new Ryu conversation id after a successful import. */
 	onImported: (conversationId: string) => void;
 }) {
+	const { url, token, userJwt } = target;
+	const queryTarget = useMemo(
+		() => ({ url, token, userJwt }),
+		[url, token, userJwt]
+	);
 	const [agentId, setAgentId] = useState<string | null>(null);
 	const [threads, setThreads] = useState<NativeThread[]>([]);
 	const [supported, setSupported] = useState(true);
@@ -88,7 +93,7 @@ export function ImportThreadsDialog({
 			setError(null);
 			setSelected(new Set());
 			try {
-				const result = await listAgentThreads(target, id);
+				const result = await listAgentThreads(queryTarget, id);
 				setSupported(result.supported);
 				setThreads(result.threads);
 			} catch (e) {
@@ -98,7 +103,7 @@ export function ImportThreadsDialog({
 				setLoading(false);
 			}
 		},
-		[target]
+		[queryTarget]
 	);
 
 	useEffect(() => {

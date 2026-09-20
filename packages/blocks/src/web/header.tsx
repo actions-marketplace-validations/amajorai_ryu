@@ -465,18 +465,21 @@ export default function Header({
 
 			<div
 				className={cn(
-					"relative z-10 flex flex-row items-center justify-between p-4 px-10",
+					"relative z-10 flex flex-row items-center justify-between gap-4 p-4 px-4 sm:px-6 lg:px-10",
 					transparent && "bg-background/20 backdrop-blur-sm"
 				)}
 			>
-				<div className="flex flex-1 items-center gap-3">
+				<div className="flex min-w-0 flex-1 items-center gap-3">
 					<Link
-						className="flex items-center gap-4"
+						className="flex min-w-0 items-center gap-4"
 						data-cuelume-hover="tick"
 						href={homeHref as Route}
 					>
 						<Logo size="28px" variant="outline" />
-						<Badge className="rounded-bl-lg" variant="secondary">
+						<Badge
+							className="hidden shrink-0 rounded-bl-lg lg:inline-flex"
+							variant="secondary"
+						>
 							{localizedResearchPreview}
 						</Badge>
 					</Link>
@@ -493,7 +496,7 @@ export default function Header({
 					) : null}
 				</div>
 
-				<nav className="hidden items-center font-medium md:flex">
+				<nav className="hidden shrink-0 items-center font-medium md:flex">
 					{showCatalogMenus && (
 						<MotionNavigationMenu viewportClassName="bg-background shadow-none backdrop-blur-none backdrop-saturate-100">
 							<MotionNavigationMenuList>
@@ -650,7 +653,7 @@ export default function Header({
 					<HeaderLinkList links={links} pathname={pathname} />
 				</nav>
 
-				<div className="hidden flex-1 items-center justify-end md:flex">
+				<div className="hidden min-w-0 flex-1 items-center justify-end md:flex">
 					{userMenu}
 				</div>
 			</div>
