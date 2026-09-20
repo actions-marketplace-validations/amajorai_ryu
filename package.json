@@ -44,7 +44,7 @@
     "@earendil-works/pi-coding-agent": "^0.84.4",
     "@ryu/env": "workspace:*",
     "dotenv": "catalog:",
-    "mermaid": "^11.15.0",
+    "mermaid": "^11.16.1",
     "next-themes": "^0.4.6",
     "zod": "catalog:"
   },
