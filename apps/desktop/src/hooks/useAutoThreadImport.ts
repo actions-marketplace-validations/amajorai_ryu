@@ -20,6 +20,7 @@
 
 import { useEffect, useRef } from "react";
 import { readAutoImportThreads } from "@/src/hooks/useAutoImportThreads.ts";
+import { agentSupportsHistoryHint } from "@/src/lib/agent-history.ts";
 import { engineForAgent } from "@/src/lib/agent-logos.tsx";
 import { listAgentSyncProfiles } from "@/src/lib/api/agent-sync.ts";
 import {
@@ -29,11 +30,6 @@ import {
 import type { AgentSummary } from "@/src/lib/api/agents.ts";
 import type { ApiTarget } from "@/src/lib/api/client.ts";
 import { useWorkspaceStore } from "@/src/store/useWorkspaceStore.ts";
-
-/** Engines whose native history Core can read — used to avoid probing agents
- *  whose engine plainly keeps no importable local history. The list endpoint's
- *  `supported` flag remains the real authority. */
-const HISTORY_ENGINE_HINT = /claude|codex/i;
 
 /** How often to rescan for new agent threads while the setting is on. */
 const POLL_INTERVAL_MS = 5 * 60 * 1000;
@@ -78,7 +74,7 @@ function historyAgentsByEngine(agents: AgentSummary[]): AgentSummary[] {
 	const byEngine = new Map<string, AgentSummary>();
 	for (const agent of agents) {
 		const engine = engineForAgent(agent) ?? agent.id;
-		if (!HISTORY_ENGINE_HINT.test(engine)) {
+		if (!agentSupportsHistoryHint(agent)) {
 			continue;
 		}
 		if (!byEngine.has(engine)) {
