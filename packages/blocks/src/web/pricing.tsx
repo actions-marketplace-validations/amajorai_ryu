@@ -60,6 +60,7 @@ import {
 	businessIncludedCreditUsd,
 	businessMonthlyPriceUsd,
 } from "./business-pricing.ts";
+import { docsHref } from "./data/resources.tsx";
 import {
 	HOSTED_AGENT_SLIDER_MAX,
 	normalizeTeamsSeatCount,
@@ -1805,7 +1806,7 @@ export function SelfHostedOssCard() {
 						variant: "outline",
 						className: "w-full",
 					})}
-					href="https://docs.ryuhq.com/docs/start-here/getting-started/self-host"
+					href={docsHref("/docs/start-here/getting-started/self-host")}
 				>
 					Read the self-hosting guide
 				</a>

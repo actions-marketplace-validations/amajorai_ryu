@@ -34,7 +34,7 @@ export function ToolAccessPreview({ compact = false }: PreviewProps) {
 			className={cn(
 				"relative overflow-hidden rounded-[1.5rem] text-foreground",
 				compact
-					? "min-h-[13rem] bg-gradient-to-br from-primary/10 via-card to-muted/50 p-4 sm:p-5"
+					? "min-h-[13rem] bg-background p-4 sm:p-5"
 					: "bg-background p-6 md:p-8"
 			)}
 			data-testid="tool-access-preview"
@@ -124,7 +124,7 @@ export function DeploymentPreview({ compact = false }: PreviewProps) {
 			className={cn(
 				"relative overflow-hidden rounded-[1.5rem] text-foreground",
 				compact
-					? "min-h-[13rem] bg-gradient-to-br from-sky-500/10 via-card to-primary/10 p-4 sm:p-5"
+					? "min-h-[13rem] bg-background p-4 sm:p-5"
 					: "bg-background p-6 md:p-8"
 			)}
 			data-testid="deployment-preview"
@@ -168,7 +168,7 @@ export function DeploymentPreview({ compact = false }: PreviewProps) {
 				/>
 				<div
 					className={cn(
-						"min-w-0 rounded-2xl bg-primary/5",
+						"min-w-0 rounded-2xl bg-background ring-1 ring-border/50",
 						compact ? "flex-1 p-3" : "w-full p-6"
 					)}
 				>

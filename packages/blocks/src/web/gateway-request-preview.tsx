@@ -51,7 +51,7 @@ export function GatewayRequestPreview({
 	if (compact) {
 		return (
 			<div
-				className="relative w-full overflow-hidden rounded-[1.5rem] bg-gradient-to-br from-primary/10 via-card to-muted/40 p-3 text-foreground sm:p-4"
+				className="relative w-full overflow-hidden rounded-[1.5rem] bg-background p-3 text-foreground sm:p-4"
 				data-testid="gateway-request-preview"
 			>
 				<Tabs
@@ -78,7 +78,7 @@ export function GatewayRequestPreview({
 						aria-hidden="true"
 						className="size-4 shrink-0 text-muted-foreground"
 					/>
-					<span className="truncate rounded-lg bg-primary/5 px-2.5 py-2 text-xs">
+					<span className="truncate rounded-lg bg-background px-2.5 py-2 text-xs ring-1 ring-border/50">
 						Gateway
 					</span>
 					<ArrowRight
@@ -91,7 +91,7 @@ export function GatewayRequestPreview({
 				</div>
 				<div
 					aria-live="polite"
-					className="mt-3 flex items-center gap-3 rounded-xl bg-muted/30 px-3 py-3"
+					className="mt-3 flex items-center gap-3 rounded-xl bg-background px-3 py-3 ring-1 ring-border/50"
 				>
 					<example.Icon
 						aria-hidden="true"
@@ -184,7 +184,7 @@ export function GatewayRequestPreview({
 					aria-live="polite"
 					className={
 						compact
-							? "flex items-center gap-3 bg-muted/30 px-4 py-3"
+							? "flex items-center gap-3 bg-background px-4 py-3"
 							: "flex flex-col justify-center bg-muted/30 p-6 md:p-10"
 					}
 				>

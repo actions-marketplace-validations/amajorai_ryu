@@ -24,8 +24,33 @@ export type ResourceCategory = "Learn" | "Explore" | "Support";
 /* Docs live in a separate Fumadocs app, not a route in this site. The base URL
  * is configurable via NEXT_PUBLIC_DOCS_URL (inlined by Next at build). Local
  * development can point it at :4000; production uses the canonical docs host. */
-export const DOCS_URL =
-	process.env.NEXT_PUBLIC_DOCS_URL ?? "https://docs.ryuhq.com";
+const configuredDocsUrl = process.env.NEXT_PUBLIC_DOCS_URL;
+
+function resolveDocsUrl(): string {
+	if (!configuredDocsUrl) {
+		return process.env.NODE_ENV === "development"
+			? "http://localhost:4000"
+			: "https://docs.ryuhq.com";
+	}
+
+	try {
+		const url = new URL(configuredDocsUrl);
+		const isLoopback =
+			url.hostname === "localhost" ||
+			url.hostname === "127.0.0.1" ||
+			url.hostname === "[::1]";
+		if (isLoopback && url.pathname.replace(/\/$/, "") === "/docs") {
+			return "http://localhost:4000";
+		}
+	} catch {
+		// An invalid value is left to the browser so the existing configuration
+		// contract remains visible to the caller instead of being silently hidden.
+	}
+
+	return configuredDocsUrl;
+}
+
+export const DOCS_URL = resolveDocsUrl();
 
 export function docsHref(path: string): string {
 	return `${DOCS_URL.replace(/\/$/, "")}/${path.replace(/^\//, "")}`;
