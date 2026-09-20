@@ -2104,27 +2104,27 @@ export const MessageList = memo(function MessageList({
 	);
 	const startOfToday = useMemo(() => startOfTodayMs(), [tzRevision]);
 	// Anchor id → flat turn index, so the floating header can map the scroller's
-	// `currentAnchorId` back onto a group. Only turns with a user message are
-	// anchors (`scrollAnchor={Boolean(turn.userMsg)}` below), and their anchor id
-	// is that message's id.
+	// `currentAnchorId` back onto a group. Normal turns use the user message id;
+	// assistant-only turns (for example a page-tool result) use their first
+	// assistant message so a newly appended result remains scrollable and visible.
 	const turnIndexByAnchorId = useMemo(() => {
 		const byId = new Map<string, number>();
 		for (const [index, turn] of turns.entries()) {
-			if (turn.userMsg) {
-				byId.set(turn.userMsg.id, index);
+			const anchorId = turn.userMsg?.id ?? turn.assistantMsgs[0]?.id;
+			if (anchorId) {
+				byId.set(anchorId, index);
 			}
 		}
 		return byId;
 	}, [turns]);
 
-	// Anchor ids in DOM order: every turn that opens with a user message. The
-	// beUI MessageScroller owns scroll-follow but exposes no anchor API, so the
-	// transcript tracks "which turn is at the top" itself — the fact the floating
-	// date header and the chat TOC both render from.
+	// Anchor ids in DOM order. The beUI MessageScroller owns scroll-follow but
+	// exposes no anchor API, so the transcript tracks "which turn is at the top"
+	// itself — including assistant-only page-tool results.
 	const transcriptAnchorIds = useMemo(
 		() =>
 			turns
-				.map((turn) => turn.userMsg?.id)
+				.map((turn) => turn.userMsg?.id ?? turn.assistantMsgs[0]?.id)
 				.filter((id): id is string => Boolean(id)),
 		[turns]
 	);
@@ -2403,6 +2403,8 @@ export const MessageList = memo(function MessageList({
 					// predecessor, everything else keeps the 8px the old `gap-2`
 					// on Content used to give every child.
 					const groupPosition = userRunPositions[turnIndex] ?? "single";
+					const turnAnchorId =
+						turn.userMsg?.id ?? turn.assistantMsgs[0]?.id ?? null;
 					const continuesRun =
 						groupPosition === "middle" || groupPosition === "last";
 					const hasUnreadMessage = turn.assistantMsgs.some(
@@ -2435,6 +2437,14 @@ export const MessageList = memo(function MessageList({
 								data-group-position={groupPosition}
 								data-message-id={turn.userMsg ? turnKey : undefined}
 								data-slot="message-scroller-item"
+								data-transcript-anchor-id={
+									turn.userMsg ? undefined : (turnAnchorId ?? undefined)
+								}
+								ref={(element) => {
+									if (!turn.userMsg && turnAnchorId) {
+										registerTranscriptAnchor(turnAnchorId, element);
+									}
+								}}
 							>
 								{turn.userMsg &&
 									(() => {

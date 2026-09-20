@@ -30,3 +30,29 @@ test("renders a host-owned conversation header above the chat stage", () => {
 	expect(headerIndex).toBeGreaterThanOrEqual(0);
 	expect(transcriptIndex).toBeGreaterThan(headerIndex);
 });
+
+test("renders an assistant-only page-tool result", () => {
+	const markup = renderToStaticMarkup(
+		<AgentChat
+			assistantName="Ryu"
+			messages={[
+				{
+					id: "page-tool-result",
+					parts: [
+						{
+							text: "list_agent_skills result: - local skill",
+							type: "text",
+						},
+					],
+					role: "assistant",
+				} as UIMessage,
+			]}
+			onSend={() => undefined}
+			onStop={() => undefined}
+			status="ready"
+		/>
+	);
+
+	expect(markup).toContain("list_agent_skills result: - local skill");
+	expect(markup).toContain('data-transcript-anchor-id="page-tool-result"');
+});
