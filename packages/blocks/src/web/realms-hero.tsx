@@ -17,7 +17,7 @@ export default function RealmsHero() {
 	return (
 		<div className="bg-background text-foreground" data-testid="realms-hero">
 			<section
-				className="border-border border-b bg-muted/30 text-foreground"
+				className="border-border border-b text-foreground"
 				data-testid="hero-surface"
 			>
 				<div

@@ -94,7 +94,7 @@ const COMPACT_PRODUCTS: ProductChoice[] = [
 function ProductExploreLink({ product }: { product: ProductChoice }) {
 	return (
 		<Link
-			className="group absolute inset-x-0 bottom-0 z-10 flex items-center justify-between gap-3 bg-gradient-to-t from-card via-card/95 to-transparent px-4 pt-10 pb-4 text-foreground outline-offset-4 backdrop-blur-sm focus-visible:outline-2 focus-visible:outline-ring"
+			className="group absolute inset-x-0 bottom-0 z-10 flex items-center justify-between gap-3 bg-gradient-to-t from-background via-background/95 to-transparent px-4 pt-10 pb-4 text-foreground outline-offset-4 backdrop-blur-sm focus-visible:outline-2 focus-visible:outline-ring"
 			data-testid={`realm-card-${product.id}`}
 			href={product.href as Route}
 		>
@@ -122,7 +122,7 @@ function ProductDemoCard({
 	return (
 		<article
 			className={cn(
-				"group relative isolate flex min-w-0 flex-col overflow-hidden rounded-3xl border border-border bg-card text-foreground transition-colors focus-within:border-foreground/30 hover:border-foreground/20",
+				"group relative isolate flex min-w-0 flex-col overflow-hidden rounded-3xl border border-border bg-background text-foreground transition-colors focus-within:border-foreground/30 hover:border-foreground/20",
 				className
 			)}
 			data-testid={`product-demo-${product.id}`}
@@ -162,7 +162,7 @@ function ShowcaseSurface({
 	return (
 		<div
 			className={cn(
-				"relative isolate flex h-full min-h-[9rem] flex-col overflow-hidden rounded-[1.75rem] bg-gradient-to-br from-muted/80 via-card to-muted/40 p-4 text-foreground sm:p-5",
+				"relative isolate flex h-full min-h-[9rem] flex-col overflow-hidden rounded-[1.75rem] bg-background p-4 text-foreground sm:p-5",
 				className
 			)}
 		>
@@ -190,7 +190,7 @@ function ProductPeekContent({ product }: { product: ProductChoice }) {
 	switch (product.id) {
 		case "apps":
 			return (
-				<ShowcaseSurface className="bg-gradient-to-br from-sky-500/15 via-card to-primary/5">
+				<ShowcaseSurface>
 					<ShowcaseGlow className="-top-10 -right-8 size-36 bg-sky-400/25" />
 					<ShowcaseMeta eyebrow="Ryu surfaces" status="4 live" />
 					<div className="relative z-10 mt-auto grid grid-cols-2 gap-2 pt-8">
@@ -213,7 +213,7 @@ function ProductPeekContent({ product }: { product: ProductChoice }) {
 			);
 		case "box":
 			return (
-				<ShowcaseSurface className="bg-gradient-to-br from-amber-500/15 via-card to-primary/5">
+				<ShowcaseSurface>
 					<ShowcaseGlow className="-bottom-10 -left-8 size-32 bg-amber-400/25" />
 					<ShowcaseMeta eyebrow="Workspace" status="box_7f3a" />
 					<div className="relative z-10 flex flex-1 items-center justify-center py-3">
@@ -243,7 +243,7 @@ function ProductPeekContent({ product }: { product: ProductChoice }) {
 			);
 		case "bot":
 			return (
-				<ShowcaseSurface className="bg-gradient-to-br from-primary/20 via-card to-sky-500/10">
+				<ShowcaseSurface>
 					<ShowcaseGlow className="-top-12 -right-10 size-40 bg-primary/30" />
 					<ShowcaseMeta eyebrow="Agent thread" status="online" />
 					<div className="relative z-10 mt-auto space-y-2 pt-8 text-xs">
@@ -260,7 +260,7 @@ function ProductPeekContent({ product }: { product: ProductChoice }) {
 			);
 		case "console":
 			return (
-				<ShowcaseSurface className="min-h-52 bg-gradient-to-br from-slate-500/15 via-card to-primary/10">
+				<ShowcaseSurface className="min-h-52">
 					<ShowcaseGlow className="-top-12 left-1/3 size-40 bg-primary/25" />
 					<ShowcaseMeta eyebrow="Ryu Console" status="live" />
 					<div className="relative z-10 flex flex-1 items-center justify-center py-3">
@@ -295,7 +295,7 @@ function ProductPeekContent({ product }: { product: ProductChoice }) {
 			);
 		case "hire":
 			return (
-				<ShowcaseSurface className="bg-gradient-to-br from-violet-500/15 via-card to-primary/5">
+				<ShowcaseSurface>
 					<ShowcaseGlow className="-right-10 -bottom-8 size-36 bg-violet-400/25" />
 					<ShowcaseMeta eyebrow="Specialist pool" status="42 credits" />
 					<div className="relative z-10 flex flex-1 items-center justify-center py-2">
@@ -316,7 +316,7 @@ function ProductPeekContent({ product }: { product: ProductChoice }) {
 			);
 		case "mail":
 			return (
-				<ShowcaseSurface className="bg-gradient-to-br from-orange-500/15 via-card to-primary/5">
+				<ShowcaseSurface>
 					<ShowcaseGlow className="-top-10 -right-10 size-36 bg-orange-400/25" />
 					<ShowcaseMeta eyebrow="Agent inbox" status="3 unread" />
 					<div className="relative z-10 flex flex-1 items-center justify-center py-2">
@@ -342,7 +342,7 @@ function ProductPeekContent({ product }: { product: ProductChoice }) {
 			);
 		case "notify":
 			return (
-				<ShowcaseSurface className="bg-gradient-to-br from-emerald-500/15 via-card to-sky-500/5">
+				<ShowcaseSurface>
 					<ShowcaseGlow className="-bottom-10 -left-8 size-36 bg-emerald-400/25" />
 					<ShowcaseMeta eyebrow="/v1/events" status="live" />
 					<div className="relative z-10 mt-auto space-y-3 pt-6 pl-5">
@@ -377,7 +377,7 @@ function ProductPeekContent({ product }: { product: ProductChoice }) {
 			);
 		case "os":
 			return (
-				<ShowcaseSurface className="min-h-52 bg-gradient-to-br from-primary/20 via-card to-sky-500/10">
+				<ShowcaseSurface className="min-h-52">
 					<ShowcaseGlow className="-top-12 right-1/3 size-44 bg-primary/30" />
 					<ShowcaseMeta eyebrow="Ryu OS" status="workspace" />
 					<div className="relative z-10 flex flex-1 items-center justify-center py-3">
@@ -402,7 +402,7 @@ function ProductPeekContent({ product }: { product: ProductChoice }) {
 			);
 		case "passport":
 			return (
-				<ShowcaseSurface className="bg-gradient-to-br from-primary/15 via-card to-emerald-500/10">
+				<ShowcaseSurface>
 					<ShowcaseGlow className="-top-8 -right-8 size-36 bg-emerald-400/25" />
 					<ShowcaseMeta eyebrow="Agent identity" status="verified" />
 					<div className="relative z-10 flex flex-1 items-center justify-center py-2">
@@ -422,7 +422,7 @@ function ProductPeekContent({ product }: { product: ProductChoice }) {
 			);
 		case "share":
 			return (
-				<ShowcaseSurface className="bg-gradient-to-br from-cyan-500/15 via-card to-primary/10">
+				<ShowcaseSurface>
 					<ShowcaseGlow className="-right-10 -bottom-8 size-36 bg-cyan-400/25" />
 					<ShowcaseMeta eyebrow="Node exchange" status="available" />
 					<div className="relative z-10 flex flex-1 items-center justify-center py-4">
@@ -496,7 +496,7 @@ function ProductCard({
 	return (
 		<article
 			className={cn(
-				"group relative isolate flex min-w-0 flex-col overflow-hidden rounded-3xl border border-border bg-card text-foreground transition-colors hover:border-foreground/20",
+				"group relative isolate flex min-w-0 flex-col overflow-hidden rounded-3xl border border-border bg-background text-foreground transition-colors hover:border-foreground/20",
 				className
 			)}
 		>
@@ -512,7 +512,7 @@ export function ProductRealmSelector() {
 	return (
 		<section
 			aria-label="Products"
-			className="bg-muted/30 text-foreground"
+			className="text-foreground"
 			data-testid="product-paths"
 		>
 			<div className="mx-auto max-w-7xl px-4 py-12 sm:px-6 md:py-16 lg:px-8">

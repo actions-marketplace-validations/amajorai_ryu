@@ -126,34 +126,38 @@ export function useAutoThreadImport({
 			if (cancelled || scanningRef.current || !readAutoImportThreads()) {
 				return;
 			}
-			const managedEngines = new Set<string>();
-			try {
-				const profiles = (await listAgentSyncProfiles(targetRef.current))
-					.profiles;
-				for (const profile of profiles) {
-					if (profile.importEnabled) {
-						managedEngines.add(profile.provider);
-					}
-				}
-			} catch {
-				// The legacy scheduler remains the safe fallback while Core is offline.
+			const historyAgents = historyAgentsByEngine(agentsRef.current);
+			if (historyAgents.length === 0) {
+				return;
 			}
-			const candidates = historyAgentsByEngine(agentsRef.current).filter(
-				(agent) => {
+			// Own the entire scan, including the slow profile lookup, before yielding.
+			scanningRef.current = true;
+			let seen: Set<string> | undefined;
+			let importedAny = false;
+			let budget = MAX_IMPORTS_PER_SCAN;
+			try {
+				const managedEngines = new Set<string>();
+				try {
+					const profiles = (await listAgentSyncProfiles(targetRef.current))
+						.profiles;
+					for (const profile of profiles) {
+						if (profile.importEnabled) {
+							managedEngines.add(profile.provider);
+						}
+					}
+				} catch {
+					// The legacy scheduler remains the safe fallback while Core is offline.
+				}
+				const candidates = historyAgents.filter((agent) => {
 					const engine = (engineForAgent(agent) ?? agent.id)
 						.replace(/^acp:/i, "")
 						.toLowerCase();
 					return !managedEngines.has(engine);
+				});
+				if (cancelled || candidates.length === 0) {
+					return;
 				}
-			);
-			if (candidates.length === 0) {
-				return;
-			}
-			scanningRef.current = true;
-			const seen = loadSeen();
-			let importedAny = false;
-			let budget = MAX_IMPORTS_PER_SCAN;
-			try {
+				seen = loadSeen();
 				for (const agent of candidates) {
 					if (cancelled || budget <= 0) {
 						break;
@@ -198,7 +202,9 @@ export function useAutoThreadImport({
 					}
 				}
 			} finally {
-				saveSeen(seen);
+				if (seen) {
+					saveSeen(seen);
+				}
 				scanningRef.current = false;
 				if (importedAny && !cancelled) {
 					onImportedRef.current?.();

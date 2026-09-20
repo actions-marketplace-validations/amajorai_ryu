@@ -1,4 +1,6 @@
+import { FRONTEND_URL } from "@/lib/app-urls.ts";
 import { addAccount } from "@/lib/auth-client.ts";
+import { localizeDevVerificationUrl } from "./device-verification-url.ts";
 
 // Device Authorization Grant (RFC 8628) run DIRECTLY against Better Auth — no
 // Core broker. Sign-in must work with no local node running (desktop dev) and
@@ -62,14 +64,20 @@ export async function startDeviceAuth(
 		throw new Error("Malformed device code response");
 	}
 
-	const verificationUri =
+	const verificationUri = localizeDevVerificationUrl(
 		typeof data.verification_uri === "string"
 			? data.verification_uri
-			: `${base}/device`;
-	let verificationUriComplete =
+			: `${base}/device`,
+		FRONTEND_URL,
+		import.meta.env.DEV
+	);
+	let verificationUriComplete = localizeDevVerificationUrl(
 		typeof data.verification_uri_complete === "string"
 			? data.verification_uri_complete
-			: verificationUri;
+			: verificationUri,
+		FRONTEND_URL,
+		import.meta.env.DEV
+	);
 	if (returnTo) {
 		const sep = verificationUriComplete.includes("?") ? "&" : "?";
 		verificationUriComplete += `${sep}returnTo=${encodeURIComponent(returnTo)}`;

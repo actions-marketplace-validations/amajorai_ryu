@@ -682,6 +682,18 @@ const AnimatedLogo: React.FC<LogoProps> = ({
 				? "neutral"
 				: expressionSelection
 	);
+	const [prefersReducedMotion, setPrefersReducedMotion] = useState(false);
+
+	useEffect(() => {
+		if (typeof window === "undefined" || !window.matchMedia) {
+			return;
+		}
+		const media = window.matchMedia("(prefers-reduced-motion: reduce)");
+		const update = () => setPrefersReducedMotion(media.matches);
+		update();
+		media.addEventListener?.("change", update);
+		return () => media.removeEventListener?.("change", update);
+	}, []);
 
 	const finalColors = { ...LOGO_DEFAULT_COLORS, ...colors };
 
@@ -1209,10 +1221,11 @@ const AnimatedLogo: React.FC<LogoProps> = ({
 	// never leak outside the mark. currentColor is the resting tint (theme-adaptive),
 	// white is the moving highlight. No mouse tracking.
 	if (variant === "shimmer") {
-		const reduceMotion =
-			typeof window !== "undefined" &&
-			typeof window.matchMedia === "function" &&
-			window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+		// Read the media query in an effect, never during render. A render-time
+		// `window.matchMedia()` makes SSR and the first client render disagree on
+		// whether `<animateTransform>` exists, which caused hydration errors on
+		// the login page for reduced-motion users.
+		const reduceMotion = prefersReducedMotion;
 		const shimmerStroke = `url(#${shimmerGradientId})`;
 		return (
 			<div

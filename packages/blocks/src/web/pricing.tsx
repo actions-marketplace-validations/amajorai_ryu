@@ -22,6 +22,7 @@ import {
 	SelectTrigger,
 	SelectValue,
 } from "@ryu/ui/components/select.tsx";
+import { Slider } from "@ryu/ui/components/slider.tsx";
 import {
 	Tabs,
 	TabsIndicator,
@@ -60,6 +61,7 @@ import {
 	businessMonthlyPriceUsd,
 } from "./business-pricing.ts";
 import {
+	HOSTED_AGENT_SLIDER_MAX,
 	normalizeTeamsSeatCount,
 	TEAMS_MAX_SEATS,
 	TEAMS_MIN_SEATS,
@@ -1884,6 +1886,77 @@ export function SelfHostedPlanGrid() {
 }
 
 /**
+ * Shared organization seat selection for the public Teams/Business shelf.
+ *
+ * The selected human-seat quantity drives both card totals and the checkout
+ * handoff. The final value is an Enterprise handoff, so it keeps the priced
+ * cards visible as an anchor while replacing their checkout actions with the
+ * sales path.
+ */
+function OrganizationSeatSelector({
+	onChange,
+	seats,
+}: {
+	onChange: (seats: number) => void;
+	seats: number;
+}) {
+	const enterpriseHandoff = seats > TEAMS_MAX_SEATS;
+	const valueLabel = enterpriseHandoff
+		? `${TEAMS_MAX_SEATS + 1}+ seats`
+		: `${seats} seats`;
+
+	return (
+		<div
+			className="mx-auto mb-8 max-w-2xl rounded-2xl border bg-muted/30 p-5"
+			data-pricing-seat-selector
+		>
+			<div className="flex flex-wrap items-start justify-between gap-3">
+				<div>
+					<p className="font-medium text-sm">How many people need access?</p>
+					<p className="mt-1 text-muted-foreground text-xs">
+						Choose human member seats for your organization. Teams and Business
+						share this quantity.
+					</p>
+				</div>
+				<output
+					aria-live="polite"
+					className="font-heading font-medium text-lg tabular-nums"
+					data-pricing-seat-value
+				>
+					{valueLabel}
+				</output>
+			</div>
+
+			<Slider
+				aria-label="Organization seats"
+				className="mt-5"
+				max={HOSTED_AGENT_SLIDER_MAX}
+				min={TEAMS_MIN_SEATS}
+				onValueChange={(next) => {
+					const value = Array.isArray(next) ? next[0] : next;
+					if (typeof value === "number") {
+						onChange(normalizeTeamsSeatCount(value));
+					}
+				}}
+				step={1}
+				value={[seats]}
+			/>
+
+			<div className="mt-2 flex items-center justify-between gap-2 text-muted-foreground text-xs">
+				<span>5 seats</span>
+				<span>50 seats</span>
+				<span>51+ · Enterprise</span>
+			</div>
+			<p className="mt-3 text-muted-foreground text-xs">
+				{enterpriseHandoff
+					? "Organizations with more than 50 seats can continue with Enterprise."
+					: "Your selected seat count is used for the Teams and Business totals."}
+			</p>
+		</div>
+	);
+}
+
+/**
  * The pricing plans, presentational: the self-serve plans for one AUDIENCE in a
  * grid. The public page uses the business shelf — Teams, Business, and
  * Enterprise. The individual shelf shows the local desktop license, Pro, and
@@ -1905,6 +1978,8 @@ export function PricingPlanGrid({
 	maxSeats,
 	onMaxSeatsChange,
 	maxMinSeats = MAX_MIN_SEATS,
+	onHostedAgentCountChange,
+	onSeatsChange,
 	seats,
 }: {
 	/** Which shelf to render — see {@link PRICING_AUDIENCE_PLANS}. */
@@ -1960,29 +2035,38 @@ export function PricingPlanGrid({
 		);
 	}
 	const selectedSeats = normalizeTeamsSeatCount(seats ?? hostedAgentCount);
+	const seatChangeHandler = onSeatsChange ?? onHostedAgentCountChange;
 
 	return (
-		<div className="mx-auto mb-12 grid max-w-7xl grid-cols-1 gap-8 md:grid-cols-3">
-			<HostedAgentPlanCard
-				agentCount={selectedSeats}
-				currentPlan={currentPlan}
-				isRecommended={false}
-				isYearly={isYearly}
-				loadingPlan={loadingPlan}
-				onCheckout={onCheckout}
-				planId="teams"
-			/>
-			<HostedAgentPlanCard
-				agentCount={selectedSeats}
-				currentPlan={currentPlan}
-				isRecommended={selectedSeats <= TEAMS_MAX_SEATS}
-				isYearly={isYearly}
-				loadingPlan={loadingPlan}
-				onCheckout={onCheckout}
-				planId="business"
-			/>
-			<EnterprisePlanCard isRecommended={selectedSeats > TEAMS_MAX_SEATS} />
-		</div>
+		<>
+			{seatChangeHandler ? (
+				<OrganizationSeatSelector
+					onChange={seatChangeHandler}
+					seats={selectedSeats}
+				/>
+			) : null}
+			<div className="mx-auto mb-12 grid max-w-7xl grid-cols-1 gap-8 md:grid-cols-3">
+				<HostedAgentPlanCard
+					agentCount={selectedSeats}
+					currentPlan={currentPlan}
+					isRecommended={false}
+					isYearly={isYearly}
+					loadingPlan={loadingPlan}
+					onCheckout={onCheckout}
+					planId="teams"
+				/>
+				<HostedAgentPlanCard
+					agentCount={selectedSeats}
+					currentPlan={currentPlan}
+					isRecommended={selectedSeats <= TEAMS_MAX_SEATS}
+					isYearly={isYearly}
+					loadingPlan={loadingPlan}
+					onCheckout={onCheckout}
+					planId="business"
+				/>
+				<EnterprisePlanCard isRecommended={selectedSeats > TEAMS_MAX_SEATS} />
+			</div>
+		</>
 	);
 }
 
