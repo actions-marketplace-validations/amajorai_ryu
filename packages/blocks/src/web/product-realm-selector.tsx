@@ -512,7 +512,7 @@ export function ProductRealmSelector() {
 	return (
 		<section
 			aria-label="Products"
-			className="bg-muted/30 text-foreground"
+			className="text-foreground"
 			data-testid="product-paths"
 		>
 			<div className="mx-auto max-w-7xl px-4 py-12 sm:px-6 md:py-16 lg:px-8">

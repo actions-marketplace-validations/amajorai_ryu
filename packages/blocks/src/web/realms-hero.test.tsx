@@ -39,7 +39,7 @@ test("homepage leads with the compact headline and 3D logo", () => {
 	expect(html).toContain('data-testid="product-demo-compute"');
 	expect(html).toContain('data-testid="realm-visual-os"');
 	expect(html).toContain('data-testid="realm-visual-apps"');
-	expect(html).toContain("bg-muted/30 text-foreground");
+	expect(html).not.toContain("bg-muted/30 text-foreground");
 	expect(html).toContain("max-w-7xl");
 	expect(html).toContain(
 		"bg-gradient-to-t from-card via-card/95 to-transparent"
