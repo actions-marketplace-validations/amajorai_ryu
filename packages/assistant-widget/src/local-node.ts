@@ -180,7 +180,9 @@ export async function runLocalNodeChat(
 	try {
 		response = await fetch(`${config.baseUrl}/api/chat/stream`, {
 			body: JSON.stringify({
-				agent_id: "default",
+				// Core seeds the batteries-included agent as `ryu`; `default` is a
+				// routing concept, not a durable agent id and fails on a fresh node.
+				agent_id: "ryu",
 				browser_context_consent: false,
 				browser_surface: "website-assistant",
 				companion_source: false,

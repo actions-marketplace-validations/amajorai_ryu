@@ -30,6 +30,7 @@ import {
 } from "@ryu/ui/components/select";
 import { Spinner } from "@ryu/ui/components/spinner";
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { agentSupportsHistoryHint } from "@/src/lib/agent-history.ts";
 import { AgentAvatar, engineForAgent } from "@/src/lib/agent-logos.tsx";
 import {
 	importAgentThread,
@@ -39,15 +40,6 @@ import {
 import type { AgentSummary } from "@/src/lib/api/agents.ts";
 import type { ApiTarget } from "@/src/lib/api/client.ts";
 import { compactAge } from "@/src/lib/time.ts";
-
-/** Engines whose native history Core can read — used only to pick a sensible
- * default agent. The endpoint's `supported` flag is the real authority. */
-const HISTORY_ENGINE_HINT = /claude|codex/i;
-
-function agentSupportsHistoryHint(agent: AgentSummary): boolean {
-	const engine = engineForAgent(agent) ?? agent.id;
-	return HISTORY_ENGINE_HINT.test(engine);
-}
 
 export function ImportThreadsDialog({
 	open,

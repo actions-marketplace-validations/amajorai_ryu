@@ -59,6 +59,7 @@ describe("local node bridge validation", () => {
 				"Content-Type": "application/json",
 			});
 			expect(JSON.parse(String(capturedInit?.body))).toMatchObject({
+				agent_id: "ryu",
 				browser_surface: "website-assistant",
 				persist: false,
 			});

@@ -1,3 +1,5 @@
+import { copyFile, mkdir } from "node:fs/promises";
+import { dirname, resolve } from "node:path";
 import { expect, test } from "@playwright/test";
 
 test("automatic scans stay single-flight and dialog selections survive parent repaint", async ({
@@ -84,10 +86,17 @@ test("automatic scans stay single-flight and dialog selections survive parent re
 	await expect(page.getByTestId("refresh")).toHaveText("1");
 	await expect(row).toHaveAttribute("aria-pressed", "true");
 	expect(listings).toBe(beforeRepaint);
+	const screenshotPath = testInfo.outputPath("thread-import-completed.png");
 	await page.screenshot({
-		path: testInfo.outputPath("thread-import-completed.png"),
+		path: screenshotPath,
 		fullPage: true,
 	});
+	const proofPath = resolve(
+		testInfo.config.rootDir,
+		"../../../docs/proof/thread-import-performance/thread-import-completed.png"
+	);
+	await mkdir(dirname(proofPath), { recursive: true });
+	await copyFile(screenshotPath, proofPath);
 	await page.evaluate(() => window.dispatchEvent(new Event("proof-identity")));
 	await expect.poll(() => listings).toBe(beforeRepaint + 1);
 	await expect(row).toHaveAttribute("aria-pressed", "false");

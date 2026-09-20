@@ -9,6 +9,7 @@ import {
 test("Teams seat selection stops at the Enterprise handoff", () => {
 	expect(TEAMS_MAX_SEATS).toBe(50);
 	expect(HOSTED_AGENT_SLIDER_MAX).toBe(51);
+	expect(normalizeTeamsSeatCount(51)).toBe(HOSTED_AGENT_SLIDER_MAX);
 	expect(normalizeTeamsSeatCount(1000)).toBe(51);
 	expect(normalizeTeamsSeatCount(3)).toBe(TEAMS_MIN_SEATS);
 });
