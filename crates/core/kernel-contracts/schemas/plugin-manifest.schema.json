@@ -948,7 +948,6 @@
           ]
         },
         "kind": {
-          "default": "python",
           "description": "Runtime kind. `\"python\"` is the only provisionable kind today; others are\naccepted (round-trip) but provisioning returns an \"unsupported\" error.\n\nDefaults to `\"python\"` so this config can be nested inside the internally\n`#[serde(tag = \"kind\")]`-tagged [`SidecarProcess::Python`] variant: there the\nouter enum consumes the `\"kind\"` key as its discriminant, so the inner field\nwould otherwise be reported missing — the classic internally-tagged collision.\nStandalone use still round-trips an explicit `kind`.",
           "type": "string"
         },
